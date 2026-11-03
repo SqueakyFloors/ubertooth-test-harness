@@ -330,6 +330,75 @@ name it.
 
 **Known limits.** Covered in practice by `Ubertooth identity`.
 
+## Bootloader identity
+
+**What it does.** Nothing as a plan entry: a catalog entry for the bootloader
+read, which mandatory preflight does on every board of every run instead.
+
+**Theory of operation.** A board's bootloader is the first 16 KiB of its
+flash, and `ubertooth-dfu` runs from there, so an ordinary firmware write
+cannot replace it: a board keeps the bootloader it came with until somebody
+installs another one over a programmer on its in-system programming header.
+`ubertooth-util -B` is what reports which one that is, in one line:
+
+```text
+Bootloader: 2.00 git-1a2b3c4, CRC32:0x9d2fe1b4
+Bootloader: no version block (factory or earlier, treated as 1.x), CRC32:0x5f0a73c1
+```
+
+The first form comes from a 48-byte version block the fork's bootloader
+carries at a fixed offset; the second is every board as shipped. The CRC-32 is
+of the whole region, worked out on the board, and is on the line either way.
+
+Preflight reads it for every board whose firmware the run requires, after the
+firmware checks, since firmware older than the read refuses it. What the run
+then requires is `--bootloader`:
+
+- `record`, the default, asks only that the board answered, and records what
+  it said. A bootloader write is physical and cannot be undone over USB, so
+  nothing about one is implicit in a bench or release run.
+- `check` compares the answer with a bootloader built from the run's own
+  Ubertooth source and fails the run when a board is on an older or different
+  one. All three of the version, the build string, and the region hash must
+  agree: two different 2.00 images are two different bootloaders, and the hash
+  is what tells them apart.
+- `update` installs that bootloader on a stale board whose registry pairs it
+  with a debug programmer, then reads `-B` again and requires exactly the
+  identity that was written, and the application still reporting the run's
+  revision. A stale board with no programmer fails and the reason names the
+  missing capability.
+
+"Current" is not the resolved commit's bootloader but the newest commit,
+reachable from it, that touched the sources the bootloader image is built
+from. The build string in the block is the whole repository's revision at
+build time, so an artifact pinned to the resolved commit would differ on every
+unrelated commit and ask for a physical write to every board on most days, for
+no change in behavior. The harness reads the bootloader's own makefile and
+refuses a pin whose paths no longer cover a source the image is built from.
+
+**Hardware and arguments.** One `Ubertooth` per check, selected by full
+serial. `update` also needs a `Debug programmer` paired with the board, with a
+`serial device`, plus `lpc21isp` and `arm-none-eabi-gcc` on the host; see
+"Installing a bootloader through it" in [`hardware.md`](hardware.md).
+
+**Expected outcome.** No implementation as a plan entry; only a
+`runnable: false` plan may name it. As a preflight check: one `-B` per
+selected board, recorded in `run.jsonl` as a `bootloader_identity` record and
+shown in the report's Bootloader section and in the GUI's board list.
+`record` passes on any answer, including a factory bootloader; `check` and
+`update` pass only on the identity the artifact names.
+
+**Known limits.** A run against a fork commit from before `-B` existed has no
+check at all, and records that it had none. The region hash is worked out from
+the artifact, which is the image padded with the 0xff of erased flash and the
+vector checksum filled in; a programmer that wrote the region any other way
+would be caught by the read-back rather than predicted, which is what the
+first hardware test of the update path confirms
+([#298](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/298)).
+There is no one factory hash to compare against: shipped boards each report a
+different one, so a board's own hash is worth recording and another board's
+says nothing about it.
+
 ## Part ID
 
 **What it does.** Nothing yet: a catalog entry for reading the

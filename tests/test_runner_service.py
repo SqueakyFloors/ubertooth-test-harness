@@ -219,7 +219,7 @@ def run_request(request_id="r1", **overrides):
     fields = dict(
         request_id=request_id, ref="HEAD", commit=None, plan="local",
         suite="fast", tests=[], build=False, flash_build=True,
-        with_firmware=False, with_python=False,
+        with_firmware=False, with_python=False, bootloader="record",
     )
     fields.update(overrides)
     return encode_controller_message("run", **fields)
@@ -290,12 +290,40 @@ class ProtocolTests(unittest.TestCase):
             "both without build": json.dumps(
                 {**good, "with_firmware": True, "with_python": True}
             ),
+            # The bootloader mode: missing, not one of the three words, or a
+            # comparing mode without build, which run-suite refuses too
+            # (#298).
+            "missing bootloader": json.dumps(
+                {k: v for k, v in good.items() if k != "bootloader"}
+            ),
+            "unknown bootloader mode": json.dumps({**good, "bootloader": "install"}),
+            "boolean bootloader": json.dumps({**good, "bootloader": True}),
+            "bootloader check without build": json.dumps(
+                {**good, "bootloader": "check"}
+            ),
+            "bootloader update without build": json.dumps(
+                {**good, "bootloader": "update"}
+            ),
+            # A write happens before preflight, so the board has to be
+            # carrying the run's own firmware first.
+            "bootloader update without flashing": json.dumps(
+                {**good, "build": True, "flash_build": False,
+                 "bootloader": "update"}
+            ),
         }
         for name, text in cases.items():
             with self.subTest(name), self.assertRaises(ProtocolError):
                 decode_controller_message(text)
         with self.assertRaises(ProtocolError):
             decode_controller_message(b"{}")
+
+    def test_a_bootloader_mode_with_a_build_is_accepted(self):
+        for mode in ("record", "check", "update"):
+            with self.subTest(mode):
+                message = decode_controller_message(
+                    run_request(build=True, bootloader=mode)
+                )
+                self.assertEqual(mode, message["bootloader"])
 
     def test_encoder_applies_the_schema(self):
         with self.assertRaises(ProtocolError):
@@ -647,6 +675,29 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
         parsed = cli._parser().parse_args(argv[3:])
         self.assertEqual("python3", parsed.with_python)
         self.assertIs(True, parsed.with_firmware)
+
+    async def test_the_bootloader_mode_reaches_the_run_suite_option(self):
+        libbtbb = self.fixture.root / "libbtbb"
+        libbtbb.mkdir()
+        started = []
+
+        async def fake_exec(*argv, **_kwargs):
+            started.append(argv)
+            raise OSError("not started in this test")
+
+        with patch(
+            "ubertooth_harness.runner_service.asyncio.create_subprocess_exec", fake_exec
+        ):
+            async with StubController() as controller, self.running(
+                controller, libbtbb_source=libbtbb, libbtbb_ref="abc1234",
+            ):
+                await controller.next("register")
+                await controller.send(run_request(build=True, bootloader="update"))
+                await controller.next("run_rejected")
+        argv = list(started[-1])
+        self.assertIn("--bootloader=update", argv)
+        parsed = cli._parser().parse_args(argv[3:])
+        self.assertEqual("update", parsed.bootloader)
 
     async def test_startup_log_names_the_libbtbb_builds_use(self):
         libbtbb = self.fixture.root / "libbtbb"

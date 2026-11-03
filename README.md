@@ -1232,12 +1232,16 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --libbtbb-source /path/to/libbtbb \
   --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
   --build [--no-flash-build] [--with-firmware] [--with-python[=PYTHON]] \
+  [--bootloader record|check|update] \
   --output runs
 ```
 
 A `--build` run also flashes its boards with the firmware it built before
 preflight, unless `--no-flash-build`; see [Flashing the boards with the run's
-build](#flashing-the-boards-with-the-runs-build).
+build](#flashing-the-boards-with-the-runs-build). Every run also reads which
+bootloader is underneath that firmware, and `--bootloader` says what to do
+about an older one; see [The boards'
+bootloaders](#the-boards-bootloaders).
 
 The examples here and the default in `scripts/ci.sh` use one commit of the
 [`SqueakyFloors/libbtbb`](https://github.com/SqueakyFloors/libbtbb) fork: the
@@ -1444,6 +1448,57 @@ as stays unique in that repository. So a requirement taken from the full
 commit, which is what a run that resolved its own libbtbb has, is still
 satisfied by the library's seven-digit stamp; what the full commit buys is
 that a library reporting more digits must agree on all of them.
+### The boards' bootloaders
+
+A board's bootloader is the first 16 KiB of its flash. `ubertooth-dfu` runs
+from there, so an ordinary firmware write cannot replace it: a board keeps the
+bootloader it came with until somebody installs another one over a serial
+in-system programming adapter or JTAG on its header. The Ubertooth fork reports
+which one a board has on `ubertooth-util -B`, and every run reads it
+([#298](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/298)).
+
+`--bootloader` says what the run does about it:
+
+- `record` (the default) reads `-B` after the firmware checks and records the
+  version, the build string, and the CRC-32 of the whole region, for every
+  board whose firmware preflight requires. Nothing is compared and nothing is
+  written: installing a bootloader is physical and cannot be undone over USB,
+  so a bench run and the release suite never do it by implication.
+- `check` also builds the bootloader from the run's own Ubertooth source and
+  fails the run when a board is on an older or different one. All three of the
+  version, the build string, and the region hash must agree; the version
+  alone is never enough, because two different 2.00 images are two different
+  bootloaders.
+- `update` installs that bootloader on a stale board whose registry pairs it
+  with a [debug programmer](docs/hardware.md), writes it once, and then
+  requires `-B` to report exactly what was written and the application to
+  still report the run's revision. A stale board with no programmer fails, and
+  the reason names the missing capability rather than trying USB.
+
+`check` and `update` need `--build` and `arm-none-eabi-gcc`; `update` also
+needs `lpc21isp` and a programmer with a `serial device` in the registry, and
+takes the [host lock](#the-host-lock) with the board and its programmer for
+the write. A failed write is a hard failure that keeps every command and its
+output and is never retried: a second attempt over a half-written region would
+make the board's state less knowable, not more.
+
+**What "current" means.** Not the resolved commit's bootloader, but the newest
+commit reachable from it that touched the sources the bootloader image is
+built from. The build string the bootloader carries is the whole repository's
+revision at build time, so pinning the artifact to the resolved commit would
+change its identity on every unrelated commit and demand a physical write to
+every board on most days for no change in behavior. The pin, the paths it
+watches, and the sources the bootloader's own makefile names all go in the run
+manifest, and a makefile that starts building from a path outside those is
+refused rather than quietly leaving the pin stale.
+
+**Record:** `bootloader_build_started`/`bootloader_build_finished` for the
+artifact, `bootloader_stage_started`/`bootloader_stage_finished` for the
+stage, one `bootloader_identity` per board, and
+`bootloader_update_started`/`bootloader_update_finished` around a write. Every
+command is recorded with phase `bootloader` or `bootloader-update`. report.md
+has a "Bootloader" section with a row per board, and the GUI shows each
+board's bootloader in its board list.
 
 ## Source identity, manifest, and mandatory preflight
 
@@ -2639,10 +2694,10 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 5` and a `type` (version 2 added
+Messages are JSON objects with `"version": 6` and a `type` (version 2 added
 the run's `commit`, version 3 its `flash_build`, version 4 the `run_file`
 request and its answers, version 5 the run's `with_firmware` and
-`with_python`; a runner or controller of
+`with_python`, and version 6 its `bootloader`; a runner or controller of
 another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
 extra field, a wrong value, or a combination the receiver could not act on,
@@ -2957,7 +3012,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID\|?group_id=ID]` | browser stream: a `snapshot`, then `target`, `run` and `group` updates. With `run_id`, that one run's `event` records too (and its group in the snapshot); with `group_id`, every member run's updates and `event` records, one stream for the whole group. Name one or the other, not both. A `group` update carries `"removed": true` when that group is forgotten (it started no run and no request can still be accepted), so a page does not keep a group the history no longer lists. A browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot); a group stream carries every member's traffic, so it reaches that mark sooner than one run's does |
-| `WS /ws/runner` | target runner protocol v5 |
+| `WS /ws/runner` | target runner protocol v6 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
 `localhost:PORT` and, if it has an `Origin`, that same origin (runner
@@ -3034,7 +3089,7 @@ manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
 without a valid message, and runs cannot be started on it: only a message that
-decodes as protocol v5 resets the offline timer, and malformed messages do
+decodes as protocol v6 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
@@ -3140,8 +3195,9 @@ anyway.
 The runner protocol has no version negotiation: the controller and runner
 must speak the same version: protocol v2 (which added the listed commit to
 `run`), v3 (which added `flash_build`), v4 (which added the `run_file`
-request and its answers) and v5 (which added the run's `with_firmware` and
-`with_python`) are each a hard break from the version before. An older runner is refused at `register` (the
+request and its answers), v5 (which added the run's `with_firmware` and
+`with_python`) and v6 (which added its `bootloader`) are each a hard break
+from the version before. An older runner is refused at `register` (the
 controller closes the connection, code 1008), and since it did register it
 reconnects after the shortest backoff (0.5 s) and is refused again,
 indefinitely; its log shows `registered with ...` then `controller connection

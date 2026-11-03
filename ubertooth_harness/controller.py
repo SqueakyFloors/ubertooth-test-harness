@@ -24,7 +24,7 @@ commit listed for that ref, and the runner runs exactly that commit, so a
 stale or differently configured runner checkout cannot substitute another
 one; the commit is recorded in ``run.json``.
 
-Target runners connect to ``/ws/runner`` and speak protocol v5
+Target runners connect to ``/ws/runner`` and speak protocol v6
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,
@@ -56,6 +56,12 @@ import time
 from typing import Callable, Mapping, Sequence
 import uuid
 
+from ubertooth_harness.bootloader import (
+    COMPARING_MODES as BOOTLOADER_COMPARING_MODES,
+    MODES as BOOTLOADER_MODES,
+    MODE_RECORD as BOOTLOADER_RECORD,
+    MODE_UPDATE as BOOTLOADER_UPDATE,
+)
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.gui import (
@@ -251,7 +257,7 @@ class Target:
 
 _RUN_FIELDS = (
     "run_id", "target", "request_id", "ref", "commit", "plan", "suite", "tests",
-    "build", "flash_build", "with_firmware", "with_python",
+    "build", "flash_build", "with_firmware", "with_python", "bootloader",
     "status", "created_at", "finished_at", "exit_code", "reason",
     "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
     "learned_durations", "group_id",
@@ -286,6 +292,11 @@ class Run:
     # without these fields loads with both false, which is what it did).
     with_firmware: bool = False
     with_python: bool = False
+    # What the run was asked to do about its boards' bootloaders (run-suite
+    # --bootloader). Runs stored before this field could only record what was
+    # installed, which is what "record" means, so an older record loads as
+    # that.
+    bootloader: str = BOOTLOADER_RECORD
     status: str = "running"
     created_at: str = dataclasses.field(default_factory=_now)
     finished_at: str | None = None
@@ -1145,6 +1156,7 @@ class Controller:
                 flash_build=fields["flash_build"],
                 with_firmware=fields["with_firmware"],
                 with_python=fields["with_python"],
+                bootloader=fields["bootloader"],
                 group_id=group.group_id if group is not None else None,
             )
             self.runs[run_id] = run
@@ -1487,7 +1499,7 @@ class Controller:
     async def _run_fields(
         self, *, ref: str, plan: str, suite: str, tests: list[str], build: bool,
         commit: str | None, flash_build: bool, with_firmware: bool,
-        with_python: bool,
+        with_python: bool, bootloader: str,
     ) -> dict:
         """The ``run`` message's fields, with the ref resolved once.
 
@@ -1507,6 +1519,24 @@ class Controller:
                     f"{option} requires build: run-suite refuses "
                     f"--{option.replace('_', '-')} without --build", 422
                 )
+        if bootloader not in BOOTLOADER_MODES:
+            raise ControllerError(
+                "bootloader must be one of " + ", ".join(BOOTLOADER_MODES), 422
+            )
+        if bootloader in BOOTLOADER_COMPARING_MODES and not build:
+            raise ControllerError(
+                f"bootloader {bootloader} requires build: it compares each "
+                "board against a bootloader built from the run's own source, "
+                "which run-suite refuses without --build", 422
+            )
+        if bootloader == BOOTLOADER_UPDATE and not (build and flash_build):
+            # The write happens before preflight, so run-suite requires the
+            # board to be carrying the run's own firmware first.
+            raise ControllerError(
+                "bootloader update requires flash_build: the write happens "
+                "before preflight, so the board must be carrying the run's own "
+                "firmware first", 422
+            )
         return dict(
             ref=ref, commit=await self.resolve_ref(ref, commit), plan=plan,
             suite=suite, tests=list(tests),
@@ -1515,13 +1545,14 @@ class Controller:
             # Each one asked for without build was refused above, so these
             # are what the caller asked for (#257).
             with_firmware=with_firmware, with_python=with_python,
+            bootloader=bootloader,
         )
 
     async def start_run(
         self, host: str, *, ref: str, plan: str, suite: str,
         tests: list[str], build: bool, commit: str | None = None,
         flash_build: bool = True, with_firmware: bool = False,
-        with_python: bool = False,
+        with_python: bool = False, bootloader: str = BOOTLOADER_RECORD,
     ) -> Run:
         if host not in self.targets:
             # A target that never registered is the caller's own mistake,
@@ -1535,7 +1566,7 @@ class Controller:
         fields = await self._run_fields(
             ref=ref, plan=plan, suite=suite, tests=tests, build=build,
             commit=commit, flash_build=flash_build, with_firmware=with_firmware,
-            with_python=with_python,
+            with_python=with_python, bootloader=bootloader,
         )
         return await self._request_run(host, fields)
 
@@ -1659,6 +1690,7 @@ class Controller:
         self, hosts, *, ref: str, plan: str, suite: str, tests: list[str],
         build: bool, commit: str | None = None, flash_build: bool = True,
         with_firmware: bool = False, with_python: bool = False,
+        bootloader: str = BOOTLOADER_RECORD,
     ) -> RunGroup:
         """Start one child run per host, together, as one run group.
 
@@ -1682,7 +1714,7 @@ class Controller:
         fields = await self._run_fields(
             ref=ref, plan=plan, suite=suite, tests=tests, build=build,
             commit=commit, flash_build=flash_build, with_firmware=with_firmware,
-            with_python=with_python,
+            with_python=with_python, bootloader=bootloader,
         )
         group = new_group(chosen, fields)
         while group.group_id in self.groups or group.group_id in self.runs:
@@ -2266,12 +2298,14 @@ ENDPOINTS = {
     "GET /api/targets/{host}": "one target",
     "POST /api/targets/{host}/runs": (
         "start a run: {ref, commit, plan, suite, tests, build, flash_build, "
-        "with_firmware, with_python}; flash_build is recorded false without "
-        "build, and with_firmware or with_python without build is refused"
+        "with_firmware, with_python, bootloader}; flash_build is recorded "
+        "false without build, and with_firmware, with_python, or a bootloader "
+        "of check or update without build is refused"
     ),
     "POST /api/run-groups": (
         "start one run per host as a run group: {hosts, ref, commit, plan, "
-        "suite, tests, build, flash_build, with_firmware, with_python}; 201 "
+        "suite, tests, build, flash_build, with_firmware, with_python, "
+        "bootloader}; 201 "
         "with the group, each member carrying its run or why it did not start"
     ),
     "GET /api/run-groups": (
@@ -2328,6 +2362,11 @@ def create_app(controller: Controller):
         # needs build, and is refused (422) without it.
         with_firmware: bool = False
         with_python: bool = False
+        # What to do about each board's bootloader: record what is installed,
+        # check it against one built from the run's source, or update a stale
+        # board through its registered programmer. The last two need build,
+        # and are refused (422) without it.
+        bootloader: str = BOOTLOADER_RECORD
 
     class GroupRequest(RunRequest):
         # The same run request, for every host the group names (each gets its
@@ -2421,7 +2460,7 @@ def create_app(controller: Controller):
             host, ref=request.ref, plan=request.plan, suite=request.suite,
             tests=request.tests, build=request.build, commit=request.commit,
             flash_build=request.flash_build, with_firmware=request.with_firmware,
-            with_python=request.with_python,
+            with_python=request.with_python, bootloader=request.bootloader,
         )
         return {"run": run.view()}
 
@@ -2432,6 +2471,7 @@ def create_app(controller: Controller):
             suite=request.suite, tests=request.tests, build=request.build,
             commit=request.commit, flash_build=request.flash_build,
             with_firmware=request.with_firmware, with_python=request.with_python,
+            bootloader=request.bootloader,
         )
         return {"group": controller.view_group(group)}
 

@@ -30,6 +30,8 @@ from ubertooth_harness.manifest import ManifestError, RunManifest, json_value
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
+from ubertooth_harness import bootloader as bootloader_identity
+
 from ubertooth_harness.outputfiles import (
     TARGET_SERIAL_STREAM,
     CommandOutput,
@@ -69,6 +71,39 @@ from ubertooth_harness.stateful import (
     artifact_key,
 )
 from ubertooth_harness import transitions
+
+
+def _record_bootloader_identity(publisher, check, result, failure: str) -> None:
+    """Record the bootloader one preflight read found on one board."""
+    found = bootloader_identity.identity_from_match(
+        output_of(result).search(bootloader_identity.IDENTITY_LINE_PATTERN)
+    )
+    expectation = check.bootloader
+    publisher.emit(
+        "bootloader_identity",
+        "failed" if failure else "passed",
+        {
+            "resource": check.resource_alias,
+            # Lower case, as the stage's records and the board leases spell
+            # it: the GUI keys its board list by this, and two spellings of
+            # one serial would be two boards.
+            "serial": str(check.resource_identity.get("serial", "")).lower(),
+            "host": check.host,
+            "mode": expectation.mode,
+            "installed": found.to_dict() if found else None,
+            "expected": (
+                expectation.expected.to_dict() if expectation.expected else None
+            ),
+            "written": False,
+            "status": (
+                "unreadable" if found is None
+                else "current" if expectation.expected is None
+                or found.matches(expectation.expected)
+                else "stale"
+            ),
+            "reason": failure,
+        },
+    )
 
 # File records per output_files event; each is about 180 bytes, so a batch
 # stays well inside the event limit (events.OUTPUT_CHECKS_MAX_BYTES).
@@ -1357,6 +1392,12 @@ class NamedTestSequencer:
             )
             failure = check.result_failure(result)
             self._record_output_checks(publisher, result)
+            if check.bootloader is not None:
+                # Which bootloader this board has, as its own record: the
+                # check's pass or failure says whether it was the one the run
+                # wanted, and this says what it is. Every run records it, so
+                # a board's bootloader can be read off any run's log.
+                _record_bootloader_identity(publisher, check, result, failure)
             if failure and check.needs_fallback(result):
                 # The command left the question unanswered, so this fork
                 # commit answers it on the older option: ask that one, and

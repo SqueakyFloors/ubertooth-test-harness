@@ -373,6 +373,7 @@ button.primary:disabled:hover { background: var(--primary); }
 }
 .board-name { font-weight: 650; }
 .board-resets { color: var(--muted); font-variant-numeric: tabular-nums; }
+.board-bootloader { color: var(--muted); }
 .board-reset { border-left-color: var(--bad-fg); }
 .board .reason { flex-basis: 100%; }
 
