@@ -2,7 +2,7 @@
 
 Every message is one JSON object in one WebSocket text frame:
 
-    {"version": 5, "type": "<type>", ...fields}
+    {"version": 6, "type": "<type>", ...fields}
 
 Each type has an exact field set. Decoding is strict: a message that is not a
 JSON object, has an unknown version or type, lacks a field, has a field of the
@@ -385,6 +385,10 @@ def _run_options(message: Mapping) -> str:
     # run's own source, which run-suite refuses without --build.
     if message["bootloader"] in ("check", "update") and not message["build"]:
         return f"bootloader {message['bootloader']} requires build"
+    # A bootloader write happens before preflight, so run-suite requires the
+    # board to be carrying the run's own firmware first.
+    if message["bootloader"] == "update" and not message["flash_build"]:
+        return "bootloader update requires flash_build"
     return ""
 
 

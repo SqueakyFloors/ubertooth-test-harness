@@ -60,6 +60,7 @@ from ubertooth_harness.bootloader import (
     COMPARING_MODES as BOOTLOADER_COMPARING_MODES,
     MODES as BOOTLOADER_MODES,
     MODE_RECORD as BOOTLOADER_RECORD,
+    MODE_UPDATE as BOOTLOADER_UPDATE,
 )
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.events import REPORT, RUN_LOG
@@ -1527,6 +1528,14 @@ class Controller:
                 f"bootloader {bootloader} requires build: it compares each "
                 "board against a bootloader built from the run's own source, "
                 "which run-suite refuses without --build", 422
+            )
+        if bootloader == BOOTLOADER_UPDATE and not (build and flash_build):
+            # The write happens before preflight, so run-suite requires the
+            # board to be carrying the run's own firmware first.
+            raise ControllerError(
+                "bootloader update requires flash_build: the write happens "
+                "before preflight, so the board must be carrying the run's own "
+                "firmware first", 422
             )
         return dict(
             ref=ref, commit=await self.resolve_ref(ref, commit), plan=plan,

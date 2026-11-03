@@ -86,7 +86,7 @@
             <option value="update">Update a stale board through its programmer</option>
           </select>
         </div>
-        <p id="bootloader-note" class="hint">A board keeps its bootloader through every firmware update, so recording it is all a normal run does. Check and Update need Build and arm-none-eabi-gcc on the target; Update writes flash over a debug programmer the registry pairs with the board, and fails on a stale board that has none.</p>
+        <p id="bootloader-note" class="hint">A board keeps its bootloader through every firmware update, so recording it is all a normal run does. Check and Update need Build and arm-none-eabi-gcc on the target. Update writes flash over a debug programmer the registry pairs with the board, and fails on a stale board that has none; it also needs Flash, because the write happens before preflight and the board has to be carrying this run's firmware first.</p>
         <p id="run-blocked" class="hint warn" role="status" hidden></p>
         <div class="form-actions">
           <button type="submit" id="run-button" class="primary" aria-describedby="run-blocked">Run</button>

@@ -304,6 +304,12 @@ class ProtocolTests(unittest.TestCase):
             "bootloader update without build": json.dumps(
                 {**good, "bootloader": "update"}
             ),
+            # A write happens before preflight, so the board has to be
+            # carrying the run's own firmware first.
+            "bootloader update without flashing": json.dumps(
+                {**good, "build": True, "flash_build": False,
+                 "bootloader": "update"}
+            ),
         }
         for name, text in cases.items():
             with self.subTest(name), self.assertRaises(ProtocolError):

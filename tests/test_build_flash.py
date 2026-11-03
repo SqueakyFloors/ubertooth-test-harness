@@ -709,6 +709,14 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.assertIn(f"UT_0 ({SERIAL_A}): no programmer registered; check-only",
                       stdout)
 
+    def test_the_run_s_own_bootloader_artifact_name_is_reserved(self):
+        """A given file must not stand in the manifest for the one written."""
+        code, _out, stderr = self._run_suite(
+            "--artifact", "bootloader region=" + str(self.hardware),
+        )
+        self.assertEqual(2, code)
+        self.assertIn("is the run's own bootloader region", stderr)
+
     def test_recording_is_the_default(self):
         code, stdout, _err = self._run_suite("--dry-run")
         self.assertEqual(0, code)

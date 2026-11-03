@@ -975,6 +975,21 @@ class GroupStartTests(RunGroupTestCase):
                 {"hosts": [LINUX], "with_firmware": True},
                 "with_firmware requires build",
             ),
+            # The bootloader modes that compare need a build, and the one
+            # that writes needs the boards flashed with it first (#298).
+            "bootloader check without build": (
+                {"hosts": [LINUX], "bootloader": "check"},
+                "bootloader check requires build",
+            ),
+            "bootloader update without flashing": (
+                {"hosts": [LINUX], "build": True, "flash_build": False,
+                 "bootloader": "update"},
+                "bootloader update requires flash_build",
+            ),
+            "a bootloader mode nobody has": (
+                {"hosts": [LINUX], "bootloader": "install"},
+                "bootloader must be one of",
+            ),
             "a ref the repository does not list": (
                 {"hosts": [LINUX], "ref": "no-such-branch"}, "is not a branch or tag",
             ),

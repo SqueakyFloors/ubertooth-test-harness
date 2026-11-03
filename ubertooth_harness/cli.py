@@ -744,10 +744,7 @@ def _prepare_run(
         expectation, bootloader_artifact = _bootloader_stage(
             args, sources, built, executor, publisher, run_dir, leases
         )
-        if (
-            bootloader_artifact is not None
-            and bootloader.ARTIFACT_NAME not in {item.name for item in artifacts}
-        ):
+        if bootloader_artifact is not None:
             artifacts += (
                 FileIdentity.from_path(
                     bootloader.ARTIFACT_NAME, bootloader_artifact.region_path
@@ -859,12 +856,17 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
         _release_flash_host_lock(args, leases)
     artifact = None
     if mode in bootloader.COMPARING_MODES:
-        artifact = bootloader.BootloaderArtifactBuilder(executor).build(
-            ubertooth, publisher,
-            checkout=built.plan.work_dir / "src" / "ubertooth",
-            work_dir=run_dir / "bootloader",
-            output_dir=run_dir,
-        )
+        # Inside the run's cancellation, as the build and the flash stage are:
+        # a clone and a `make` take long enough that Ctrl-C has to end the run
+        # as canceled rather than failed, and must not leave `make` running.
+        with _signals_cancel(CancellationToken()) as token:
+            artifact = bootloader.BootloaderArtifactBuilder(executor).build(
+                ubertooth, publisher,
+                checkout=built.plan.work_dir / "src" / "ubertooth",
+                work_dir=run_dir / "bootloader",
+                output_dir=run_dir,
+                cancellation=token,
+            )
     if mode == bootloader.MODE_UPDATE:
         with _signals_cancel(CancellationToken()) as token:
             summary = bootloader.BootloaderUpdater(executor).run(
@@ -908,6 +910,15 @@ def _test_environment(sources, plan) -> dict:
 def _parse_artifacts(values: list[str]) -> tuple[FileIdentity, ...]:
     artifacts = []
     names = set()
+    if bootloader.ARTIFACT_NAME in {value.split("=", 1)[0] for value in values}:
+        # A run that compares bootloaders records the region it built under
+        # this name, and that is the file it wrote to a board. A given file
+        # under the same name would stand in the manifest for one it is not.
+        raise ManifestError(
+            f"artifact name '{bootloader.ARTIFACT_NAME}' is the run's own "
+            "bootloader region (--bootloader check and update record it); "
+            "use another name"
+        )
     for value in values:
         if "=" not in value:
             raise ManifestError("artifact must use NAME=PATH")

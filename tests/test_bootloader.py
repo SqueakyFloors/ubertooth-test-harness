@@ -142,6 +142,36 @@ class IdentityTests(unittest.TestCase):
             pattern, "Bootloader: 2.00 git-1a2b3c4, CRC32:0x00000001"))
 
 
+class BuildStringTests(unittest.TestCase):
+    """Which commit a bootloader's build string names."""
+
+    COMMIT = "abf677c5b1234567890abcdef1234567890abcde"
+
+    def test_an_abbreviation_of_the_commit_names_it(self):
+        for digits in ("abf677c", "abf677c5b", "abf677c5b123456"):
+            with self.subTest(digits):
+                self.assertTrue(
+                    bootloader.names_commit(f"git-{digits}", self.COMMIT)
+                )
+
+    def test_another_commit_does_not(self):
+        self.assertFalse(bootloader.names_commit("git-1234567", self.COMMIT))
+
+    def test_a_modified_tree_does_not(self):
+        """`*` means bytes nobody could build again."""
+        self.assertFalse(
+            bootloader.names_commit("git-abf677c5b*", self.COMMIT)
+        )
+
+    def test_a_hash_shorter_than_git_ever_writes_does_not(self):
+        self.assertFalse(bootloader.names_commit("git-abf67", self.COMMIT))
+
+    def test_something_that_is_not_a_build_string_does_not(self):
+        for build in ("", "2020-12-R1", "abf677c5b"):
+            with self.subTest(build):
+                self.assertFalse(bootloader.names_commit(build, self.COMMIT))
+
+
 class RegionTests(unittest.TestCase):
 
     def test_the_region_is_the_image_padded_with_erased_flash(self):
@@ -249,39 +279,73 @@ class MakefileCoverageTests(unittest.TestCase):
         text = (
             "TARGET = bootloader\n"
             "LIBS_PATH = ../common\n"
+            "LPCUSB_PATH = $(LIBS_PATH)/lpcusb/target\n"
             "SRC = bl_version.c \\\n"
             "      $(LIBS_PATH)/ubertooth.c \\\n"
             "      $(LPCUSB_PATH)/usbinit.c\n"
             "CPPSRC = $(TARGET).cpp dfu.cpp\n"
             "LINKER_SCRIPT = LPC17xx_Linker_Script_bootloader.ld\n"
+            "LINKER_SCRIPT_DIRS = . $(LIBS_PATH)\n"
         )
         self.assertEqual(
             (
-                "bl_version.c", "../common/ubertooth.c",
-                "../common/lpcusb/target/usbinit.c",
-                "bootloader.cpp", "dfu.cpp",
-                "LPC17xx_Linker_Script_bootloader.ld",
+                (
+                    "bl_version.c", "../common/ubertooth.c",
+                    "../common/lpcusb/target/usbinit.c",
+                    "bootloader.cpp", "dfu.cpp",
+                    "LPC17xx_Linker_Script_bootloader.ld",
+                ),
+                (".", "../common"),
             ),
             bootloader._makefile_sources(text),
         )
 
+    def test_the_makefile_s_own_values_are_followed_not_assumed(self):
+        """A path the makefile moves is read from it, never substituted stale."""
+        named, _dirs = bootloader._makefile_sources(
+            "LIBS_PATH = ../shared\nSRC = $(LIBS_PATH)/ubertooth.c\n"
+        )
+        self.assertEqual(("../shared/ubertooth.c",), named)
+
+    def test_the_real_fork_makefile_reads(self):
+        """Against the fork itself, so the parser cannot drift from it."""
+        fork = Path("/Users/ruswagne/ubertooth-fork")
+        text = subprocess.run(
+            ["git", "-C", str(fork), "show",
+             "squeaky/main:firmware/bootloader/Makefile"],
+            capture_output=True, text=True, check=False,
+        ).stdout if (fork / ".git").exists() else ""
+        if not text:
+            self.skipTest("no fork checkout of main to read")
+        named, dirs = bootloader._makefile_sources(text)
+        self.assertIn("bl_version.c", named)
+        self.assertIn("../common/lpcusb/target/usbinit.c", named)
+        self.assertIn("LPC17xx_Linker_Script_bootloader.ld", named)
+        self.assertEqual((".", "../common"), dirs)
+
     def test_a_source_appended_with_plus_equals_is_read_too(self):
         """A source the pin must cover cannot hide behind `+=`."""
-        text = (
+        named, _dirs = bootloader._makefile_sources(
             "SRC = bl_version.c\n"
             "SRC += ../elsewhere/added.c\n"
             "CPPSRC := bootloader.cpp\n"
         )
         self.assertEqual(
-            ("bl_version.c", "../elsewhere/added.c", "bootloader.cpp"),
-            bootloader._makefile_sources(text),
+            ("bl_version.c", "../elsewhere/added.c", "bootloader.cpp"), named
         )
 
-    def test_a_variable_this_harness_does_not_know_is_refused(self):
+    def test_a_variable_the_makefile_does_not_set_is_refused(self):
         with self.assertRaises(bootloader.BootloaderError) as caught:
             bootloader._makefile_sources("SRC = $(SOMEWHERE)/thing.c\n")
-        self.assertIn("variable this harness does not know",
+        self.assertIn("$(SOMEWHERE), which it does not set",
                       str(caught.exception))
+
+    def test_a_variable_defined_in_terms_of_itself_is_refused(self):
+        with self.assertRaises(bootloader.BootloaderError) as caught:
+            bootloader._makefile_sources(
+                "LIBS_PATH = $(LIBS_PATH)/more\nSRC = $(LIBS_PATH)/a.c\n"
+            )
+        self.assertIn("in terms of itself", str(caught.exception))
 
 
 def git(path: Path, *arguments: str) -> str:
@@ -306,6 +370,7 @@ SRC = bl_version.c \\
       $(LIBS_PATH)/ubertooth.c
 CPPSRC = $(TARGET).cpp
 LINKER_SCRIPT = LPC17xx_Linker_Script_bootloader.ld
+LINKER_SCRIPT_DIRS = . $(LIBS_PATH)
 
 VERSION_NOW := git-$(shell git log --pretty=format:'%h' -n 1)
 
@@ -1072,7 +1137,7 @@ class ExpectationTests(unittest.TestCase):
             with self.subTest(mode):
                 failure = self.expectation(mode).failure("UT_A", None)
                 self.assertIn("did not report its bootloader", failure)
-                self.assertIn("flash the board with this run's build", failure)
+                self.assertIn("a flash with this run's build fixes", failure)
 
     def test_checking_compares_the_whole_identity(self):
         expectation = self.expectation(bootloader.MODE_CHECK)
@@ -1098,6 +1163,16 @@ class ExpectationTests(unittest.TestCase):
             "UT_A", bootloader.parse_identity(FACTORY_LINE + "\n")
         )
         self.assertIn("no debug programmer is registered for it", failure)
+
+    def test_checking_a_programmer_with_no_port_says_which_field_is_missing(self):
+        """Not "register a programmer" for one that is already registered."""
+        expectation = self.expectation(bootloader.MODE_CHECK, device=None)
+        failure = expectation.failure(
+            "UT_A", bootloader.parse_identity(FACTORY_LINE + "\n")
+        )
+        self.assertIn("Prog_A is registered for it with no 'serial device'",
+                      failure)
+        self.assertNotIn("no debug programmer is registered", failure)
 
     def test_updating_a_board_with_no_programmer_names_the_capability(self):
         expectation = self.expectation(bootloader.MODE_UPDATE, programmer=False)
@@ -1194,7 +1269,7 @@ class PreflightCompileTests(unittest.TestCase):
         failure = check.result_failure(result)
         self.assertIn("did not report its bootloader", failure)
         self.assertIn("exited 1", failure)
-        self.assertNotIn("flash the board", failure)
+        self.assertNotIn("a flash with this run's build fixes", failure)
 
     def test_firmware_that_refuses_the_read_is_told_to_be_flashed(self):
         """The one failure a reflash does fix, which exits 1 with no line."""
@@ -1204,7 +1279,7 @@ class PreflightCompileTests(unittest.TestCase):
             duration_s=0.01, timed_out=False,
         )
         failure = check.result_failure(result)
-        self.assertIn("flash the board with this run's build", failure)
+        self.assertIn("a flash with this run's build fixes", failure)
 
     def test_a_timed_out_read_is_a_failure_whatever_the_line_said(self):
         check = self.compile(self.expectation(bootloader.MODE_RECORD))[-1]

@@ -468,7 +468,13 @@
       // Check and Update compare the board against a bootloader built from
       // the ref, which run-suite refuses without a build; the controller
       // refuses it too, so Build off means Record.
-      bootloader: $("build").checked ? $("bootloader").value : "record",
+      // Update writes flash before preflight, so the controller refuses it
+      // unless the boards are flashed with the run's own build first.
+      bootloader: $("build").checked && $("flash-build").checked
+        ? $("bootloader").value
+        : $("build").checked && $("bootloader").value !== "update"
+          ? $("bootloader").value
+          : "record",
     };
     if (!host || !body.ref || !body.plan || !body.suite) {
       status.textContent = "Choose a ref, plan, suite and target first.";
@@ -694,7 +700,13 @@
         resource: String(details.resource ?? ""), serial, resets: 0, state: "", warning: "",
       };
       board.bootloader = bootloaderText(details.installed);
-      board.bootloaderStatus = String(details.status ?? "");
+      // In update mode the stage says it wrote one and preflight then reads
+      // the board again; the later read must not take away the fact that
+      // this run installed it, which is what report.md keeps too.
+      board.bootloaderWritten = board.bootloaderWritten || Boolean(details.written);
+      const read = String(details.status ?? "");
+      board.bootloaderStatus =
+        board.bootloaderWritten && read === "current" ? "updated" : read;
       live.boards.set(serial, board);
       if (details.expected) {
         live.bootloaderExpected = bootloaderText(details.expected);
@@ -1004,7 +1016,7 @@
         className: board.bootloaderStatus === "stale"
           || board.bootloaderStatus === "unreadable" ? "reason" : "board-bootloader",
         text: `; bootloader ${board.bootloader}`
-          + (board.bootloaderStatus === "updated" ? " (installed by this run)" : ""),
+          + (board.bootloaderWritten ? " (installed by this run)" : ""),
       }) : null,
       board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
     const expectedNote = $("bootloader-expected");
@@ -1267,7 +1279,12 @@
     // only thing a run can do is record what each board has.
     const bootloaderChoice = $("bootloader");
     bootloaderChoice.disabled = !build;
-    if (!build) bootloaderChoice.value = "record";
+    // Update writes flash before preflight, so it needs the boards flashed
+    // with this run's build first.
+    bootloaderChoice.querySelector('option[value="update"]').disabled = !flashing;
+    if (!build || (!flashing && bootloaderChoice.value === "update")) {
+      bootloaderChoice.value = "record";
+    }
     const suite = findSuite($("plan").value, $("suite").value);
     const suiteName = $("suite").value;
     for (const option of BUILD_OPTIONS) {

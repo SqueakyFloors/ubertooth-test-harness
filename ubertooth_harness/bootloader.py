@@ -59,7 +59,11 @@ from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.flash import HarnessError
-from ubertooth_harness.patterns import FIRMWARE_VERSION_RE, same_revision
+from ubertooth_harness.patterns import (
+    FIRMWARE_VERSION_RE,
+    GIT_SHORT_HASH_MIN,
+    same_revision,
+)
 from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.resources import DEBUG_PROGRAMMER
 
@@ -232,6 +236,25 @@ class BootloaderIdentity:
             "has_version_block": self.has_version_block,
             "detail": self.detail,
         }
+
+
+def names_commit(build: str, commit: str) -> bool:
+    """Does a bootloader's build string name ``commit``?
+
+    `git-<hash>`, where the hash is an abbreviation of the commit. Git
+    abbreviates to as many digits as that clone needs, and the artifact's
+    build string and the pin come from two checkouts, so the hash is compared
+    as a prefix rather than for equality. A `*` (a modified tree) fails,
+    because nobody could build those bytes again.
+    """
+    if not build.startswith("git-"):
+        return False
+    digits = build[len("git-"):].lower()
+    return (
+        len(digits) >= GIT_SHORT_HASH_MIN
+        and all(character in "0123456789abcdef" for character in digits)
+        and commit.lower().startswith(digits)
+    )
 
 
 def identity_from_match(match: re.Match | None) -> BootloaderIdentity | None:
@@ -418,16 +441,15 @@ PIN_PATHS = (
 _PIN_TIMEOUT_S = 30.0
 
 _BOOTLOADER_MAKEFILE = "firmware/bootloader/Makefile"
-# The makefile's own variables, as it sets them.
-_MAKEFILE_VARS = {
-    "LIBS_PATH": "../common",
-    "LPCUSB_PATH": "../common/lpcusb/target",
-    "TARGET": "bootloader",
-}
-# Where the makefile looks for its linker script (LINKER_SCRIPT_DIRS there),
-# in its order. A script named without a directory is recorded at the first
-# of these that has it, so the sources a run reports are paths that exist.
-_LINKER_SCRIPT_DIRS = (".", "../common")
+# A variable used in a source list, and every assignment the makefile makes.
+# The values come from the makefile itself rather than being written here: a
+# hardcoded path would keep being substituted after the makefile moved a
+# source, and the coverage check below would then pass while the pin no longer
+# covered it.
+_VAR_REFERENCE = re.compile(r"\$\((?P<name>[A-Za-z_0-9]+)\)")
+_VAR_ASSIGNMENT = re.compile(
+    r"(?m)^(?P<name>[A-Za-z_0-9]+)[ \t]*(?::|\?|\+|!)?=[ \t]*(?P<value>[^\n#]*)"
+)
 # Every assignment form make takes, `+=` included: a source appended rather
 # than listed must be covered too, or the pin would miss the one file that
 # changed. An unknown form is refused by _makefile_sources below.
@@ -545,24 +567,70 @@ def verify_interface_constants(source, *, read=read_interface_header) -> int:
     return macros[_VERSION_MACRO]
 
 
-def _makefile_sources(text: str) -> tuple[str, ...]:
+def _assignments(text: str) -> dict[str, str]:
+    """Every variable the makefile sets, by its first assignment."""
+    assigned: dict[str, str] = {}
+    for match in _VAR_ASSIGNMENT.finditer(text):
+        assigned.setdefault(match["name"], match["value"].strip())
+    return assigned
+
+
+def _expand(value: str, assigned: Mapping[str, str], where: str,
+            seen: tuple[str, ...] = ()) -> str:
+    """``value`` with the makefile's own variables substituted.
+
+    A variable the makefile does not set, and a definition that refers to
+    itself, are refused: this expansion decides which files the pin has to
+    cover, so a value it had to guess at would be a pin that misses one.
+    """
+    def one(match: re.Match) -> str:
+        name = match["name"]
+        if name in seen:
+            raise BootloaderError(
+                f"{_BOOTLOADER_MAKEFILE} defines {name} in terms of itself, so "
+                f"{where} cannot be read"
+            )
+        if name not in assigned:
+            raise BootloaderError(
+                f"{_BOOTLOADER_MAKEFILE} builds {where} from $({name}), which "
+                "it does not set, so this harness cannot say which files the "
+                "image is built from"
+            )
+        return _expand(assigned[name], assigned, where, seen + (name,))
+
+    return _VAR_REFERENCE.sub(one, value)
+
+
+def _linker_script_dirs(text: str, assigned: Mapping[str, str]) -> tuple[str, ...]:
+    """Where the makefile looks for its linker script, in its order.
+
+    ``LINKER_SCRIPT_DIRS`` there: the image's own directory and the library
+    paths. A script named without a directory is recorded at the first of
+    these that has it, so the sources a run reports are paths that exist.
+    """
+    value = assigned.get("LINKER_SCRIPT_DIRS")
+    if value is None:
+        return (".",)
+    expanded = _expand(value, assigned, "LINKER_SCRIPT_DIRS")
+    found = tuple(item for item in shlex.split(expanded, comments=True) if item)
+    return found or (".",)
+
+
+def _makefile_sources(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Every file the bootloader makefile names as part of its image.
 
-    Paths as written, relative to ``firmware/bootloader``, with the
-    makefile's own variables put back in.
+    Paths as written, relative to ``firmware/bootloader``, with the makefile's
+    own variables put back in, and the directories it searches for a linker
+    script named without one.
     """
+    assigned = _assignments(text)
     found: list[str] = []
     for match in _ASSIGNMENT_RE.finditer(text):
-        value = match["value"].replace("\\\n", " ")
-        for name, replacement in _MAKEFILE_VARS.items():
-            value = value.replace(f"$({name})", replacement)
-        if "$(" in value:
-            raise BootloaderError(
-                f"{_BOOTLOADER_MAKEFILE} builds {match['name']} from a variable "
-                f"this harness does not know: {value.strip()!r}"
-            )
+        value = _expand(
+            match["value"].replace("\\\n", " "), assigned, match["name"]
+        )
         found += [item for item in shlex.split(value, comments=True) if item]
-    return tuple(dict.fromkeys(found))
+    return tuple(dict.fromkeys(found)), _linker_script_dirs(text, assigned)
 
 
 def _in_tree(source_path: Path | str, commit: str, path: Path) -> bool:
@@ -592,17 +660,18 @@ def verify_source_coverage(
     )
     prefix = Path(_BOOTLOADER_MAKEFILE).parent
     covered = [Path(item) for item in paths]
+    named, script_dirs = _makefile_sources(text)
     sources = []
     uncovered = []
-    for name in _makefile_sources(text):
+    for name in named:
         # Names are relative to firmware/bootloader. The linker script is
         # searched for in . and ../common; both are covered, so taking it as
         # a path in the image's own directory is enough here.
         candidates = [name]
         if "/" not in name:
             # A bare name is a linker script, which the makefile searches for
-            # in its own directory and then in ../common.
-            candidates = [f"{where}/{name}" for where in _LINKER_SCRIPT_DIRS]
+            # in the directories it lists.
+            candidates = [f"{where}/{name}" for where in script_dirs]
         path = None
         for candidate in candidates:
             try:
@@ -919,15 +988,17 @@ class BootloaderArtifactBuilder:
                 f"the built bootloader reports version {version}, but "
                 f"{INTERFACE_HEADER} at the pin defines {expected_version}"
             )
-        if build != f"git-{pin.short_commit}":
-            # A build string that is not exactly the pinned commit's means the
-            # image would be rebuilt, and rewritten to a board, on the next
-            # run. The `*` a modified tree adds is refused for the same
-            # reason: nobody could build those bytes again.
+        if not names_commit(build, pin.commit):
+            # A build string that is not the pinned commit's means the image
+            # would be rebuilt, and rewritten to a board, on the next run. The
+            # `*` a modified tree adds is refused for the same reason: nobody
+            # could build those bytes again. The hash is compared as a prefix
+            # of the commit, because the two abbreviations come from git in
+            # two checkouts, which need not abbreviate to the same length.
             raise BootloaderError(
-                f"the built bootloader carries build string {build!r}, not "
-                f"'git-{pin.short_commit}' from the pinned commit; its identity "
-                "would not be reproducible"
+                f"the built bootloader carries build string {build!r}, which is "
+                f"not the pinned commit {pin.short_commit}; its identity would "
+                "not be reproducible"
             )
         region_path = work_dir / REGION_NAME
         region_path.write_bytes(region)
@@ -1388,6 +1459,11 @@ class BootloaderUpdater:
                 publisher, board, f"bootloader-verify-{board.alias}-{attempt}",
                 "bootloader_identity_after", token,
             )
+            if read.cancelled:
+                return BoardBootloaderResult(
+                    board, "canceled", now, f"canceled: {token.reason}",
+                    written=True, previous=installed,
+                )
             if now is not None:
                 break
             if attempt < VERIFY_ATTEMPTS:
@@ -1470,14 +1546,14 @@ class BootloaderExpectation:
         board = self.boards.get(alias or "")
         where = alias or "the selected board"
         if installed is None:
-            # No line at all: firmware older than the request refuses it, and
-            # the tool says so and prints nothing. Name the fix, because the
-            # bootloader read is the one check a reflash does not satisfy by
-            # itself on a board whose firmware predates it.
+            # No line at all. The command's own exit status is what says why,
+            # and PreflightCheck.result_failure reports it where there is one;
+            # this wording is for a caller that has only the output, so it
+            # names the usual cause without claiming it.
             return (
                 f"{where} did not report its bootloader; firmware older than "
-                "the bootloader read refuses it, so flash the board with this "
-                "run's build and read it again"
+                "the bootloader read refuses it, which a flash with this run's "
+                "build fixes"
             )
         if not self.compares:
             # Recording only, and the board answered: nothing here can fail.
@@ -1487,10 +1563,16 @@ class BootloaderExpectation:
         if self.mode == MODE_UPDATE and board is not None and not board.can_be_programmed:
             return no_programmer_reason(board, installed, self.expected)
         tail = ""
-        if board is not None and not board.can_be_programmed:
+        if board is not None and not board.has_programmer:
             tail = (
                 "; no debug programmer is registered for it, so this run cannot "
                 "install one"
+            )
+        elif board is not None and not board.can_be_programmed:
+            tail = (
+                f"; {DEBUG_PROGRAMMER} {board.programmer_alias} is registered "
+                "for it with no 'serial device', so there is no port to program "
+                "through"
             )
         elif board is not None:
             tail = (
