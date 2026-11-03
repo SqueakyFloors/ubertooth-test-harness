@@ -92,3 +92,43 @@ suites:
         duration: 18s
         interval: 30
         update: 60
+
+  # The same advertiser read by the weak-link receivers, which is what #168
+  # asked for: does a DK capture still work with the Ubertooth behind an
+  # attenuator? Measured 2026-11-02 in the attenuated device sweep, 25 s per
+  # leg against a DK advertising every 20 ms (about 1250 expected):
+  #
+  #   clear  1193 advertisements, 1193 valid CRC, 0 invalid, RSSI mean -29.9
+  #   20 dB  1175 advertisements, 1175 valid CRC, 0 invalid, RSSI mean -69.0
+  #   40 dB  1228 advertisements, 1228 valid CRC, 0 invalid, RSSI mean -70.0
+  #
+  # So attenuation costs this capture nothing, and the test's own floor (a
+  # fifth of the expected advertisements, advertiser_cases.MIN_SHARE) holds
+  # with large margin at both. No threshold is changed or added here: both
+  # entries are the committed test, pointed at a different board.
+  #
+  # Worth knowing when reading a run: the raw record count falls with
+  # attenuation (12144, 8161, 6098) while the advertisement count stays flat.
+  # The clear board's extra records are ambient traffic and false
+  # access-address matches, not signal, so a raw count is a bad quality
+  # measure here.
+  ble-weak-link:
+    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        weak link: {Ubertooth: 20}
+        coverage: smoke
+        duration: 5s
+        interval: 100
+        payload: c0ffee
+
+    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 5s
+        interval: 100
+        payload: c0ffee

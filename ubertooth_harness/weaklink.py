@@ -36,48 +36,57 @@ numbers were taken at even when the bench was rewired since.
 
 ## What the bench has been measured at
 
-Both settings have been measured only by driving `ubertooth-util -e`, `-n`
-and `-m` by hand: the `range-weak-link` suite has never judged a result,
-because it stops on a fork bug first (`docs/tests.md`, `Two-device range
-test`). What those runs establish is narrow.
+Both receivers have been measured, and a runnable plan may point a test at
+either. The figures come from two sessions, both with one firmware revision
+across the boards compared, because the bench's receivers are routinely left
+on different images and an A/B that ignores that measures the firmware.
 
-At 20 dB (harness PR #217): ten round trips completed, request and reply PA
-levels 0 to 2, so the level stayed inside the bound the ordinary suite
-already applies; and a full-band `specan` mean moved 1.1 dB between the
-attenuated board and an ordinary one, with 0.1 dB of run-to-run spread, so
-mean band RSSI cannot measure an attenuator at all.
+**The range test** (2026-11-02, six rounds per responder, one ordinary
+sender): the responder's reply PA level, which is what the attenuated board
+must transmit at to be heard, reaches 1 behind 20 dB and 3 behind 40 dB, with
+every round a clean round trip. Reply level 3 is `maximum PA level`'s own
+default bound, so a 40 dB range entry has to raise that argument rather than
+inherit it. The copy numbers run over most of their 0 to 15 range at both, so
+they discriminate nothing at that sample size. Earlier, at 20 dB only
+(harness PR #217): a full-band `specan` mean moved 1.1 dB between the
+attenuated board and an ordinary one with 0.1 dB of spread, so a band mean
+cannot resolve a per-level step.
 
-At 20 against 40 dB (2026-11-02, one sender and one firmware for both sides,
-six rounds each; `docs/tests.md` has the table): the responder's reply PA
-level separates cleanly, reaching 1 behind 20 dB and 3 behind 40 dB, while
-every round completed. So 40 dB neither loses the link nor is too clean to
-measure, and the reply level is the figure that moves. The copy numbers run
-over most of their 0 to 15 range at both, so at this sample size they
-discriminate nothing.
+**Captures over the link**, which the range test could never speak for, come
+from the attenuated device sweep (2026-11-02, nine interleaved Classic legs,
+three BLE legs and four AFH legs; `docs/tests.md` carries the tables per
+test):
 
-**Measured is per test, not per bench, and this list is per bench.** Those
-runs measured the *range test* at 40 dB; they say nothing about what a
-capture decodes there, because the range test retries a packet up to sixteen
-times and reports only the copy that got through. So 40 dB is not in the list
-below: adding it would let the four capture entries into a runnable plan
-carrying floors set over a strong link, which is the one thing the gate
-exists to stop. A 40 dB range entry is what this measurement licenses, and
-promoting it wants a per-test record rather than this global one.
+* a known Classic piconet is decoded at both, with every packet carrying the
+  target LAP and none carrying another, and the clock acquired at 20 and
+  40 dB;
+* `-e` is honoured exactly at both: an `-e 0` leg holds `err=0` records and
+  nothing else, `-e 2` tops out at 2 and `-e 4` at 4;
+* **40 dB is not an error regime.** Its error profile sits close to 20 dB's
+  (74% against 77% `err=0` at `-e 2`) on a comparable packet count while
+  reading about 14 dB lower, so the link still has margin there. Damaged
+  packets in quantity would need more attenuation than the bench now has;
+* a known BLE advertiser is captured completely at both, about 1175 and 1228
+  advertisements with **no** CRC failure, and `tshark` agrees with the tool's
+  own count exactly;
+* AFH map recovery is *better* attenuated: the 20 dB board recovered a known
+  38-channel map exactly, 0 false and 0 missed, where both clear boards
+  over-marked by 11 to 15 channels. 40 dB begins to erode the other way,
+  losing two edge channels;
+* neither attenuated board produced a pegged record in 6861 packets, where a
+  clear board pegged on 23 to 41% of its own.
 
-What no measurement covers is a capture taken over this link. Nothing has
-been shown about whether 20 dB at a meter damages packets: a completed round
-trip is not evidence that none were damaged, since the range test keeps the
-first reply of up to sixteen copies and reports only the lowest level and
-copy that got through. So the checks that turn on error flags, recovery under
-errors, or an access-code error threshold are pointed at the bench's 40 dB
-receiver rather than at 20 dB, following the issue's own request for
-a larger figure, and `CHECKS` carries the measurement each one still needs
-instead of a threshold inferred from the runs above.
+One measured caveat sits in the code below rather than in prose: at 20 dB,
+`-e 4` collapsed to single-digit packet counts twice, minutes after the same
+board returned 2692 at `-e 2` and while the 40 dB board returned 2376 at
+`-e 4`. It is unexplained and fork-side, so no weak-link entry asks for `-e 4`
+at 20 dB.
 
-`measured()` and `unmeasured()` are what give this force: `plan.check_runnable`
-refuses a runnable plan that points a test at an attenuation not in
-`MEASURED_ATTENUATIONS_DB`, so an entry cannot quietly start judging its old
-floors over a link nobody has characterized.
+`measured()` and `unjudgeable()` are what give this force: `check_runnable`
+and `check_suite_runnable` refuse a plan or suite that points a test at an
+attenuation outside `MEASURED_ATTENUATIONS_DB`, or at a band rather than one
+figure, so an entry cannot quietly judge its old floors over a link nobody
+has characterized.
 """
 
 from __future__ import annotations
@@ -92,15 +101,15 @@ from ubertooth_harness.rf import NORMAL_LINK, PlacementError, PlacementRequireme
 # Attenuations the bench has been MEASURED at, in dB. A runnable plan may
 # only point a test at one of these (plan.check_runnable).
 #
-# Fitted is not measured, and this list tracks the second. A 40 dB receiver
-# has been on the bench and in the registry since 2026-11-02, so a 40 dB
-# entry can now be planned and run by hand; it joins this list when a run has
-# produced the figures its checks would be judged against, and not before.
-# The maintainer's attenuators stack in 1, 3, 5, 10, 20 and 30 dB steps, so
-# 20 and 40 dB are the current measurement points rather than fixed limits.
-MEASURED_ATTENUATIONS_DB: tuple[float, ...] = (20.0,)
-# Attenuations the weak-link checks ask for, which no run has characterized.
-PLANNED_ATTENUATIONS_DB: tuple[float, ...] = (30.0, 40.0)
+# Fitted is not measured, and this list tracks the second. Both of these have
+# had captures taken over them, not just a range round trip, which is what
+# lets a capture test be judged there (see the section above). The
+# maintainer's attenuators stack in 1, 3, 5, 10, 20 and 30 dB steps, so these
+# are the points measured so far rather than fixed limits.
+MEASURED_ATTENUATIONS_DB: tuple[float, ...] = (20.0, 40.0)
+# Asked for and still uncharacterized: the second point that would turn the
+# 20-against-40 figures into a curve.
+PLANNED_ATTENUATIONS_DB: tuple[float, ...] = (30.0,)
 
 
 def measured(attenuation_db: float) -> bool:
@@ -289,60 +298,61 @@ class Check:
 # `docs/tests.md` says per test what a weak link changes for it.
 CHECKS: tuple[Check, ...] = (
     Check(
+        "Board-to-DK capture with an attenuated receiver",
+        "Capture known BLE advertiser", "Ubertooth", 20.0, "",
+    ),
+    Check(
+        "Follow a marginal Classic piconet",
+        "Follow Classic Bluetooth piconet", "Ubertooth", 20.0, "",
+    ),
+    Check(
+        "AFH map recovery on a weak link",
+        "Recover AFH map", "Ubertooth", 20.0, "",
+    ),
+    Check(
+        "UAP and clock recovery under errors",
+        "Capture known Classic device", "Ubertooth", 40.0, "",
+    ),
+    Check(
+        "Access-code error threshold (ubertooth-rx -e)",
+        "Classic Bluetooth receive", "Ubertooth", 40.0, "",
+    ),
+    Check(
         "HEC and CRC error flags, Classic",
         "Classic capture record fields", "Ubertooth", 40.0,
-        "a capture holding records a flag actually fired on, plus a check "
-        "that one did: today's cases require the fields to agree, not that "
-        "any header failed its HEC, and the floors were set over a strong link",
+        "a capture whose records a flag actually fired on. The sweep decoded "
+        "packets at 40 dB but wrote no capture file, and 40 dB is not an "
+        "error regime on this bench anyway (74% against 77% err=0), so the "
+        "flags may simply not fire; more attenuation than the bench has may "
+        "be needed, and a case that requires a flag to have fired does not "
+        "exist yet",
     ),
     Check(
         "HEC and CRC error flags, BLE",
         "Capture known BLE connection", "Ubertooth", 40.0,
-        "the same, for the LE records' CRC flag: the test's floor for packets "
-        "with a valid CRC was set on a strong link",
-    ),
-    Check(
-        "UAP and clock recovery under errors",
-        "Capture known Classic device", "Ubertooth", 40.0,
-        "how often libbtbb settles on a wrong UAP when packets are marginal, "
-        "which needs a link that delivers marginal packets first",
-    ),
-    Check(
-        "Access-code error threshold (ubertooth-rx -e)",
-        "Classic Bluetooth receive", "Ubertooth", 40.0,
-        "packets carrying 1 to 5 access-code errors, and a case that compares "
-        "what different -e values find: today's -e 0 and -e 4 cases only "
-        "require that no packet exceeded the limit",
-    ),
-    Check(
-        "Follow a marginal Classic piconet",
-        "Follow Classic Bluetooth piconet", "Ubertooth", 20.0,
-        "one capture over this link: whether follow survives the lost packets "
-        "and recovers, and what packet floor it then supports",
+        "a connection to capture: only one registered DK declares central and "
+        "peripheral, so no pair can be bound on this bench",
     ),
     Check(
         "Follow a marginal BLE connection",
         "Follow a BLE connection across its end", "Ubertooth", 20.0,
-        "one capture over this link: whether follow reacquires the connection "
-        "across its end when packets are lost, and at what rate",
-    ),
-    Check(
-        "Board-to-DK capture with an attenuated receiver",
-        "Capture known BLE advertiser", "Ubertooth", 20.0,
-        "one measurement that a DK capture still works at 20 dB; without it "
-        "the packet floors would be a guess",
+        "the same single DK: following a connection across its end needs two",
     ),
     Check(
         "Transmit power steps",
         "Transmit power steps", "receiver", 20.0,
-        "the RSSI step per PA level, which no test reports yet: the range "
-        "test reports only the level that got through",
+        "an implementation, and the RSSI step per PA level it would judge. "
+        "The sweep's per-source asymmetry is the warning: the Classic peer "
+        "separated the two receivers by about 14 dB while the DK separated "
+        "them by 1 dB, so a step figure belongs to a source and a geometry, "
+        "not to the attenuator alone",
     ),
     Check(
         "Receiver sensitivity",
         "Receiver sensitivity", "receiver", 20.0,
         "a method as much as a figure: which reading the receiver takes from "
         "a held transmitter is open, since the per-packet figures need "
-        "packets and the one level-settable sender here sends a carrier",
+        "packets and the one level-settable sender here sends a carrier. The "
+        "sweep's RSSI means are explicitly not sensitivity",
     ),
 )

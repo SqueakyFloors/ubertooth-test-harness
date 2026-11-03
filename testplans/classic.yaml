@@ -152,3 +152,84 @@ suites:
         allow RF transmission: true
         coverage: smoke
         sessions: 5
+
+  # The Classic weak-link entries #168 asked for, each at the attenuation a
+  # run has characterized. Measured 2026-11-02 in the attenuated device
+  # sweep, with the ESP32 pair streaming and one firmware revision across
+  # every board compared. Each entry is the committed test pointed at a
+  # weak-link receiver; no threshold is changed.
+  #
+  # `ubertooth-rx -l <LAP> -u <UAP> -e N -t 25` per leg, interleaved:
+  #
+  #        | packets | clock acquired | RSSI mean | err=0 share
+  #   -e 0 |    1793 | yes            |     -52.3 | 100%          (20 dB)
+  #   -e 2 |    2692 | yes            |     -52.3 |  77%          (20 dB)
+  #   -e 0 |     880 | yes            |     -66.3 | 100%          (40 dB)
+  #   -e 2 |    2388 | yes            |     -66.7 |  74%          (40 dB)
+  #   -e 4 |    2376 | yes            |     -67.3 |  63%          (40 dB)
+  #
+  # Every decoded packet in all nine legs carried the target LAP and no leg
+  # carried another, the supplied UAP was used rather than guessed, and `-e`
+  # was honoured exactly (an `-e 0` leg holds err=0 and nothing else).
+  #
+  # Two things that shaped which entry sits at which attenuation:
+  #
+  #  * 40 dB is not an error regime here: its error profile is close to
+  #    20 dB's on a comparable packet count. So the `-e` entry is at 40 dB
+  #    because that is the weakest link measured, not because it produces
+  #    damaged packets in quantity.
+  #  * at 20 dB, `-e 4` collapsed to 1 and then 5 packets, minutes after the
+  #    same board returned 2692 at `-e 2` and while the 40 dB board returned
+  #    2376 at `-e 4`. Unexplained and fork-side. Nothing here asks for `-e 4`
+  #    at 20 dB, which is why the comprehensive `-e` entry is the 40 dB one.
+  classic-weak-link:
+    # Follow a known piconet over the weak link: `-l`/`-u` targeting and the
+    # packet floor, with the clock acquired at this attenuation.
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 20}
+        coverage: smoke
+        duration: 25s
+
+    # AFH recovery is the one check attenuation makes *better*, measured
+    # against the peers' known 38-channel map over 70 s:
+    #
+    #   clear 3460    53 channels marked, 38/38 found, 15 false, 0 missed
+    #   20 dB 1cc0    38 channels marked, 38/38 found,  0 false, 0 missed
+    #   40 dB 13e0    36 channels marked, 36/38 found,  0 false, 2 missed
+    #   clear 1d00    49 channels marked, 38/38 found, 11 false, 0 missed
+    #
+    # 20 dB recovered the map exactly. The test keeps its committed
+    # tolerances; this entry is where they are met with the most room.
+    - Recover AFH map:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 20}
+        coverage: smoke
+        duration: 2m
+
+    # UAP and clock recovery at the weakest link measured: the peers' real
+    # UAP is known, so a wrong one is recognizable, and the clock was
+    # acquired at this attenuation.
+    - Capture known Classic device:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 25s
+
+    # The access-code error threshold: comprehensive, because the `-e` cases
+    # are comprehensive-only.
+    - Classic Bluetooth receive:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        weak link: {Ubertooth: 40}
+        coverage: comprehensive
+        duration: 25s
