@@ -67,7 +67,6 @@ from ubertooth_harness.classic_cases import (
     STREAM_PAYLOAD,
     STREAM_PERIOD_MS,
     Check,
-    _all,
     _capture_file_step,
     _capture_path,
     _pair,
@@ -127,19 +126,6 @@ INQUIRY_MIN_S = 8 * 1.28
 # allows two such devices with margin; a bench with more falls back on the
 # driver's own deadline, which fails with its message.
 NAME_READS_S = 60.0
-# What -x adds, which is the one allowance here that is not a worst case.
-# `extra_info()` is called for every device the inquiry answered AND for
-# every survey result whose UAP the sweep recovered, which the pair's own
-# piconet is on any working run -- those go to the `00:00:<UAP>:<LAP>`
-# address the tool assembles, so each costs a page as well. Per
-# device, connects (25 s), sleeps a second, and reads the name (25 s), the
-# version (20 s) and up to two feature pages (20 s each): about 113 s if a
-# device fails every read. The number of devices is whatever is in range, so
-# no figure bounds it. This covers two or three devices behaving normally with
-# a wide margin; a run that needs more fails on the driver's deadline, with
-# its message, rather than being left to the harness's own.
-EXTENDED_REPORT_S = 240.0
-
 # What `ubertooth-follow` spends before its capture starts, all of it inside
 # the window the driver interrupts at, so the window has to be the capture
 # plus this or the capture is shorter than the plan asked for -- and with a
@@ -191,42 +177,16 @@ INQUIRY_LINE = re.compile(
 SCAN_RESULT_LINE = re.compile(
     r"^\?\?:\?\?:(?P<uap>\?\?|[0-9A-F]{2}):"
     r"(?P<lap>[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2})(?:\t(?P<name>.*))?$")
-# The lines of the extended report of -x, which are indented under the device
-# they belong to (extra_info() in ubertooth-scan.c). Only the three a
-# reachable device always answers are checked: the address it was reached at,
-# its name, and its LMP version. The features, the clock offset and the
-# channel map depend on the controller.
-_EXTENDED_ADDRESS = re.compile(r"^\tBD Address:  (?P<address>\S+)$")
-_EXTENDED_NAME = re.compile(r"^\tDevice Name: (?P<name>.*)$")
-_EXTENDED_LMP = re.compile(
-    r"^\tLMP Version: .+ \(0x[0-9a-f]+\) LMP Subversion: 0x[0-9a-f]+$")
-
-# What libubertooth says when the capture's own USB stream died. Every case
-# but one catches that through the tool's exit status; the -x case, which has
-# to accept a non-zero status for a reason of its own, forbids these lines
-# instead. A teardown the board refused is the other reason that status is
-# set, and that leaves the board in its mode, which the `_stop` step after
-# the capture reports.
-CAPTURE_FAILED = (
-    # rx_xfer_status(): a transfer error, a board that left the bus, or an
-    # overflow.
-    r"(?m)^error: receive transfer failed: ",
-    # cb_xfer(): the resubmit that could not be made.
-    r"(?m)^error: resubmitting the receive transfer failed ",
-    # The same path for a stalled receive endpoint, which
-    # ubertooth_report_unsupported_request() reports by name.
-    r"(?m)^error: could not receive the capture\b",
-)
-
 # An established link in `hcitool con`: one line per link, naming its type and
 # its state. `state 1` is BlueZ's connected state; `state 2` is a page still
 # in flight, which is what the scan's own name reads leave behind and what the
-# kernel times out by itself. Measured on the bench: a scan left three such
+# kernel times out by itself. Measured on the bench: a scan left five such
 # pending links, one of them to the `00:00:<UAP>:<LAP>` address it assembles
-# from a survey result, and all three were gone shortly after. So only an
+# from a survey result, and all of them were gone shortly after. So only an
 # established link is held against a run -- that is a peer this host is
 # keeping, which is what this check is for.
 ESTABLISHED_LINK = r"(?m)^\s*[<>]\s+(?:ACL|SCO|eSCO|LE)\s.*\sstate 1\s"
+
 
 # ---------------------------------------------------------------------------
 # The adapter, from the registry
@@ -383,54 +343,6 @@ def scan_results_list(lap: str, *, with_map: bool = False) -> Check:
         if with_map and not found[lap]:
             return (f"the result for LAP {lap} has no 'AFH map:' line after "
                     "it; the scan prints one per piconet it reports")
-        return ""
-    return check
-
-
-def extended_report(address: str, name: str) -> Check:
-    """``-x``'s report of this device holds its address, name and version.
-
-    The three are checked together, inside the one device's block, and not as
-    three patterns over the whole output: the scan reports every device the
-    inquiry answered, each with a report of its own, so another device's
-    ``LMP Version:`` line would otherwise stand in for a missing one here.
-
-    A block is the device's own line (``<address>\t<name>``, or a survey
-    result) followed by the indented lines of its report.
-    """
-    def check(output) -> str:
-        blocks: dict[str, list[str]] = {}
-        current: list[str] | None = None
-        for line in text_lines(output):
-            if line.startswith("\t"):
-                if current is not None:
-                    current.append(line)
-                continue
-            match = INQUIRY_LINE.match(line) or SCAN_RESULT_LINE.match(line)
-            current = blocks.setdefault(line, []) if match else None
-        mine = next(
-            (lines for device, lines in blocks.items()
-             if device.split("\t")[0] == address), None)
-        if mine is None:
-            return (f"no device line for {address}, so it has no extended "
-                    "report either")
-        reported = next(
-            (found["address"] for found in map(_EXTENDED_ADDRESS.match, mine)
-             if found), None)
-        if reported != address:
-            return (f"the extended report under {address} gives its address as "
-                    f"{reported or 'nothing'}")
-        found_name = next(
-            (found["name"] for found in map(_EXTENDED_NAME.match, mine)
-             if found), None)
-        if found_name is None:
-            return (f"the extended report of {address} has no 'Device Name:' "
-                    f"line; the peer firmware names it {name!r}")
-        if found_name != name:
-            return (f"the extended report of {address} names it "
-                    f"{found_name!r}, and the peer firmware names it {name!r}")
-        if not any(_EXTENDED_LMP.match(line) for line in mine):
-            return f"the extended report of {address} holds no LMP version"
         return ""
     return check
 
@@ -612,42 +524,21 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
                             "'AFH map:' line the scan built for it"),
     ]
     if arguments["coverage"] == "comprehensive":
-        # -x asks each device found for its name, version and features over a
-        # connection the scan makes itself. It is comprehensive-only because
-        # it is the one part of this tool that transmits to whatever the
-        # inquiry answered, rather than only listening.
+        # `-s -x` is deliberately not exercised. The bench settled why: `-x`
+        # fetches its report over a connection it makes to each device, and
+        # the acceptor is in the pair's link throughout, so the connection
+        # does not happen -- a run had the inquiry list the acceptor and its
+        # extended report carry no address at all. An idle acceptor would
+        # answer, but then the sweep has no piconet to report, and with two
+        # Classic boards the two cannot both hold. What it wants is a third
+        # Classic device, idle and connectable, which this bench has not got
+        # (#88); docs/tests.md records the measurement.
         #
-        # Either exit status, which the bench settled. -x fetches a report
-        # from every device the inquiry answered AND from every piconet the
-        # sweep heard, and on this bench most of those are other people's:
-        # a comprehensive run measured seven `reading the extended features
-        # failed: Connection timed out`, seven clock-offset failures and six
-        # AFH-map failures, all of them other devices', and the tool exits 1
-        # if any part of any report could not be fetched. Pinning a zero exit
-        # therefore failed the case for reasons that were not the bench's.
-        #
-        # What the status is given up for is bought back two ways: the lines
-        # libubertooth prints when the capture's own stream died are
-        # forbidden, and a teardown the board refused leaves it in its mode,
-        # which the `_stop` step after the capture reports. The acceptor's own
-        # report block and the piconet in the survey results are what decide
-        # the case.
-        cases.append(scan(
-            "-s", "-x", case_id="extended-report",
-            name=f"ubertooth-scan -s -x reports the acceptor's name and LMP "
-                 f"version over a connection, and the piconet LAP {central}",
-            check=_all(inquiry_found(acceptor["address"], acceptor_name),
-                       extended_report(acceptor["address"], acceptor_name),
-                       scan_results_list(central)),
-            returncodes=(0, 1),
-            forbidden=CAPTURE_FAILED,
-            extra_s=(INQUIRY_S + NAME_READS_S + BOARD_SETUP_S
-                     + EXTENDED_REPORT_S),
-            patterns=_pair_report(acceptor, initiator,
-                                  exit_status="[01]"),
-            expected_state=(f"the extended report of {acceptor['address']} held "
-                            f"{acceptor_name} and an LMP version, and the scan "
-                            f"results listed LAP {central}")))
+        # Measured in the same run, and the reason a case here could not pin
+        # the exit status either: `-x` also asks every piconet the sweep
+        # heard, and twenty of those reads failed against devices the bench
+        # does not own.
+        pass
     return tuple(cases)
 
 
