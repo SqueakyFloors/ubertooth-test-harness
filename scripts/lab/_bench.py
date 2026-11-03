@@ -11,6 +11,7 @@ from ubertooth_harness import leases
 from ubertooth_harness.resources import RegistryError
 
 PEER_TYPE = leases.PEER_TYPE
+PROGRAMMER_TYPE = leases.PROGRAMMER_TYPE
 HELD_TYPES = tuple(leases.LEASED_TYPES)
 
 # The shortest prefix of a serial a name may be. Bench notes name a board by
@@ -99,9 +100,14 @@ def plain_serial(resource) -> str:
     """The serial a bench's own scripts may name a device's lock file after.
 
     An Ubertooth's lease key is its serial, so there is no second name and
-    this is empty. A DK's and a peer's keys are not their serials, so both
-    names exist and both are taken.
+    this is empty. A DK's, a peer's and a programmer's keys are not their
+    serials, so both names exist and both are taken.
     """
+    if resource.type == PROGRAMMER_TYPE:
+        # As registered, not lowercased: a programmer's serial goes into its
+        # lease key verbatim, and the bench's own lock file is named after
+        # that same string, so another spelling would name another file.
+        return str(resource.identity.get("serial", "") or "").strip()
     if resource.type not in (leases.DK_TYPE, PEER_TYPE):
         return ""
     for key in ("jlink serial", "bridge serial"):

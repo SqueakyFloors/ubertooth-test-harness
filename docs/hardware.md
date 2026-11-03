@@ -22,6 +22,7 @@ a device, switching a hub port, the udev rule), and
 | Ubertooth One | the device under test: receive, transmit, range, flash | libusb, selected by its full 32-hex-digit serial (`-U`) |
 | nRF52840 DK (PCA10056) | Bluetooth LE peer: advertiser, central, and peripheral | the on-board J-Link: SWD to flash, its virtual COM port for the shell |
 | ESP32-WROOM-32E | Classic Bluetooth (BR/EDR) peer pair: SPP link and data | a CP2102N USB-to-UART bridge, for both flashing and the shell |
+| A debug programmer | wired to one board's debug or programming header, for flashing and recovery by hand | nothing: the harness only holds it with that board, and a bench tool drives it |
 | Acroname USBHub3+ | per-port USB power and data, with VBUS readback | the BrainStem API over the hub's own USB control link |
 | StarTech managed hub | per-port USB power, no measurement | its built-in serial management controller |
 | A plain powered hub | carries devices that need no power control | nothing: it has no control interface at all |
@@ -222,6 +223,69 @@ By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
 their registry aliases, holds them, and runs that module, which is how a
 capture against the pair is taken outside a run: `peer stream` for the data
 link and `peer audio` for the voice link.
+
+### A debug programmer and the board it programs
+
+A bench may have a programmer left permanently wired to one board: a USB
+serial adapter on an Ubertooth's in-system programming header, an SWD probe on
+a debug connector, or anything of that kind. It is for writing a bootloader or
+recovering a board that no longer answers over USB, which is work done by hand
+with the vendor's own tool; no test binds one and the harness never drives it.
+
+What the harness does is keep the two together. The programmer and the board
+it is wired to are one piece of hardware as far as using either goes:
+programming the board while another command owns it, or using the board while
+it is being programmed, spoils a test or leaves the board needing hands on it.
+So the registry records the pairing and every command that holds one member
+holds the other.
+
+```yaml
+  UT_Linux1:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity:
+      serial: fedcba9876543210fedcba9876543210
+
+  Prog_Linux0:
+    type: Debug programmer
+    attached to: Host_Linux
+    programs: UT_Linux1
+    identity:
+      serial: A000AA00
+      # Optional, where the adapter has one:
+      # serial device: /dev/serial/by-id/usb-Vendor_Adapter-if00-port0
+```
+
+- `identity.serial` is the serial the adapter's USB descriptor reports, and is
+  required: it names the lease, as `programmer-<serial>`, taken verbatim as
+  registered (a `serial device`, where one is recorded, must be the stable
+  `/dev/serial/by-id` path, not `/dev/ttyUSB<n>`, which is assignment order).
+- `programs:` is the one board it is wired to. A registry is refused when that
+  board is not registered, is not a device the harness leases (a host, a hub:
+  there would be no lock to take for it), is attached to another host (leases
+  are local to a host, so a pair across two of them would hold nothing),
+  already has another programmer, or is the programmer itself, and when the
+  pairing loops back on itself. Its serial has to be its own: a programmer
+  may not take a serial another device is registered with, nor one that
+  spells a file the lease directory keeps for itself (`host-power`,
+  `takeover`), because the bench lock name for a programmer is that serial
+  on its own and a lock of one would be read as a lock of the other.
+- A chain is allowed and is held as one set, for a bench that wires a
+  programmer to another programmer's own header: holding any member holds all
+  of them.
+- Holding either member holds both, in one all-or-nothing attempt in the
+  harness's own lock order, whichever one was named; naming both is harmless.
+  That covers `scripts/lab/hold`, `ubertooth-harness lease`, a run that uses
+  or power-cycles the board, and `scripts/lab/hub-port` on either member's
+  port. The three by-hand commands say on standard error which device the
+  pairing brought in and why, and `ubertooth-harness boards` prints the
+  pairing under both. A run takes the pair without saying so in its record
+  yet ([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)).
+- The programmer appears in `ubertooth-harness boards` like any other leased
+  device, so a holder a reader did not expect is explained where they see it.
+
+Nothing about a particular bench is in the harness: the type, the serial, and
+the pairing all come from the registry.
 
 ### Acroname USBHub3+
 
@@ -581,6 +645,9 @@ because a firmware write may still be running; its error says what to look
 for. Commands waiting for a device are served in the order they arrived, so a
 run that wants several devices is not left behind by short leases on one of
 them.
+A device permanently wired to another one -- a board and its debug programmer
+-- is held together with it, whichever of the two a command names (see [A
+debug programmer and the board it programs](#a-debug-programmer-and-the-board-it-programs)).
 Where the bench's own scripts lock devices with their own per-device files, a
 lease takes those too (`--external-board-lock`). See
 [Sharing boards: leases](../README.md#sharing-boards-leases).

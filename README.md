@@ -140,11 +140,12 @@ Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
 ```
 
 Every test that binds hardware also accepts `rf:`, which asks for a board by
-where it sits on the bench, one requirement per hardware role (see
-[RF placement](#rf-placement-where-a-board-sits-on-the-bench)), and
-`required hardware: true`, which says the hardware that step names is what
-the step is there to measure: a registry without it blocks the step and fails
-the run instead of leaving it out (see
+where it sits on the bench, one requirement per hardware role, and
+`weak link:`, the shorthand for one role at an attenuation in dB (see
+[RF placement](#rf-placement-where-a-board-sits-on-the-bench)). It also
+accepts `required hardware: true`, which says the hardware that step names is
+what the step is there to measure: a registry without it blocks the step and
+fails the run instead of leaving it out (see
 [Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 
 The two select separately: `hosts:` says which registered hosts the step may
@@ -352,7 +353,7 @@ A plan asks for a placement per hardware role:
       coverage: smoke
       duration: 10s
       rf:
-        Ubertooth: {min_attenuation_db: 10}
+        Ubertooth: {min_attenuation_db: 20, max_attenuation_db: 20}
 ```
 
 A requirement takes `min_attenuation_db`, `max_attenuation_db`, and `antenna`,
@@ -363,13 +364,60 @@ boards alone; an explicit alias that cannot satisfy the requirement fails
 planning. A host with no board placed for a role is recorded as not applicable,
 naming the requirement and what the host has instead.
 
-Tests whose cases need an ordinary link ask for one themselves, so a plan need
-not: `Classic Bluetooth receive`, `Raw receive`, `BLE extcap capture`,
-`BLE extcap in tshark`,
-`Capture known BLE advertiser`, and `Capture known BLE connection` require
-`antenna: true` with no attenuation, which keeps a capture, a survey, or a
-followed connection off an attenuated board. A plan's `rf:` for a role
-overrides that default.
+#### `weak link:`, the shorthand for the usual case
+
+Most plans want one thing: this role on the attenuated board, every other role
+on an ordinary one. `weak link:` says that with the attenuation as its only
+number:
+
+```yaml
+  - Capture known BLE advertiser:
+      hosts: [Host_Linux]
+      coverage: smoke
+      duration: 5s
+      weak link: {Ubertooth: 20}
+```
+
+That is the same as asking for `min_attenuation_db: 20, max_attenuation_db: 20,
+antenna: true` on the `Ubertooth` role and `max_attenuation_db: 0,
+antenna: true` on every other role of the test. Exactly 20, not at least:
+figures taken behind 20 dB say nothing about a bench with 10 dB or 40 dB in
+the path, so a bench carrying a different attenuator fails planning with the
+requirement in the message rather than running against numbers taken
+elsewhere. Swapping the attenuator is then a one-line plan change. A test
+takes `rf:` or `weak link:`, not both, and the attenuation must be above 0 dB,
+since an ordinary board is what every other role gets anyway.
+
+[`testplans/weak-link.yaml`](testplans/weak-link.yaml) collects the checks
+that need the bench's weak-link board: error flags and recovery under bit
+errors, the `ubertooth-rx -e` threshold, follow on a marginal link, a
+board-to-DK capture with the receiver attenuated, transmit power steps, and
+receiver sensitivity. It is not runnable: two entries have no implementation,
+and the other seven name a test that already exists but whose floors were set
+over whatever link it last ran, so each needs a run over this link before
+they mean anything here. `ubertooth_harness/weaklink.py` names what each
+check is waiting on, and two of them want a new assertion as well as a
+measurement.
+
+A **runnable** plan may only ask for a link a figure has been taken over:
+exactly one attenuation, and one the bench has been measured at, today 20 dB
+alone. A bare `min_attenuation_db` is refused there too, because which board
+it binds depends on what the bench happens to hold. `validate-plan` and
+`run-suite` both apply that, so a suite is refused before any board is
+touched.
+
+Some tests ask for an ordinary link themselves, so a plan need not:
+`Classic Bluetooth receive`, `Raw receive`, `BLE extcap capture`, `BLE extcap
+in tshark`, `Capture known BLE advertiser`, `Capture known BLE connection`,
+`Follow a BLE connection across its end`, `Classic capture record fields`,
+`Capture known Classic device`, `Follow Classic Bluetooth piconet`, and
+`Recover AFH map` require `antenna: true` with no attenuation on their
+`Ubertooth` role (`catalog.RF_DEFAULTS`), which keeps those captures,
+surveys, and followed connections off an attenuated board. That is a list,
+not a rule: other tests take captures too and carry no default, so read
+`RF_DEFAULTS` rather than inferring from what a test does. A plan's `rf:` or
+`weak link:` for a role overrides the default, which is how one of these
+tests is pointed at the attenuated board on purpose.
 
 Every run records the placement of each board it used that records one, in
 `run.jsonl`: on each invocation of the `manifest` record
@@ -589,7 +637,7 @@ python -m ubertooth_harness run-suite \
   --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 017676965a77cd7b00bfede343b7800dee6aa6a5 \
+  --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
   --build --output runs
 ```
 
@@ -670,7 +718,7 @@ python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
   --hardware host-only.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 017676965a77cd7b00bfede343b7800dee6aa6a5 \
+  --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
   --build --output runs
 ```
 
@@ -1164,7 +1212,7 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 017676965a77cd7b00bfede343b7800dee6aa6a5 \
+  --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
   --build [--no-flash-build] [--with-firmware] [--with-python[=PYTHON]] \
   --output runs
 ```
@@ -1922,6 +1970,55 @@ find them busy and refuse (it fails, it does not hang). Use
 `--external-board-lock ''` there, or drop the wrapper and let the harness
 take both locks.
 
+### A device and its debug programmer: one pair
+
+A bench may leave a programmer wired to one board's debug or programming
+header (a USB serial adapter, an SWD probe). The two are one piece of
+hardware as far as using either goes: programming the board while another
+command owns it, or using the board while it is being programmed, spoils a
+test or leaves the board needing hands on it. So the registry records the
+pairing, and every command that holds one member holds the other
+([#286](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/286)):
+
+```yaml
+  Prog_Linux0:
+    type: Debug programmer
+    attached to: Host_Linux
+    programs: UT_Linux1          # the one board it is wired to
+    identity:
+      serial: A000AA00           # leased as programmer-A000AA00
+```
+
+Whichever member a command names, both are taken in the same all-or-nothing
+attempt, in the usual lock order, and naming both is harmless. That holds for
+`ubertooth-harness lease`, [`scripts/lab/hold`](scripts/lab/README.md), a
+`run-suite` that binds or power-cycles the board, and
+`scripts/lab/hub-port` on either member's port. The three commands a person
+runs by hand say on standard error which device the pairing brought in and why
+(`note: Prog_Linux0 is the programmer wired to UT_Linux1, so it is held
+too`), so a holder nobody asked for is never a mystery, and `boards` prints
+the pairing under both devices. A run holds the pair the same way, and its
+record does not yet say why it took the programmer
+([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)):
+
+```
+Prog_Linux0  free
+             pair:  UT_Linux1 is the device Prog_Linux0 programs, so the two are held together
+UT_Linux1    free
+             pair:  Prog_Linux0 is the programmer wired to UT_Linux1, so the two are held together
+```
+
+The registry is refused when a pairing cannot be real: a target that is not
+registered, is not a device the harness leases, sits on another host (leases
+are local to one host), or already has a programmer, a programmer whose
+serial another device is registered with or which spells a file the lease
+directory keeps for itself, a programmer that names itself or more than one
+target, a `programs:` on anything that is not a `Debug programmer`, and a
+pairing that loops back on itself. A chain of pairs is allowed and is held as
+one set. No test binds a programmer and the harness
+never drives one; see
+[`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs).
+
 ## MAC polling workload soak
 
 [`testplans/mac-polling.yaml`](testplans/mac-polling.yaml) contains one dedicated `MAC polling soak` item.
@@ -2364,7 +2461,7 @@ python -m ubertooth_harness runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
   [--libbtbb-source /path/to/libbtbb \
-   --libbtbb-ref 017676965a77cd7b00bfede343b7800dee6aa6a5] \
+   --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2] \
   [--plans-dir testplans] [--allow-power-changes] \
   --output runs
 ```

@@ -20,12 +20,15 @@ attached, no attenuation, distance not recorded. That default is what lets a
 test ask for a normal receiver with ``max_attenuation_db: 0``.
 
 A test asks for a placement with ``rf:`` in the plan, one requirement per
-hardware role:
+hardware role. ``weaklink.py``'s ``weak link:`` is the shorthand for the
+usual case and is what most plans want; a runnable plan also has to pin the
+attenuation to a figure the bench has been measured at, which ``rf:`` leaves
+to the plan author:
 
 ```yaml
   - Classic Bluetooth receive:
       rf:
-        Ubertooth: {min_attenuation_db: 10}
+        Ubertooth: {min_attenuation_db: 20, max_attenuation_db: 20}
 ```
 
 A test whose cases need a normal link (a capture, a survey, following a live
