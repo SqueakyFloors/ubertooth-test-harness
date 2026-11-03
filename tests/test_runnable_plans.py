@@ -145,13 +145,18 @@ class RunnablePlanTests(unittest.TestCase):
             if _asks_for_attenuation(load_plan(path, catalog), suite, catalog)
         ]
         # Which suites the predicate takes out is itself reviewed: only the
-        # weak-link plan's own suites and `range-weak-link`. Adding a
-        # `weak link:` step to `classic`, `ble` or `release` would otherwise
-        # drop that whole suite from this check without anyone noticing.
+        # weak-link suites, which ask for a board the example registry
+        # carries commented out. Adding a `weak link:` step to `classic`'s
+        # or `release`'s ordinary suites would otherwise drop that whole
+        # suite from this check without anyone noticing.
         self.assertEqual(
-            [(PLANS / "range.yaml", "range-weak-link")]
-            + [(PLANS / "weak-link.yaml", suite)
-               for suite in load_plan(PLANS / "weak-link.yaml", catalog).suites],
+            sorted(
+                [(PLANS / "ble.yaml", "ble-weak-link"),
+                 (PLANS / "classic.yaml", "classic-weak-link"),
+                 (PLANS / "range.yaml", "range-weak-link")]
+                + [(PLANS / "weak-link.yaml", suite)
+                   for suite in load_plan(PLANS / "weak-link.yaml", catalog).suites]
+            ),
             sorted(skipped),
         )
         compiled = []

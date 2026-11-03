@@ -152,3 +152,30 @@ suites:
         allow RF transmission: true
         coverage: smoke
         sessions: 5
+
+  # The one Classic weak-link entry a run has characterized with the command
+  # this test runs. Measured 2026-11-02 in the attenuated device sweep, ESP32
+  # pair streaming, one firmware revision across every board compared:
+  # `ubertooth-rx -l e9c5ba -u 0d -e N -t 25` on the 20 dB receiver gave 1793
+  # packets at `-e 0` and 2692 at `-e 2`, every decoded packet carrying the
+  # target LAP and none carrying another, with the clock acquired. The test's
+  # own floors (ten packet lines, none of another LAP) hold with margin.
+  # Nothing here changes a threshold: it is the committed test, at `duration:
+  # 25s` to match the window measured, pointed at the weak-link receiver.
+  #
+  # Three further Classic entries are NOT here, and testplans/weak-link.yaml
+  # says why each: UAP and clock recovery (its smoke cases survey and sweep
+  # untargeted, so they need the LAP recovered from the air, which no leg
+  # measured), the access-code error threshold (no case compares what
+  # different `-e` values find, and zero packets satisfy the ones there are),
+  # and AFH recovery (half its smoke profile is the 20-channel minimum map,
+  # which was not measured).
+  classic-weak-link:
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 20}
+        coverage: smoke
+        duration: 25s

@@ -115,15 +115,22 @@ that beside the figures.
 
 A **runnable** plan may only ask for a link a figure has been taken over:
 either no attenuation at all, or exactly one attenuation the bench has been
-measured at, today 20 dB alone (`weaklink.MEASURED_ATTENUATIONS_DB`). A test's
+measured at, today 20 dB and 40 dB (`weaklink.MEASURED_ATTENUATIONS_DB`). A test's
 floors were set over whatever link it last ran, so running it behind an
 uncharacterized attenuator would judge it against figures taken elsewhere. A
 bare `min_attenuation_db`, which only `rf:` can write, is refused there as
 well, since which board it binds depends on what the bench holds.
 `validate-plan` applies this to a whole plan and `run-suite` to the suite it
 is about to run, so a suite is refused before a board is touched.
-[`testplans/weak-link.yaml`](../testplans/weak-link.yaml) is where those
-entries wait, and it says what each one needs.
+The weak-link entries a run has characterized live in the plan they belong
+to, each carrying the figures it was judged against: `ble-weak-link` in
+[`ble.yaml`](../testplans/ble.yaml), `classic-weak-link` in
+[`classic.yaml`](../testplans/classic.yaml), and `range-weak-link` in
+[`range.yaml`](../testplans/range.yaml). None of them changed a threshold:
+each is the committed test pointed at a weak-link receiver.
+[`testplans/weak-link.yaml`](../testplans/weak-link.yaml) holds what is still
+waiting, split into what needs a second nRF52840 DK and what needs a
+measurement or an implementation.
 
 **Coverage profiles.** A test with a `coverage:` argument takes `smoke` or
 `comprehensive`. Smoke keeps one case per behavior; comprehensive adds the
@@ -1969,7 +1976,9 @@ them. `coverage:` and a required `duration:`; the pair streams 200 bytes every
 `/dev/serial/by-id`. Nothing flashes a peer, so each board must already run
 `utesp-1.0.0` or a later 1.x image, which mandatory preflight checks. The
 Ubertooth defaults to needing an ordinary link, so a plan has to say
-`weak link:` to point it at the attenuated board.
+`weak link:` to point it at the attenuated board, as `classic-weak-link`
+does at 40 dB: measured there, the clock was acquired and every decoded
+packet carried the target LAP with none carrying another.
 
 **Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
 central's LAP in its survey results, and a run with no target reports at least
@@ -2013,7 +2022,9 @@ the tool while the pair streams.
 **Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
 and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
 required `duration:`, Linux only, and an ordinary link for the Ubertooth by
-default.
+default. `classic-weak-link` points it at the 20 dB receiver, where a 25 s
+window decoded 1793 packets at `-e 0` and 2692 at `-e 2`, all of the target
+LAP, with the clock acquired.
 
 **Expected outcome.** Smoke runs 2 cases: `-l <central LAP> -u <central UAP>`
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
@@ -2376,7 +2387,23 @@ peers must run `utesp-1.3.0` or a later 1.x image, which is where `afh` and
 the link map arrived; an older one fails the case naming what it found. The
 Ubertooth defaults to needing an ordinary link, as the other two Classic
 tests do, so a plan asking for the attenuated receiver has to say so; two
-minutes is the capture window both plans that hold it use.
+minutes is the capture window every plan that holds it uses.
+
+**Attenuation makes this test better, which is unusual here.** Measured
+2026-11-02 against the peers' known 38-channel map, 70 s per leg:
+
+| receiver | channels marked | true found | false | missed |
+|---|---|---|---|---|
+| clear | 53 | 38 / 38 | 15 | 0 |
+| **20 dB** | **38** | **38 / 38** | **0** | **0** |
+| 40 dB | 36 | 36 / 38 | 0 | 2 |
+
+The 20 dB board recovered the map exactly; both clear boards over-marked by
+11 to 15 channels, and 40 dB starts eroding the other way. So
+`classic-weak-link` runs it at 20 dB, where its committed tolerances are met
+with the most room. Note that `-r` prints a timestamp and an 80-bit binary
+map, not an `AFH map: 0x…` line; a grep for the hex form reports "no map" on
+a run that worked.
 
 The release plan holds it too, as the `smoke` profile, and it is the one
 entry there that names a bench host, because the peers are on one host. It

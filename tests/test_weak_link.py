@@ -87,6 +87,17 @@ def registry(directory) -> FileResourceRegistry:
     return FileResourceRegistry.load(path)
 
 
+def one_step_plan(test_name, body):
+    """A one-step runnable plan, for exercising the runnable gates."""
+    directory = tempfile.mkdtemp()
+    path = Path(directory) / "p.yaml"
+    path.write_text(
+        "plan: One\nsuites:\n  s:\n"
+        f"    - {test_name}:\n        hosts: [Host_Linux]\n" + body
+    )
+    return load_plan(path, builtin_catalog())
+
+
 def requirements_of(test_name, arguments):
     """What a plan entry's arguments require of each role's placement."""
     definition = builtin_catalog().get(test_name)
@@ -180,8 +191,9 @@ class PlacementTests(unittest.TestCase):
             weaklink.placements({"receiver": 20}, {"Ubertooth": "Ubertooth"})
 
     def test_unmeasured_reports_the_attenuations_with_no_bench_measurement(self):
-        self.assertEqual((), weaklink.unmeasured([20, 20.0]))
-        self.assertEqual((30.0, 40.0), weaklink.unmeasured([40, 20, 30, 40]))
+        self.assertEqual((), weaklink.unmeasured([20, 20.0, 40, 40.0]))
+        self.assertEqual((30.0, 50.0), weaklink.unmeasured([40, 20, 30, 50, 30]))
+        self.assertTrue(weaklink.measured(40))
         for planned in weaklink.PLANNED_ATTENUATIONS_DB:
             with self.subTest(planned):
                 self.assertFalse(weaklink.measured(planned))
@@ -193,6 +205,9 @@ class PlacementTests(unittest.TestCase):
 
     def test_attenuations_are_described_for_a_refusal(self):
         self.assertEqual("20 dB", weaklink.describe_attenuations([20]))
+        self.assertEqual("20 and 40 dB",
+                         weaklink.describe_attenuations(
+                             weaklink.MEASURED_ATTENUATIONS_DB))
         self.assertEqual("30 and 40 dB", weaklink.describe_attenuations([30, 40.0]))
         self.assertEqual("no attenuation", weaklink.describe_attenuations([]))
 
@@ -266,78 +281,98 @@ class RangeSuiteTests(unittest.TestCase):
 
 
 class WeakLinkPlanTests(unittest.TestCase):
+    """What is left in the not-runnable plan, and why each entry is there."""
 
-    def test_it_is_not_runnable_for_both_of_the_reasons_it_states(self):
-        """Two reasons, and the plan would be refused for either: two entries
-        have no implementation, and the four 40 dB entries ask for an
-        attenuation the bench has never been measured at."""
+    def test_it_is_not_runnable_and_its_two_suites_say_why(self):
         catalog = builtin_catalog()
         plan = load_plan(WEAK_LINK_PLAN, catalog)
         self.assertFalse(plan.runnable)
-        self.assertEqual(("Transmit power steps", "Receiver sensitivity"),
-                         unimplemented_tests(plan, catalog))
         self.assertEqual(
-            {
-                "Classic capture record fields":
-                    ("Ubertooth needs 40 dB, which is not measured",),
-                "Capture known BLE connection":
-                    ("Ubertooth needs 40 dB, which is not measured",),
-                "Capture known Classic device":
-                    ("Ubertooth needs 40 dB, which is not measured",),
-                "Classic Bluetooth receive":
-                    ("Ubertooth needs 40 dB, which is not measured",),
-            },
-            dict(unjudgeable_attenuations(plan, catalog)),
+            ["weak-link-needs-a-dk-pair", "weak-link-unmeasured"],
+            sorted(plan.suites),
         )
-        # `runnable: false` is what makes check_runnable pass on it; the same
-        # plan marked runnable is refused, for the implementation first.
+        # The unmeasured suite is refused for both reasons a plan can be:
+        # two entries have no implementation, and one asks for a link no
+        # capture figure exists for.
+        self.assertEqual(
+            ("Transmit power steps", "Receiver sensitivity"),
+            unimplemented_tests(plan, catalog, "weak-link-unmeasured"),
+        )
         check_runnable(plan, catalog)
-        with self.assertRaisesRegex(PlanError, "no implementation"):
-            check_runnable(replace(plan, runnable=True), catalog)
 
-    def test_run_suite_refuses_each_suite_of_it_whatever_the_flag_says(self):
-        """`runnable: false` says a plan may name these entries, not that a
-        run may judge them, so the per-suite check does not consult it."""
+    def test_the_dk_pair_suite_is_blocked_by_hardware_first(self):
+        """These two are unmeasured *because* they are unrunnable: a
+        connection needs two distinct DKs and the bench registers one, so no
+        figure can be taken at any attenuation. Both facts hold, and the
+        hardware one is the cause: give a bench a second DK and the entries
+        bind, which is what the fixture here has."""
         catalog = builtin_catalog()
         plan = load_plan(WEAK_LINK_PLAN, catalog)
-        with self.assertRaisesRegex(PlanError, "no implementation"):
-            check_suite_runnable(plan, "weak-link-20db", catalog)
-        with self.assertRaisesRegex(
-            PlanError, r"no figure has been taken over.*40 dB, which is not measured"
-        ):
-            check_suite_runnable(plan, "weak-link-40db", catalog)
-        # Every suite of every committed runnable plan passes the same check,
-        # `range-weak-link` (20 dB) included.
-        for path in sorted(PLANS.glob("*.yaml")):
-            other = load_plan(path, catalog)
-            if not other.runnable:
-                continue
-            for suite in other.suites:
-                with self.subTest(f"{path.name}:{suite}"):
-                    check_suite_runnable(other, suite, catalog)
+        # Unmeasured, like every other entry in the waiting plan.
+        self.assertEqual(
+            ["Capture known BLE connection",
+             "Follow a BLE connection across its end"],
+            sorted(unjudgeable_attenuations(
+                plan, catalog, "weak-link-needs-a-dk-pair")),
+        )
+        # But implemented, and bindable the moment a second DK exists.
+        self.assertEqual(
+            (), unimplemented_tests(plan, catalog, "weak-link-needs-a-dk-pair"))
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = PlanCompiler(catalog, registry(directory)).compile_suite(
+                plan, "weak-link-needs-a-dk-pair", strict_hardware=True)
+            self.assertEqual(
+                ["Capture known BLE connection",
+                 "Follow a BLE connection across its end"],
+                sorted(i.test_name for i in compiled.invocations),
+            )
+
+    def test_a_single_dk_bench_cannot_bind_a_connection_pair(self):
+        """The bench's actual limitation, as planning reports it: one DK
+        declaring central and peripheral cannot fill both roles."""
+        one_dk = HARDWARE.replace("""  DK_Peripheral:
+    type: nRF52840 DK
+    attached to: Host_Linux
+    roles: [advertiser, central, peripheral]
+    identity: {jlink serial: "000123456790", BLE address: "C0:00:00:00:00:02"}
+""", "").replace("      peripheral: DK_Peripheral\n", "")
+        catalog = builtin_catalog()
+        plan = load_plan(WEAK_LINK_PLAN, catalog)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hardware.yaml"
+            path.write_text(one_dk)
+            compiler = PlanCompiler(catalog, FileResourceRegistry.load(path))
+            with self.assertRaises(PlanningError) as raised:
+                compiler.compile_suite(plan, "weak-link-needs-a-dk-pair")
+        self.assertIn("no valid distinct resource assignment",
+                      str(raised.exception))
 
     def test_a_loose_lower_bound_is_refused_in_a_runnable_plan(self):
-        """`rf:` can write a bare `min_attenuation_db`, and on a bench that
-        later gains a stronger attenuator that would bind it: the figures
-        would belong to a link nobody chose. Only `weak link:`'s exact pin,
-        or no attenuation at all, can be judged."""
-        for spelling, expected in (
-            ("{min_attenuation_db: 20}", "at least 20 dB"),
-            ("{min_attenuation_db: 20, max_attenuation_db: 40}",
-             "at least 20 dB and at most 40 dB"),
-            ("{max_attenuation_db: 40}", "at most 40 dB"),
-            ("{antenna: true}", "any attenuation"),
-        ):
+        """`rf:` can write a bare `min_attenuation_db`, and which board that
+        binds depends on what the bench holds. Only an exact pin at a
+        measured figure, or no attenuation, can be judged."""
+        for spelling in ("{min_attenuation_db: 20}",
+                         "{min_attenuation_db: 20, max_attenuation_db: 40}",
+                         "{max_attenuation_db: 40}",
+                         "{antenna: true}"):
             with self.subTest(spelling):
                 with self.assertRaisesRegex(PlanError, "does not pin the attenuation"):
                     check_runnable(self._runnable_with(f"rf: {{Ubertooth: {spelling}}}"),
                                    builtin_catalog())
-        # An ordinary board, and the measured exact pin, are both fine.
+        # An ordinary board, and an exact pin this test is measured at, are
+        # both fine. The advertiser capture is the test measured at 20 and
+        # 40 dB, so it is the one that can carry an exact pin.
+        advertiser = ("        advertiser: default\n        coverage: smoke\n"
+                      "        duration: 5s\n        interval: 100\n"
+                      "        payload: c0ffee\n")
         for spelling in ("{max_attenuation_db: 0, antenna: true}",
-                         "{min_attenuation_db: 20, max_attenuation_db: 20}"):
+                         "{min_attenuation_db: 20, max_attenuation_db: 20}",
+                         "{min_attenuation_db: 40, max_attenuation_db: 40}"):
             with self.subTest(spelling):
-                check_runnable(self._runnable_with(f"rf: {{Ubertooth: {spelling}}}"),
-                               builtin_catalog())
+                check_runnable(one_step_plan(
+                    "Capture known BLE advertiser",
+                    advertiser + f"        rf: {{Ubertooth: {spelling}}}\n"),
+                    builtin_catalog())
 
     def _runnable_with(self, argument):
         directory = tempfile.mkdtemp()
@@ -355,142 +390,147 @@ class WeakLinkPlanTests(unittest.TestCase):
         return load_plan(path, builtin_catalog())
 
     def test_a_runnable_plan_cannot_ask_for_an_unmeasured_attenuation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "runnable.yaml"
-            path.write_text(
-                "plan: Guessing\n"
-                "suites:\n"
-                "  s:\n"
-                "    - Classic Bluetooth receive:\n"
-                "        hosts: [Host_Linux]\n"
-                "        coverage: smoke\n"
-                "        duration: 5s\n"
-                "        weak link: {Ubertooth: 40}\n"
-            )
-            with self.assertRaisesRegex(
-                PlanError,
-                r"Classic Bluetooth receive: Ubertooth needs 40 dB, "
-                r"which is not measured",
-            ) as raised:
-                check_runnable(load_plan(path, builtin_catalog()), builtin_catalog())
-        self.assertIn("measured at 20 dB", str(raised.exception))
+        """30 dB is the attenuator the bench has not had: asking for it in a
+        runnable plan is refused, naming it and what is measured."""
+        with self.assertRaisesRegex(
+            PlanError,
+            r"Classic Bluetooth receive: Ubertooth needs 30 dB, "
+            r"which is not measured",
+        ) as raised:
+            check_runnable(self._runnable_with("weak link: {Ubertooth: 30}"),
+                           builtin_catalog())
+        self.assertIn("measured at 20 and 40 dB", str(raised.exception))
 
     def test_the_same_refusal_covers_the_rf_spelling(self):
-        """A pending check written out as `rf:` instead of `weak link:` is
-        refused the same way: the rule reads the placement requirements, not
-        the argument it came from."""
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "runnable.yaml"
-            path.write_text(
-                "plan: Guessing\n"
-                "suites:\n"
-                "  s:\n"
-                "    - Classic Bluetooth receive:\n"
-                "        hosts: [Host_Linux]\n"
-                "        coverage: smoke\n"
-                "        duration: 5s\n"
-                "        rf: {Ubertooth: {min_attenuation_db: 40}}\n"
+        with self.assertRaisesRegex(PlanError, "30 dB"):
+            check_runnable(
+                self._runnable_with("rf: {Ubertooth: {min_attenuation_db: 30, "
+                                    "max_attenuation_db: 30}}"),
+                builtin_catalog())
+
+
+class MeasuredSuiteTests(unittest.TestCase):
+    """The entries the 2026-11-02 measurements promoted into runnable plans."""
+
+    # Where each promoted check now lives, and at what attenuation.
+    PROMOTED = {
+        ("ble.yaml", "ble-weak-link"): [
+            ("Capture known BLE advertiser", 20.0),
+            ("Capture known BLE advertiser", 40.0),
+        ],
+        ("classic.yaml", "classic-weak-link"): [
+            ("Follow Classic Bluetooth piconet", 20.0),
+        ],
+        ("range.yaml", "range-weak-link"): [
+            ("Two-device range test", 20.0),
+        ],
+    }
+
+    def test_each_promoted_suite_is_runnable_and_asks_for_its_attenuation(self):
+        catalog = builtin_catalog()
+        for (name, suite), expected in self.PROMOTED.items():
+            with self.subTest(f"{name}:{suite}"):
+                plan = load_plan(PLANS / name, catalog)
+                self.assertTrue(plan.runnable)
+                # Runnable through both gates, the per-plan and the per-suite.
+                check_runnable(plan, catalog)
+                check_suite_runnable(plan, suite, catalog)
+                found = []
+                for step in plan.steps(suite):
+                    definition = catalog.get(step.test_name)
+                    for want in definition.placement_requirements(
+                        step.arguments
+                    ).values():
+                        if want.min_attenuation_db:
+                            found.append((step.test_name,
+                                          want.min_attenuation_db))
+                self.assertEqual(sorted(expected), sorted(found))
+
+    def test_the_gate_is_per_test_not_per_bench(self):
+        """40 dB is measured for a BLE advertiser capture and not for a
+        Classic capture file, so a bench-wide list would admit the second on
+        the first's evidence. This is the distinction the gate has to make."""
+        catalog = builtin_catalog()
+        self.assertTrue(weaklink.measured(40))
+        self.assertTrue(weaklink.measured_for(
+            "Capture known BLE advertiser", "Ubertooth", 40))
+        self.assertFalse(weaklink.measured_for(
+            "Classic capture record fields", "Ubertooth", 40))
+        accepted = one_step_plan(
+            "Capture known BLE advertiser",
+            "        advertiser: default\n        coverage: smoke\n"
+            "        duration: 5s\n        interval: 100\n"
+            "        payload: c0ffee\n        weak link: {Ubertooth: 40}\n")
+        check_runnable(accepted, catalog)
+        refused = one_step_plan(
+            "Classic capture record fields",
+            "        acceptor: default\n        initiator: default\n"
+            "        coverage: smoke\n        duration: 25s\n"
+            "        weak link: {Ubertooth: 40}\n")
+        with self.assertRaisesRegex(
+            PlanError, "measured on this bench but not for this test"
+        ):
+            check_runnable(refused, catalog)
+
+    def test_a_role_is_part_of_the_evidence(self):
+        """The range test is measured at 20 dB for its `responder`, so the
+        same attenuation asked of its `sender` is not covered."""
+        self.assertTrue(weaklink.measured_for(
+            "Two-device range test", "responder", 20))
+        self.assertFalse(weaklink.measured_for(
+            "Two-device range test", "sender", 20))
+
+    def test_every_promoted_entry_matches_its_ordinary_counterpart(self):
+        """"No threshold moved" means what it says: each promoted entry's
+        normalized arguments equal a named ordinary entry's, bar the weak
+        link and whatever the comment in the plan explains."""
+        catalog = builtin_catalog()
+        # (promoted plan, suite, ordinary plan, suite, allowed differences)
+        pairs = [
+            ("ble.yaml", "ble-weak-link", "ble.yaml", "ble",
+             "Capture known BLE advertiser", set()),
+            ("classic.yaml", "classic-weak-link", "classic.yaml", "classic",
+             "Follow Classic Bluetooth piconet", set()),
+        ]
+        for name, suite, oname, osuite, test, allowed in pairs:
+            definition = catalog.get(test)
+            ordinary = next(
+                definition.normalize_arguments(step.arguments)
+                for step in load_plan(PLANS / oname, catalog).steps(osuite)
+                if step.test_name == test
             )
-            with self.assertRaisesRegex(PlanError, "40 dB"):
-                check_runnable(load_plan(path, builtin_catalog()), builtin_catalog())
-
-    def test_every_suite_compiles_against_a_bench_that_has_the_attenuators(self):
-        catalog = builtin_catalog()
-        plan = load_plan(WEAK_LINK_PLAN, catalog)
-        with tempfile.TemporaryDirectory() as directory:
-            compiler = PlanCompiler(catalog, registry(directory))
-            for suite in plan.suites:
-                with self.subTest(suite):
-                    compiled = compiler.compile_suite(
-                        plan, suite, strict_hardware=True)
-                    self.assertTrue(compiled.invocations, suite)
-
-    def test_each_entry_binds_the_board_at_the_attenuation_it_asked_for(self):
-        """The attenuation is not re-derived from the argument: the run
-        records the placement of the board the planner bound, which is what a
-        report quotes its figures as having been taken at."""
-        catalog = builtin_catalog()
-        plan = load_plan(WEAK_LINK_PLAN, catalog)
-        expected = {check.test: check.attenuation_db for check in weaklink.CHECKS}
-        with tempfile.TemporaryDirectory() as directory:
-            compiler = PlanCompiler(catalog, registry(directory))
-            seen = {}
-            for suite in plan.suites:
-                for invocation in compiler.compile_suite(
-                    plan, suite, strict_hardware=True
-                ).invocations:
-                    role = next(
-                        role for role, want in catalog.get(
-                            invocation.test_name
-                        ).placement_requirements(invocation.arguments).items()
-                        if want.min_attenuation_db
-                    )
-                    placed = invocation.resource_placements[role]
-                    seen[invocation.test_name] = placed["attenuation_db"]
-                    self.assertIs(True, placed["antenna"])
-        self.assertEqual(expected, seen)
-
-    def test_a_bench_with_no_attenuated_board_is_told_what_is_missing(self):
-        """The example registry has the host but no attenuated board, which is
-        a plan error rather than a skip, and the message names the requirement
-        and what each board is placed as instead."""
-        catalog = builtin_catalog()
-        plan = load_plan(WEAK_LINK_PLAN, catalog)
-        compiler = PlanCompiler(
-            catalog, FileResourceRegistry.load(ROOT / "hardware.example.yaml"))
-        with self.assertRaises(PlanningError) as raised:
-            compiler.compile_suite(plan, "weak-link-20db")
-        message = str(raised.exception)
-        self.assertIn("attenuation of exactly 20 dB and its antenna attached",
-                      message)
-        self.assertIn("UT_Linux0 has 0 dB", message)
+            promoted = [
+                definition.normalize_arguments(step.arguments)
+                for step in load_plan(PLANS / name, catalog).steps(suite)
+                if step.test_name == test
+            ]
+            self.assertTrue(promoted, f"{suite} has no {test} entry")
+            for arguments in promoted:
+                differ = {
+                    key for key in set(arguments) | set(ordinary)
+                    if arguments.get(key) != ordinary.get(key)
+                }
+                with self.subTest(f"{suite}:{test}"):
+                    self.assertEqual(
+                        {"weak link"} | allowed, differ,
+                        f"{test} in {suite} differs from {osuite} by {differ}")
 
 
 class CheckTableTests(unittest.TestCase):
-    """weaklink.CHECKS is the list of weak-link plan entries, so it and the
-    plan have to agree; a check added to one without the other fails here."""
+    """weaklink.CHECKS is the ledger of the nine checks #168 approved, plus
+    the AFH one the measurements added. It and the plans have to agree."""
 
-    def test_every_check_names_a_catalog_test(self):
-        names = builtin_catalog().names
-        for check in weaklink.CHECKS:
-            with self.subTest(check.item):
-                self.assertIn(check.test, names)
-                self.assertIn(
-                    check.weak_role,
-                    builtin_catalog().get(check.test).hardware_roles or {},
-                )
-
-    def test_every_check_is_in_the_weak_link_plan_at_its_attenuation(self):
-        plan = load_plan(WEAK_LINK_PLAN, builtin_catalog())
-        asked = {
-            step.test_name: dict(step.arguments["weak link"])
-            for suite in plan.suites for step in plan.steps(suite)
-        }
-        self.assertEqual(
-            {check.test: {check.weak_role: check.attenuation_db}
-             for check in weaklink.CHECKS},
-            {name: {role: float(db) for role, db in want.items()}
-             for name, want in asked.items()},
-        )
-
-    def test_every_check_is_still_pending_a_measurement(self):
-        # All nine are, which is why none is in a runnable plan. When one
-        # stops being pending, this is where the change shows up, and its
-        # entry moves out of weak-link.yaml.
-        for check in weaklink.CHECKS:
-            with self.subTest(check.item):
-                self.assertTrue(check.pending, check.describe())
-                self.assertIn(check.needs, check.describe())
-
-    def test_no_check_sits_in_a_committed_runnable_plan(self):
-        """Read from the placement requirements, not the argument, so a check
-        spelled out as `rf:` is caught as well as one using `weak link:`."""
+    def test_every_check_names_a_catalog_test_and_one_of_its_roles(self):
         catalog = builtin_catalog()
-        pending = {
-            (check.test, check.weak_role, check.attenuation_db)
-            for check in weaklink.CHECKS if check.pending
-        }
-        checked = 0
+        for check in weaklink.CHECKS:
+            with self.subTest(check.item):
+                self.assertIn(check.test, catalog.names)
+                self.assertIn(check.weak_role,
+                              catalog.get(check.test).hardware_roles or {})
+
+    def test_a_measured_check_sits_in_a_runnable_plan_at_its_attenuation(self):
+        catalog = builtin_catalog()
+        placed = {}
         for path in sorted(PLANS.glob("*.yaml")):
             plan = load_plan(path, catalog)
             if not plan.runnable:
@@ -501,17 +541,54 @@ class CheckTableTests(unittest.TestCase):
                     for role, want in definition.placement_requirements(
                         step.arguments
                     ).items():
-                        if not want.min_attenuation_db:
-                            continue
-                        checked += 1
-                        with self.subTest(f"{path.name}:{suite}:{step.test_name}"):
-                            self.assertNotIn(
-                                (step.test_name, role, want.min_attenuation_db),
-                                pending,
-                            )
-        # `range-weak-link` is the one weak-link entry a runnable plan does
-        # carry, so this loop is not vacuous.
-        self.assertEqual(1, checked)
+                        if want.min_attenuation_db:
+                            placed.setdefault(
+                                (step.test_name, role), set()
+                            ).add(want.min_attenuation_db)
+        for check in weaklink.CHECKS:
+            with self.subTest(check.item):
+                key = (check.test, check.weak_role)
+                if check.pending:
+                    self.assertNotIn(
+                        check.attenuation_db, placed.get(key, set()),
+                        f"{check.item} is pending but in a runnable plan")
+                else:
+                    self.assertIn(
+                        check.attenuation_db, placed.get(key, set()),
+                        f"{check.item} is measured but in no runnable plan")
+
+    def test_a_pending_check_gives_its_reason_and_waits_in_the_plan(self):
+        catalog = builtin_catalog()
+        plan = load_plan(WEAK_LINK_PLAN, catalog)
+        waiting = {
+            (step.test_name, role, want.min_attenuation_db)
+            for suite in plan.suites for step in plan.steps(suite)
+            for role, want in catalog.get(
+                step.test_name
+            ).placement_requirements(step.arguments).items()
+            if want.min_attenuation_db
+        }
+        pending = [check for check in weaklink.CHECKS if check.pending]
+        # Eight are still pending; each names what it waits on and is carried
+        # by the not-runnable plan rather than merely described.
+        self.assertEqual(8, len(pending))
+        for check in pending:
+            with self.subTest(check.item):
+                self.assertTrue(check.needs)
+                self.assertIn(check.needs, check.describe())
+                self.assertIn(
+                    (check.test, check.weak_role, check.attenuation_db),
+                    waiting,
+                )
+
+    def test_a_measured_check_describes_itself_without_a_reason(self):
+        for check in weaklink.CHECKS:
+            if check.pending:
+                continue
+            with self.subTest(check.item):
+                self.assertNotIn("pending", check.describe())
+                self.assertIn(f"{check.attenuation_db:g} dB", check.describe())
+
 
 
 class DocumentationTests(unittest.TestCase):
