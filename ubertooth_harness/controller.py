@@ -56,6 +56,7 @@ import time
 from typing import Callable, Mapping, Sequence
 import uuid
 
+from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.gui import (
     DEFAULT_PLANS_DIR,
@@ -445,6 +446,10 @@ class Controller:
         # Lists the refs a run may name; None refuses every run.
         self.ref_source = ref_source
         self.plans_dir = Path(plans_dir).expanduser()
+        # The test catalog, built once: every run start reads a plan against
+        # it to see whether that run could measure what its suite requires,
+        # and building one costs about 90 ms. Its definitions are frozen.
+        self.catalog = builtin_catalog()
         # Durations learned from the runs stored here, kept beside them.
         self.estimates = EstimateStore.load(self.results_dir / STORE_FILE, log=log)
         self._learning = asyncio.Lock()
@@ -1514,10 +1519,12 @@ class Controller:
         flash_build: bool = True, with_firmware: bool = False,
         with_python: bool = False,
     ) -> Run:
-        # An unknown or offline target is said so before anything about the
-        # suite: that is the caller's own mistake to fix. _request_link
-        # _request_run reads it again when the request is sent.
-        self._target_link(host)
+        if host not in self.targets:
+            # A target that never registered is the caller's own mistake,
+            # and is said so before anything about the suite. Whether it is
+            # reachable now is judged where the request is sent, after the
+            # ref and the options, as it was before.
+            raise ControllerError(f"unknown target {host!r}", 404)
         await self._refuse_unmeasurable(plan, suite, [host], tests)
         # Checked first of what can wait: everything after it runs without
         # yielding until the request is recorded as pending.
@@ -1549,7 +1556,7 @@ class Controller:
                 for host in hosts
                 if (target := self.targets.get(host)) is not None
             },
-            tests=list(tests),
+            tests=list(tests), catalog=self.catalog,
         )
         if reason:
             raise ControllerError(f"suite {suite!r}: {reason}", 422)
