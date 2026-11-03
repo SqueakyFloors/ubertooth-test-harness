@@ -438,7 +438,7 @@ def extended_report(address: str, name: str) -> Check:
 
 
 def _session_argv(acceptor, initiator, command, *, timeout, min_seconds,
-                  interrupt_after=None, files=()):
+                  interrupt_after=None, allow_link_loss=False, files=()):
     """esp32peer.py stream ... -- <tool> ... [<capture option> <path>]"""
     def argv(context):
         capture = []
@@ -460,6 +460,8 @@ def _session_argv(acceptor, initiator, command, *, timeout, min_seconds,
         )
         if interrupt_after is not None:
             base += ("--interrupt-after", str(interrupt_after))
+        if allow_link_loss:
+            base += ("--allow-link-loss",)
         return base + ("--",) + tuple(command) + tuple(capture)
     return argv
 
@@ -467,7 +469,7 @@ def _session_argv(acceptor, initiator, command, *, timeout, min_seconds,
 def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
                seconds, needs, expected_state, check=None, patterns=(),
                returncodes=(0,), interrupt=False, extra_s=0.0,
-               floor_s=0.0, files=(), verify=()):
+               floor_s=0.0, allow_link_loss=False, files=(), verify=()):
     """One tool run against the adapter while the ESP32 pair streams.
 
     ``seconds`` is the capture window: the tool's own ``-t`` where it has
@@ -496,7 +498,8 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
         min_seconds = seconds + floor_s - EARLY_EXIT_S
     argv = _session_argv(acceptor, initiator, command, timeout=timeout,
                          min_seconds=min_seconds,
-                         interrupt_after=interrupt_after, files=files)
+                         interrupt_after=interrupt_after,
+                         allow_link_loss=allow_link_loss, files=files)
     steps = (
         _stop(serial, "establish-idle", "Establish idle before reading"),
         *_read_originals(serial, MODE_RESET_SETTINGS),
@@ -539,9 +542,18 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
     )
 
 
-def _pair_report(acceptor, initiator) -> tuple[str, ...]:
-    """The driver's report of the session, which pins a zero exit."""
-    return _pair_patterns(acceptor, initiator)
+def _pair_report(acceptor, initiator, *, link_loss=False) -> tuple[str, ...]:
+    """The driver's report of the session, which pins a zero exit.
+
+    With ``link_loss``, the line that says what became of the link is
+    required too, so a run records whether it held: the scan cases allow it
+    to go down, because the tool takes it down itself, and this is where
+    that shows.
+    """
+    patterns = _pair_patterns(acceptor, initiator)
+    if link_loss:
+        patterns += (r"(?m)^link loss allowed: ",)
+    return patterns
 
 
 # ---------------------------------------------------------------------------
@@ -558,9 +570,19 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
     device = hci["device"]
     central = initiator["lap"]
     acceptor_name = esp32peer.device_name(acceptor["address"])
-    report = _pair_report(acceptor, initiator)
+    report = _pair_report(acceptor, initiator, link_loss=True)
 
     def scan(*options, **case):
+        # The tool reads the name of every device its inquiry answered and of
+        # every piconet its sweep heard, by paging it, and a page to a board
+        # already in a link ends that link: measured on the bench, where both
+        # scan cases came back with the pair's link down 1 time and the
+        # acceptor having received nothing, while the same pair held a link
+        # through a 25 s `ubertooth-rx` capture in the same minutes. So these
+        # cases are judged on what the pair put on the air -- MIN_WRITES, and
+        # the inquiry and survey results themselves -- and the link's fate is
+        # reported rather than required.
+        case.setdefault("allow_link_loss", True)
         case.setdefault("patterns", report)
         # The Ubertooth half's survey results are each paged for a name, in
         # every case; -s adds a whole inquiry before the window opens, and a

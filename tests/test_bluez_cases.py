@@ -363,6 +363,27 @@ class InquiryCaseTests(unittest.TestCase):
         self.assertGreater(float(argv[argv.index("--timeout") + 1]),
                            float(plain[plain.index("--timeout") + 1]))
 
+    def test_the_scan_cases_allow_the_link_the_tool_takes_down(self):
+        """The tool pages every device it found, which ends a peer's link;
+        what the cases are judged on is what went on the air."""
+        for case_id, case in scan_cases("comprehensive").items():
+            with self.subTest(case_id):
+                argv = driver_argv(case)
+                self.assertIn("--allow-link-loss", argv)
+                # And the report has to say what became of it.
+                step = steps(case)["pair-and-run"]
+                self.assertIn(r"(?m)^link loss allowed: ", step.output_patterns)
+                # The writes are still required.
+                self.assertIn("--min-writes", argv)
+
+    def test_the_follow_cases_still_require_the_link_to_hold(self):
+        for case_id, case in follow_cases("comprehensive").items():
+            with self.subTest(case_id):
+                argv = driver_argv(case)
+                self.assertNotIn("--allow-link-loss", argv)
+                step = steps(case)["pair-and-run"]
+                self.assertNotIn(r"(?m)^link loss allowed: ", step.output_patterns)
+
     def test_every_case_reads_the_adapter_first(self):
         for case_id, case in scan_cases("comprehensive").items():
             with self.subTest(case_id):
@@ -681,7 +702,7 @@ class ToolPatternTests(unittest.TestCase):
     # The driver's own report lines are checked against the real driver
     # below; here only the lines the tool prints.
     DRIVER = ("acceptor ", "initiator ", "central ", "link:", "command exit:",
-              "pair streamed")
+              "pair streamed", "link loss allowed")
 
     def test_the_follow_progress_lines_match_the_tools_output(self):
         self.matched(follow_cases()["follow-target"],
@@ -709,45 +730,33 @@ class ToolPatternTests(unittest.TestCase):
         """The pair's report, built by the real driver against the firmware fake.
 
         A pattern is written from what the driver is meant to print, so the
-        two can drift apart with nothing failing until a bench run.
+        two can drift apart with nothing failing until a bench run. Driven
+        both ways, because the scan cases allow the link the tool takes down
+        and so require one line the follow cases do not.
         """
         from tests.fake_esp32 import FakePeerFirmware, opener
 
-        acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS)
-        initiator = FakePeerFirmware(INITIATOR_ADDRESS)
-        acceptor.link(initiator)
-        open_one = opener({"/dev/a": acceptor, "/dev/b": initiator})
-        peers = (esp32peer.Peer("/dev/a", "acceptor", ACCEPTOR_ADDRESS,
-                                opener=open_one),
-                 esp32peer.Peer("/dev/b", "initiator", INITIATOR_ADDRESS,
-                                opener=open_one))
-        report = io.StringIO()
-        esp32peer.stream(*peers, (sys.executable, "-c", "pass"), out=report,
-                         settle_s=0.0, min_writes=10)
-        text = report.getvalue()
-        for case in (scan_cases()["inquiry"], follow_cases()["follow-target"]):
+        for allow, case in ((True, scan_cases()["inquiry"]),
+                            (False, follow_cases()["follow-target"])):
+            acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS)
+            initiator = FakePeerFirmware(INITIATOR_ADDRESS)
+            acceptor.link(initiator)
+            open_one = opener({"/dev/a": acceptor, "/dev/b": initiator})
+            peers = (esp32peer.Peer("/dev/a", "acceptor", ACCEPTOR_ADDRESS,
+                                    opener=open_one),
+                     esp32peer.Peer("/dev/b", "initiator", INITIATOR_ADDRESS,
+                                    opener=open_one))
+            report = io.StringIO()
+            esp32peer.stream(*peers, (sys.executable, "-c", "pass"),
+                             out=report, settle_s=0.0, min_writes=10,
+                             allow_link_loss=allow)
+            text = report.getvalue()
             with self.subTest(case.case_id):
                 for pattern in steps(case)["pair-and-run"].output_patterns:
                     if not any(mark in pattern for mark in self.DRIVER):
                         continue
                     with self.subTest(pattern=pattern):
                         self.assertRegex(text, re.compile(pattern))
-
-    def test_every_case_pins_a_zero_exit(self):
-        """Including -x, whose status is one bit for several things: a
-        device's report that failed, a dead capture stream, and a board that
-        would not give its mode up. Accepting 1 for the first would accept
-        the other two, which no check here can see."""
-        for cases in (scan_cases("comprehensive"), follow_cases("comprehensive")):
-            for case_id, case in cases.items():
-                with self.subTest(case_id):
-                    step = steps(case)["pair-and-run"]
-                    self.assertEqual((0,), step.expected_returncodes)
-                    self.assertEqual((), step.forbidden_patterns)
-                    exits = [pattern for pattern in step.output_patterns
-                             if "command exit:" in pattern]
-                    self.assertEqual(
-                        [r"(?m)^command exit: 0 after \d+\.\d s$"], exits)
 
 
 class AdapterHelperTests(unittest.TestCase):

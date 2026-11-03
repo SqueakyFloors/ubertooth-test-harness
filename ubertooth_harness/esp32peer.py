@@ -906,7 +906,8 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
            timeout: float = 300.0, out=None,
            settle_s: float = SETTLE_S, wanted_map: str | None = None,
            map_report: str | None = None, command_output: str | None = None,
-           interrupt_after: float | None = None) -> int:
+           interrupt_after: float | None = None,
+           allow_link_loss: bool = False) -> int:
     """Hold the pair's link up and streaming while ``command`` runs.
 
     Both ports are opened first, which resets both boards, so the pair starts
@@ -932,7 +933,8 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
                            timeout=timeout, out=out, settle_s=settle_s,
                            wanted_map=wanted, map_report=map_report,
                            command_output=command_output,
-                           interrupt_after=interrupt_after)
+                           interrupt_after=interrupt_after,
+                           allow_link_loss=allow_link_loss)
         finally:
             initiator_shell.close()
     finally:
@@ -995,7 +997,7 @@ def _write_map_report(path: str, requested: str, samples: Sequence[dict],
 def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             period, payload, min_writes, min_seconds, timeout, out,
             settle_s, wanted_map=None, map_report=None, command_output=None,
-            interrupt_after=None) -> int:
+            interrupt_after=None, allow_link_loss=False) -> int:
     acceptor_shell.wait_ready()
     initiator_shell.wait_ready()
     acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
@@ -1070,15 +1072,28 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     _report_traffic(out, initiator.label, after_initiator)
     _report_traffic(out, acceptor.label, after_acceptor)
     problems = [reason for reason in released if reason]
+    # A command that pages the peers takes their link down as a side effect:
+    # `ubertooth-scan` reads the name of every device its inquiry answered and
+    # of every piconet its sweep heard, and a page to a board already in a
+    # link ends that link (measured on the bench, harness #274). A session
+    # given --allow-link-loss reports that rather than failing on it, because
+    # what such a command is being judged on is what went on the air, which
+    # `min_writes` is the measure of. Everything else still fails on it.
+    lost = []
     if after_initiator["disconnects"]:
-        problems.append(f"the link went down {after_initiator['disconnects']} "
-                        "time(s) while the command ran")
+        lost.append(f"the link went down {after_initiator['disconnects']} "
+                    "time(s) while the command ran")
+    if after_acceptor["rx_bytes"] < payload:
+        lost.append(f"the acceptor received {after_acceptor['rx_bytes']} "
+                    "bytes, less than one payload")
+    if allow_link_loss:
+        print("link loss allowed: " + ("; ".join(lost) or "the link held"),
+              file=out)
+    else:
+        problems.extend(lost)
     if after_initiator["writes"] < min_writes:
         problems.append(f"the initiator reported {after_initiator['writes']} "
                         f"writes, fewer than the {min_writes} this test needs")
-    if after_acceptor["rx_bytes"] < payload:
-        problems.append(f"the acceptor received {after_acceptor['rx_bytes']} "
-                        "bytes, less than one payload")
     if seconds < min_seconds:
         problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
                         f"{min_seconds:g} s this test needs: it stopped early")
@@ -1605,6 +1620,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                               help="ms")
             pair.add_argument("--payload", type=int, default=DEFAULT_PAYLOAD,
                               help="bytes")
+            pair.add_argument("--allow-link-loss", action="store_true",
+                              help="report a link the command took down, and "
+                                   "an acceptor that received nothing, rather "
+                                   "than failing on either; the writes are "
+                                   "then what says the pair was on the air")
             pair.add_argument("--min-writes", type=int, default=1,
                               help="writes the initiator must report afterwards")
             pair.add_argument("--map", dest="channel_map",
@@ -1657,7 +1677,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 min_seconds=args.min_seconds, timeout=args.timeout,
                 wanted_map=args.channel_map, map_report=args.map_report,
                 command_output=args.command_output,
-                interrupt_after=args.interrupt_after)
+                interrupt_after=args.interrupt_after,
+                allow_link_loss=args.allow_link_loss)
         peer = Peer(args.device, args.role, args.address, args.alias)
         if args.command == "identify":
             identify(peer)
