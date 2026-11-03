@@ -485,20 +485,45 @@ class RunSuiteFlashTests(unittest.TestCase):
         types = [e["event_type"] for e in self.events()]
         self.assertLess(types.index("build_finished"), types.index("build_flash_started"))
         # Only the image it writes. The alternate `btbr` image is built when a
-        # run asks for --with-firmware, so a plan that never runs it does not
-        # fail because that image did not build.
+        # run asks for it (--with-btbr) or runs a test that needs it, so a
+        # plan that never runs it does not fail because it did not build.
         self.assertEqual([(APPLICATION_IMAGE,)], self.built_images)
         self.assertNotIn(BTBR_BUILD_ARTIFACT, self.artifact_names())
 
-    def test_with_firmware_builds_and_records_both_images(self):
+    def test_with_firmware_alone_builds_the_application_image_only(self):
+        # The firmware build is the application image: this plan runs no test
+        # that needs the alternate one, so nothing waits for it to build and
+        # the run does not fail because it did not (#279).
         executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD},
                               lease_dir=self.lease_dir)
         self.assertEqual(0, self.run_suite(executor, "--with-firmware"),
                          self.stderr)
+        self.assertEqual([(APPLICATION_IMAGE,)], self.built_images)
+        names = self.artifact_names()
+        self.assertIn(TEST_BUILD_ARTIFACT, names)
+        self.assertNotIn(BTBR_BUILD_ARTIFACT, names)
+
+    def test_with_btbr_builds_and_records_both_images(self):
+        executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD},
+                              lease_dir=self.lease_dir)
+        self.assertEqual(0, self.run_suite(executor, "--with-btbr"), self.stderr)
         self.assertEqual([FIRMWARE_IMAGES], self.built_images)
         names = self.artifact_names()
         self.assertIn(TEST_BUILD_ARTIFACT, names)
         self.assertIn(BTBR_BUILD_ARTIFACT, names)
+
+    def test_with_btbr_without_build_is_refused(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+            code = main([
+                "run-suite", "--plan", str(self.plan()), "--suite", "fast",
+                "--hardware", str(self.hardware), "--host", "Host_Local",
+                "--ubertooth-source", str(self.source), "--ubertooth-ref", "HEAD",
+                "--lease-dir", str(self.lease_dir),
+                "--output", str(self.output), "--with-btbr",
+            ])
+        self.assertEqual(2, code)
+        self.assertIn("--with-btbr requires --build", stderr.getvalue())
 
     def test_the_flash_finishes_before_the_manifest_and_preflight(self):
         executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD}, lease_dir=self.lease_dir)

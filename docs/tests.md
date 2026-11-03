@@ -2384,10 +2384,15 @@ Ubertooths on the host are guarded.
 The case needs a Linux host (the peer is reached through `/dev/serial/by-id`),
 the Python tools, and both firmware images, and says so as needs, so a host or
 a run that cannot do it leaves the case out before anything is flashed.
-`run-suite --build --with-firmware --with-python` is the run that satisfies it;
-`--artifact "btbr build=PATH"` and `--artifact "test build=PATH"` name the
-images by hand. A controller or GUI run cannot ask for those build options yet
-([#257](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/257)).
+`run-suite --build --with-firmware --with-python` is the run that satisfies it:
+the alternate image is named by the test itself, so a run that selected it
+builds that image too. `--with-btbr` asks for the image outright, and
+`--artifact "btbr build=PATH"` and `--artifact "test build=PATH"` name both
+images by hand. A controller or GUI run asks for all three with its own
+`with_firmware`, `with_btbr` and `with_python` options, which the GUI ticks
+and holds for a suite holding this test
+([#257](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/257),
+[#279](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/279)).
 
 **Expected outcome.** One case per session. The startup and the prompt come
 first, and a session that does not reach the prompt fails there. Then smoke

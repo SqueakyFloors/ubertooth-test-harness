@@ -15,7 +15,10 @@ One declaration, ``Needs``, sits on a case (``CommandCase.needs``,
 - the host programs a case runs that nothing here installs (``HOST_TOOLS``,
   tshark so far): present on the host's PATH or not;
 - a firmware build: the run's "test build" image (``--build --with-firmware``
-  or ``--artifact "test build=PATH"``).
+  or ``--artifact "test build=PATH"``);
+- the alternate btbr image: the run's "btbr build" image (``--build
+  --with-btbr``, or ``--artifact "btbr build=PATH"``), which is asked for in
+  its own right rather than read off the firmware build.
 
 What a host lacks is not run, and is recorded as "not applicable on <host>:
 <reason>", apart from skips and failures. A required test that lacks the
@@ -43,7 +46,8 @@ BLUEZ_TOOLS = ("ubertooth-scan", "ubertooth-follow")
 HOST_TOOLS = ("tshark",)
 TEST_BUILD_LABEL = "test_build"
 # The alternate `btbr` firmware image, which only the ubertooth-btbr case
-# needs and only a run that asked for --with-firmware builds.
+# needs and only a run that asked for it builds (``--with-btbr``, or a run
+# whose selected tests say they need it).
 BTBR_BUILD_LABEL = "btbr_build"
 _PLATFORM_NAMES = {"linux": "Linux", "macos": "macOS"}
 
@@ -63,7 +67,8 @@ class Needs:
     # The run's alternate firmware image ("btbr build"), which no other test
     # needs: without this, a run carrying the test build alone would be
     # judged able to run the btbr case and then stop at case planning for
-    # want of the image.
+    # want of the image. A test declares it beside firmware_build, never
+    # instead of it, because the two images are built apart (#279).
     btbr_build: bool = False
     # Host programs it runs that nothing here installs (HOST_TOOLS).
     host_tools: tuple[str, ...] = ()
@@ -183,7 +188,7 @@ def unmet(needs: Needs, capabilities: HostCapabilities | None) -> str:
                 "--artifact \"test build=PATH\")")
     if needs.btbr_build and capabilities.btbr_build is False:
         return ("needs the alternate btbr firmware image (run-suite --build "
-                "--with-firmware, or --artifact \"btbr build=PATH\")")
+                "--with-btbr, or --artifact \"btbr build=PATH\")")
     if capabilities.host_tools is not None:
         for tool in needs.host_tools:
             if tool not in capabilities.host_tools:
@@ -212,17 +217,18 @@ def _installed_bluez(platform: str, path: str | None) -> frozenset:
 def planned_capabilities(
     host: str, platform: str, *, build: bool, with_python: bool, with_firmware: bool,
     artifact_labels: Iterable[str] = (), path: str | None = None,
-    with_btbr: bool | None = None,
+    with_btbr: bool = False,
 ) -> HostCapabilities:
     """What a run with these options will have, before it builds anything.
 
     A Linux build configures with REQUIRE_ALL=ON, so it has every BlueZ tool
     or fails to build.
+
+    ``with_btbr`` is its own option, not read off ``with_firmware``: a
+    firmware build makes the application image, and the alternate btbr image
+    only when the run asked for it (#279).
     """
     labels = set(artifact_labels)
-    # Only a run that asked for --with-firmware builds the alternate image;
-    # one that turned the firmware build on just to flash its boards does not.
-    with_btbr = with_firmware if with_btbr is None else with_btbr
     if build:
         bluez = frozenset(BLUEZ_TOOLS) if platform == "linux" else frozenset()
     else:

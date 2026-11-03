@@ -423,14 +423,16 @@ class RunTests(ControllerTestCase):
     async def test_the_build_options_are_sent_recorded_and_served(self):
         # What the request asks for reaches the runner, the stored record and
         # the API view, so a test that needs an image or the Python tools can
-        # be dispatched the way the command line runs it (#257).
+        # be dispatched the way the command line runs it (#257). The
+        # alternate btbr image is one of them in its own right (#279).
         cases = (
-            ({"build": True, "with_firmware": True}, (True, False)),
-            ({"build": True, "with_python": True}, (False, True)),
-            ({"build": True, "with_firmware": True, "with_python": True},
-             (True, True)),
-            ({"build": True}, (False, False)),
-            ({"build": False}, (False, False)),
+            ({"build": True, "with_firmware": True}, (True, False, False)),
+            ({"build": True, "with_btbr": True}, (False, True, False)),
+            ({"build": True, "with_python": True}, (False, False, True)),
+            ({"build": True, "with_firmware": True, "with_btbr": True,
+              "with_python": True}, (True, True, True)),
+            ({"build": True}, (False, False, False)),
+            ({"build": False}, (False, False, False)),
         )
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)
@@ -439,7 +441,8 @@ class RunTests(ControllerTestCase):
                     post, message = await self.start_run(runner, **body)
                     self.assertEqual(
                         expected,
-                        (message["with_firmware"], message["with_python"]),
+                        (message["with_firmware"], message["with_btbr"],
+                         message["with_python"]),
                     )
                     run_id = f"options-{index}"
                     await runner.send(
@@ -449,18 +452,24 @@ class RunTests(ControllerTestCase):
                     self.assertEqual(201, status, payload)
                     self.assertEqual(
                         expected,
-                        (payload["run"]["with_firmware"], payload["run"]["with_python"]),
+                        (payload["run"]["with_firmware"],
+                         payload["run"]["with_btbr"],
+                         payload["run"]["with_python"]),
                     )
                     record = json.loads(
                         (self.results / run_id / "run.json").read_text()
                     )
                     self.assertEqual(
-                        expected, (record["with_firmware"], record["with_python"])
+                        expected,
+                        (record["with_firmware"], record["with_btbr"],
+                         record["with_python"]),
                     )
                     detail = (await self.http("GET", f"/api/runs/{run_id}"))[1]
                     self.assertEqual(
                         expected,
-                        (detail["run"]["with_firmware"], detail["run"]["with_python"]),
+                        (detail["run"]["with_firmware"],
+                         detail["run"]["with_btbr"],
+                         detail["run"]["with_python"]),
                     )
                     await runner.send(
                         "run_error", request_id=message["request_id"], run_id=run_id,
@@ -471,13 +480,13 @@ class RunTests(ControllerTestCase):
                     )
 
     async def test_a_build_option_without_build_is_refused_by_name(self):
-        # run-suite refuses --with-firmware and --with-python without
-        # --build, so the controller never sends such a run: the caller is
-        # told which option it was, and nothing reaches the runner.
+        # run-suite refuses --with-firmware, --with-btbr and --with-python
+        # without --build, so the controller never sends such a run: the
+        # caller is told which option it was, and nothing reaches the runner.
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)
             base = {"ref": "main", "plan": "fast", "suite": "fast"}
-            for option in ("with_firmware", "with_python"):
+            for option in ("with_firmware", "with_btbr", "with_python"):
                 for build in (False, None):
                     body = {**base, option: True}
                     if build is not None:
@@ -511,7 +520,10 @@ class RunTests(ControllerTestCase):
         await self.server.stop()
         await self.start_controller()
         run = self.controller.runs["old-run"]
-        self.assertEqual((False, False), (run.with_firmware, run.with_python))
+        self.assertEqual(
+            (False, False, False),
+            (run.with_firmware, run.with_btbr, run.with_python),
+        )
         self.assertEqual("passed", run.status)
 
     async def test_run_is_dispatched_streamed_and_persisted(self):

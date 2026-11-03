@@ -257,7 +257,8 @@ class Target:
 
 _RUN_FIELDS = (
     "run_id", "target", "request_id", "ref", "commit", "plan", "suite", "tests",
-    "build", "flash_build", "with_firmware", "with_python", "bootloader",
+    "build", "flash_build", "with_firmware", "with_btbr", "with_python",
+    "bootloader",
     "status", "created_at", "finished_at", "exit_code", "reason",
     "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
     "learned_durations", "group_id",
@@ -287,10 +288,13 @@ class Run:
     # The boards were flashed with the build first (only with build; runs
     # stored before protocol 3 did not flash).
     flash_build: bool = False
-    # The build also built the firmware image and the Python tools (only with
-    # build; runs stored before protocol 5 could ask for neither, so a record
-    # without these fields loads with both false, which is what it did).
+    # The build also built the firmware image, the alternate btbr image, and
+    # the Python tools (only with build; runs stored before protocol 5 could
+    # ask for none of them, and those stored before protocol 6 could not ask
+    # for the btbr image, so a record without these fields loads with them
+    # false, which is what it did).
     with_firmware: bool = False
+    with_btbr: bool = False
     with_python: bool = False
     # What the run was asked to do about its boards' bootloaders (run-suite
     # --bootloader). Runs stored before this field could only record what was
@@ -1155,6 +1159,7 @@ class Controller:
                 tests=list(fields["tests"]), build=fields["build"],
                 flash_build=fields["flash_build"],
                 with_firmware=fields["with_firmware"],
+                with_btbr=fields["with_btbr"],
                 with_python=fields["with_python"],
                 bootloader=fields["bootloader"],
                 group_id=group.group_id if group is not None else None,
@@ -1499,7 +1504,7 @@ class Controller:
     async def _run_fields(
         self, *, ref: str, plan: str, suite: str, tests: list[str], build: bool,
         commit: str | None, flash_build: bool, with_firmware: bool,
-        with_python: bool, bootloader: str,
+        with_btbr: bool, with_python: bool, bootloader: str,
     ) -> dict:
         """The ``run`` message's fields, with the ref resolved once.
 
@@ -1512,7 +1517,8 @@ class Controller:
         # fails at once. The protocol refuses it too (encode_controller_message
         # below), but the caller gets the option's own name from here.
         for option, wanted in (
-            ("with_firmware", with_firmware), ("with_python", with_python),
+            ("with_firmware", with_firmware), ("with_btbr", with_btbr),
+            ("with_python", with_python),
         ):
             if wanted and not build:
                 raise ControllerError(
@@ -1543,16 +1549,17 @@ class Controller:
             # Flashing applies only to a run that builds (#135).
             build=build, flash_build=bool(build and flash_build),
             # Each one asked for without build was refused above, so these
-            # are what the caller asked for (#257).
-            with_firmware=with_firmware, with_python=with_python,
-            bootloader=bootloader,
+            # are what the caller asked for (#257, #279).
+            with_firmware=with_firmware, with_btbr=with_btbr,
+            with_python=with_python, bootloader=bootloader,
         )
 
     async def start_run(
         self, host: str, *, ref: str, plan: str, suite: str,
         tests: list[str], build: bool, commit: str | None = None,
         flash_build: bool = True, with_firmware: bool = False,
-        with_python: bool = False, bootloader: str = BOOTLOADER_RECORD,
+        with_btbr: bool = False, with_python: bool = False,
+        bootloader: str = BOOTLOADER_RECORD,
     ) -> Run:
         if host not in self.targets:
             # A target that never registered is the caller's own mistake,
@@ -1566,7 +1573,8 @@ class Controller:
         fields = await self._run_fields(
             ref=ref, plan=plan, suite=suite, tests=tests, build=build,
             commit=commit, flash_build=flash_build, with_firmware=with_firmware,
-            with_python=with_python, bootloader=bootloader,
+            with_btbr=with_btbr, with_python=with_python,
+            bootloader=bootloader,
         )
         return await self._request_run(host, fields)
 
@@ -1689,8 +1697,8 @@ class Controller:
     async def start_group(
         self, hosts, *, ref: str, plan: str, suite: str, tests: list[str],
         build: bool, commit: str | None = None, flash_build: bool = True,
-        with_firmware: bool = False, with_python: bool = False,
-        bootloader: str = BOOTLOADER_RECORD,
+        with_firmware: bool = False, with_btbr: bool = False,
+        with_python: bool = False, bootloader: str = BOOTLOADER_RECORD,
     ) -> RunGroup:
         """Start one child run per host, together, as one run group.
 
@@ -1714,7 +1722,8 @@ class Controller:
         fields = await self._run_fields(
             ref=ref, plan=plan, suite=suite, tests=tests, build=build,
             commit=commit, flash_build=flash_build, with_firmware=with_firmware,
-            with_python=with_python, bootloader=bootloader,
+            with_btbr=with_btbr, with_python=with_python,
+            bootloader=bootloader,
         )
         group = new_group(chosen, fields)
         while group.group_id in self.groups or group.group_id in self.runs:
@@ -1985,10 +1994,11 @@ class Controller:
             invocations = planned_invocations(events, estimates=estimates)
             stages = run_stage_estimates(
                 estimates, events, run.target, build=run.build,
-                # As in /api/runs/{run_id}: a run that flashes its boards
-                # builds the firmware for that whether it asked for the image
-                # or not.
-                with_firmware=run.with_firmware or run.flash_build,
+                # As in /api/runs/{run_id}: a run that flashes its boards, or
+                # that asked for the alternate image, builds the firmware
+                # whether it asked for the application image or not.
+                with_firmware=(run.with_firmware or run.flash_build
+                               or run.with_btbr),
                 with_python=run.with_python,
             )
             per_host[member["host"]] = host_steps(
@@ -2298,15 +2308,16 @@ ENDPOINTS = {
     "GET /api/targets/{host}": "one target",
     "POST /api/targets/{host}/runs": (
         "start a run: {ref, commit, plan, suite, tests, build, flash_build, "
-        "with_firmware, with_python, bootloader}; flash_build is recorded "
-        "false without build, and with_firmware, with_python, or a bootloader "
-        "of check or update without build is refused"
+        "with_firmware, with_btbr, with_python, bootloader}; flash_build is "
+        "recorded false without build, and any of with_firmware, with_btbr, "
+        "with_python, or a bootloader of check or update without build is "
+        "refused"
     ),
     "POST /api/run-groups": (
         "start one run per host as a run group: {hosts, ref, commit, plan, "
-        "suite, tests, build, flash_build, with_firmware, with_python, "
-        "bootloader}; 201 "
-        "with the group, each member carrying its run or why it did not start"
+        "suite, tests, build, flash_build, with_firmware, with_btbr, "
+        "with_python, bootloader}; 201 with the group, each member carrying "
+        "its run or why it did not start"
     ),
     "GET /api/run-groups": (
         "run groups, newest first (?target=HOST); a run of its own is listed "
@@ -2358,9 +2369,12 @@ def create_app(controller: Controller):
         build: bool = False
         # Flash the boards with the build first: the default when building.
         flash_build: bool = True
-        # Build the firmware image and the Python tools as well; each one
-        # needs build, and is refused (422) without it.
+        # Build the firmware image, the alternate btbr image and the Python
+        # tools as well; each one needs build, and is refused (422) without
+        # it. The btbr image is asked for in its own right: a firmware build
+        # makes the application image without it (#279).
         with_firmware: bool = False
+        with_btbr: bool = False
         with_python: bool = False
         # What to do about each board's bootloader: record what is installed,
         # check it against one built from the run's source, or update a stale
@@ -2460,7 +2474,8 @@ def create_app(controller: Controller):
             host, ref=request.ref, plan=request.plan, suite=request.suite,
             tests=request.tests, build=request.build, commit=request.commit,
             flash_build=request.flash_build, with_firmware=request.with_firmware,
-            with_python=request.with_python, bootloader=request.bootloader,
+            with_btbr=request.with_btbr, with_python=request.with_python,
+            bootloader=request.bootloader,
         )
         return {"run": run.view()}
 
@@ -2470,8 +2485,8 @@ def create_app(controller: Controller):
             request.hosts, ref=request.ref, plan=request.plan,
             suite=request.suite, tests=request.tests, build=request.build,
             commit=request.commit, flash_build=request.flash_build,
-            with_firmware=request.with_firmware, with_python=request.with_python,
-            bootloader=request.bootloader,
+            with_firmware=request.with_firmware, with_btbr=request.with_btbr,
+            with_python=request.with_python, bootloader=request.bootloader,
         )
         return {"group": controller.view_group(group)}
 
@@ -2512,11 +2527,13 @@ def create_app(controller: Controller):
                 estimates, events, run.target, build=run.build,
                 # A run that flashes its boards builds the firmware for that
                 # whether it asked for the image or not (run-suite turns
-                # --with-firmware on for it), and a firmware build is the
-                # longer kind; the run's own build_started record replaces
-                # this guess as soon as it arrives. Nothing turns the Python
-                # tools on by itself, so that one is what was asked for.
-                with_firmware=run.with_firmware or run.flash_build,
+                # --with-firmware on for it), and so does one that asked for
+                # the alternate btbr image; a firmware build is the longer
+                # kind. The run's own build_started record replaces this
+                # guess as soon as it arrives. Nothing turns the Python tools
+                # on by itself, so that one is what was asked for.
+                with_firmware=(run.with_firmware or run.flash_build
+                               or run.with_btbr),
                 with_python=run.with_python,
             ),
         }

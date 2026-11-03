@@ -74,6 +74,11 @@
         </div>
         <p id="with-firmware-note" class="hint">Costs extra build time and needs arm-none-eabi-gcc on the target; the run then records its own firmware image, which every test that writes or checks an image needs.</p>
         <div class="field field-check">
+          <input type="checkbox" id="with-btbr" name="with_btbr" aria-describedby="with-btbr-note">
+          <label for="with-btbr">Build the alternate btbr image too</label>
+        </div>
+        <p id="with-btbr-note" class="hint">Costs another firmware build's worth of build time on top of the image above, which it asks for; the run then records the btbr image, the one ubertooth-btbr runs and nothing else does.</p>
+        <div class="field field-check">
           <input type="checkbox" id="with-python" name="with_python" aria-describedby="with-python-note">
           <label for="with-python">Build the Python tools too</label>
         </div>

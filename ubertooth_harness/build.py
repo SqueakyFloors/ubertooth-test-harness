@@ -41,12 +41,13 @@ _FIRMWARE_HINTS = {
     "linux": "sudo apt install gcc-arm-none-eabi make",
 }
 
-# The firmware directories a --with-firmware build makes a .dfu from. The
-# application image is what every other test needs on its board; `btbr` is
-# the image ubertooth-btbr needs and nothing else runs, so a board is set up
-# for one or the other (host/doc/ubertooth-btbr.md, FIRMWARE). Building both
-# here is what lets a test flash btbr and put the application back from
-# artifacts of the same commit.
+# The firmware directories a build can make a .dfu from. The application
+# image is what every other test needs on its board; `btbr` is the image
+# ubertooth-btbr needs and nothing else runs, so a board is set up for one or
+# the other (host/doc/ubertooth-btbr.md, FIRMWARE). Building both is what
+# lets a test flash btbr and put the application back from artifacts of the
+# same commit; which of them one run builds is the run's own option
+# (cli.py's --with-btbr, #279).
 FIRMWARE_IMAGES = (APPLICATION_IMAGE, BTBR_IMAGE)
 # Run-manifest artifact names of the two images, as a plan and --artifact
 # write them. "test build" is the application image every other test needs;
@@ -83,10 +84,9 @@ class BuildPlan:
     # Interpreter the Python tools are built for (ENABLE_PYTHON=ON), or None.
     python: str | None = None
     # The firmware directories this plan makes a .dfu from, when it builds
-    # firmware at all. A run that asked for --with-firmware builds both; a
-    # run that only needs to flash its boards builds the application image
-    # alone, so a plan that never touches the alternate one does not depend
-    # on it building.
+    # firmware at all. A firmware build makes the application image; the
+    # alternate one is added for a run that asked for it, so a plan that
+    # never touches it does not depend on it building (#279).
     firmware_images: tuple[str, ...] = FIRMWARE_IMAGES
 
     @property

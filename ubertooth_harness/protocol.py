@@ -26,10 +26,11 @@ from typing import Any, Callable, Mapping
 # the ref name in their own checkout); version 3 added ``flash_build``;
 # version 4 added the ``run_file`` request and its two answers; version 5
 # added ``with_firmware`` and ``with_python`` to the run message; version 6
-# added ``bootloader``. There is no negotiation: a message of any other
-# version is refused, so a controller and a runner of different versions never
-# work together (DESIGN.md section 2).
-PROTOCOL_VERSION = 6
+# added ``bootloader``; version 7 added ``with_btbr`` beside the other build
+# options. There is no negotiation: a message of any other version is refused,
+# so a controller and a runner of different versions never work together
+# (DESIGN.md section 2).
+PROTOCOL_VERSION = 7
 # Bounds what the runner accepts from the controller. Outbound events may be
 # larger (the manifest record is bounded at 1 MiB).
 MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
@@ -246,10 +247,13 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
     # whole suite); ``build`` builds the resolved commits into the run
     # directory first; ``flash_build`` (meaningful only with ``build``) then
     # flashes the run's boards with that build's firmware before preflight.
-    # ``with_firmware`` and ``with_python`` are the two further build options:
-    # each one true adds that option to the run's build (run-suite
-    # ``--with-firmware``, ``--with-python``), and each requires ``build``,
-    # exactly as run-suite requires ``--build`` for them (see _run_options).
+    # ``with_firmware``, ``with_btbr`` and ``with_python`` are the three
+    # further build options: each one true adds that option to the run's
+    # build (run-suite ``--with-firmware``, ``--with-btbr``,
+    # ``--with-python``), and each requires ``build``, exactly as run-suite
+    # requires ``--build`` for them (see _run_options). ``with_btbr`` is the
+    # alternate btbr firmware image, asked for in its own right because a
+    # firmware build makes the application image without it (#279).
     # ``bootloader`` is run-suite ``--bootloader``: ``record`` what each board
     # has, ``check`` it against a bootloader built from the run's source, or
     # ``update`` a stale board through the programmer its registry pairs with
@@ -264,6 +268,7 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "build": _boolean,
         "flash_build": _boolean,
         "with_firmware": _boolean,
+        "with_btbr": _boolean,
         "with_python": _boolean,
         "bootloader": _bootloader_mode,
     },
@@ -372,13 +377,14 @@ RUNNER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
 def _run_options(message: Mapping) -> str:
     """Why a run message's build options cannot be acted on, or ''.
 
-    ``run-suite`` refuses ``--with-firmware`` and ``--with-python`` without
-    ``--build``, so a request that asks for either without ``build`` names a
-    command line that cannot run. It is refused here, in both directions:
-    the controller cannot encode it, and a runner that is sent one rejects it
-    with ``protocol_error`` rather than starting a run that fails at once.
+    ``run-suite`` refuses ``--with-firmware``, ``--with-btbr`` and
+    ``--with-python`` without ``--build``, so a request that asks for one of
+    them without ``build`` names a command line that cannot run. It is
+    refused here, in both directions: the controller cannot encode it, and a
+    runner that is sent one rejects it with ``protocol_error`` rather than
+    starting a run that fails at once.
     """
-    for field in ("with_firmware", "with_python"):
+    for field in ("with_firmware", "with_btbr", "with_python"):
         if message[field] and not message["build"]:
             return f"{field} requires build"
     # `check` and `update` compare a board against a bootloader built from the

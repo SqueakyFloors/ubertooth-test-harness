@@ -102,12 +102,13 @@ redirects.
 Implemented protocol, version 6 (`ubertooth_harness/protocol.py`; version 2
 added the run's `commit`, version 3 its `flash_build`, version 4 the
 `run_file` request and its answers, version 5 the run's `with_firmware` and
-`with_python`, and version 6 its `bootloader`). Every message is one
+`with_python`, version 6 its `bootloader`, and version 7 its `with_btbr`).
+Every message is one
 JSON text frame `{"version": 6, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, wrongly typed value, or combination of fields
-it could not act on (`with_firmware` or `with_python` without `build`), and
-does not act on it
+it could not act on (`with_firmware`, `with_btbr` or `with_python` without
+`build`), and does not act on it
 (the runner answers `protocol_error {reason}`). Inbound messages to the runner
 are limited to 64 KiB; the controller accepts runner messages up to 4 MiB,
 since one `event` carries one run.jsonl record and the manifest record alone
@@ -117,7 +118,7 @@ Controller → target runner:
 
 | Type | Fields |
 |------|--------|
-| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then), `with_firmware` and `with_python` (bool: the run's build also builds and records the firmware image, and builds the Python tools, passing `--with-firmware` and `--with-python`; `run-suite` takes neither without `--build`, so either one true without `build` is rejected as a message the receiver could not act on), `bootloader` (`record`, `check` or `update`: what the run does about its boards' bootloaders, passed as `--bootloader`; `check` and `update` compare against a bootloader built from the run's own source, which `run-suite` refuses without `--build`, so either one without `build` is rejected the same way) |
+| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then), `with_firmware`, `with_btbr` and `with_python` (bool: the run's build also builds and records the application firmware image, the alternate btbr image, and the Python tools, passing `--with-firmware`, `--with-btbr` and `--with-python`; `run-suite` takes none of them without `--build`, so any one true without `build` is rejected as a message the receiver could not act on. The btbr image is its own field because a firmware build makes the application image without it, so a test that needs the alternate one has to say so directly), `bootloader` (`record`, `check` or `update`: what the run does about its boards' bootloaders, passed as `--bootloader`; `check` and `update` compare against a bootloader built from the run's own source, which `run-suite` refuses without `--build`, so either one without `build` is rejected the same way) |
 | `cancel` | `run_id`, `reason` |
 | `run_file` | `request_id`, `run_id`, `path` (a path that run's own run.jsonl records), `offset` and `limit` in bytes (`limit` at most 256 KiB, since the page travels in one message) |
 
@@ -1055,7 +1056,8 @@ by the REST API and `/ws/live`.
   repository and caches for 60 s) + plan and suite selectors
   (`GET /api/plans`) + one target + build toggle + "Flash the firmware to the boards
   first" (ticked by default, disabled while build is off) + "Build the
-  firmware image too" and "Build the Python tools too" (`--with-firmware`,
+  firmware image too", "Build the alternate btbr image too" and "Build the
+  Python tools too" (`--with-firmware`, `--with-btbr`,
   `--with-python`; each explains what it costs, is disabled while build is
   off, and follows what the chosen suite needs: `/api/plans` marks each test
   and suite `requires_*` where the test cannot run without the option, which
@@ -1328,8 +1330,9 @@ Later (multi-node), Ansible:
 3. **Target runner service** — register/heartbeat/run over the wire; test against a
    stub controller. Implemented (protocol v6, loopback controllers only;
    v2 added the listed commit to `run`, v3 `flash_build`, v4 the `run_file`
-   request and its answers, v5 the run's `with_firmware` and `with_python`, v6 its `bootloader`;
-   no version interoperates with another).
+   request and its answers, v5 the run's `with_firmware` and `with_python`,
+   v6 its `bootloader`, v7 its `with_btbr`; no version interoperates with
+   another).
 4. **Controller + web GUI** — targets, ref dropdown, live checkoff, countdown.
    Implemented: controller (registry, dispatch, results store, REST and live
    WebSocket API, `127.0.0.1` only) and the GUI (targets, run setup, live
