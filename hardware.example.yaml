@@ -50,8 +50,13 @@ resources:
     # `weak link: {Ubertooth: 20}`, which also asks for an ordinary board for
     # every other role of that test; the capture, survey and follow tests
     # declare an ordinary link as their own default, so they keep away from
-    # it unless a plan says otherwise. testplans/weak-link.yaml collects the
-    # checks this board is for.
+    # it unless a plan says otherwise.
+    #
+    # A bench that runs the committed weak-link suites needs TWO such boards,
+    # one at 20 dB and one at 40 dB: `ble-weak-link` captures a DK advertiser
+    # at both. Register a second attenuated Ubertooth with its own `rf:` block
+    # to run that suite; one board at 20 dB covers `classic-weak-link` and
+    # `range-weak-link` only.
     # rf:
     #   antenna: true
     #   attenuation_db: 20

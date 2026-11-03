@@ -176,7 +176,7 @@ def unjudgeable_attenuations(
         definition = test_catalog.get(step.test_name)
         asked = definition.placement_requirements(step.arguments)
         for role, want in sorted(asked.items()):
-            reason = weaklink.unjudgeable(want)
+            reason = weaklink.unjudgeable(want, step.test_name, role)
             if reason:
                 found.setdefault(step.test_name, []).append(f"{role} {reason}")
     return MappingProxyType({
