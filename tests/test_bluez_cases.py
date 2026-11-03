@@ -29,7 +29,6 @@ from ubertooth_harness.bluez_cases import (
     extended_report,
     inquiry_found,
     inquiry_scan_cases,
-    maps_reported,
     scan_results_list,
 )
 from ubertooth_harness.catalog import builtin_catalog
@@ -363,27 +362,6 @@ class InquiryCaseTests(unittest.TestCase):
         self.assertGreater(float(argv[argv.index("--timeout") + 1]),
                            float(plain[plain.index("--timeout") + 1]))
 
-    def test_the_scan_cases_allow_the_link_the_tool_takes_down(self):
-        """The tool pages every device it found, which ends a peer's link;
-        what the cases are judged on is what went on the air."""
-        for case_id, case in scan_cases("comprehensive").items():
-            with self.subTest(case_id):
-                argv = driver_argv(case)
-                self.assertIn("--allow-link-loss", argv)
-                # And the report has to say what became of it.
-                step = steps(case)["pair-and-run"]
-                self.assertIn(r"(?m)^link loss allowed: ", step.output_patterns)
-                # The writes are still required.
-                self.assertIn("--min-writes", argv)
-
-    def test_the_follow_cases_still_require_the_link_to_hold(self):
-        for case_id, case in follow_cases("comprehensive").items():
-            with self.subTest(case_id):
-                argv = driver_argv(case)
-                self.assertNotIn("--allow-link-loss", argv)
-                step = steps(case)["pair-and-run"]
-                self.assertNotIn(r"(?m)^link loss allowed: ", step.output_patterns)
-
     def test_every_case_reads_the_adapter_first(self):
         for case_id, case in scan_cases("comprehensive").items():
             with self.subTest(case_id):
@@ -638,13 +616,6 @@ class OutputCheckTests(unittest.TestCase):
         self.assertIn("not LAP " + CENTRAL_LAP,
                       check(fake_bluez.scan_survey(lap="2a1b2a", uap="41")))
 
-    def test_the_map_check_counts_the_lines_the_scan_prints_per_piconet(self):
-        self.assertEqual("", maps_reported()(fake_bluez.scan_survey()))
-        self.assertIn("0 'AFH map:' lines", maps_reported()(
-            fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))))
-        self.assertEqual("", maps_reported(2)(
-            fake_bluez.scan_survey() + fake_bluez.scan_survey(lap="2a1b2a")))
-
     def test_the_extended_report_case_checks_both_halves_and_the_block(self):
         """-x also exits 1 for a dead capture stream, so the case requires
         the piconet in the survey results too."""
@@ -689,12 +660,28 @@ class OutputCheckTests(unittest.TestCase):
             fake_bluez.packet_lines(count=MIN_PACKETS)
             + fake_bluez.packet_lines(lap="2a1b2a", count=1)))
 
-    def test_the_afh_follow_check_also_wants_the_map_the_tool_printed(self):
-        check = steps(
-            follow_cases()["follow-target-afh"])["pair-and-run"].output_check
-        packets = fake_bluez.packet_lines(count=MIN_PACKETS)
-        self.assertIn("0 'AFH map:' lines", check(packets))
-        self.assertEqual("", check(fake_bluez.WHOLE_BAND_MAP + "\n" + packets))
+    def test_the_afh_case_pins_the_disabled_answer_the_bench_gives(self):
+        """The peer reports AFH off on the link the page made, so the tool
+        says so and follows without it: measured, so that is what is pinned,
+        and a map it could not have had is forbidden."""
+        step = steps(follow_cases()["follow-target-afh"])["pair-and-run"]
+        self.assertIn(
+            r"(?m)^the remote device is not using AFH; following without it$",
+            step.output_patterns)
+        self.assertEqual(
+            (r"(?m)^AFH map read: ", r"(?m)^AFH map: 0x", r"(?m)^error: "),
+            step.forbidden_patterns)
+        for line in ("AFH map read: 79 of 79 channels in use",
+                     "AFH map: 0x" + "ff" * 9 + "7f",
+                     "error: AFH map read failed: Input/output error"):
+            with self.subTest(line):
+                self.assertTrue(
+                    any(re.search(pattern, line)
+                        for pattern in step.forbidden_patterns), line)
+        # It still has to report the piconet.
+        check = step.output_check
+        self.assertEqual("", check(fake_bluez.packet_lines(count=MIN_PACKETS)))
+        self.assertIn("expected at least", check(""))
 
 
 class ToolPatternTests(unittest.TestCase):
@@ -711,7 +698,7 @@ class ToolPatternTests(unittest.TestCase):
     # The driver's own report lines are checked against the real driver
     # below; here only the lines the tool prints.
     DRIVER = ("acceptor ", "initiator ", "central ", "link:", "command exit:",
-              "pair streamed", "link loss allowed")
+              "pair streamed")
 
     def test_the_follow_progress_lines_match_the_tools_output(self):
         self.matched(follow_cases()["follow-target"],
@@ -719,15 +706,21 @@ class ToolPatternTests(unittest.TestCase):
         self.matched(follow_cases()["follow-target-afh"],
                      fake_bluez.follow_progress(afh=True), skip=self.DRIVER)
 
-    def test_without_a_reads_the_tool_says_it_is_not_using_afh(self):
+    def test_the_two_follow_cases_pin_the_two_lines_the_tool_prints(self):
+        """Without -a the tool says it is not using AFH; with -a it reports
+        that the remote is not, which is what this bench answers."""
         plain = fake_bluez.follow_progress()
         with_afh = fake_bluez.follow_progress(afh=True)
         self.assertIn("Not use AFH", plain)
         self.assertNotIn("Not use AFH", with_afh)
         self.matched(follow_cases()["follow-target-afh"], with_afh,
                      skip=self.DRIVER)
-        self.assertNotRegex(plain,
-                            re.compile(r"(?m)^AFH map read: \d+ of 79 "))
+        # Neither case may see a map: -a was told there is none.
+        step = steps(follow_cases()["follow-target-afh"])["pair-and-run"]
+        for text in (plain, with_afh):
+            for pattern in step.forbidden_patterns:
+                with self.subTest(pattern=pattern):
+                    self.assertIsNone(re.search(pattern, text))
 
     def test_the_extended_report_case_has_no_patterns_of_its_own(self):
         """Its three lines are read as one device's block, by the check."""
@@ -739,33 +732,44 @@ class ToolPatternTests(unittest.TestCase):
         """The pair's report, built by the real driver against the firmware fake.
 
         A pattern is written from what the driver is meant to print, so the
-        two can drift apart with nothing failing until a bench run. Driven
-        both ways, because the scan cases allow the link the tool takes down
-        and so require one line the follow cases do not.
+        two can drift apart with nothing failing until a bench run.
         """
         from tests.fake_esp32 import FakePeerFirmware, opener
 
-        for allow, case in ((True, scan_cases()["inquiry"]),
-                            (False, follow_cases()["follow-target"])):
-            acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS)
-            initiator = FakePeerFirmware(INITIATOR_ADDRESS)
-            acceptor.link(initiator)
-            open_one = opener({"/dev/a": acceptor, "/dev/b": initiator})
-            peers = (esp32peer.Peer("/dev/a", "acceptor", ACCEPTOR_ADDRESS,
-                                    opener=open_one),
-                     esp32peer.Peer("/dev/b", "initiator", INITIATOR_ADDRESS,
-                                    opener=open_one))
-            report = io.StringIO()
-            esp32peer.stream(*peers, (sys.executable, "-c", "pass"),
-                             out=report, settle_s=0.0, min_writes=10,
-                             allow_link_loss=allow)
-            text = report.getvalue()
+        acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        initiator = FakePeerFirmware(INITIATOR_ADDRESS)
+        acceptor.link(initiator)
+        open_one = opener({"/dev/a": acceptor, "/dev/b": initiator})
+        peers = (esp32peer.Peer("/dev/a", "acceptor", ACCEPTOR_ADDRESS,
+                                opener=open_one),
+                 esp32peer.Peer("/dev/b", "initiator", INITIATOR_ADDRESS,
+                                opener=open_one))
+        report = io.StringIO()
+        esp32peer.stream(*peers, (sys.executable, "-c", "pass"), out=report,
+                         settle_s=0.0, min_writes=10)
+        text = report.getvalue()
+        for case in (scan_cases()["inquiry"], follow_cases()["follow-target"]):
             with self.subTest(case.case_id):
                 for pattern in steps(case)["pair-and-run"].output_patterns:
                     if not any(mark in pattern for mark in self.DRIVER):
                         continue
                     with self.subTest(pattern=pattern):
                         self.assertRegex(text, re.compile(pattern))
+
+    def test_every_case_pins_a_zero_exit(self):
+        """Including -x, whose status is one bit for several things: a
+        device's report that failed, a dead capture stream, and a board that
+        would not give its mode up. Accepting 1 for the first would accept
+        the other two, which no check here can see."""
+        for cases in (scan_cases("comprehensive"), follow_cases("comprehensive")):
+            for case_id, case in cases.items():
+                with self.subTest(case_id):
+                    step = steps(case)["pair-and-run"]
+                    self.assertEqual((0,), step.expected_returncodes)
+                    exits = [pattern for pattern in step.output_patterns
+                             if "command exit:" in pattern]
+                    self.assertEqual(
+                        [r"(?m)^command exit: 0 after \d+\.\d s$"], exits)
 
 
 class AdapterHelperTests(unittest.TestCase):

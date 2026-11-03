@@ -370,29 +370,6 @@ def scan_results_list(lap: str, *, with_map: bool = False) -> Check:
     return check
 
 
-def maps_reported(minimum: int = 1) -> Check:
-    """The tool printed a channel map.
-
-    For the ``-a`` case of ``Follow Classic piconet over HCI``, which is its
-    only use: there the map is the point, and the tool prints it only when it
-    read one and handed it to the board.
-
-    Not for ``ubertooth-scan``, where it could not fail. That tool prints a
-    map line after every survey result, and ``afh_map_line()`` writes an
-    empty string only for a null map, which libbtbb never hands it; an
-    all-zero map prints as ``AFH map: 0x`` and twenty zeros. The survey case
-    uses ``scan_results_list(..., with_map=True)``, which reads the map that
-    follows one named result rather than counting lines.
-    """
-    def check(output) -> str:
-        maps = [line for line in text_lines(output) if afhmap.MAP_LINE.match(line)]
-        if len(maps) < minimum:
-            return (f"{len(maps)} 'AFH map:' lines, expected at least "
-                    f"{minimum}: the scan prints one per piconet it reports")
-        return ""
-    return check
-
-
 def extended_report(address: str, name: str) -> Check:
     """``-x``'s report of this device holds its address, name and version.
 
@@ -446,7 +423,7 @@ def extended_report(address: str, name: str) -> Check:
 
 
 def _session_argv(acceptor, initiator, command, *, timeout, min_seconds,
-                  interrupt_after=None, allow_link_loss=False, files=()):
+                  interrupt_after=None, files=()):
     """esp32peer.py stream ... -- <tool> ... [<capture option> <path>]"""
     def argv(context):
         capture = []
@@ -468,16 +445,14 @@ def _session_argv(acceptor, initiator, command, *, timeout, min_seconds,
         )
         if interrupt_after is not None:
             base += ("--interrupt-after", str(interrupt_after))
-        if allow_link_loss:
-            base += ("--allow-link-loss",)
         return base + ("--",) + tuple(command) + tuple(capture)
     return argv
 
 
 def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
                seconds, needs, expected_state, check=None, patterns=(),
-               returncodes=(0,), interrupt=False, extra_s=0.0,
-               floor_s=0.0, allow_link_loss=False, files=(), verify=()):
+               returncodes=(0,), forbidden=(), interrupt=False, extra_s=0.0,
+               floor_s=0.0, files=(), verify=()):
     """One tool run against the adapter while the ESP32 pair streams.
 
     ``seconds`` is the capture window: the tool's own ``-t`` where it has
@@ -506,8 +481,7 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
         min_seconds = seconds + floor_s - EARLY_EXIT_S
     argv = _session_argv(acceptor, initiator, command, timeout=timeout,
                          min_seconds=min_seconds,
-                         interrupt_after=interrupt_after,
-                         allow_link_loss=allow_link_loss, files=files)
+                         interrupt_after=interrupt_after, files=files)
     steps = (
         _stop(serial, "establish-idle", "Establish idle before reading"),
         *_read_originals(serial, MODE_RESET_SETTINGS),
@@ -523,6 +497,7 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
              mutates=True,
              expected_returncodes=tuple(returncodes),
              output_patterns=tuple(patterns),
+             forbidden_patterns=tuple(forbidden),
              output_check=check),
         _stop(serial),
         *verify,
@@ -553,18 +528,9 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
     )
 
 
-def _pair_report(acceptor, initiator, *, link_loss=False) -> tuple[str, ...]:
-    """The driver's report of the session, which pins a zero exit.
-
-    With ``link_loss``, the line that says what became of the link is
-    required too, so a run records whether it held: the scan cases allow it
-    to go down, because the tool takes it down itself, and this is where
-    that shows.
-    """
-    patterns = _pair_patterns(acceptor, initiator)
-    if link_loss:
-        patterns += (r"(?m)^link loss allowed: ",)
-    return patterns
+def _pair_report(acceptor, initiator) -> tuple[str, ...]:
+    """The driver's report of the session, which pins a zero exit."""
+    return _pair_patterns(acceptor, initiator)
 
 
 # ---------------------------------------------------------------------------
@@ -581,19 +547,9 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
     device = hci["device"]
     central = initiator["lap"]
     acceptor_name = esp32peer.device_name(acceptor["address"])
-    report = _pair_report(acceptor, initiator, link_loss=True)
+    report = _pair_report(acceptor, initiator)
 
     def scan(*options, **case):
-        # The tool reads the name of every device its inquiry answered and of
-        # every piconet its sweep heard, by paging it, and a page to a board
-        # already in a link ends that link: measured on the bench, where both
-        # scan cases came back with the pair's link down 1 time and the
-        # acceptor having received nothing, while the same pair held a link
-        # through a 25 s `ubertooth-rx` capture in the same minutes. So these
-        # cases are judged on what the pair put on the air -- MIN_WRITES, and
-        # the inquiry and survey results themselves -- and the link's fate is
-        # reported rather than required.
-        case.setdefault("allow_link_loss", True)
         case.setdefault("patterns", report)
         # The Ubertooth half's survey results are each paged for a name, in
         # every case; -s adds a whole inquiry before the window opens, and a
@@ -709,21 +665,33 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
                check=piconet_packets(central, MIN_PACKETS, only=True),
                expected_state=f"{MIN_PACKETS}+ packet lines, all with LAP "
                               f"{central}"),
-        # -a is the only host path that follows with AFH on: it reads the map
-        # of the link the page made, over HCI, and hands it to the board. The
-        # map read is of that link rather than of the pair's own piconet, so
-        # the case checks that a map was read and applied, not which channels
-        # it holds.
+        # -a is the only host path that follows with AFH on: it asks the
+        # target, over the link the page made, for that link's channel map.
+        # On this bench the answer is that there is none -- the peer reports
+        # AFH off on that link -- so the tool says so, clears -a, and follows
+        # without it. That is FOLLOW_AFH_ACTION_DISABLE, a documented outcome
+        # with a zero exit, and it is what the bench produced in both runs
+        # that reached it (2026-11-03).
+        #
+        # So that is what this case pins: the tool reached the read, was told
+        # there was no map, said it was following without one, and still
+        # reported the piconet. It fails if the read errors instead
+        # (FOLLOW_AFH_ACTION_FAIL, which is an `error:` line and exit 1), if
+        # the tool claims a map, or if the follow then finds nothing. What
+        # stays unexercised is the branch that applies a map, because no peer
+        # here offers one; docs/tests.md records that and why.
         follow("-a", case_id="follow-target-afh",
-               name=f"ubertooth-follow -t {target} -a reads a channel map over "
-                    "HCI and follows with AFH on",
+               name=f"ubertooth-follow -t {target} -a asks the link for its "
+                    "channel map, is told there is none, and follows anyway",
                patterns=report + targeted + (
-                   r"(?m)^AFH map read: \d+ of 79 channels in use$",),
-               check=_all(piconet_packets(central, MIN_PACKETS, only=True),
-                          maps_reported()),
-               expected_state=(f"{MIN_PACKETS}+ packet lines with LAP {central}, "
-                               "and one 'AFH map:' line read from the link's "
-                               "map and handed to the board")),
+                   r"(?m)^the remote device is not using AFH; following "
+                   r"without it$",),
+               check=piconet_packets(central, MIN_PACKETS, only=True),
+               forbidden=(r"(?m)^AFH map read: ", r"(?m)^AFH map: 0x",
+                          r"(?m)^error: "),
+               expected_state=(f"{MIN_PACKETS}+ packet lines with LAP {central} "
+                               "after the tool reported the remote is not "
+                               "using AFH")),
     ]
     if arguments["coverage"] == "comprehensive":
         # The file is decoded as well as counted: a BR/EDR capture holding

@@ -121,9 +121,15 @@ def packet_lines(lap: str = CENTRAL_LAP, count: int = 12) -> str:
 
 def follow_progress(target: str = INITIATOR_ADDRESS, lap: str = CENTRAL_LAP,
                     uap: str = CENTRAL_UAP, afh: bool = False) -> str:
-    """The standard error of ``ubertooth-follow -t <target>``, with or without
-    ``-a``."""
+    """The standard error of ``ubertooth-follow -t <target>``.
+
+    Without ``-a`` the tool says it is not using AFH. With ``-a`` it asks the
+    link for its channel map, and on the bench the answer is that there is
+    none: the peer reports AFH off on the link the page made, so the tool
+    says so and follows without it (``FOLLOW_AFH_ACTION_DISABLE``). Both
+    lines are taken from runs on 2026-11-03.
+    """
     lines = [f"Target {target}: LAP={lap} UAP={uap}"]
-    lines.append("AFH map read: 79 of 79 channels in use" if afh
-                 else "Not use AFH")
+    lines.append("the remote device is not using AFH; following without it"
+                 if afh else "Not use AFH")
     return "\n".join(lines) + "\n"

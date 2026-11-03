@@ -313,61 +313,6 @@ class StreamTests(unittest.TestCase):
                                  settle_s=0.0, **options)
         return status, report.getvalue(), acceptor_firmware, initiator_firmware
 
-    def _dropping(self, command=TRUE, **options):
-        """A session whose link goes down while the command runs.
-
-        What `ubertooth-scan` does to the pair on the bench: it pages every
-        device it found to read its name, and a page to a board already in a
-        link ends that link. The boards still report their boot state after
-        the release reset, so only the figures the session reads before it
-        differ.
-        """
-        class Dropping(FakePeerFirmware):
-            def status(self):
-                line = super().status()
-                if self.connected:
-                    # Read once the link is up: the drop the command caused.
-                    self.disconnects = 1
-                    line = super().status()
-                return line
-
-        acceptor_firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
-        initiator_firmware = Dropping(INITIATOR_ADDRESS)
-        acceptor_firmware.link(initiator_firmware)
-        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
-        report = io.StringIO()
-        try:
-            status = esp32peer.stream(acceptor, initiator, command, out=report,
-                                      settle_s=0.0, **options)
-        except esp32peer.PeerError as error:
-            return None, f"{report.getvalue()}\nERROR {error}"
-        return status, report.getvalue()
-
-    def test_a_link_the_command_took_down_fails_a_session_by_default(self):
-        _status, report = self._dropping(min_writes=1)
-        self.assertIn("the link went down 1 time(s) while the command ran",
-                      report)
-        self.assertNotIn("pair streamed: yes", report)
-
-    def test_allow_link_loss_reports_it_instead(self):
-        """`ubertooth-scan` pages the peers to read their names, which ends
-        their link; the writes are what says the pair was on the air."""
-        status, report = self._dropping(min_writes=1, allow_link_loss=True)
-        self.assertEqual(0, status)
-        self.assertIn("link loss allowed: the link went down 1 time(s)", report)
-        self.assertIn("pair streamed: yes", report)
-
-    def test_allow_link_loss_still_needs_the_writes(self):
-        _status, report = self._dropping(min_writes=10_000,
-                                         allow_link_loss=True)
-        self.assertIn("writes, fewer than the 10000 this test needs", report)
-        self.assertNotIn("pair streamed: yes", report)
-
-    def test_a_link_that_held_says_so_under_allow_link_loss(self):
-        _status, report, _a, _i = self._stream(min_writes=10,
-                                               allow_link_loss=True)
-        self.assertIn("link loss allowed: the link held", report)
-
     def test_the_pair_links_up_streams_and_the_command_runs(self):
         status, report, acceptor, initiator = self._stream(min_writes=10)
         self.assertEqual(0, status)
