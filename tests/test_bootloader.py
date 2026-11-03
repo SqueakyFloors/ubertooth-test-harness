@@ -606,6 +606,23 @@ class RegistryPairingTests(unittest.TestCase):
         self.assertTrue(boards[0].has_programmer)
         self.assertFalse(boards[0].can_be_programmed)
 
+    def test_a_board_with_no_registered_serial_is_a_refusal_not_a_traceback(self):
+        from ubertooth_harness.flash import HarnessError
+
+        resources = dict(registry().resources)
+        resources["UT_A"] = Resource(
+            alias="UT_A", type="Ubertooth", platform=None, roles=(),
+            defaults=MappingProxyType({}), attached_to="Host_Local",
+            identity=MappingProxyType({}), capabilities=(),
+            power=MappingProxyType({}), driver=None,
+        )
+        resources.pop("Prog_A")
+        with self.assertRaises(HarnessError) as caught:
+            bootloader.boards_for_bootloader(
+                FileResourceRegistry(resources), ["UT_A"]
+            )
+        self.assertIn("no registered serial", str(caught.exception))
+
     def test_the_documented_programmer_command_is_what_is_run(self):
         self.assertEqual(
             ("lpc21isp", "-control", "/tmp/region.hex", PROGRAMMER_DEVICE,

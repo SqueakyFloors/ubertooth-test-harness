@@ -58,13 +58,18 @@ import zlib
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
+from ubertooth_harness.flash import HarnessError
 from ubertooth_harness.patterns import FIRMWARE_VERSION_RE, same_revision
 from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.resources import DEBUG_PROGRAMMER
 
 
-class BootloaderError(RuntimeError):
-    """A bootloader artifact, identity, or update cannot be had."""
+class BootloaderError(HarnessError):
+    """A bootloader artifact, identity, or update cannot be had.
+
+    A ``HarnessError``, so the command line reports it as the refusal it is
+    rather than letting it out as a traceback.
+    """
 
 
 # ----- the fork's own numbers ----------------------------------------------
