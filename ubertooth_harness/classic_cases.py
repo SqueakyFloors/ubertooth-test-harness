@@ -357,14 +357,23 @@ def _capture_path(name):
     return path
 
 
+# The checker's own count line, read per line: a Step.output_check is handed
+# the stdout lines to iterate, not one string, so this used to raise a
+# TypeError the moment a capture file was checked. Found by the first bench
+# run of `Follow Classic piconet over HCI`, which reuses this step (#274).
+_PACKET_COUNT = re.compile(r"^Capture format: .*, packets: (\d+)$")
+
+
 def _written_packets(minimum: int) -> Check:
     """The capture file holds packets, not just a header."""
     def check(output) -> str:
-        match = re.search(r"(?m)^Capture format: .*, packets: (\d+)$", output)
-        if match is None:
+        found = next(
+            (match[1] for match in map(_PACKET_COUNT.match, text_lines(output))
+             if match), None)
+        if found is None:
             return "the checker did not report a packet count"
-        if int(match[1]) < minimum:
-            return (f"the capture holds {match[1]} packets, expected at least "
+        if int(found) < minimum:
+            return (f"the capture holds {found} packets, expected at least "
                     f"{minimum}")
         return ""
     return check

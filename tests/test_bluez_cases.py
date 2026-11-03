@@ -506,7 +506,6 @@ class AdapterStepTests(unittest.TestCase):
         self.patterns(step, fake_bluez.hciconfig(up=True))
 
     def test_an_adapter_that_is_down_fails_the_read(self):
-        step = steps(scan_cases()["inquiry"])["adapter-up"]
         text = fake_bluez.hciconfig(up=False)
         self.assertNotRegex(text, re.compile(r"(?m)^\s+UP RUNNING\b"))
         self.assertRegex(text, re.compile(r"(?m)^\s+DOWN\b"))
