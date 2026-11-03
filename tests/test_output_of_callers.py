@@ -1,10 +1,15 @@
 """The two places that read a command's saved output through `output_of`.
 
-Both reached a real board before they reached a test: `Host version` judges
-its output pattern in `catalog.TestDefinition.result_failure`, and preflight's
-bootloader read is recorded by `sequencer._record_bootloader_identity`. Each
-raised `NameError` on the first line that called `output_of`, so these call
-them with output that matches and output that does not.
+Each raised `NameError` on the first line that called `output_of`, so these
+call them with output that matches and output that does not.
+
+`sequencer._record_bootloader_identity` records preflight's `ubertooth-util
+-B` read, and it is the one that reached a real board first: it failed on the
+bench after the build and the flash had already run.
+`catalog.TestDefinition.result_failure` judges a test's `output_pattern`, and
+has no production caller today -- `command_cases` yields `cases.CommandCase`,
+whose own module imported the helper -- so that half was latent rather than
+live. Both are tested here because either could be called tomorrow.
 """
 
 import unittest
@@ -107,6 +112,18 @@ class BootloaderIdentityRecordTests(unittest.TestCase):
                                     expectation("record", None))
         self.assertIsNone(details["installed"])
         self.assertEqual("unreadable", details["status"])
+
+    def test_an_identity_that_differs_records_stale(self):
+        # What `check` mode exists for: the board answered, and with something
+        # other than the artifact this run built.
+        expected = bootloader.identity_from_match(
+            output_of(IDENTITY).search(bootloader.IDENTITY_LINE_PATTERN)
+        )
+        _, _, details = self.record(OTHER, expectation("check", expected))
+        self.assertEqual("stale", details["status"])
+        self.assertIsNotNone(details["installed"])
+        self.assertNotEqual(details["installed"], details["expected"])
+        self.assertFalse(details["written"])
 
     def test_a_failure_reason_is_carried_and_marks_the_event_failed(self):
         _, status, details = self.record(
