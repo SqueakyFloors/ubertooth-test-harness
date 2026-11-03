@@ -562,6 +562,47 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
             "a pointer array of parts")
         self.assertEqual("unchecked", check_sources(self._sources(commit)).status)
 
+    def test_a_list_is_found_however_its_rows_are_written(self):
+        """A row says it is a part by naming one, not by the order its
+        fields are in: a second list written with field names, or with a
+        field this does not read, is still a list nothing compared."""
+        for description, rows in (
+            ("positional rows",
+             '\t{ 0x281D3747, "LPC4337", 1024 * 1024 },\n'),
+            ("field names",
+             '\t{ .part_id = 0x281D3747, .name = "LPC4337", '
+             '.flash_size = 1024 * 1024 },\n'),
+            ("a field this does not read",
+             '\t{ 0x281D3747, "LPC4337", 1024 * 1024, 1 },\n'),
+        ):
+            with self.subTest(description):
+                commit = self._commit_files(
+                    {"host/ubertooth-tools/src/lpc18.c":
+                     "static const struct dfu_part LPC18_PARTS[] = {\n"
+                     + rows + "};\n"},
+                    description)
+                check = check_sources(self._sources(commit))
+                self.assertEqual("unchecked", check.status, check.message)
+                self.assertIn("lpc18.c", check.message)
+
+    def test_an_assignment_does_not_borrow_a_later_arrays_rows(self):
+        """The body of a candidate is its own braces. Taking everything up
+        to the next `};` let a declaration with no initializer count the rows
+        of a later array in the same file."""
+        commit = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_fill.c":
+             "void fill(struct dfu_part *e, size_t i)\n"
+             "{\n"
+             "\tstruct dfu_part DFU_PARTS[4];\n"
+             "\tDFU_PARTS[i] = *e;\n"
+             "}\n"
+             "static const struct other_thing OTHERS[] = {\n"
+             '\t{ 1, "x", 2 },\n'
+             "};\n"},
+            "an assignment above another array")
+        check = check_sources(self._sources(commit))
+        self.assertEqual("passed", check.status, check.message)
+
     def test_a_list_of_a_typedef_name_is_still_found(self):
         """A fork that typedefs the part type and keeps a table name derived
         from DFU_PARTS is found by the name; one that changes both is the

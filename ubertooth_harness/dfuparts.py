@@ -130,10 +130,11 @@ HOST_TREE = "host/"
 # itself: a body that still names all three and subtracts one term more
 # compares as a match. Two other trees are beyond it as well: one that
 # renames all three of TREE_MARKERS at once, which leaves nothing here to
-# find, and a second part list whose type is a typedef under a name of its
-# own AND whose array is not named for the table, which neither key below
-# matches. The read-back step catches all three, by checking the length the
-# tool reports against the flash the same line says the part has
+# find, and a second part list that neither key below matches (its type a
+# typedef under a name of its own AND its array not named for the table) or
+# whose rows name no part (an array of pointers to parts declared
+# elsewhere). The read-back step catches all three, by checking the length
+# the tool reports against the flash the same line says the part has
 # (dfuimage.ReadbackPlan._length_follows_the_reported_part).
 UPLOAD_LENGTH_FUNCTION = "dfu_upload_length"
 _FUNCTION_BODY = re.compile(
@@ -471,23 +472,55 @@ def part_lists_in(text: str) -> int:
     """How many part lists ``text`` defines.
 
     A declaration that matches one of the patterns is only a list when what
-    it is given looks like part entries: rows of an identifier, a name in
-    quotes, and a size. That is what tells the table, and a second list of
-    any type or name, from an array merely named after the table -- a
-    `DFU_PARTS_BY_SIZE[] = { 32, 64, 128 }` holds no names and is no part
-    list. Comments and the insides of strings are blanked first, so a
-    commented-out copy and a declaration quoted in a string count for
-    nothing; the quotes themselves stay, which is what a row is known by.
+    it is given holds part rows (_looks_like_a_part_row). That is what tells
+    the table, and a second list of any type or name, from an array merely
+    named after the table: a `DFU_PARTS_BY_SIZE[] = { 32, 64, 128 }` holds no
+    name and is no part list. Comments and the insides of strings are blanked
+    first, so a commented-out copy and a declaration quoted in a string count
+    for nothing; the quotes themselves stay, which is what a row is known by.
     """
     clean = _without_comments(text, strings=False)
     lists = 0
     for found in _PART_LIST_DEFINITION_RE.finditer(clean):
-        tail = clean[found.end():]
-        end = tail.find("};")
-        body = tail if end < 0 else tail[:end]
-        if any(_FIELDS.fullmatch(row) for row in _ROW.findall(body)):
+        body = _initializer_at(clean, found.end())
+        if any(_looks_like_a_part_row(row) for row in _ROW.findall(body)):
             lists += 1
     return lists
+
+
+def _initializer_at(text: str, index: int) -> str:
+    """What is between the braces of the initializer at ``index``, or "".
+
+    Its own braces, found by counting: taking everything up to the next `};`
+    would let a declaration with no initializer of its own borrow the rows of
+    a later array in the same file.
+    """
+    start = text.find("{", index)
+    if start < 0 or text[index:start].strip():
+        return ""
+    depth = 0
+    for position in range(start, len(text)):
+        if text[position] == "{":
+            depth += 1
+        elif text[position] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:position]
+    return text[start + 1:]
+
+
+def _looks_like_a_part_row(row: str) -> bool:
+    """Whether ``row`` is a row of a part list.
+
+    A name in quotes with figures beside it. Written positionally or by field
+    name, with or without fields this does not read: what says a row is a
+    part is the name and the figures, not their order. An array of plain
+    numbers -- a size table derived from the parts, say -- has no name in it
+    and is no part list.
+    """
+    if '"' not in row:
+        return False
+    return len(_LITERAL.findall(row)) >= 2
 
 
 def tree_mentions(source: Path | str, ref: str, pattern: str,
