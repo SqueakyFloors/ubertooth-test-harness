@@ -151,6 +151,9 @@ class SequencerTests(unittest.TestCase):
             self.assertEqual(
                 [
                     "run_started",
+                    # Every run compares the DFU flash sizes with the fork's
+                    # own part table, before the manifest (#283).
+                    "dfu_part_table",
                     "manifest",
                     "host_capabilities",
                     "preflight_started",

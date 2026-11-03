@@ -374,6 +374,14 @@ suites:
                 e for e in events if e["event_type"] == "manifest"
             )["details"]["manifest"]
             self.assertEqual("HEAD", manifest["sources"][0]["requested_ref"])
+            # A run of installed tools, with neither --build nor a libbtbb
+            # source, still compares the DFU flash sizes with the fork's own
+            # part table, before the manifest (#283). This source is a
+            # throwaway repository, so it has no table to compare with.
+            kinds = [event["event_type"] for event in events]
+            self.assertEqual(["run_started", "dfu_part_table", "manifest"], kinds[:3])
+            self.assertEqual(1, kinds.count("dfu_part_table"))
+            self.assertEqual("skipped", events[1]["status"])
             self.assertEqual(
                 hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 manifest["artifacts"][0]["sha256"],

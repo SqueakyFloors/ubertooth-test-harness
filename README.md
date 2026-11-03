@@ -2080,10 +2080,12 @@ into `<output>/<run-id>/` (plus `build/` with `--build`, `captures/` when
 a capture case ran, and `output/` when a command printed a lot):
 
 - `run.jsonl`: every record, appended and fsynced as it happens. The first
-  records are `run_started`, then the two comparisons with the fork at the
-  commit under test -- `libbtbb_pin` ([libbtbb](#libbtbb)) and
-  `dfu_part_table`, the flash sizes a DFU read-back is checked against
-  ([DFU images](#dfu-images)), neither of which fails a run -- and `manifest`
+  records are `run_started`, then the comparisons with the fork at the
+  commit under test -- `dfu_part_table`, the flash sizes a DFU read-back is
+  checked against ([DFU images](#dfu-images)), on every run, and
+  `libbtbb_pin` ([Building the resolved
+  revision](#building-the-resolved-revision)) on a run that builds; neither
+  fails a run -- and `manifest`
   (sources, plan and registry hashes,
   artifacts, invocations, Python/OS environment, and build toolchain), then
   build commands, preflight, and each test's events, including every command

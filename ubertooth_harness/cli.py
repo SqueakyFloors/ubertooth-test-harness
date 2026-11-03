@@ -311,11 +311,11 @@ def _record_dfu_part_table(publisher, sources) -> None:
 
     The harness keeps its own copy of those sizes, so a part the fork adds
     later would turn a correct read-back into a failure: the record names the
-    entry the copy is missing and the run goes on (#283).
+    entry the copy is missing and the run goes on (#283). A run this command
+    does not open the record for gets it from the sequencer instead, so every
+    run carries it exactly once.
     """
-    check = dfuparts.check_sources(sources)
-    if check is not None:
-        publisher.emit(dfuparts.EVENT, check.status, check.details())
+    dfuparts.record(publisher, sources)
 
 
 def _record_lease_takeovers(publisher, leases) -> None:

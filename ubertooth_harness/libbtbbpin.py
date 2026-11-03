@@ -90,6 +90,9 @@ def fork_pin_at(source: Path | str, ref: str) -> ForkPin | None:
     result = subprocess.run(
         ["git", "-C", str(source), "show", f"{ref}:install.sh"],
         capture_output=True, text=True, check=False,
+        # A byte that is not valid here must not raise out of a check that
+        # only warns.
+        errors="replace",
         # A missing path is told from a git failure by git's own wording, so
         # the message must not be translated.
         env={**os.environ, "LC_ALL": "C"},

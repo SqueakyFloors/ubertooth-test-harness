@@ -196,6 +196,25 @@ class ParseTests(unittest.TestCase):
         text = PART_TABLE_C.replace("DFU_PARTS[]", "BOOTLOADER_DFU_PARTS[]")
         self.assertIsNone(parse_part_table(text))
 
+    def test_an_old_table_left_in_a_comment_is_not_the_table(self):
+        """A commented-out table above the real one must not be read as the
+        real one, or the comparison would report the sizes the fork left
+        behind."""
+        # Only the array, since the fork's comment above it would close the
+        # one wrapped around it.
+        array = PART_TABLE_C[PART_TABLE_C.index("static const"):]
+        commented = "/*\n" + array + "\n*/\n" + GROWN_TABLE_C
+        self.assertEqual(parse_part_table(GROWN_TABLE_C), parse_part_table(commented))
+        self.assertIn(1024 * 1024,
+                      [part.flash_size for part in parse_part_table(commented)])
+
+    def test_two_tables_at_once_are_reported_not_chosen_between(self):
+        """A table kept behind `#if 0` is not a comment, so both are there;
+        which one a read-back follows is not this module's to decide."""
+        both = PART_TABLE_C + "\n#if 0\n" + GROWN_TABLE_C + "\n#endif\n"
+        with self.assertRaisesRegex(PartTableUnreadable, "2 DFU_PARTS tables"):
+            parse_part_table(both)
+
     def test_defines_are_read_and_a_missing_one_is_none(self):
         self.assertEqual(128 * 1024,
                          parse_define(RECOVERY_H, "DFU_ASSUMED_FLASH_SIZE"))
@@ -351,7 +370,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
                 check = check_sources(self._sources(commit))
                 self.assertEqual("unchecked", check.status)
                 self.assertIn("no DFU_PARTS table in", check.message)
-                self.assertIn("renamed or moved", check.message)
+                self.assertIn("renamed, moved, or written in a way", check.message)
                 # Only the files the table could be in, not every file read.
                 self.assertNotIn("src/dfu.h", check.message)
 
@@ -393,9 +412,26 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
     def test_a_commit_with_no_table_is_skipped_not_a_warning(self):
         check = check_sources(self._sources(self.untabled))
         self.assertEqual("skipped", check.status)
-        self.assertIn("so there is no part table to compare with", check.message)
+        # Both readings, since the sources cannot tell them apart.
+        self.assertIn("has neither", check.message)
+        self.assertIn("from before the part table or has moved it", check.message)
         self.assertIn("dfu_recovery.c", check.message)
         self.assertEqual([], check.details()["fork_flash_sizes"])
+
+    def test_a_byte_that_is_not_utf8_does_not_raise_out_of_the_check(self):
+        """One odd byte in a comment is not a reason to fail a run: the
+        module's whole promise is that nothing here does."""
+        path = self.repo / "host/ubertooth-tools/src/dfu_recovery.c"
+        _git(self.repo, "checkout", "-q", "-b", "latin1", self.tabled)
+        try:
+            path.write_bytes(PART_TABLE_C.encode() + b"/* Ren\xe9 */\n")
+            _git(self.repo, "add", str(path.relative_to(self.repo)))
+            _git(self.repo, "commit", "-q", "-m", "a byte that is not UTF-8")
+            commit = _git(self.repo, "rev-parse", "HEAD")
+        finally:
+            _git(self.repo, "checkout", "-q", "main")
+        check = check_sources(self._sources(commit))
+        self.assertEqual("passed", check.status)
 
     def test_the_check_says_why_it_could_not_run(self):
         gone = (SourceRevision("Ubertooth", str(self.repo / "gone"), "", "main",

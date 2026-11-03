@@ -36,7 +36,6 @@ from ubertooth_harness.dfuimage import (
     ASSUMED_FLASH_SIZE,
     PART_FLASH_SIZES,
     describe_flash_size,
-    upload_length,
 )
 
 EVENT = "dfu_part_table"
@@ -70,8 +69,9 @@ _LITERAL = re.compile(r"(0[xX][0-9a-fA-F]+|\d+)[uUlL]*")
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 _LINE_COMMENT = re.compile(r"//[^\n]*")
 # A fork checkout on an unresponsive filesystem must not hold up a run that
-# already has the bench: this is advisory, so it gives up instead.
-GIT_TIMEOUT_S = 30.0
+# already has the bench: this is advisory, so it gives up instead. One read
+# per file in SOURCE_FILES, so the whole check is bounded by three of these.
+GIT_TIMEOUT_S = 10.0
 
 
 class PartTableUnreadable(RuntimeError):
@@ -155,13 +155,21 @@ def parse_part_table(text: str) -> tuple[PartEntry, ...] | None:
 
     An entry written in a way this cannot read raises PartTableUnreadable,
     and so does a table whose rows are not all entries: dropping one would
-    hide exactly the difference this is here to find.
+    hide exactly the difference this is here to find. So does more than one
+    table, since which of them a read-back length follows is then not this
+    module's to decide -- a table left behind `#if 0` beside the real one
+    reads that way, and a commented-out one is gone before the search.
     """
-    found = _TABLE.search(text)
-    if found is None:
+    bodies = _TABLE.findall(_without_comments(text))
+    if not bodies:
         return None
+    if len(bodies) > 1:
+        raise PartTableUnreadable(
+            f"{len(bodies)} DFU_PARTS tables here, so which one a read-back "
+            "length follows is not clear"
+        )
     entries = []
-    for row in _table_rows(_without_comments(found.group(1))):
+    for row in _table_rows(bodies[0]):
         fields = _FIELDS.fullmatch(row)
         identifier = parse_number(fields["id"]) if fields else None
         size = parse_number(fields["flash"]) if fields else None
@@ -226,6 +234,9 @@ def _show(source: Path | str, ref: str, path: str) -> str | None:
         result = subprocess.run(
             ["git", "-C", str(source), "show", f"{ref}:{path}"],
             capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_S,
+            # A byte that is not valid here is a byte in a C comment: it must
+            # not raise out of a check that is only advisory.
+            errors="replace",
             env={**os.environ, "LC_ALL": "C"},
         )
     except subprocess.TimeoutExpired:
@@ -247,12 +258,14 @@ def _show(source: Path | str, ref: str, path: str) -> str | None:
 def fork_parts_at(source: Path | str, ref: str) -> ForkParts | None:
     """The part figures at ``ref`` of a fork checkout, or None for none.
 
-    None means only one thing: this commit has no DFU recovery sources at
-    all, so there is nothing to compare with. A commit that has them and
-    whose figures this cannot find -- the table renamed, moved to a file not
-    listed here, or written another way -- raises PartTableUnreadable, so a
-    comparison that stopped working is reported and not taken for a commit
-    without a table. Git errors other than a missing path raise RuntimeError.
+    None means this commit has neither of PART_TABLE_FILES, so there is
+    nothing here to read a table out of. A commit that has one of them and
+    no table this can find raises PartTableUnreadable, so a comparison that
+    stopped working is reported rather than taken for a commit from before
+    the table. Moving the table to another file is caught that way while
+    either file is still there, and read as None when neither is: the two
+    cannot be told apart from the sources, so the record says both readings.
+    Git errors other than a missing path raise RuntimeError.
     """
     texts = {path: _show(source, ref, path) for path in SOURCE_FILES}
     if all(texts[path] is None for path in PART_TABLE_FILES):
@@ -268,7 +281,7 @@ def fork_parts_at(source: Path | str, ref: str) -> ForkParts | None:
         raise PartTableUnreadable(
             f"no DFU_PARTS table in {present}, which this reads the flash sizes "
             "out of: either this commit is from before the table, or the table "
-            "was renamed or moved"
+            "was renamed, moved, or written in a way this does not recognize"
         )
     assumed = parse_define(joined, "DFU_ASSUMED_FLASH_SIZE")
     offset = parse_define(joined, "BOOTLOADER_OFFSET")
@@ -358,6 +371,19 @@ class PartTableCheck:
         }
 
 
+def record(publisher, sources: Sequence) -> None:
+    """Record the comparison for a run's sources, if it has an Ubertooth one.
+
+    Every run records it, not only one that builds: the flash sizes are
+    checked against whatever fork commit a run resolves, and the harness's
+    copy falling behind costs a run with installed tools just as much. The
+    caller that emitted ``run_started`` records it, so it lands once.
+    """
+    check = check_sources(sources)
+    if check is not None:
+        publisher.emit(EVENT, check.status, check.details())
+
+
 def check_sources(sources: Sequence) -> PartTableCheck | None:
     """Compare the harness's copy with the fork's table at a run's Ubertooth
     commit (manifest.SourceRevision objects).
@@ -376,11 +402,12 @@ def check_sources(sources: Sequence) -> PartTableCheck | None:
             "unchecked", f"DFU part table not checked: {error}", ubertooth.commit
         )
     if fork is None:
-        files = " or ".join(PART_TABLE_FILES)
+        files = " nor ".join(PART_TABLE_FILES)
         return PartTableCheck(
             "skipped",
-            f"DFU part table not checked: {label} has no {files}, so there is no "
-            "part table to compare with",
+            f"DFU part table not checked: {label} has neither {files}, so this "
+            "commit is from before the part table or has moved it somewhere "
+            "this does not read",
             ubertooth.commit,
         )
     warning = drift_warning(fork, fork_label=label)
