@@ -1166,13 +1166,22 @@ def _run_suite(args: argparse.Namespace) -> int:
                 "installed; install it, or use --no-flash-build to keep the "
                 "boards' firmware"
             )
-    # Which images the firmware build makes: the application image every
-    # other test needs on its board, and the alternate btbr image when the
-    # run asked for it or a selected test says it needs it. A plan that
-    # never runs the alternate one does not wait for it to build, and does
-    # not fail because it did not (#279).
+    # Which images the firmware build makes, when it runs at all: the
+    # application image every other test needs on its board, and the
+    # alternate btbr image when the run asked for it or a selected test says
+    # it needs it. A plan that never runs the alternate one does not wait for
+    # it to build, and does not fail because it did not (#279).
+    #
+    # The second image is only ever added to a firmware build that is already
+    # happening. A selected test is not reason enough to turn the firmware
+    # build on: that needs arm-none-eabi-gcc, which a host may not have, and
+    # a run that used to pass with the btbr case left out as not applicable
+    # must not start failing for a toolchain nobody asked it to use. So
+    # `--with-firmware` (which `--with-btbr` implies) is what decides whether
+    # firmware is built, and this decides which images it then makes.
     args.firmware_images = _firmware_images(
-        with_btbr=args.with_btbr or _tests_need_btbr(catalog, invocations)
+        with_btbr=args.with_firmware
+        and (args.with_btbr or _tests_need_btbr(catalog, invocations))
     )
     # A device the registry says is permanently wired to one of the run's own
     # (a debug programmer and the board it programs) is held with it. Said

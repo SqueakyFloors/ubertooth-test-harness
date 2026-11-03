@@ -2,7 +2,7 @@
 
 Every message is one JSON object in one WebSocket text frame:
 
-    {"version": 6, "type": "<type>", ...fields}
+    {"version": 7, "type": "<type>", ...fields}
 
 Each type has an exact field set. Decoding is strict: a message that is not a
 JSON object, has an unknown version or type, lacks a field, has a field of the

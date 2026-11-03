@@ -24,7 +24,7 @@ commit listed for that ref, and the runner runs exactly that commit, so a
 stale or differently configured runner checkout cannot substitute another
 one; the commit is recorded in ``run.json``.
 
-Target runners connect to ``/ws/runner`` and speak protocol v6
+Target runners connect to ``/ws/runner`` and speak protocol v7
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,

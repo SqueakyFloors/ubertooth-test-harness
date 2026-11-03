@@ -512,6 +512,22 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.assertIn(TEST_BUILD_ARTIFACT, names)
         self.assertIn(BTBR_BUILD_ARTIFACT, names)
 
+    def test_a_run_that_builds_no_firmware_names_no_alternate_image(self):
+        # --build --no-flash-build and no build option: no firmware is built
+        # at all, so the images the plan would make must not claim the
+        # alternate one. A selected test that needs it does not turn the
+        # firmware build on by itself, because that needs a toolchain the
+        # host may not have; without it the case is left out as not
+        # applicable, which is what it was before (#279).
+        executor = FakeBoards(self.revision, {SERIAL_A: self.revision,
+                                              SERIAL_B: self.revision},
+                              lease_dir=self.lease_dir)
+        self.assertEqual(0, self.run_suite(executor, "--no-flash-build"),
+                         self.stderr)
+        self.assertEqual([False], self.builds)
+        self.assertEqual([(APPLICATION_IMAGE,)], self.built_images)
+        self.assertNotIn(BTBR_BUILD_ARTIFACT, self.artifact_names())
+
     def test_with_btbr_without_build_is_refused(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
