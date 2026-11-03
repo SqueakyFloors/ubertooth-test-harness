@@ -439,7 +439,10 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
                      "host/ubertooth-tools/src/dfu_recovery.h"))
         check = check_sources(self._sources(moved))
         self.assertEqual("unchecked", check.status)
-        self.assertIn("no DFU_PARTS table in", check.message)
+        # Found as a part list in a file this does not read, which is what
+        # it is: the array's new name does not matter, the type does.
+        self.assertIn("a part list is defined in", check.message)
+        self.assertIn("dfu_parts.c", check.message)
 
     def test_a_second_part_list_elsewhere_is_reported(self):
         """Today's table where it belongs, and another part list in a file
@@ -493,6 +496,48 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         check = check_sources(self._sources(second))
         self.assertEqual("unchecked", check.status)
         self.assertIn("part lists are defined in", check.message)
+
+    def test_a_list_is_found_by_its_type_not_by_its_name_or_its_suffix(self):
+        """What makes a list one the tool can look a part up in is the type,
+        so an array called something else, or in a file whose name is not a C
+        source, is still a list this has not compared."""
+        extra = GROWN_TABLE_C[GROWN_TABLE_C.index("static const"):].replace(
+            "DFU_PARTS[]", "LPC18_PARTS[]")
+        for description, path in (
+            ("an array named something else", "host/ubertooth-tools/src/lpc18.c"),
+            # Only the .in is in git; the build generates the header.
+            ("a generated header's source",
+             "host/ubertooth-tools/src/dfu_parts.h.in"),
+            ("an included fragment", "host/ubertooth-tools/src/dfu_parts.inc"),
+        ):
+            with self.subTest(description):
+                commit = self._commit_files({path: extra}, description)
+                check = check_sources(self._sources(commit))
+                self.assertEqual("unchecked", check.status)
+                self.assertIn(path, check.message)
+
+    def test_an_array_that_is_not_of_the_part_type_is_not_a_list(self):
+        """An ordinary derived array named after the table is not a part
+        list, and reporting a run over one would be crying wolf."""
+        derived = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_sizes.c":
+             "static const uint32_t DFU_PARTS_BY_SIZE[] = { 32, 64, 128 };\n"},
+            "an array named after the table")
+        check = check_sources(self._sources(derived))
+        self.assertEqual("passed", check.status, check.message)
+
+    def test_a_second_list_names_the_file_that_holds_it(self):
+        second = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(
+                PART_TABLE_C
+                + GROWN_TABLE_C[GROWN_TABLE_C.index("static const"):].replace(
+                    "DFU_PARTS[]", "LPC18_PARTS[]"))},
+            "a second list beside the table")
+        check = check_sources(self._sources(second))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("dfu_recovery.c (2)", check.message)
+        # Not every file that was read, only the ones holding a list.
+        self.assertNotIn("src/dfu.h", check.message)
 
     def test_a_test_fixture_is_not_a_second_list(self):
         """The fork's host tests build arrays of their own to compare the

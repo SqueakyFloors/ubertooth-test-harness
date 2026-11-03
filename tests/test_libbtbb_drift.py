@@ -159,6 +159,31 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         self.assertEqual(ForkPin(URL, NEW), fork_pin_at(self.repo, "main"))
         self.assertIsNone(fork_pin_at(self.repo, self.unpinned))
 
+    def test_a_read_that_takes_too_long_is_a_runtime_error(self):
+        """This check only warns, so it gives up rather than holding a run
+        that already has its boards."""
+        with mock.patch.object(
+            libbtbbpin.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(["git"], libbtbbpin.GIT_TIMEOUT_S),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "took longer than"):
+                fork_pin_at(self.repo, "main")
+        # And the run records it rather than ending: check_sources turns a
+        # RuntimeError into an unchecked record.
+        with mock.patch.object(
+            libbtbbpin.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(["git"], libbtbbpin.GIT_TIMEOUT_S),
+        ):
+            check = check_sources(self._sources(self.pinned, OLD, OLD))
+        self.assertEqual("unchecked", check.status)
+
+    def test_a_byte_that_is_not_utf8_does_not_raise(self):
+        (self.repo / "install.sh").write_bytes(
+            _install_sh(NEW).encode() + b"# Ren\xe9\n")
+        _git(self.repo, "commit", "-q", "-am", "a byte that is not UTF-8")
+        commit = _git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(ForkPin(URL, NEW), fork_pin_at(self.repo, commit))
+
     def test_fork_pin_at_a_bad_ref_raises(self):
         with self.assertRaises(RuntimeError):
             fork_pin_at(self.repo, "no-such-ref")

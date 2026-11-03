@@ -2481,10 +2481,9 @@ report), `unchecked` (the figures are not where they are read from: the table
 renamed, moved to another file, a second part list elsewhere, defined twice,
 written in a way the reader does not know, or a read-back length the fork now
 works out from something other than these three figures; the reason is
-given), or `skipped` (the commit names neither `DFU_PARTS` nor
-`dfu_upload_length` anywhere, so it is older than the figures and has none to
-compare with: `DFU_PARTS`, `dfu_upload_length`, and
-`DFU_ASSUMED_FLASH_SIZE` are the three names it looks for). A comparison
+given), or `skipped` (the commit names none of `DFU_PARTS`,
+`dfu_upload_length`, and `DFU_ASSUMED_FLASH_SIZE` anywhere, so it is older
+than the figures and has none to compare with). A comparison
 that stopped working reports itself, which is the failure this check exists
 to avoid, and two things are beyond it: the arithmetic, since a fork that
 still names all three figures and works the length out of them differently

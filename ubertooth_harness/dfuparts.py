@@ -69,27 +69,36 @@ PART_TABLE_FILES = SOURCE_FILES[:2]
 # for that.
 TREE_MARKERS = ("DFU_PARTS", "dfu_upload_length", "DFU_ASSUMED_FLASH_SIZE")
 
-# A part list being defined, rather than the table being mentioned: a test
-# that walks it, a comment, or a document names the symbol without holding a
-# list of its own, and reading those as a second list would report a run
-# unchecked over nothing. Written for `git grep --extended-regexp`, which is
-# POSIX ERE and has no \t escape, so whitespace is a character class. A file
-# this matches is then read and has to hold a table parse_part_table() finds,
-# since text alone cannot tell a declaration from a man page quoting one.
-PART_LIST_DEFINITION = r"DFU_PARTS[A-Za-z0-9_]*[[:space:]]*\[[^]]*\][[:space:]]*="
+# A part list being defined: an array of the fork's own part type. The type
+# is what makes a list one the tool can look a part up in, so this finds a
+# list whatever its array is called and whatever file holds it -- the table
+# itself, a second list beside it, one added for another family. Keying on
+# the array's name instead missed `struct dfu_part LPC18_PARTS[]`, and
+# reported an ordinary derived array that happened to be named after the
+# table.
+#
+# Written for `git grep --extended-regexp`, which is POSIX ERE and has no \t
+# escape, so whitespace is a character class. A file this matches is then
+# read, and the declaration has to survive having its comments and its
+# string literals blanked: text alone cannot tell a declaration from a man
+# page quoting one.
+PART_LIST_DEFINITION = (
+    r"struct[[:space:]]+dfu_part[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\[")
 # The same thing as a Python pattern, for confirming a file git grep found.
 _PART_LIST_DEFINITION_RE = re.compile(
-    r"DFU_PARTS[A-Za-z0-9_]*\s*\[[^]]*\]\s*=")
+    r"struct\s+dfu_part\s+[A-Za-z_][A-Za-z0-9_]*\s*\[")
 # A C character literal, so a `'"'` in a source cannot be read as the start
 # of a string and swallow the rest of the file.
 _CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\])'")
-# Only a C source can declare one. A document that quotes the table, or a
-# test that holds the declaration in a string, is text about code.
-C_SOURCE_SUFFIXES = (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx")
 # A test's own fixture is not what the tool compiles: the fork's host tests
 # build arrays of their own to compare the table against, and reporting a run
 # over one would be crying wolf.
 TEST_PATH_PARTS = ("/tests/", "/test/")
+# Nor is a document that quotes the table. These are named rather than C
+# sources being named, so that a list in a generated header's `.in` or in an
+# included fragment still counts: what the tool compiles is not decided by a
+# file extension, but a man page is certainly not it.
+PROSE_SUFFIXES = (".md", ".rst", ".txt", ".1", ".adoc", ".html")
 
 # The part of the tree whose part list decides a read-back length: the host
 # tool's. The bootloader keeps a table of its own to bound its own read-back
@@ -420,12 +429,14 @@ def _holds_a_part_list(source: Path | str, ref: str, path: str,
     A grep over a tree finds a man page quoting the table in a fenced block,
     a test holding the declaration in a string literal, and a commented-out
     copy. None of those is a list the fork compiles, and reporting a run over
-    one would be crying wolf. So the file has to be C, and the declaration
-    has to survive having its comments and its string literals blanked.
+    one would be crying wolf. So the declaration has to survive having its
+    comments and its string literals blanked. The file's name is not what
+    decides: a list in a generated header's `.in`, or in an included
+    fragment, is compiled like any other.
     """
-    if not path.endswith(C_SOURCE_SUFFIXES):
-        return False
     if any(part in f"/{path}" for part in TEST_PATH_PARTS):
+        return False
+    if path.endswith(PROSE_SUFFIXES):
         return False
     # A read that fails raises, rather than being reported as a part list
     # nothing here ever saw.
@@ -512,21 +523,25 @@ def fork_parts_at(source: Path | str, ref: str,
     # A second list in the files that were read, which the search above
     # cannot see because these are the files it reads from. One table is
     # compared; a second one beside it would not be.
-    lists = _PART_LIST_DEFINITION_RE.findall(
-        _without_comments(joined, strings=False))
-    if len(lists) > 1:
+    lists = {path: len(_PART_LIST_DEFINITION_RE.findall(
+        _without_comments(texts[path], strings=False))) for path in read}
+    if sum(lists.values()) > 1:
+        holding = ", ".join(f"{path} ({count})"
+                            for path, count in lists.items() if count)
         raise PartTableUnreadable(
-            f"{len(lists)} part lists are defined in "
-            f"{' and '.join(read)}, and only the DFU_PARTS table is compared, "
-            "so the others are lists this has not looked at"
+            f"{sum(lists.values())} part lists are defined in {holding}, and "
+            "only the DFU_PARTS table is compared, so the others are lists "
+            "this has not looked at"
         )
     parts = parse_part_table(joined)
     if parts is None:
+        where = ", ".join(sorted({path for paths in marked.values()
+                                  for path in paths}))
         raise PartTableUnreadable(
             f"no DFU_PARTS table in {' or '.join(PART_TABLE_FILES)}, which this "
-            "reads the flash sizes out of, though this commit has the DFU "
-            "recovery sources: the table was renamed, moved, or written in a "
-            "way this does not recognize"
+            f"reads the flash sizes out of, though {where} names what it looks "
+            "for: the table was renamed, moved, or written in a way this does "
+            "not recognize"
         )
     figures = {}
     for name in ("DFU_ASSUMED_FLASH_SIZE", "BOOTLOADER_OFFSET", "BOOTLOADER_SIZE"):
@@ -547,10 +562,13 @@ def _check_figures_are_the_ones_used(text: str, figures: dict) -> None:
     """Refuse figures the fork no longer works a read-back length out of.
 
     Reading three `#define`s says what they are, not that they are still what
-    the length follows. A fork that takes the region from a new symbol and
-    leaves these behind at their old values would compare as a match while
-    every length differed. So the function the harness mirrors has to name
-    them itself: that is the one place their meaning lives.
+    the length follows. So the function the harness mirrors has to name them
+    itself: that is the one place their meaning lives. A fork that renamed
+    them and left these behind at their old values is caught that way.
+
+    What this does not see is a body that still names all three and works the
+    length out differently; the read-back step catches that, by the length
+    the tool reports against the flash the same line gives.
     """
     # Comments first, as the table and the defines are read: a figure named
     # only in a comment is not a use, and a commented-out copy of the
