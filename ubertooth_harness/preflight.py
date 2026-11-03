@@ -123,9 +123,21 @@ class PreflightCheck:
                     output.note_pattern(
                         "expected", self.name, pattern, output.search(pattern)
                     )
-            failure = self.bootloader.failure(
-                self.resource_alias, bootloader_identity.identity_from_match(found)
-            )
+            installed = bootloader_identity.identity_from_match(found)
+            if installed is None and (
+                result.returncode not in self.accepted_returncodes
+            ):
+                # No line and a status this check does not accept: the read
+                # failed for a reason of its own (no board, a board another
+                # command holds, a libusb error), and naming old firmware
+                # would name the wrong fix. The command's own output is in
+                # the transcript.
+                target = self.resource_alias or self.host
+                return (
+                    f"{self.name}: {target} did not report its bootloader "
+                    f"(ubertooth-util -B exited {result.returncode})"
+                )
+            failure = self.bootloader.failure(self.resource_alias, installed)
             return f"{self.name}: {failure}" if failure else ""
         if result.returncode not in self.accepted_returncodes:
             return f"{self.name}: command exited {result.returncode}"

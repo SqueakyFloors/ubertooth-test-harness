@@ -265,6 +265,18 @@ class MakefileCoverageTests(unittest.TestCase):
             bootloader._makefile_sources(text),
         )
 
+    def test_a_source_appended_with_plus_equals_is_read_too(self):
+        """A source the pin must cover cannot hide behind `+=`."""
+        text = (
+            "SRC = bl_version.c\n"
+            "SRC += ../elsewhere/added.c\n"
+            "CPPSRC := bootloader.cpp\n"
+        )
+        self.assertEqual(
+            ("bl_version.c", "../elsewhere/added.c", "bootloader.cpp"),
+            bootloader._makefile_sources(text),
+        )
+
     def test_a_variable_this_harness_does_not_know_is_refused(self):
         with self.assertRaises(bootloader.BootloaderError) as caught:
             bootloader._makefile_sources("SRC = $(SOMEWHERE)/thing.c\n")
@@ -414,6 +426,45 @@ class PinTests(unittest.TestCase):
         self.assertIn("host/elsewhere.c", str(caught.exception))
         self.assertIn("would not move", str(caught.exception))
 
+    def test_the_linker_script_is_recorded_where_the_build_finds_it(self):
+        script = self.source / "firmware" / "bootloader" / \
+            "LPC17xx_Linker_Script_bootloader.ld"
+        shared = self.source / "firmware" / "common" / script.name
+        script.rename(shared)
+        git(self.source, "add", "-A")
+        git(self.source, "commit", "--quiet", "-m", "share the linker script")
+        pin = bootloader.resolve_pin(source_revision(self.source))
+        self.assertIn("firmware/common/" + script.name, pin.sources)
+        self.assertNotIn("firmware/bootloader/" + script.name, pin.sources)
+
+    def test_a_version_block_offset_that_moved_is_reported(self):
+        header = (self.source / "host" / "libubertooth" / "src"
+                  / "ubertooth_interface.h")
+        header.write_text(
+            INTERFACE_HEADER.replace(
+                "#define UBERTOOTH_BL_VERSION_OFFSET UBERTOOTH_FW_INFO_OFFSET",
+                "#define UBERTOOTH_BL_VERSION_OFFSET 0x200",
+            )
+        )
+        git(self.source, "commit", "--quiet", "-am", "move the block")
+        with self.assertRaises(bootloader.BootloaderError) as caught:
+            bootloader.verify_interface_constants(source_revision(self.source))
+        self.assertIn("the version block offset is 0x200", str(caught.exception))
+
+    def test_a_version_block_offset_that_is_gone_is_reported(self):
+        header = (self.source / "host" / "libubertooth" / "src"
+                  / "ubertooth_interface.h")
+        header.write_text(
+            INTERFACE_HEADER.replace(
+                "#define UBERTOOTH_BL_VERSION_OFFSET UBERTOOTH_FW_INFO_OFFSET\n", ""
+            )
+        )
+        git(self.source, "commit", "--quiet", "-am", "drop the offset")
+        with self.assertRaises(bootloader.BootloaderError) as caught:
+            bootloader.verify_interface_constants(source_revision(self.source))
+        self.assertIn("UBERTOOTH_BL_VERSION_OFFSET is not defined",
+                      str(caught.exception))
+
     def test_the_interface_numbers_are_put_against_the_commit(self):
         source = source_revision(self.source)
         self.assertTrue(bootloader.supported_at(source))
@@ -539,6 +590,19 @@ class ArtifactTests(unittest.TestCase):
         artifact = self.build()
         self.assertEqual(f"git-{pinned}", artifact.build)
         self.assertFalse(artifact.pin.is_resolved_commit)
+
+    def test_an_image_built_from_a_modified_tree_is_refused(self):
+        """A `*` build string is nobody's to build again, so it is not an artifact."""
+        makefile = self.source / "firmware" / "bootloader" / "Makefile"
+        makefile.write_text(MAKEFILE.replace(
+            "VERSION_NOW := git-$(shell git log --pretty=format:'%h' -n 1)",
+            "VERSION_NOW := git-$(shell git log --pretty=format:'%h' -n 1)*",
+        ))
+        git(self.source, "commit", "--quiet", "-am", "stamp a modified tree")
+        with self.assertRaises(bootloader.BootloaderError) as caught:
+            self.build()
+        self.assertIn("would not be reproducible", str(caught.exception))
+        self.assertIn("*", str(caught.exception))
 
     def test_an_image_whose_build_string_is_not_the_pin_is_refused(self):
         makefile = self.source / "firmware" / "bootloader" / "Makefile"
@@ -890,6 +954,41 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("firmware lock", str(caught.exception))
         self.assertEqual([], bench.commands)
 
+    def test_recording_with_an_artifact_is_refused(self):
+        """Recording compares nothing, so an artifact means another mode."""
+        bench = FakeProgrammerBench(installed={SERIAL_A: FACTORY_LINE})
+        with self.assertRaises(bootloader.BootloaderError) as caught:
+            self.run_stage(
+                bench, self.boards(), mode=bootloader.MODE_RECORD,
+                artifact=artifact_for(),
+            )
+        self.assertIn("compares nothing", str(caught.exception))
+        self.assertEqual([], bench.commands)
+
+    def test_a_programmer_that_never_started_wrote_nothing(self):
+        bench = FakeProgrammerBench(installed={SERIAL_A: FACTORY_LINE})
+        original = bench.run
+
+        def run(argv, **kwargs):
+            if tuple(argv)[0] == "lpc21isp":
+                bench.written.append(tuple(argv))
+                return bench.result(argv, 127, "", "command not found\n")
+            return original(argv, **kwargs)
+
+        bench.run = run
+        summary = self.run_stage(
+            bench, self.boards(), mode=bootloader.MODE_UPDATE,
+            artifact=artifact_for(),
+        )
+        self.assertEqual("failed", summary.status)
+        outcome = summary.boards[0]
+        # Nothing reached the board, so nobody is sent to the bench for it.
+        self.assertFalse(outcome.written)
+        self.assertIn("did not start", outcome.reason)
+        self.assertIn("still has no version block", outcome.reason)
+        self.assertIn(PROGRAMMER_DEVICE, outcome.reason)
+        self.assertNotIn("unknown state", outcome.reason)
+
     def test_a_comparing_mode_without_an_artifact_is_refused(self):
         bench = FakeProgrammerBench(installed={SERIAL_A: FORK_LINE})
         with self.assertRaises(bootloader.BootloaderError) as caught:
@@ -1084,6 +1183,29 @@ class PreflightCompileTests(unittest.TestCase):
         )
         self.assertEqual("", check.result_failure(matching))
 
+    def test_a_read_that_failed_for_another_reason_names_its_own_failure(self):
+        """No board, or a board somebody else holds, is not old firmware."""
+        check = self.compile(self.expectation(bootloader.MODE_RECORD))[-1]
+        result = CommandResult(
+            argv=check.argv, returncode=1, stdout="",
+            stderr="error: no Ubertooth device found\n",
+            duration_s=0.01, timed_out=False,
+        )
+        failure = check.result_failure(result)
+        self.assertIn("did not report its bootloader", failure)
+        self.assertIn("exited 1", failure)
+        self.assertNotIn("flash the board", failure)
+
+    def test_firmware_that_refuses_the_read_is_told_to_be_flashed(self):
+        """The one failure a reflash does fix, which exits 1 with no line."""
+        check = self.compile(self.expectation(bootloader.MODE_RECORD))[-1]
+        result = CommandResult(
+            argv=check.argv, returncode=0, stdout="", stderr="",
+            duration_s=0.01, timed_out=False,
+        )
+        failure = check.result_failure(result)
+        self.assertIn("flash the board with this run's build", failure)
+
     def test_a_timed_out_read_is_a_failure_whatever_the_line_said(self):
         check = self.compile(self.expectation(bootloader.MODE_RECORD))[-1]
         result = CommandResult(
@@ -1121,3 +1243,77 @@ exit 0
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportSectionTests(unittest.TestCase):
+    """The report's Bootloader section, built from a run's own records."""
+
+    @staticmethod
+    def render(records):
+        from ubertooth_harness.report import render_run
+
+        events = [{
+            "schema_version": 1, "run_id": "r", "sequence": 1,
+            "timestamp": "2026-11-03T06:00:00", "event_type": "run_started",
+            "status": "running", "details": {},
+        }]
+        for index, (kind, status, details) in enumerate(records, start=2):
+            events.append({
+                "schema_version": 1, "run_id": "r", "sequence": index,
+                "timestamp": "2026-11-03T06:00:0%d" % min(index, 9),
+                "event_type": kind, "status": status, "details": details,
+            })
+        events.append({
+            "schema_version": 1, "run_id": "r", "sequence": len(events) + 1,
+            "timestamp": "2026-11-03T06:01:00", "event_type": "run_finished",
+            "status": "passed", "details": {"reason": ""},
+        })
+        return render_run(events)
+
+    def test_a_board_this_run_wrote_says_so_after_preflight_read_it_again(self):
+        """The stage writes, then preflight reads: the row keeps both facts."""
+        installed = bootloader.parse_identity(FORK_LINE + "\n").to_dict()
+        previous = bootloader.parse_identity(FACTORY_LINE + "\n").to_dict()
+        text = self.render([
+            ("bootloader_identity", "passed", {
+                "resource": "UT_A", "serial": SERIAL_A, "mode": "update",
+                "installed": installed, "previous": previous,
+                "expected": installed, "written": True, "status": "updated",
+                "reason": "",
+            }),
+            ("bootloader_identity", "passed", {
+                "resource": "UT_A", "serial": SERIAL_A, "mode": "update",
+                "installed": installed, "previous": None,
+                "expected": installed, "written": False, "status": "current",
+                "reason": "",
+            }),
+            ("bootloader_stage_finished", "passed", {
+                "mode": "update", "reason": "", "expected": installed,
+                "boards": [],
+            }),
+        ])
+        self.assertIn("## Bootloader", text)
+        row = next(
+            line for line in text.splitlines()
+            if line.startswith("| UT_A ")
+        )
+        self.assertIn("2.00 git-abc1234, CRC32:0x11112222", row)
+        self.assertIn("| updated ", row)
+        self.assertIn("| yes ", row)
+
+    def test_recording_only_says_nothing_was_compared(self):
+        text = self.render([
+            ("bootloader_identity", "passed", {
+                "resource": "UT_A", "serial": SERIAL_A, "mode": "record",
+                "installed": bootloader.parse_identity(
+                    FACTORY_LINE + "\n").to_dict(),
+                "previous": None, "expected": None, "written": False,
+                "status": "current", "reason": "",
+            }),
+        ])
+        self.assertIn("Mode: `record`", text)
+        self.assertIn("recorded what each board has", text)
+        self.assertIn("no version block", text)
+
+    def test_a_run_with_no_such_record_has_no_section(self):
+        self.assertNotIn("## Bootloader", self.render([]))

@@ -11,7 +11,7 @@ checkoff, and a countdown/ETA in a web GUI.
 > compilation, simulated port restoration, grouped and stateful command cases,
 > per-run builds, and flash reliability as a plan test are implemented. Each run
 > writes one run.jsonl and one report.md. The persistent target runner
-> (protocol v5, outbound-only to a loopback controller) is implemented and
+> (protocol v6, outbound-only to a loopback controller) is implemented and
 > tested against a stub controller. The controller (target registry, run
 > dispatch, results store, REST and live WebSocket API; `127.0.0.1` only) is
 > implemented and tested against scripted runners and the real runner, and it
@@ -63,7 +63,7 @@ checkoff, and a countdown/ETA in a web GUI.
   updates, and (with `?run_id=`) one run's events or (with `?group_id=`) a
   whole group's, to browsers, best effort: a
   browser that falls behind is disconnected, never the runner. `/ws/runner`
-  speaks protocol v5. Each run is a flat directory
+  speaks protocol v6. Each run is a flat directory
   `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with group
   records in `groups/` beside them and the
   results directory outside the repository by default
@@ -99,11 +99,11 @@ the runner refuses any controller URL whose host is not loopback (`127.0.0.1`,
 connects to the checked address itself, ignores proxies, and follows no HTTP
 redirects.
 
-Implemented protocol, version 5 (`ubertooth_harness/protocol.py`; version 2
+Implemented protocol, version 6 (`ubertooth_harness/protocol.py`; version 2
 added the run's `commit`, version 3 its `flash_build`, version 4 the
 `run_file` request and its answers, version 5 the run's `with_firmware` and
-`with_python`). Every message is one
-JSON text frame `{"version": 5, "type": ..., ...fields}`. Each
+`with_python`, and version 6 its `bootloader`). Every message is one
+JSON text frame `{"version": 6, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, wrongly typed value, or combination of fields
 it could not act on (`with_firmware` or `with_python` without `build`), and
@@ -1313,9 +1313,9 @@ Later (multi-node), Ansible:
    automated build/install, armed physical power control, and generic
    command/soak execution remain.
 3. **Target runner service** — register/heartbeat/run over the wire; test against a
-   stub controller. Implemented (protocol v5, loopback controllers only;
+   stub controller. Implemented (protocol v6, loopback controllers only;
    v2 added the listed commit to `run`, v3 `flash_build`, v4 the `run_file`
-   request and its answers, v5 the run's `with_firmware` and `with_python`;
+   request and its answers, v5 the run's `with_firmware` and `with_python`, v6 its `bootloader`;
    no version interoperates with another).
 4. **Controller + web GUI** — targets, ref dropdown, live checkoff, countdown.
    Implemented: controller (registry, dispatch, results store, REST and live

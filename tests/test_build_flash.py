@@ -675,6 +675,30 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.assertIn("UT_0 has none", stderr)
         self.assertIn("--bootloader check", stderr)
 
+    def test_updating_needs_the_run_s_own_firmware_on_the_board(self):
+        """A write happens before preflight, so the board carries this build."""
+        code, _out, stderr = self._run_suite(
+            "--bootloader=update", "--build", "--no-flash-build",
+            "--libbtbb-source", str(self.source), "--libbtbb-ref", "HEAD",
+        )
+        self.assertEqual(2, code)
+        self.assertIn("must be carrying this run's own firmware first", stderr)
+        self.assertIn("drop --no-flash-build", stderr)
+
+    def test_updating_without_the_programmer_command_is_refused(self):
+        with patch("ubertooth_harness.cli.shutil.which", return_value=None):
+            code, _out, stderr = self._run_suite(
+                "--bootloader=update", "--build",
+                "--libbtbb-source", str(self.source), "--libbtbb-ref", "HEAD",
+            )
+        self.assertEqual(2, code)
+        # The registry refusal comes first on this bench; with a programmer
+        # registered the missing tool is what is left.
+        self.assertTrue(
+            "lpc21isp" in stderr or "only through a debug programmer" in stderr,
+            stderr,
+        )
+
     def test_dry_run_says_what_it_would_do_about_each_board_s_bootloader(self):
         code, stdout, _err = self._run_suite(
             "--bootloader=check", "--build", "--dry-run",

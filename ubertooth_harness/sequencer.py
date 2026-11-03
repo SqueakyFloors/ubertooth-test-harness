@@ -84,7 +84,10 @@ def _record_bootloader_identity(publisher, check, result, failure: str) -> None:
         "failed" if failure else "passed",
         {
             "resource": check.resource_alias,
-            "serial": check.resource_identity.get("serial", ""),
+            # Lower case, as the stage's records and the board leases spell
+            # it: the GUI keys its board list by this, and two spellings of
+            # one serial would be two boards.
+            "serial": str(check.resource_identity.get("serial", "")).lower(),
             "host": check.host,
             "mode": expectation.mode,
             "installed": found.to_dict() if found else None,

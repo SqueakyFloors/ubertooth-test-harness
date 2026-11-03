@@ -710,11 +710,27 @@ def _bootloader_section(run: _Run) -> list[str]:
     ]
     if not records:
         return []
-    # One row per board, the last record for it: in `update` mode the stage
-    # records what it found and preflight records what is there now.
+    # One row per board. In `update` mode there are two records for a board:
+    # the stage's, which says it wrote one, and preflight's later read, which
+    # says what is there now. The row takes the later identity and keeps the
+    # earlier record's `written` and `previous`, because "this run installed
+    # it" is the fact this section exists to carry.
     rows: dict[str, dict] = {}
     for details in records:
-        rows[str(details.get("resource") or details.get("serial") or "")] = details
+        name = str(details.get("resource") or details.get("serial") or "")
+        earlier = rows.get(name)
+        if earlier is not None and earlier.get("written"):
+            details = {
+                **details,
+                "written": True,
+                "previous": earlier.get("previous"),
+                "status": (
+                    "updated" if details.get("status") == "current"
+                    else details.get("status")
+                ),
+                "reason": details.get("reason") or earlier.get("reason", ""),
+            }
+        rows[name] = details
     stage = next(
         (event.get("details", {}) for event in reversed(run.events)
          if event["event_type"] == "bootloader_stage_finished"), {}

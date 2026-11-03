@@ -156,10 +156,6 @@ _VERSION_DETAIL_RE = re.compile(
 #: pattern ``identity_from_match`` reads a match of, so a caller that searched
 #: a command's saved output does not have to search it twice.
 IDENTITY_LINE_PATTERN = _IDENTITY_LINE_RE.pattern
-#: What a board that cannot answer prints instead. Firmware older than the
-#: request stalls it, and the tool says so and prints no line at all.
-READ_FAILED_PATTERN = r"bootloader information read failed"
-
 #: How long to give one `-B`: it is a single control transfer against a board
 #: whose report was worked out at startup.
 IDENTITY_TIMEOUT_S = 5.0
@@ -428,8 +424,16 @@ _MAKEFILE_VARS = {
     "LPCUSB_PATH": "../common/lpcusb/target",
     "TARGET": "bootloader",
 }
+# Where the makefile looks for its linker script (LINKER_SCRIPT_DIRS there),
+# in its order. A script named without a directory is recorded at the first
+# of these that has it, so the sources a run reports are paths that exist.
+_LINKER_SCRIPT_DIRS = (".", "../common")
+# Every assignment form make takes, `+=` included: a source appended rather
+# than listed must be covered too, or the pin would miss the one file that
+# changed. An unknown form is refused by _makefile_sources below.
 _ASSIGNMENT_RE = re.compile(
-    r"(?m)^(?P<name>SRC|CPPSRC|ASRC|LINKER_SCRIPT)\s*[:?]?=(?P<value>(?:[^\n\\]|\\\n)*)"
+    r"(?m)^(?P<name>SRC|CPPSRC|ASRC|LINKER_SCRIPT)[ \t]*(?::|\?|\+|!)?="
+    r"(?P<value>(?:[^\n\\]|\\\n)*)"
 )
 
 
@@ -500,6 +504,30 @@ def verify_interface_constants(source, *, read=read_interface_header) -> int:
             differences.append(f"{name} is not defined")
         elif value != expected:
             differences.append(f"{name} is 0x{value:x}, not 0x{expected:x}")
+    # The version block's own offset, however the header spells it: a number,
+    # or another macro this header defines (today UBERTOOTH_FW_INFO_OFFSET).
+    # Every read in this module is at a fixed offset, so an offset that moved
+    # and was not noticed would make all of them wrong.
+    spelled = re.search(
+        r"#define\s+UBERTOOTH_BL_VERSION_OFFSET\s+(?P<value>\S+)", text
+    )
+    if spelled is None:
+        differences.append("UBERTOOTH_BL_VERSION_OFFSET is not defined")
+    else:
+        written = spelled["value"]
+        offset = macros.get(written.rstrip("uU")) if not written.startswith(
+            ("0x", "0X")
+        ) and not written.isdigit() else int(written.rstrip("uU"), 0)
+        if offset is None:
+            differences.append(
+                f"UBERTOOTH_BL_VERSION_OFFSET is {written}, which this harness "
+                "cannot read as a number"
+            )
+        elif offset != VERSION_BLOCK_OFFSET:
+            differences.append(
+                f"the version block offset is 0x{offset:x}, not "
+                f"0x{VERSION_BLOCK_OFFSET:x}"
+            )
     magic = re.search(
         r"#define\s+UBERTOOTH_BL_VERSION_MAGIC\s+\"([^\"]*)\"", text
     )
@@ -508,16 +536,6 @@ def verify_interface_constants(source, *, read=read_interface_header) -> int:
             "UBERTOOTH_BL_VERSION_MAGIC is not "
             f"{VERSION_BLOCK_MAGIC.decode()}"
         )
-    offset = re.search(
-        r"#define\s+UBERTOOTH_BL_VERSION_OFFSET\s+(\S+)", text
-    )
-    if offset is not None and offset.group(1) == "UBERTOOTH_FW_INFO_OFFSET":
-        info = macros.get("UBERTOOTH_FW_INFO_OFFSET")
-        if info is not None and info != VERSION_BLOCK_OFFSET:
-            differences.append(
-                f"the version block offset is 0x{info:x}, not "
-                f"0x{VERSION_BLOCK_OFFSET:x}"
-            )
     if differences:
         raise BootloaderError(
             f"{INTERFACE_HEADER} at {source.name} {source.commit[:12]} no longer "
@@ -547,6 +565,18 @@ def _makefile_sources(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(found))
 
 
+def _in_tree(source_path: Path | str, commit: str, path: Path) -> bool:
+    """Does ``path`` exist in the tree at ``commit``?"""
+    try:
+        _git(
+            source_path, "cat-file", "-e", f"{commit}:{path.as_posix()}",
+            timeout_s=_PIN_TIMEOUT_S,
+        )
+    except BootloaderError:
+        return False
+    return True
+
+
 def verify_source_coverage(
     source_path: Path | str, commit: str, *, paths: Sequence[str] = PIN_PATHS
 ) -> tuple[str, ...]:
@@ -568,13 +598,24 @@ def verify_source_coverage(
         # Names are relative to firmware/bootloader. The linker script is
         # searched for in . and ../common; both are covered, so taking it as
         # a path in the image's own directory is enough here.
-        try:
-            path = _normalize(prefix / name)
-        except ValueError as error:
-            raise BootloaderError(
-                f"{_BOOTLOADER_MAKEFILE} at {commit[:12]} names {name!r}, which "
-                f"is outside the repository: {error}"
-            ) from error
+        candidates = [name]
+        if "/" not in name:
+            # A bare name is a linker script, which the makefile searches for
+            # in its own directory and then in ../common.
+            candidates = [f"{where}/{name}" for where in _LINKER_SCRIPT_DIRS]
+        path = None
+        for candidate in candidates:
+            try:
+                resolved = _normalize(prefix / candidate)
+            except ValueError as error:
+                raise BootloaderError(
+                    f"{_BOOTLOADER_MAKEFILE} at {commit[:12]} names "
+                    f"{candidate!r}, which is outside the repository: {error}"
+                ) from error
+            path = path or resolved
+            if _in_tree(source_path, commit, resolved):
+                path = resolved
+                break
         sources.append(path.as_posix())
         if not any(
             path == candidate or candidate in path.parents for candidate in covered
@@ -672,7 +713,6 @@ def resolve_pin(
 IMAGE_NAME = "bootloader.bin"
 REGION_NAME = "bootloader-region.bin"
 REGION_HEX_NAME = "bootloader-region.hex"
-MANIFEST_NAME = "bootloader.json"
 #: The run-manifest artifact name of the region image, as `--artifact` and a
 #: plan would write one.
 ARTIFACT_NAME = "bootloader region"
@@ -743,14 +783,8 @@ class BootloaderArtifactBuilder:
     build's and the flash stage's are.
     """
 
-    def __init__(
-        self,
-        executor: CommandExecutor,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-    ):
+    def __init__(self, executor: CommandExecutor):
         self.executor = executor
-        self.clock = clock
         self._output_dir: Path | None = None
 
     def _run(
@@ -864,7 +898,10 @@ class BootloaderArtifactBuilder:
         )
         self._run(
             publisher, "bootloader-make", "build the bootloader image",
-            ("make", "-C", str(tree / "firmware" / "bootloader"), "bin", "hex"),
+            # `bin` only: the hex a programmer takes is written from the
+            # whole region below, not from the makefile's own hex, which
+            # covers the image alone.
+            ("make", "-C", str(tree / "firmware" / "bootloader"), "bin"),
             MAKE_TIMEOUT_S, token,
         )
         built = tree / "firmware" / "bootloader" / IMAGE_NAME
@@ -882,9 +919,11 @@ class BootloaderArtifactBuilder:
                 f"the built bootloader reports version {version}, but "
                 f"{INTERFACE_HEADER} at the pin defines {expected_version}"
             )
-        if build.rstrip("*") != f"git-{pin.short_commit}":
-            # A build string that is not the pinned commit means the image
-            # would be rebuilt (and rewritten to a board) on the next run.
+        if build != f"git-{pin.short_commit}":
+            # A build string that is not exactly the pinned commit's means the
+            # image would be rebuilt, and rewritten to a board, on the next
+            # run. The `*` a modified tree adds is refused for the same
+            # reason: nobody could build those bytes again.
             raise BootloaderError(
                 f"the built bootloader carries build string {build!r}, not "
                 f"'git-{pin.short_commit}' from the pinned commit; its identity "
@@ -939,6 +978,9 @@ PROGRAMMER_CRYSTAL_KHZ = "4000"
 #: One ISP write of 16 KiB at that baud rate, with the part's own erase and
 #: the adapter's reset handshake in front of it.
 PROGRAM_TIMEOUT_S = 180.0
+#: The exit status a shell gives for a program it could not start, which the
+#: executor passes on: the programmer never ran, so nothing was written.
+NOT_STARTED = 127
 #: After the write the board starts its application again and re-enumerates.
 REBOOT_TIMEOUT_S = 20.0
 VERIFY_ATTEMPTS = 6
@@ -1111,11 +1153,9 @@ class BootloaderUpdater:
         self,
         executor: CommandExecutor,
         *,
-        clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self.executor = executor
-        self.clock = clock
         self.sleep = sleep
         self._output_dir: Path | None = None
 
@@ -1186,6 +1226,13 @@ class BootloaderUpdater:
             raise BootloaderError(
                 f"--bootloader {mode} needs a bootloader artifact to compare "
                 "against; the run did not build one"
+            )
+        if mode == MODE_RECORD and artifact is not None:
+            # Recording compares nothing, so an artifact here would only be a
+            # caller that meant one of the other two modes.
+            raise BootloaderError(
+                "--bootloader record compares nothing, so it takes no "
+                "bootloader artifact"
             )
         if mode == MODE_UPDATE and not holds_host_lock:
             # Fail before any board is touched: writing flash without this
@@ -1261,7 +1308,9 @@ class BootloaderUpdater:
             return BoardBootloaderResult(board, "unreadable", None, reason)
         if expected is None or installed.matches(expected):
             return BoardBootloaderResult(board, "current", installed)
-        if mode == MODE_CHECK or not board.can_be_programmed:
+        if mode != MODE_UPDATE or not board.can_be_programmed:
+            # Only `update` writes. Anything else reports what it found, so a
+            # mode this stage does not know cannot reach the programmer.
             return BoardBootloaderResult(
                 board, "stale", installed,
                 no_programmer_reason(board, installed, expected)
@@ -1294,12 +1343,26 @@ class BootloaderUpdater:
             owner={"resource": board.alias},
         )
         if result.cancelled:
-            # A write that was interrupted leaves the region in a state only
-            # the board can report, so the identity is read again below
-            # rather than assumed.
+            # A write stopped part-way leaves the region in a state only the
+            # board can say, and this run is not going to ask: the identity
+            # is left unknown rather than guessed, and the next run reads it.
             return BoardBootloaderResult(
                 board, "canceled", None, f"canceled: {token.reason}",
                 written=True, previous=installed,
+            )
+        if result.returncode == NOT_STARTED and not result.timed_out:
+            # The shell's status for a program it could not start. Nothing
+            # reached the board, so its bootloader is the one it had: saying
+            # the region is in an unknown state would send somebody to the
+            # bench for a board nobody touched.
+            return BoardBootloaderResult(
+                board, "failed", installed,
+                f"{programmer_tool} did not start for {board.alias} "
+                f"({' '.join(argv)} exited {NOT_STARTED}); nothing was written, "
+                f"so {board.alias} still has {installed.describe()}. Install "
+                f"{programmer_tool} and check that "
+                f"{board.programmer_device} is there",
+                previous=installed,
             )
         if result.timed_out or result.returncode != 0:
             detail = "timed out" if result.timed_out else f"exited {result.returncode}"

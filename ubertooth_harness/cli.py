@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -743,7 +744,10 @@ def _prepare_run(
         expectation, bootloader_artifact = _bootloader_stage(
             args, sources, built, executor, publisher, run_dir, leases
         )
-        if bootloader_artifact is not None:
+        if (
+            bootloader_artifact is not None
+            and bootloader.ARTIFACT_NAME not in {item.name for item in artifacts}
+        ):
             artifacts += (
                 FileIdentity.from_path(
                     bootloader.ARTIFACT_NAME, bootloader_artifact.region_path
@@ -849,6 +853,10 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
                 "expected": None, "boards": [],
             })
         return None, None
+    if mode != bootloader.MODE_UPDATE:
+        # Nothing here writes flash, and the build below can take minutes, so
+        # the host's firmware lock goes back before it rather than after.
+        _release_flash_host_lock(args, leases)
     artifact = None
     if mode in bootloader.COMPARING_MODES:
         artifact = bootloader.BootloaderArtifactBuilder(executor).build(
@@ -993,6 +1001,16 @@ def _run_suite(args: argparse.Namespace) -> int:
             f"--bootloader {args.bootloader} compares each board against a "
             "bootloader built from the run's own source, so it requires --build"
         )
+    if args.bootloader == bootloader.MODE_UPDATE and args.no_flash_build:
+        # A bootloader write happens before preflight, so the application the
+        # board answers `-B` from would be whatever was on it: a board written
+        # here and then turned down by preflight for its firmware is the worst
+        # of both. The run's own firmware goes on first.
+        raise HarnessError(
+            "--bootloader update writes a board's flash before preflight, so "
+            "the board must be carrying this run's own firmware first; drop "
+            "--no-flash-build, or use --bootloader check"
+        )
     args.flash_boards = ()
     # Both images unless the firmware build is turned on only to flash.
     args.firmware_images = FIRMWARE_IMAGES
@@ -1039,6 +1057,17 @@ def _run_suite(args: argparse.Namespace) -> int:
             f"--bootloader {args.bootloader} builds the bootloader from the "
             "run's own source, and arm-none-eabi-gcc is not installed; install "
             "it, or use --bootloader record"
+        )
+    if (
+        args.bootloader == bootloader.MODE_UPDATE
+        and not args.dry_run
+        and shutil.which(bootloader.PROGRAMMER_TOOL) is None
+    ):
+        # The programmer command itself. Said before the boards are leased
+        # and the commits built, rather than as a write that never started.
+        raise HarnessError(
+            f"--bootloader update programs a board with {bootloader.PROGRAMMER_TOOL}, "
+            "which is not installed; install it, or use --bootloader check"
         )
     if args.flash_boards and not args.with_firmware:
         # Flashing needs the firmware build, but only the image it writes:
