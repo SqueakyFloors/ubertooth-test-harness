@@ -740,7 +740,7 @@ class HostToolsLibbtbbTests(unittest.TestCase):
         # with a pin built from a shell variable, so the run stops here
         # rather than measure an unverified library.
         for pin, problem in (
-            ("master", "not a commit"),
+            ("v1.0", "not a commit"),
             ("${REF}", "not a literal commit"),
         ):
             with self.subTest(pin=pin):
