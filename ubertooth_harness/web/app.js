@@ -310,8 +310,29 @@
       ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
         + artifactWarning(suite)
       : "";
-    // This suite may need build options the last one did not.
+    // This suite may need build options the last one did not, and this
+    // target may not be able to measure it at all.
     syncBuildOptions();
+    syncRunButton();
+  }
+
+  // A run the controller would refuse is not offered: a suite no step of
+  // which runs on the chosen target, and one holding a step whose own
+  // hardware is what it measures (`required hardware:`) that names no host
+  // of this run. `/api/plans` answers both for the chosen target, in the
+  // same sentence the controller refuses with, so pressing Run cannot be
+  // the way to find out. Everything else about the bench is the run's to
+  // report: hardware it has not got blocks that step and fails the run,
+  // and the other tests still run (#265, #269).
+  function syncRunButton() {
+    const suite = findSuite($("plan").value, $("suite").value);
+    const reason = suite && suite.runnable_on_target === false
+      ? String(suite.not_runnable_reason || "This target cannot run this suite.")
+      : "";
+    const note = $("run-blocked");
+    note.textContent = reason;
+    note.hidden = !reason;
+    $("run-button").disabled = Boolean(reason);
   }
 
   // A suite with a test that needs an image no build makes (a published
@@ -442,7 +463,9 @@
         status.textContent = `Not started: ${error.message}. The ref list has been reloaded; check the ref and press Run again.`;
       }
     } finally {
-      button.disabled = false;
+      // Not simply enabled again: the suite may be one this target cannot
+      // measure, which holds the button.
+      syncRunButton();
     }
   }
 

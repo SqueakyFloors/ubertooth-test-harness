@@ -1005,7 +1005,14 @@ by the REST API and `/ws/live`.
   takes where it does run (`omitted_tests`, `omitted_estimated_s`). That is
   the host-level half of what the planner decides; hardware the bench has
   not got needs the target's resource registry, which the controller has
-  not got. The controller
+  not got. Run is held, with the reason, for a suite a run on that target
+  could not measure: one no step of which runs there, and one holding a step
+  whose own hardware is what it measures (`required hardware:`) whose
+  `hosts:` names no host of the run. `/api/plans` answers that per suite
+  (`runnable_on_target`, `not_runnable_reason`, `blocked_tests`) and
+  `POST /api/targets/{host}/runs` and `POST /api/run-groups` refuse such a
+  request with 422, a group being judged over its hosts together. The
+  controller
   refuses a ref that is not in the list or a full commit ID (422). The run
   request carries the commit listed for the ref (the GUI sends the commit it
   showed; a ref that has moved since is refused with 409 and the page lists

@@ -26,6 +26,7 @@ from ubertooth_harness.gui import (
     parse_ls_remote,
     run_git,
     step_hosts,
+    test_hardware,
 )
 from ubertooth_harness.gui import _build_needs as build_needs
 from ubertooth_harness.plan import load_plan
@@ -544,6 +545,118 @@ class PlanTests(ControllerTestCase):
             [(test["name"], test["estimated_s"]) for test in suite["omitted_tests"]],
         )
 
+    async def test_a_suite_whose_required_step_runs_elsewhere_is_not_offered(self):
+        # The release suite's required step names the bench host its ESP32
+        # Classic peers are on, so a run on another target could not measure
+        # it: run setup is told so, in the sentence the controller refuses
+        # the run with (#285).
+        status, payload, _ = await self.http("GET", "/api/plans?target=Host_Mac")
+        self.assertEqual(200, status)
+        plans = {plan["name"]: plan for plan in payload["plans"]}
+        (suite,) = plans["release"]["suites"]
+        self.assertIs(False, suite["runnable_on_target"])
+        self.assertEqual(
+            [{"name": "Recover AFH map", "hosts": ["Host_Linux"],
+              "hardware": "Ubertooth, ESP32 Classic peer (acceptor), "
+                          "ESP32 Classic peer (initiator)",
+              "reason": "runs on Host_Linux, not on Host_Mac"}],
+            suite["blocked_tests"],
+        )
+        reason = suite["not_runnable_reason"]
+        for part in ("Recover AFH map is required on Host_Linux",
+                     "ESP32 Classic peer (initiator)", "run group"):
+            self.assertIn(part, reason)
+        # A suite with no test for the target says that instead.
+        (classic,) = [s for s in plans["classic"]["suites"] if s["name"] == "classic"]
+        self.assertIs(False, classic["runnable_on_target"])
+        self.assertEqual([], classic["blocked_tests"])
+        self.assertIn("no test of this suite runs on Host_Mac",
+                      classic["not_runnable_reason"])
+        # The host it names, and no target at all, are offered the suite.
+        for query in ("?target=Host_Linux", ""):
+            status, payload, _ = await self.http("GET", f"/api/plans{query}")
+            (suite,) = [
+                plan for plan in payload["plans"] if plan["name"] == "release"
+            ][0]["suites"]
+            self.assertEqual((True, [], ""), (
+                suite["runnable_on_target"], suite["blocked_tests"],
+                suite["not_runnable_reason"]))
+
+    def test_only_a_required_steps_own_host_naming_blocks_a_run(self):
+        # `required hardware:` is about absence of the hardware the step
+        # measures (#282): a platform a host cannot meet is not applicable,
+        # which that argument deliberately does not change, and a step
+        # without the argument is nobody's gate.
+        entries = {
+            "another host, required": (
+                "    - Recover AFH map:\n        hosts: [Host_Linux]\n"
+                "        required hardware: true\n"
+                "        acceptor: default\n        initiator: default\n"
+                "        coverage: smoke\n        duration: 2m\n"
+            ),
+            "another host, not required": (
+                "    - Recover AFH map:\n        hosts: [Host_Linux]\n"
+                "        acceptor: default\n        initiator: default\n"
+                "        coverage: smoke\n        duration: 2m\n"
+            ),
+            "this platform cannot, required": (
+                "    - Exclusive Ubertooth topology:\n        hosts: each\n"
+                "        platforms: [linux]\n"
+                "        required hardware: true\n"
+                "        exclusive Ubertooth: true\n"
+            ),
+        }
+        for label, entry in entries.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "gate.yaml").write_text(
+                    "plan: Gate\nsuites:\n  gate:\n"
+                    "    - Host CLI surface:\n        hosts: each\n" + entry,
+                    encoding="utf-8",
+                )
+                (suite,) = list_plans(
+                    root, target="Host_Mac", platform="macos"
+                )[0]["suites"]
+            # Every one of them is left out of this target's estimate.
+            self.assertEqual(1, len(suite["omitted_tests"]), label)
+            blocked = label == "another host, required"
+            self.assertEqual(not blocked, suite["runnable_on_target"], label)
+            self.assertEqual(1 if blocked else 0, len(suite["blocked_tests"]), label)
+
+    def test_a_required_step_a_host_of_the_run_does_run_is_not_blocked(self):
+        # Two steps of one test, one of them for this target: that run
+        # measures the gate, so nothing is blocked (the planner keeps one
+        # record per test and none for a test the host runs).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "gate.yaml").write_text(
+                "plan: Gate\nsuites:\n  gate:\n"
+                "    - Recover AFH map:\n        hosts: [Host_Linux]\n"
+                "        required hardware: true\n"
+                "        acceptor: default\n        initiator: default\n"
+                "        coverage: smoke\n        duration: 2m\n"
+                "    - Recover AFH map:\n        hosts: [Host_Mac]\n"
+                "        required hardware: true\n"
+                "        acceptor: default\n        initiator: default\n"
+                "        coverage: smoke\n        duration: 2m\n",
+                encoding="utf-8",
+            )
+            (suite,) = list_plans(root, target="Host_Mac")[0]["suites"]
+        self.assertEqual((True, []), (suite["runnable_on_target"],
+                                      suite["blocked_tests"]))
+
+    def test_the_hardware_a_test_binds_is_named_role_by_role(self):
+        catalog = builtin_catalog()
+        self.assertEqual(
+            "Ubertooth, ESP32 Classic peer (acceptor), "
+            "ESP32 Classic peer (initiator)",
+            test_hardware(catalog, "Recover AFH map"),
+        )
+        self.assertEqual("Ubertooth", test_hardware(catalog, "Ubertooth identity"))
+        # A test that binds no hardware, and one the catalog does not know.
+        self.assertEqual("", test_hardware(catalog, "Host CLI surface"))
+        self.assertEqual("", test_hardware(catalog, "No such test"))
+
     def test_which_hosts_a_step_names(self):
         # `hosts: each` names none, so every target runs it; the planner
         # reads a singular `host` first, so this does too.
@@ -1051,6 +1164,31 @@ class PageWiringTests(unittest.TestCase):
             r'option\.chosen = \$\(option\.id\)\.checked;\s*syncBuildOptions\(\);',
         )
         self.assertNotIn("syncFlashBuild", self.js)
+
+    def test_a_suite_the_target_cannot_measure_holds_run(self):
+        # Run is held, with the reason the controller would refuse with, so
+        # pressing it is not how the operator finds out (#285).
+        body = self.js[self.js.index("function syncRunButton()"):
+                       self.js.index("// A suite with a test that needs an image")]
+        self.assertIn("suite.runnable_on_target === false", body)
+        self.assertIn("suite.not_runnable_reason", body)
+        self.assertIn('$("run-button").disabled = Boolean(reason);', body)
+        self.assertIn("note.hidden = !reason;", body)
+        # Called wherever the suite, the plan, or the target changes
+        # (renderSuiteTests), and again after a start attempt, so a refusal
+        # does not leave Run enabled for a suite that is still held.
+        tests_body = self.js[self.js.index("function renderSuiteTests()"):
+                             self.js.index("function syncRunButton()")]
+        self.assertIn("syncRunButton();", tests_body)
+        submit = self.js[self.js.index("async function submitRun("):
+                         self.js.index("// ----- live run")]
+        self.assertIn("syncRunButton();", submit)
+        self.assertNotIn("button.disabled = false;", submit)
+        # The reason is a status region the button points at.
+        self.assertRegex(
+            self.html, r'<p id="run-blocked" class="hint warn" role="status" hidden>')
+        self.assertRegex(
+            self.html, r'id="run-button"[^>]*aria-describedby="run-blocked"')
 
     def test_a_suite_needing_an_image_no_build_makes_says_so(self):
         # The build options cover every image a run can build; an image only

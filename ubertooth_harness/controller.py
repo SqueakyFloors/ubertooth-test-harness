@@ -53,7 +53,7 @@ import re
 import socket
 import sys
 import time
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 import uuid
 
 from ubertooth_harness.events import REPORT, RUN_LOG
@@ -68,6 +68,7 @@ from ubertooth_harness.gui import (
     planned_invocations,
     run_stage_estimates,
     security_headers,
+    suite_refusal,
 )
 from ubertooth_harness.learned import STORE_FILE, EstimateStore
 from ubertooth_harness.report import write_report
@@ -1513,6 +1514,11 @@ class Controller:
         flash_build: bool = True, with_firmware: bool = False,
         with_python: bool = False,
     ) -> Run:
+        # An unknown or offline target is said so before anything about the
+        # suite: that is the caller's own mistake to fix. _request_link
+        # _request_run reads it again when the request is sent.
+        self._target_link(host)
+        await self._refuse_unmeasurable(plan, suite, [host], tests)
         # Checked first of what can wait: everything after it runs without
         # yielding until the request is recorded as pending.
         fields = await self._run_fields(
@@ -1521,6 +1527,32 @@ class Controller:
             with_python=with_python,
         )
         return await self._request_run(host, fields)
+
+    async def _refuse_unmeasurable(
+        self, plan: str, suite: str, hosts: Sequence[str], tests: Sequence[str]
+    ) -> None:
+        """Refuse a run these hosts could not measure the suite with.
+
+        What the plan alone decides, before a ref is resolved, a board
+        leased or a commit built: a suite none of these hosts runs a step
+        of, and a step whose own hardware is what it measures
+        (``required hardware:``) that names no host of this run. Such a run
+        ends failed where the bench has not got that host, and passes with
+        the gate unmeasured where another host of the bench has it; neither
+        is a run worth starting. Hardware the bench has not got is not
+        judged here: the registry is the target's, and the run reports it.
+        """
+        reason = await asyncio.to_thread(
+            suite_refusal, self.plans_dir, plan, suite, list(hosts),
+            platforms={
+                host: target.platform
+                for host in hosts
+                if (target := self.targets.get(host)) is not None
+            },
+            tests=list(tests),
+        )
+        if reason:
+            raise ControllerError(f"suite {suite!r}: {reason}", 422)
 
     async def _request_run(
         self, host: str, fields: Mapping, group_id: str | None = None
@@ -1632,6 +1664,10 @@ class Controller:
         one of its hosts, and the caller is still told that nothing started.
         """
         chosen = self._group_hosts(hosts)
+        # The group's hosts together: a required step one of them runs is
+        # measured by the group, which is how a release plan covers a bench
+        # whose peers are on one host (#277).
+        await self._refuse_unmeasurable(plan, suite, chosen, tests)
         fields = await self._run_fields(
             ref=ref, plan=plan, suite=suite, tests=tests, build=build,
             commit=commit, flash_build=flash_build, with_firmware=with_firmware,
