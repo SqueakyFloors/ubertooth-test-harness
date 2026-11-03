@@ -658,6 +658,11 @@
       // The libbtbb differs from the fork's install.sh pin, or was not compared.
       pushLog(`warning: ${String(details.message ?? "")}`);
     }
+    if (kind === "dfu_part_table" && status !== "passed") {
+      // The flash sizes a DFU read-back is checked against differ from the
+      // fork's own part table, or were not compared.
+      pushLog(`warning: ${String(details.message ?? "")}`);
+    }
     if (kind === "lease_queued") {
       // A device was free while this run waited, and still not its turn:
       // why a run can start late with the bench looking idle. The harness

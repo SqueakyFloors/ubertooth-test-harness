@@ -390,6 +390,16 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "libbtbb pin",
             message if status == "passed" else f"**{status}**: {message}",
         ))
+    parts = next((e for e in run.events if e["event_type"] == "dfu_part_table"), None)
+    if parts is not None:
+        # Whether the flash sizes a DFU read-back is checked against are the
+        # ones the fork's part table has at the commit under test (#283).
+        status = parts.get("status", "")
+        message = parts.get("details", {}).get("message", "")
+        rows.append((
+            "DFU part table",
+            message if status == "passed" else f"**{status}**: {message}",
+        ))
     build = manifest.get("build") or {}
     if build:
         toolchain = ", ".join(f"{k} {v}" for k, v in sorted(build.get("toolchain", {}).items()))

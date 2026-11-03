@@ -441,8 +441,12 @@ suites:
             events = [json.loads(line) for line in
                       (output / "pin-cli-run" / "run.jsonl").read_text().splitlines()]
             kinds = [event["event_type"] for event in events]
-            self.assertEqual(["run_started", "libbtbb_pin", "manifest"], kinds[:3])
+            self.assertEqual(["run_started", "libbtbb_pin", "dfu_part_table", "manifest"],
+                             kinds[:4])
             self.assertEqual(1, kinds.count("run_started"))
+            # This source is a throwaway repository, not a fork checkout, so
+            # it has no DFU part table to compare with (#283).
+            self.assertEqual("skipped", events[2]["status"])
             self.assertEqual("warning", events[1]["status"])
             self.assertEqual("0" * 40, events[1]["details"]["fork_pin_ref"])
             self.assertEqual("passed", events[-1]["status"])

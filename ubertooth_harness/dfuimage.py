@@ -90,9 +90,18 @@ APPLICATION_OFFSET = 0x4000
 # still running its application, so a board already in the bootloader, and a
 # part the host has no entry for, get the size the firmware is linked for
 # instead (DFU_ASSUMED_FLASH_SIZE). The sizes below are the LPC175x/176x
-# flash sizes in that file's part table.
+# flash sizes in that file's part table. They are a copy of it, so a run
+# reads the fork's own table at the commit under test and warns when the two
+# differ (dfuparts.py, #283).
 PART_FLASH_SIZES = (32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024)
 ASSUMED_FLASH_SIZE = 128 * 1024
+
+
+def describe_flash_size(flash_size: int) -> str:
+    """A flash size written as the fork's own messages write it."""
+    if flash_size > 0 and flash_size % 1024 == 0:
+        return f"{flash_size // 1024} KiB"
+    return f"{flash_size} bytes"
 
 
 def upload_length(flash_size: int) -> int:
@@ -489,13 +498,17 @@ class ReadbackPlan(NamedTuple):
             problems.append(f"0x{self.start:x}-0x{self.end:x} is not "
                             f"{self.length} bytes")
         if self.length not in READBACK_LENGTHS:
-            lengths = ", ".join(str(length) for length in READBACK_LENGTHS)
+            sizes = ", ".join(describe_flash_size(size) for size in PART_FLASH_SIZES)
             # A part the fork's table has grown since PART_FLASH_SIZES was
-            # written would land here, with the lengths it does know named,
-            # which is the drift this is meant to report rather than pass.
-            problems.append(f"the read-back covers {self.length} bytes, which is "
-                            "no application region in the fork's part table "
-                            f"({lengths})")
+            # written lands here, which is the drift this is meant to report
+            # rather than pass. Naming the flash size this length implies
+            # says which entry the copy is missing, rather than leaving a
+            # reader to work it back from the figure (#283).
+            implied = describe_flash_size(self.length + APPLICATION_OFFSET)
+            problems.append(f"the read-back covers {self.length} bytes, the "
+                            f"application region of a part with {implied} of "
+                            "flash: no such part in the harness's copy of the "
+                            f"fork's part table ({sizes})")
         return problems
 
 

@@ -2462,6 +2462,23 @@ hand. A read-back can fail and leave the board in DFU (fork #208): in a case
 step that fails the case and the cleanup returns the board; in the cleanup it
 returns the board but fails the cleanup, so the run stops. Other registered boards are guards, read before and after every case.
 
+How long a read-back is follows the part, so the comparison takes the length
+from the range the command printed and checks it against the flash sizes in
+the fork's DFU part table. Those sizes are the harness's own copy of that
+table, which a part the fork adds later would leave behind: a correct
+read-back on such a part would then be reported as a length no part explains.
+To notice that, `run-suite` and `build` read the table out of the fork's
+checkout at the resolved Ubertooth commit and record the comparison as a
+`dfu_part_table` record in run.jsonl and a "DFU part table" row in report.md:
+`passed` (the same flash sizes), `warning` (they differ; it names the part
+whose entry the copy is missing, and the read-back length such a board would
+report), `unchecked` (the figures could not be read at that commit; the reason
+is given) or `skipped` (a fork commit from before the table). A difference and
+an unreadable table are also printed on stderr and shown in the browser live
+view. Nothing fails on this: the read-back check stays the harness's copy, so
+a length no part explains is still loud, and the warning is what says to add
+the entry (`ubertooth_harness/dfuparts.py`).
+
 ## Target runner service
 
 `python -m ubertooth_harness runner` is the persistent target runner. It dials
