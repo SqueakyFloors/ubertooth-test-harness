@@ -130,8 +130,8 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
         if capture_filter:
-            print("warning: this interface applies no capture filter; "
-                  "filter the packets in Wireshark instead (got %s)" % capture_filter,
+            print("warning: this interface does not apply capture filters; "
+                  "use a display filter (got %s)" % capture_filter,
                   file=sys.stderr)
         sys.exit(capture(interface, fifo, channel))
 

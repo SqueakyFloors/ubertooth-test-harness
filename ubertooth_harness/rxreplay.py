@@ -362,6 +362,11 @@ def text_lines(source):
 
 ANY_UAP_NOTE = UAP_LINE.pattern
 
+# The heading `-z` lists its results under, on standard error (see
+# survey_check). Spelled out here as PACKET_LINE is, because this module also
+# runs as a script by path; receive_cases.SURVEY_HEADING is the same word.
+SURVEY_HEADING = "Survey Results"
+
 
 def uap_note(uap: int) -> str:
     """libbtbb's note that it worked this UAP out, as the library writes it."""
@@ -420,21 +425,31 @@ def uap_check(expected: list[tuple[int, int, int]]):
 
 
 def survey_check(expected_lines: set[str]):
+    """Exactly ``expected_lines`` beside the packet lines on standard output.
+
+    The results are no longer introduced on this stream: the heading goes to
+    standard error so that standard output holds only the packet lines and
+    the addresses a script parses (fork 1c1b41b7). So every line here that
+    is not a packet line is an address the survey listed, which also makes a
+    heading that arrived on this stream a listed "address" and a failure.
+    The step's patterns are what read the heading on standard error.
+    """
     def check(output) -> str:
-        results = None
+        results = set()
         for line in text_lines(output):
-            if results is None:
-                if line == "Survey Results":
-                    results = set()
+            if not line.strip() or PACKET_LINE.match(line):
                 continue
-            if line:
-                results.add(line)
-        if results is None:
-            return "no 'Survey Results' line"
+            results.add(line.strip())
+        problems = []
+        if SURVEY_HEADING in results:
+            problems.append(
+                f"the {SURVEY_HEADING!r} heading is on stdout, among the "
+                "addresses a script parses")
+            results.discard(SURVEY_HEADING)
         if results != expected_lines:
-            return ("survey listed " + ", ".join(sorted(results)) + "; expected "
-                    + ", ".join(sorted(expected_lines)))
-        return ""
+            problems.append("survey listed " + (", ".join(sorted(results)) or "nothing")
+                            + "; expected " + ", ".join(sorted(expected_lines)))
+        return "; ".join(problems)
 
     return check
 

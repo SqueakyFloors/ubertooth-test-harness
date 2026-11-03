@@ -181,9 +181,11 @@ def main(argv) -> int:
             return 1
         if "--extcap-capture-filter" in values and not os.environ.get(
                 "FAKE_EXTCAP_QUIET_FILTER"):
-            # The plugin's own wording: it captures anyway.
-            print("warning: this interface applies no capture filter; filter the "
-                  "packets in Wireshark instead (got "
+            # The plugin's own wording (fork ba3edb15, #806): it captures
+            # anyway. patterns.NO_CAPTURE_FILTER is the same sentence, which
+            # is what the checks read it with.
+            print("warning: this interface does not apply capture filters; use"
+                  " a display filter (got "
                   f"{values['--extcap-capture-filter']})", file=sys.stderr)
         if "--fifo" not in values:
             print("error: --capture needs --fifo=PATH", file=sys.stderr)
