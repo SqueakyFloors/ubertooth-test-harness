@@ -417,6 +417,22 @@ class PlanTests(ControllerTestCase):
         self.assertAlmostEqual(sum(estimates.values()), suite["estimated_s"], places=6)
         self.assertEqual(0, suite["unestimated_tests"])
 
+    async def test_the_platform_a_target_registered_with_is_listed_for_it(self):
+        # The platform the steps were judged against comes from the target's
+        # own registration, so only a registered target has one.
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, host="Host_A")  # registers Linux
+            status, payload, _ = await self.http("GET", "/api/plans?target=Host_A")
+            self.assertEqual((200, "Host_A", "linux"),
+                             (status, payload["target"], payload["platform"]))
+            self.assertEqual(
+                "linux",
+                (await self.http("GET", "/api/targets/Host_A"))[1]["target"]["platform"],
+            )
+        for query in ("?target=Host_B", ""):
+            status, payload, _ = await self.http("GET", f"/api/plans{query}")
+            self.assertEqual((200, None), (status, payload["platform"]))
+
     async def test_a_target_is_only_shown_the_steps_it_would_run(self):
         # The release suite holds one step that names the bench host its
         # ESP32 Classic peers are on (#282). Another target compiles no
@@ -516,11 +532,60 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(("Host_Linux",), step_hosts({"hosts": ("Host_Linux",)}))
         self.assertEqual(("A", "B"), step_hosts({"hosts": ["A", "B"]}))
         self.assertEqual(("A",), step_hosts({"host": "A", "hosts": ("B",)}))
+        catalog = builtin_catalog()
+
+        def reason(arguments, target, platform=None, name="Host CLI surface"):
+            return omitted_reason(catalog, name, arguments, target, platform)
+
         # No target: nothing is left out, whatever the step names.
-        self.assertEqual("", omitted_reason({"hosts": ("Host_Linux",)}, None))
-        self.assertEqual("", omitted_reason({"hosts": ("A", "B")}, "B"))
+        self.assertEqual("", reason({"hosts": ("Host_Linux",)}, None))
+        self.assertEqual("", reason({"hosts": ("A", "B")}, "B"))
+        self.assertEqual("runs on A, B, not on C", reason({"hosts": ("A", "B")}, "C"))
+        # A test the catalog does not know is nobody's platform question.
+        self.assertEqual("", reason({}, "C", "macos", name="No such test"))
+
+    def test_a_step_the_targets_platform_cannot_run_is_left_out(self):
+        # The planner leaves a host out of a step its platform does not run
+        # (hostneeds), whichever hosts the step names, so the listing does
+        # too once the target has registered the platform it is on.
+        catalog = builtin_catalog()
+        linux_only = catalog.get("Exclusive Ubertooth topology").normalize_arguments(
+            {"platforms": ["linux"], "exclusive Ubertooth": True}
+        )
         self.assertEqual(
-            "runs on A, B, not on C", omitted_reason({"hosts": ("A", "B")}, "C"))
+            "runs only on Linux, and Host_Mac is macOS",
+            omitted_reason(catalog, "Exclusive Ubertooth topology", linux_only,
+                           "Host_Mac", "macos"),
+        )
+        for target, platform in (("Host_Linux", "linux"), ("Host_Mac", None)):
+            self.assertEqual("", omitted_reason(
+                catalog, "Exclusive Ubertooth topology", linux_only,
+                target, platform))
+        # And in a suite: the step is not that target's time, and its
+        # `Ubertooth: each` no longer counts as a per-board test there.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "both.yaml").write_text(
+                "plan: Both\nsuites:\n  both:\n"
+                "    - Exclusive Ubertooth topology:\n        hosts: each\n"
+                "        platforms: [linux]\n"
+                "        exclusive Ubertooth: true\n        Ubertooth: each\n"
+                "    - Host CLI surface:\n        hosts: each\n",
+                encoding="utf-8",
+            )
+            mac = list_plans(root, target="Host_Mac", platform="macos")[0]["suites"][0]
+            linux = list_plans(root, target="Host_Linux", platform="linux")[0]["suites"][0]
+            unknown = list_plans(root, target="Host_Mac")[0]["suites"][0]
+        self.assertEqual((3.6, 0), (mac["estimated_s"], mac["per_board_tests"]))
+        self.assertEqual(
+            [{"name": "Exclusive Ubertooth topology",
+              "reason": "runs only on Linux, and Host_Mac is macOS",
+              "estimated_s": 15.0}],
+            mac["omitted_tests"],
+        )
+        for suite in (linux, unknown):
+            self.assertEqual((18.6, 1), (suite["estimated_s"], suite["per_board_tests"]))
+            self.assertEqual([], suite["omitted_tests"])
 
     async def test_plans_say_which_build_options_a_suite_needs(self):
         # So the GUI can ask for the image or the Python tools the chosen
@@ -851,14 +916,28 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("?target=${encodeURIComponent(target)}", body)
         self.assertIn("const token = ++state.plansToken;", body)
         self.assertIn("if (token !== state.plansToken) return;", body)
-        # The operator's plan and suite survive a reload for another target.
-        self.assertIn('const keep = [current, "fast"].find(', body)
-        suites = self.js[self.js.index("function renderSuites()"):
-                         self.js.index("function renderSuiteTests()")]
-        self.assertIn("suites.find((suite) => suite.name === current)", suites)
+        # A failed load's message does not survive the next good one.
+        self.assertIn('$("plan-status").textContent = "";', body)
+        # The operator's own target change reloads it, beside the plan and
+        # suite selects; a target update while a load is in flight does not
+        # start another.
+        start = self.js[self.js.index("function start()"):]
+        self.assertIn('$("target").addEventListener("change", loadPlans);', start)
+        self.assertIn("state.plansWanted = target;", body)
         select = self.js[self.js.index("function renderTargetSelect()"):
                          self.js.index("// ----- run setup")]
-        self.assertIn("if (select.value !== state.plansTarget) loadPlans();", select)
+        self.assertIn("if (select.value !== state.plansWanted) loadPlans();", select)
+        # The operator's plan survives a reload for another target, and so
+        # does the suite they chose; choosing a plan takes the suite named
+        # after that plan, as before.
+        self.assertIn('const keep = [current, "fast"].find(', body)
+        self.assertIn("renderSuites(true);", body)
+        suites = self.js[self.js.index("function renderSuites("):
+                         self.js.index("function renderSuiteTests()")]
+        self.assertIn("keepChoice && suites.find((suite) => suite.name === current)",
+                      suites)
+        self.assertIn('$("plan").addEventListener("change", () => renderSuites());',
+                      start)
 
     def test_the_estimate_says_what_the_target_does_not_run(self):
         body = self.js[self.js.index("function estimateText(suite)"):
@@ -867,9 +946,16 @@ class PageWiringTests(unittest.TestCase):
         # time they take where they run.
         self.assertIn("const target = state.plansTarget;", body)
         self.assertIn("Estimated test time${on}", body)
-        self.assertIn("suite.omitted_tests", body)
-        self.assertIn("run on other hosts", body)
-        self.assertIn("not counted above", body)
+        omitted = self.js[self.js.index("function omittedText(suite)"):
+                          self.js.index("async function submitRun(")]
+        self.assertIn("suite.omitted_tests", omitted)
+        self.assertIn("are not run there", omitted)
+        self.assertIn("not counted above", omitted)
+        # One sentence per reason, and a step without an estimate does not
+        # hide the time of the rest.
+        self.assertIn("const groups = new Map();", omitted)
+        self.assertIn('typeof test.estimated_s === "number"', omitted)
+        self.assertIn("with no estimate", omitted)
         self.assertIn("No test of this suite runs${on}", body)
         # The checklist a run starts with leaves out what its target does
         # not run, but only while the list belongs to that target.
@@ -899,6 +985,12 @@ class PageWiringTests(unittest.TestCase):
         for field in ("needs_firmware_build", "requires_firmware_build",
                       "needs_python_tools", "requires_python_tools"):
             self.assertIn(f'"{field}"', self.js)
+        # A step the chosen target does not run must not tick, hold, or send
+        # a build option: what the suite needs is counted the way
+        # /api/plans counts its own flags.
+        needed = self.js[self.js.index("function neededBy(suite, need)"):
+                         self.js.index("function syncBuildOptions()")]
+        self.assertIn("test.runs_on_target !== false", needed)
 
     def test_a_suite_that_needs_a_build_option_holds_it_ticked(self):
         body = self.js[self.js.index("function syncBuildOptions()"):

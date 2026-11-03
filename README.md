@@ -804,8 +804,9 @@ without them runs the rest of the plan and the run fails on it rather than
 passing with that gate unmeasured (see
 [Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 It runs the `smoke` profile there, about 520 s of the plan's roughly 1175 s.
-A target that is not the host it names plans about 655 s of the suite: the
-total counts every step, whichever host it is for (#284).
+A target that is not the host it names plans about 655 s of the suite, which
+is what run setup shows for that target, with this step named as one it does
+not run.
 
 That step leases both ESP32 Classic bridges for the length of the run, so the
 peer suites below run before or after the release plan, not beside it.
@@ -2575,15 +2576,18 @@ word and symbol (colour only reinforces it).
   the suite: the plan list is fetched for that target, so the estimate adds
   up only the steps it runs, and so do the build options the suite asks for.
   A step whose plan entry names other hosts (`Recover AFH map` in the
-  release suite, which names the host its ESP32 Classic peers are on) is
-  left out of the figure and then named, with the time it takes on the host
-  that does run it: the release suite is about 654.5 s on a target that step
-  does not name, and 1174.5 s counting it. Choosing another target reloads
-  the list and keeps the plan and suite you had chosen. A suite no step of
-  which runs on the chosen target says that instead of a time. Estimates
-  learned on the target are used wherever it has them (see
-  [Learned durations](#learned-durations)), and the line says how many of
-  them are its own measurements.
+  release suite, which names the host its ESP32 Classic peers are on), or
+  one the target's own platform does not run (`Exclusive Ubertooth topology`
+  on a macOS target), is left out of the figure and then named, with the
+  time it takes on the host that does run it: the release suite is about
+  654.5 s on a target that step does not name, and 1174.5 s counting it.
+  Choosing another target reloads the list and keeps the plan and suite you
+  had chosen. A suite no step of which runs on the chosen target says that
+  instead of a time. Estimates learned on the target are used wherever it
+  has them (see [Learned durations](#learned-durations)), and the line says
+  how many of them are its own measurements. Hardware the bench has not got
+  is not part of this: the controller has no copy of the target's registry,
+  so the run itself is what reports a step whose device is missing.
 - **Live run:** the suite's tests as a checklist that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
   plus symbol), under each test the [known target](#known-targets) it ran
@@ -2719,8 +2723,8 @@ Endpoints (JSON unless noted; `GET /` lists them):
 |---|---|
 | `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
-| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all) and `needs_artifacts` (image labels the step names that no build produces, so only `run-suite --artifact` can pass them), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` also decides which steps the suite's own fields count: a step whose `hosts:` names other hosts is compiled for those hosts and not for this target, so each test carries `runs_on_target` (and `omitted_reason` when false), and the suite total, `unestimated_tests`, `per_board_tests`, the four build-option flags and `needs_artifacts` cover only the steps that target runs. The steps left out are listed in `omitted_tests` (`name`, `reason`, `estimated_s`) with their time together in `omitted_estimated_s`, so a smaller total is accounted for; a suite with no step for the target has a null total. Without a `target` nothing is left out and the fields are the whole suite's, whichever host runs a part of it. A `target` whose name is not a host name is refused with 422; the registry is not consulted, so a name no target has registered is answered with whatever has been learned under it, which is normally nothing, and with every step its `hosts:` names it |
-| `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
+| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all) and `needs_artifacts` (image labels the step names that no build produces, so only `run-suite --artifact` can pass them), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` also decides which steps the suite's own fields count: a step whose `hosts:` names other hosts is compiled for those hosts and not for this target, and, when that target has registered, a step its `platform` could not run (the response names the platform too) is left out as the planner leaves it out. Each test therefore carries `runs_on_target` (and `omitted_reason` when false), and the suite total, `unestimated_tests`, `per_board_tests`, the four build-option flags and `needs_artifacts` cover only the steps that target runs. The steps left out are listed in `omitted_tests` (`name`, `reason`, `estimated_s`, the last being the time on the host that does run it where the step names one host) with their time together in `omitted_estimated_s`, so a smaller total is accounted for; a suite with no step for the target has a null total. Hardware this bench has not got is not answered here: the controller has no copy of the target's resource registry, so those steps are counted and the run itself reports them. Without a `target` nothing is left out and the fields are the whole suite's, whichever host runs a part of it. A `target` whose name is not a host name is refused with 422; a name no target has registered is answered with whatever has been learned under it, which is normally nothing, with no platform, and with every step its `hosts:` names it |
+| `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, `platform` (the registry platform its OS is, `linux` or `macos`, else null), Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware` and `with_python` add `--with-firmware` and `--with-python` to the run's build, and either one without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `POST /api/run-groups` | start a [run group](#run-groups-one-plan-on-several-hosts): the same body as a run plus `{"hosts": ["Host_Linux", "Host_Mac"]}` (at least one, each named once, at most 16). 201 with the group, each member carrying its `run_id` or the `error` that host's start gave; 422 for an unusable request, a ref not in `/api/refs`, or an option that needs `build` without it; when no host started, the one status every host gave (404 an unknown target, 409 busy, 503 a runner away, 504 no answer in time) or 409 where they differ |
 | `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |

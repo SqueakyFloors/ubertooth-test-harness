@@ -37,7 +37,11 @@ from ubertooth_harness.learned import (
 )
 from ubertooth_harness.manifest import ManifestError, _safe_repository
 from ubertooth_harness.outputfiles import output_file_list
-from ubertooth_harness.hostneeds import TEST_BUILD_LABEL
+from ubertooth_harness.hostneeds import (
+    TEST_BUILD_LABEL,
+    platform_capabilities,
+    unmet,
+)
 from ubertooth_harness.plan import PlanError, TestStep, image_label, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
 
@@ -316,20 +320,48 @@ def step_hosts(arguments: Mapping) -> tuple[str, ...]:
     return tuple(str(alias) for alias in selector)
 
 
-def omitted_reason(arguments: Mapping, target: str | None) -> str:
+def omitted_reason(
+    catalog: TestCatalog,
+    test_name,
+    arguments: Mapping,
+    target: str | None,
+    platform: str | None = None,
+) -> str:
     """Why a run on ``target`` would not run this step, or ``''``.
 
-    Only what the plan itself decides: a step that names hosts is compiled
-    for the hosts it names and for no other, so a target it does not name
-    gets no invocation for it and none of its time. Whatever a host is left
-    out of for a reason of its own (its platform, hardware this bench has
-    not got) is decided against that host's own registry, which this listing
-    has not got, so those steps are counted.
+    What planning decides for the host itself, in the order it decides it
+    (``PlanCompiler.compile_suite``): a step that names hosts is compiled for
+    the hosts it names and for no other, and then a host whose platform the
+    step does not run on is left out as not applicable. ``platform`` is the
+    target's own (the controller has it from the target's registration);
+    without one only the plan's host naming is read, since nothing else here
+    knows what the target is.
+
+    The absences this cannot answer are the ones that need the target's
+    resource registry, which the controller has not got: hardware no host
+    here has, and a board placed differently from what the test needs. Those
+    steps are counted, and the run itself reports them.
     """
-    hosts = step_hosts(arguments)
-    if not target or not hosts or target in hosts:
+    if not target:
         return ""
-    return f"runs on {', '.join(hosts)}, not on {target}"
+    hosts = step_hosts(arguments)
+    if hosts and target not in hosts:
+        return f"runs on {', '.join(hosts)}, not on {target}"
+    if not platform:
+        return ""
+    # Exactly what the planner asks of a host before any hardware: the
+    # platform, and the test-wide needs only the platform can decide
+    # (BlueZ-only tools). Every other capability is unknown here, which
+    # hostneeds reads as met.
+    capabilities = platform_capabilities(target, platform)
+    try:
+        needs = catalog.get(test_name).test_needs(arguments)
+    except CatalogError:
+        return ""
+    return next(
+        (unmet(need, capabilities) for need in needs if unmet(need, capabilities)),
+        "",
+    )
 
 
 def _per_board(catalog: TestCatalog, step: TestStep) -> bool:
@@ -402,9 +434,9 @@ def _suite_view(name: str, tests: Sequence[Mapping]) -> dict:
     would run (``runs_on_target``): the time estimate, the build options to
     ask for, and the images only ``--artifact`` can pass. What the target
     does not run costs it nothing and asks nothing of its run. The steps
-    left out are reported beside those, with the time they would add on the
-    host that does run them, so a total that is smaller than the suite's is
-    accounted for rather than merely smaller.
+    left out are reported beside those, each with the time it would take on
+    the host that does run it, so a total that is smaller than the suite's
+    is accounted for rather than merely smaller.
 
     With no target nothing is left out, so the fields are what they were:
     the sum of every step in the suite.
@@ -451,6 +483,7 @@ def list_plans(
     *,
     estimates: EstimateStore | None = None,
     target: str | None = None,
+    platform: str | None = None,
 ) -> list[dict]:
     """Every ``<name>.yaml`` plan with its suites, tests and estimates.
 
@@ -472,11 +505,12 @@ def list_plans(
     ``estimate_fields``); without one it is the catalog estimate, as before.
 
     A ``target`` also decides which steps the suite's own fields count: a
-    step that names other hosts is not run there, so it adds nothing to that
-    target's estimate and asks nothing of its run, and is reported in
-    ``omitted_tests`` instead (see ``_suite_view``). Without a target every
-    step counts, which is the suite's whole time whichever host runs a part
-    of it.
+    step that target would not run adds nothing to its estimate and asks
+    nothing of its run, and is reported in ``omitted_tests`` instead (see
+    ``omitted_reason`` and ``_suite_view``). ``platform`` is that target's
+    own host platform, which decides a step the target could not run
+    whichever hosts it names. Without a target every step counts, which is
+    the suite's whole time whichever host runs a part of it.
     """
     plans = []
     try:
@@ -497,11 +531,21 @@ def list_plans(
         for suite, steps in plan.suites.items():
             tests = []
             for step in steps:
-                reason = omitted_reason(step.arguments, target)
+                reason = omitted_reason(
+                    catalog, step.test_name, step.arguments, target, platform
+                )
+                # A step this target does not run is timed where it does:
+                # for the host it names, when it names exactly one, so the
+                # figure is that host's learned estimate rather than this
+                # target's for a test this target never runs.
+                named = step_hosts(step.arguments)
+                host = target
+                if reason:
+                    host = named[0] if len(named) == 1 else None
                 tests.append({
                     "name": step.test_name,
                     **estimate_fields(catalog, step.test_name, step.arguments,
-                                      estimates=estimates, host=target),
+                                      estimates=estimates, host=host),
                     "per_board": _per_board(catalog, step),
                     # Whether a run on the target would run this step at all,
                     # and why not (``omitted_reason``). True for every step

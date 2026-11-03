@@ -47,9 +47,11 @@
     targets: new Map(),
     runs: new Map(),
     plans: [],
-    // The target the plan list was loaded for, and a token so a slower
-    // answer for a target already left cannot replace a newer list.
+    // The target the plan list on display was loaded for, the one a load is
+    // under way for, and a token so a slower answer for a target already
+    // left cannot replace a newer list.
     plansTarget: "",
+    plansWanted: "",
     plansToken: 0,
     // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
     refOptions: new Map(),
@@ -183,10 +185,11 @@
       return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
     }));
     if (targets.some((target) => target.host === current)) select.value = current;
-    // The first target to register, or a replaced selection, changes which
-    // host the plans were listed for; the estimates and the build options
-    // belong to that host.
-    if (select.value !== state.plansTarget) loadPlans();
+    // The first target to register, or a selection this update replaced,
+    // changes which host the plans belong to; the estimates and the build
+    // options are that host's. Compared with the target a load is under way
+    // for, so an update while one is in flight does not start another.
+    if (select.value !== state.plansWanted) loadPlans();
   }
 
   // ----- run setup ---------------------------------------------------------
@@ -239,12 +242,15 @@
   async function loadPlans() {
     const target = $("target").value;
     const token = ++state.plansToken;
+    state.plansWanted = target;
     const query = target ? `?target=${encodeURIComponent(target)}` : "";
     try {
       const data = await api("GET", `/api/plans${query}`);
       if (token !== state.plansToken) return;  // a later target owns the list
       state.plans = data.plans;
       state.plansTarget = target;
+      // A failure from an earlier load is not this list's status.
+      $("plan-status").textContent = "";
     } catch (error) {
       if (token !== state.plansToken) return;
       state.plans = [];
@@ -272,7 +278,8 @@
     const keep = [current, "fast"].find(
       (name) => name && usable.some((plan) => plan.name === name));
     if (keep) select.value = keep;
-    renderSuites();
+    // A reload for another target keeps the chosen suite as well.
+    renderSuites(true);
     if (state.live) rebuildChecklist();
   }
 
@@ -281,16 +288,17 @@
     return plan ? plan.suites.find((suite) => suite.name === suiteName) || null : null;
   }
 
-  function renderSuites() {
+  // `keepChoice` is for a reload of the same plan (another target): the
+  // chosen suite stays chosen. When the operator picks a plan, the suite
+  // named after it wins, as it did before.
+  function renderSuites(keepChoice = false) {
     const plan = state.plans.find((item) => item.name === $("plan").value);
     const select = $("suite");
     const current = select.value;
     const suites = plan ? plan.suites : [];
     select.replaceChildren(...suites.map((suite) =>
       el("option", { value: suite.name, text: `${suite.name} (${suite.tests.length} tests)` })));
-    // The chosen suite, so a reload for another target keeps it; else the
-    // suite named after the plan.
-    const keep = suites.find((suite) => suite.name === current)
+    const keep = (keepChoice && suites.find((suite) => suite.name === current))
       || suites.find((suite) => suite.name === plan?.name);
     if (keep) select.value = keep.name;
     renderSuiteTests();
@@ -365,12 +373,29 @@
   function omittedText(suite) {
     const omitted = Array.isArray(suite.omitted_tests) ? suite.omitted_tests : [];
     if (!omitted.length) return "";
-    const adds = suite.omitted_estimated_s
-      ? `, ${formatSeconds(suite.omitted_estimated_s)} of test time there,`
-      : "";
-    return `${omitted.length} test(s) of this suite run on other hosts${adds}`
-      + " and are not counted above: "
-      + omitted.map((test) => `${test.name} (${test.reason})`).join("; ") + ".";
+    // The known estimates among them, so one step without an estimate does
+    // not hide the time of the rest.
+    const timed = omitted.filter((test) => typeof test.estimated_s === "number");
+    const total = timed.reduce((sum, test) => sum + test.estimated_s, 0);
+    const untimed = omitted.length - timed.length;
+    const missing = untimed ? `${untimed} with no estimate` : "";
+    const counted = total
+      ? `${formatSeconds(total)} of test time where they do run`
+        + (missing ? `, ${missing}` : "")
+      : missing;
+    const adds = counted ? ` (${counted})` : "";
+    // Grouped by reason: a whole suite for another host is one sentence,
+    // not the same reason after every test name.
+    const groups = new Map();
+    for (const test of omitted) {
+      const names = groups.get(test.reason) || [];
+      names.push(test.name);
+      groups.set(test.reason, names);
+    }
+    const named = [...groups.entries()]
+      .map(([reason, names]) => `${names.join(", ")} — ${reason}`).join("; ");
+    return `${omitted.length} test(s) of this suite are not run there${adds}`
+      + ` and are not counted above: ${named}.`;
   }
 
   async function submitRun(event) {
@@ -1108,8 +1133,14 @@
     });
   }
 
+  // The tests of the suite that need a build option, counted the way
+  // /api/plans counts the suite's own flags: only the steps the chosen
+  // target runs, since a step it does not run must not make it build.
   function neededBy(suite, need) {
-    return suite ? suite.tests.filter((test) => test[need]).map((test) => test.name) : [];
+    if (!suite) return [];
+    return suite.tests
+      .filter((test) => test[need] && test.runs_on_target !== false)
+      .map((test) => test.name);
   }
 
   // Flash and the two build options need Build: each is disabled, with a
@@ -1174,12 +1205,15 @@
         syncBuildOptions();
       });
     }
+    // Another target is another plan listing: its own estimates, and its own
+    // answer to what the suite leaves out and what it must build.
+    $("target").addEventListener("change", loadPlans);
     $("build").addEventListener("change", syncBuildOptions);
     // Flashing builds the firmware image anyway, which the note says.
     $("flash-build").addEventListener("change", syncBuildOptions);
     syncBuildOptions();
     $("refs-reload").addEventListener("click", loadRefs);
-    $("plan").addEventListener("change", renderSuites);
+    $("plan").addEventListener("change", () => renderSuites());
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelRun);
     $("file-previous").addEventListener("click", () => pageOutputFile(-1));

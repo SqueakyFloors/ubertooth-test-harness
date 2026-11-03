@@ -998,10 +998,14 @@ by the REST API and `/ws/live`.
   passes, and the suite line then says a run started here is refused before
   its tests) → "Run". The plan list is fetched for the chosen target
   (`GET /api/plans?target=HOST`) and again whenever it changes, keeping the
-  chosen plan and suite: a step whose `hosts:` names other hosts is not
-  compiled for this target, so it is left out of the suite's estimate and of
-  the build options the suite asks for, and is named with the time it takes
-  where it does run (`omitted_tests`, `omitted_estimated_s`). The controller
+  chosen plan and suite: a step whose `hosts:` names other hosts, or whose
+  `platforms:` or test-wide needs the target's platform does not meet, is
+  not compiled for this target, so it is left out of the suite's estimate
+  and of the build options the suite asks for, and is named with the time it
+  takes where it does run (`omitted_tests`, `omitted_estimated_s`). That is
+  the host-level half of what the planner decides; hardware the bench has
+  not got needs the target's resource registry, which the controller has
+  not got. The controller
   refuses a ref that is not in the list or a full commit ID (422). The run
   request carries the commit listed for the ref (the GUI sends the commit it
   showed; a ref that has moved since is refused with 409 and the page lists
