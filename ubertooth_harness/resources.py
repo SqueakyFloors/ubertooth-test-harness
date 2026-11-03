@@ -198,8 +198,11 @@ def _bench_lock_names(resource) -> tuple[tuple[str, str], ...]:
         if not serial:
             continue
         names.append((serial, written))
-        if serial.isdigit():
-            # nrfutil's form of a J-Link serial, which sysfs zero-pads.
+        if resource.type == NRF52840_DK and serial.isdigit():
+            # A DK alone has a second spelling: nrfutil prints its J-Link
+            # serial without the leading zeros sysfs pads it with, and a
+            # bench note may name the lock either way. No other type has
+            # one, so an all-digit serial elsewhere reserves nothing.
             names.append((serial.lstrip("0"), written))
     return tuple(item for item in names if item[0])
 
@@ -637,17 +640,21 @@ class FileResourceRegistry:
                         "itself, so give the device the serial its own USB "
                         "descriptor reports"
                     )
+                # The name that collides, not either device's spelling of
+                # it: a DK is also known by its serial without the leading
+                # zeros, so the spelling in the registry may be neither
+                # device's own.
                 if self.resources[held_by].type == resource.type:
                     raise RegistryError(
                         f"{resource.type}s {held_by} and {resource.alias} are "
-                        f"registered with the same serial '{written}'; one serial "
-                        "is one device, whichever way it is written, and the two "
+                        f"registered with the same serial '{name}'; one serial is "
+                        "one device, whichever way it is written, and the two "
                         "would be held through one of the bench's lock files"
                     )
                 # Neither of them is the mistake on its own, so both are
                 # named: which one is wrong is for whoever wired the bench.
                 raise RegistryError(
-                    f"'{written}' is the serial of both {what} and {this}; the "
+                    f"'{name}' is the serial of both {what} and {this}; the "
                     "bench's own lock file for a device is named after its plain "
                     "serial, so a lock of one would be read as a lock of the other"
                 )

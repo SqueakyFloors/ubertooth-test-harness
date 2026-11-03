@@ -102,14 +102,23 @@ class NamesTestCase(unittest.TestCase):
 
 
 class OneLeaseKeyOneDevice(NamesTestCase):
-    """Two resources may not take one lease file (#288)."""
+    """Two resources may not take one lease file (#288).
+
+    For every type the harness leases today, the key and the bench lock
+    name come from one identity field, so a registry that puts two devices
+    on one key almost always puts them on one bench name as well and is
+    refused for that, which names the serial a person wrote. What is left
+    for the key check itself is below: the key check is what makes the rule
+    hold for a key built from something else.
+    """
 
     def test_two_dks_whose_keys_collide_and_whose_serials_do_not(self):
         """The lease key alone, with nothing in the serials to go on.
 
         A J-Link serial is zero-padded by sysfs and not by nrfutil, so the
-        key drops the leading zeros: these two are two serials, two bench
-        lock names, and one lease file. Nothing but the key check sees it.
+        key drops the leading zeros. `000000` and `0000000` are two serials
+        with no bench name in common (the stripped form is empty and is not
+        a name at all) and one lease file.
         """
         reason = self.refuse(dk("DK_A", "000000"), dk("DK_B", "0000000"))
         self.assertIn("DK_A", reason)
@@ -117,31 +126,12 @@ class OneLeaseKeyOneDevice(NamesTestCase):
         self.assertIn("would both be leased as 'nrf52840dk-0'", reason)
         self.assertIn("one lease file is one device", reason)
 
-    def test_two_peers_registered_with_one_bridge_serial(self):
-        """Their other identity fields differ, so only the key is shared."""
-        reason = self.refuse(
-            peer("ESP_A", BRIDGE), peer("ESP_B", BRIDGE, last="02")
+    def test_the_key_is_read_from_the_function_that_builds_it(self):
+        """So a type whose key stops coming from a serial is still covered."""
+        registry = self.load(dk("DK_A", "000123456789"))
+        self.assertEqual(
+            "nrf52840dk-123456789", leases.resource_key(registry.get("DK_A"))
         )
-        self.assertIn("ESP_A", reason)
-        self.assertIn("ESP_B", reason)
-
-    def test_one_serial_written_two_ways_is_still_one_device(self):
-        """Taken verbatim, a peer's two spellings would name two files.
-
-        That is the mistake: one device would be held twice over, so the
-        comparison ignores case even though the two could not collide.
-        """
-        reason = self.refuse(
-            peer("ESP_A", BRIDGE.upper()), peer("ESP_B", BRIDGE, last="02")
-        )
-        self.assertIn("same serial", reason)
-
-    def test_two_ubertooths_registered_with_one_serial_in_two_cases(self):
-        reason = self.refuse(
-            ubertooth("UT_A", BOARD.upper()), ubertooth("UT_B", BOARD)
-        )
-        self.assertIn("UT_A", reason)
-        self.assertIn("UT_B", reason)
 
     def test_distinct_serials_load_and_keep_their_own_keys(self):
         """The refusals above must not be refusing an ordinary bench."""
@@ -172,7 +162,63 @@ class OneLeaseKeyOneDevice(NamesTestCase):
 
 
 class OneBenchLockNameOneDevice(NamesTestCase):
-    """Two devices may not share the serial a bench lock is named after."""
+    """Two devices may not share the serial a bench lock is named after.
+
+    That name is also a lease key for an Ubertooth, so these cases cover
+    both spaces at once; the message names the serial, which is the field
+    a person wrote.
+    """
+
+    def test_two_peers_registered_with_one_bridge_serial(self):
+        """Their other identity fields differ, so the registry loaded before.
+
+        The duplicate-identity check compares whole identity mappings, and
+        one of these two would have been held as the other.
+        """
+        reason = self.refuse(
+            peer("ESP_A", BRIDGE), peer("ESP_B", BRIDGE, last="02")
+        )
+        self.assertIn("ESP_A", reason)
+        self.assertIn("ESP_B", reason)
+        self.assertIn("same serial", reason)
+
+    def test_one_serial_written_two_ways_is_still_one_device(self):
+        """Taken verbatim, a peer's two spellings would name two files.
+
+        That is the mistake: one device would be held twice over, so the
+        comparison ignores case even though the two could not collide.
+        """
+        reason = self.refuse(
+            peer("ESP_A", BRIDGE.upper()), peer("ESP_B", BRIDGE, last="02")
+        )
+        self.assertIn("same serial", reason)
+
+    def test_two_ubertooths_registered_with_one_serial_in_two_cases(self):
+        reason = self.refuse(
+            ubertooth("UT_A", BOARD.upper()), ubertooth("UT_B", BOARD)
+        )
+        self.assertIn("UT_A", reason)
+        self.assertIn("UT_B", reason)
+
+    def test_an_all_digit_serial_reserves_no_second_name(self):
+        """Only a DK has a second spelling, so only a DK reserves one.
+
+        A peer's bridge serial is taken verbatim, so `0123` is one name;
+        another device registered `123` collides with nothing.
+        """
+        registry = self.load(peer("ESP_A", "0123456789"),
+                             programmer("Prog_A", "123456789", "ESP_A"))
+        self.assertEqual(
+            "esp32-0123456789", leases.resource_key(registry.get("ESP_A"))
+        )
+        # A DK's stripped form is a real name, so that one still collides.
+        reason = self.refuse(dk("DK_A", "000123456789"),
+                             peer("ESP_B", "123456789", last="02"))
+        self.assertIn("DK_A (nRF52840 DK)", reason)
+        self.assertIn("ESP_B (ESP32 Classic peer)", reason)
+        # And the name quoted is the one that collides, which here is
+        # neither device's spelling of it in the registry.
+        self.assertIn("'123456789' is the serial of both", reason)
 
     def test_a_peer_may_not_take_a_registered_board_s_serial(self):
         """A bridge serial is 32 hex digits, like a board's (#290).
@@ -298,6 +344,51 @@ class BenchLockFileNames(NamesTestCase):
             [board], directory=self.leases, external_template=self.template
         )
         self.assertTrue(states[0]["held"])
+
+    def test_a_template_that_points_at_the_lease_directory_is_refused(self):
+        """Either of a device's own names: one process cannot flock one file
+        twice, and the file it would take is a device's lease."""
+        board = self.bench_board("ESP_A", BRIDGE)
+        for template in (
+            str(self.leases / "{serial}.lock"),          # the bench name
+            str(self.leases / "bench-{serial}.lock"),    # the lease key
+        ):
+            with self.subTest(template=template):
+                with self.assertRaises(leases.LeaseError) as caught:
+                    leases.acquire(
+                        [board],
+                        leases.holder_info(
+                            run_id=None, owner="bench", purpose="a peer session"
+                        ),
+                        directory=self.leases,
+                        external_template=template,
+                    )
+                self.assertIn("the harness's own lease file", str(caught.exception))
+
+    def test_a_ticket_carries_the_name_the_bench_s_file_uses(self):
+        """A command that gives way reads the waiter's ticket and probes
+        those files; without the name it would probe one nothing takes and
+        read a held device as free."""
+        board = self.bench_board("ESP_A", BRIDGE)
+        queue = leases.TicketQueue(
+            self.leases, [board],
+            leases.holder_info(run_id=None, owner="bench", purpose="a peer session"),
+            wait_s=60.0,
+        )
+        self.assertEqual(
+            [{"key": f"bench-{BRIDGE}", "resource": "ESP_A (bench lock)",
+              "external_key": BRIDGE}],
+            queue.waiting_for,
+        )
+        read_back = leases.waiting_resources(
+            {"waiting_for": queue.waiting_for}, board
+        )
+        self.assertEqual([f"bench-{BRIDGE}"], [item.key for item in read_back])
+        self.assertEqual([BRIDGE], [item.lock_name for item in read_back])
+        self.assertEqual(
+            self.locks / f"board-{BRIDGE}.lock",
+            leases.external_lock_path(self.template, read_back[0]),
+        )
 
     def test_a_board_needs_no_second_name_at_all(self):
         """Its lease key is its serial, so there is nothing to prefix."""

@@ -266,14 +266,13 @@ holds the other.
   are local to a host, so a pair across two of them would hold nothing),
   already has another programmer, or is the programmer itself, and when the
   pairing loops back on itself.
-- Its serial has to be its own, as every device's does: two devices may not
-  be registered with one serial, whatever their types and whichever way each
-  is written, because `scripts/lab/hold` names the bench's own lock file
-  after a device's plain serial and a lock of one would be read as a lock of
-  the other. Nor may a serial spell a file the lease directory keeps for
-  itself (`host-power`, `takeover`). The same rule covers the lease files:
-  no two devices may take one (harness
-  [#288](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/288)).
+- Its serial has to be its own, as every device's does, and the rule is not
+  this type's: see "One lock file is one device" under [Sharing the
+  bench](#sharing-the-bench). A programmer is the one device whose serial is
+  chosen by whoever labels the adapter rather than read from the hardware,
+  so it is the easiest one to give a name something else already has
+  (harness [#288](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/288),
+  [#290](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/290)).
 - A chain is allowed and is held as one set, for a bench that wires a
   programmer to another programmer's own header: holding any member holds all
   of them.
@@ -658,6 +657,17 @@ debug programmer and the board it programs](#a-debug-programmer-and-the-board-it
 Where the bench's own scripts lock devices with their own per-device files, a
 lease takes those too (`--external-board-lock`). See
 [Sharing boards: leases](../README.md#sharing-boards-leases).
+
+**One lock file is one device.** No two devices may be registered with one
+serial, whatever their types and whichever way each is written: the bench's
+own lock file for a device is named after its plain serial, so a lock of one
+would be read as a lock of the other. Nor may two resources take one lease
+file, which is a danger a duplicate identity does not cover, since a lease
+key is built from one identity field (a DK registered `000123456789` and one
+registered `123456789` are two identities and one key). A registry that does
+either is refused when it is loaded, naming both devices. `host-power` and
+`takeover` are names the lease directory keeps for itself, and no device may
+be registered with one.
 
 For a command you run by hand, [`scripts/lab/hold`](../scripts/lab/README.md)
 takes the leases and names devices the way a bench note does, by serial or by

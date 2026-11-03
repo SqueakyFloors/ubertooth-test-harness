@@ -617,17 +617,25 @@ def pairings_for_invocations(invocations: Sequence, registry) -> tuple[dict, ...
 
     One record per device the pairing added to boards_for_invocations, in
     that expansion's order. Both come from one call to the registry's own
-    expansion: the aliases it adds follow the ones it was given, and its
-    clauses are those added aliases in the same order (``expand_pairs``). So
-    a run reports exactly the devices it leases, in the registry's own
-    wording, which is the wording `hold`, `hub-port` and `boards` print for
-    the same pair; nothing here can word it differently or name a device the
-    leases do not hold.
+    expansion, which answers with the aliases to hold and one clause per
+    alias it added, in the same order (``expand_pairs``). So a run reports
+    exactly the devices it leases, in the registry's own wording, which is
+    the wording `hold`, `hub-port` and `boards` print for the same pair;
+    nothing here can word it differently or name a device the leases do not
+    hold.
     """
     named = _named_aliases(invocations, registry)
     held, clauses = expand_pairs(registry, named)
+    added = tuple(alias for alias in held if alias not in named)
+    if len(clauses) != len(added):
+        # A registry whose expansion does not follow expand_pairs' contract
+        # (one clause per added alias, in that order). Each device is still
+        # reported, because the run holds it; without its clause the line
+        # says what is known (describe_pairing_lease), which is better than
+        # giving a device another one's reason.
+        clauses = ("",) * len(added)
     records = []
-    for alias, clause in zip(held[len(named):], clauses):
+    for alias, clause in zip(added, clauses):
         # Which device the run asked for, for a reader who wants the pair
         # rather than the sentence. The clause above is what is shown.
         source = next(
@@ -908,7 +916,14 @@ class TicketQueue:
             if board.key in queued_keys:
                 continue  # one resource, two entries (a lease and its external lock)
             queued_keys.add(board.key)
-            self.waiting_for.append({"key": board.key, "resource": board.alias})
+            entry = {"key": board.key, "resource": board.alias}
+            if board.external_key:
+                # The bench's own file for this device is not named after
+                # its key (Board.external_key), and a command that gives way
+                # to this ticket probes that file: without this it would
+                # probe a name nothing takes and read a held device as free.
+                entry["external_key"] = board.external_key
+            self.waiting_for.append(entry)
         self.number = time.time_ns()
         self.name = f"{self.number:020d}-{os.getpid()}-{os.urandom(3).hex()}"
         self.tickets: list[tuple[Path, int]] = []
@@ -1176,7 +1191,14 @@ def waiting_resources(ticket: Mapping, board: Board) -> list[Board]:
             # takes its locks, so it would read as held by a running command.
             continue
         seen.add(key)
-        resources.append(Board(_printable(entry.get("resource")) or key, key))
+        # The bench's own name for the device, where the ticket records one
+        # and it is a name a file may carry; otherwise the key, as before.
+        external = str(entry.get("external_key") or "")
+        if not _LOCK_NAME.fullmatch(external) or external in (".", ".."):
+            external = ""
+        resources.append(
+            Board(_printable(entry.get("resource")) or key, key, external or None)
+        )
     return resources or [board]
 
 
