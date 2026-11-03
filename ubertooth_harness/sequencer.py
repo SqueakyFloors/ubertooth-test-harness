@@ -37,6 +37,7 @@ from ubertooth_harness.outputfiles import (
     TARGET_SERIAL_STREAM,
     CommandOutput,
     measure,
+    output_of,
     stream_for,
 )
 from ubertooth_harness.rawlog import record_output
