@@ -290,7 +290,7 @@ class Run:
     flash_build: bool = False
     # The build also built the firmware image, the alternate btbr image, and
     # the Python tools (only with build; runs stored before protocol 5 could
-    # ask for none of them, and those stored before protocol 6 could not ask
+    # ask for none of them, and those stored before protocol 7 could not ask
     # for the btbr image, so a record without these fields loads with them
     # false, which is what it did).
     with_firmware: bool = False

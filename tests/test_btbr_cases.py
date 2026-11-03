@@ -86,14 +86,27 @@ class ImageLabelTests(unittest.TestCase):
         self.assertEqual(APPLICATION_IMAGE_LABEL,
                          image_label(TEST_BUILD_ARTIFACT))
 
-    def test_a_firmware_build_makes_and_names_both_images(self):
+    def test_a_build_asked_for_both_images_makes_and_names_both(self):
+        # Which images a run builds is the run's own decision (cli.py): a
+        # firmware build makes the application image, and the alternate one
+        # when it was asked for. Given both, the plan has a step each (#279).
         with tempfile.TemporaryDirectory() as work:
             plan = plan_build(
                 ubertooth=UBERTOOTH, libbtbb=LIBBTBB, work_dir=Path(work),
-                platform="linux", with_firmware=True)
+                platform="linux", with_firmware=True,
+                firmware_images=FIRMWARE_IMAGES)
             steps = [command.step_id for command in plan.commands]
             self.assertIn("firmware-build", steps)
             self.assertIn("firmware-build-btbr", steps)
+            # The default is the application image alone, so a plan nobody
+            # asked for the alternate one does not build it.
+            application_only = plan_build(
+                ubertooth=UBERTOOTH, libbtbb=LIBBTBB, work_dir=Path(work),
+                platform="linux", with_firmware=True)
+            self.assertNotIn(
+                "firmware-build-btbr",
+                [command.step_id for command in application_only.commands],
+            )
             self.assertEqual(plan.image(APPLICATION_IMAGE), plan.firmware_image)
             self.assertEqual(plan.image(BTBR_IMAGE), plan.btbr_image)
             self.assertEqual(("bluetooth_rxtx", "btbr"), FIRMWARE_IMAGES)

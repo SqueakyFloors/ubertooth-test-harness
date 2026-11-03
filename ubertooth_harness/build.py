@@ -86,8 +86,10 @@ class BuildPlan:
     # The firmware directories this plan makes a .dfu from, when it builds
     # firmware at all. A firmware build makes the application image; the
     # alternate one is added for a run that asked for it, so a plan that
-    # never touches it does not depend on it building (#279).
-    firmware_images: tuple[str, ...] = FIRMWARE_IMAGES
+    # never touches it does not depend on it building (#279). The default is
+    # that one image, so a caller that says nothing cannot get an image the
+    # run would then record as an artifact nobody asked for.
+    firmware_images: tuple[str, ...] = (APPLICATION_IMAGE,)
 
     @property
     def bin_dir(self) -> Path:
@@ -227,7 +229,7 @@ def plan_build(
     extra_include_dir: str | None = None,
     jobs: int | None = None,
     python: str | None = None,
-    firmware_images: Sequence[str] = FIRMWARE_IMAGES,
+    firmware_images: Sequence[str] = (APPLICATION_IMAGE,),
 ) -> BuildPlan:
     if platform not in ("macos", "linux"):
         raise BuildError(f"unsupported build platform: {platform}")
