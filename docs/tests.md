@@ -2620,7 +2620,12 @@ covers 1032192 bytes, which no part in the harness's copy of the fork's part
 table explains (32 KiB, 64 KiB, 128 KiB, 256 KiB, 512 KiB); that length would
 be the application region of a part with 1024 KiB of flash`), so a part the
 fork added later shows up as the entry to add rather than as an unexplained
-figure. Every run also reads the table out of the fork's checkout at the
+figure. The length also has to follow the part the command itself named: that
+same line gives the flash the part has, so a length that is right for some
+other part in the table and wrong for this one fails too (`the read-back
+covers 16384 bytes, but the command reported a part with 64 KiB of flash,
+whose application region is 49152 bytes`). Every run also reads the table out
+of the fork's checkout at the
 commit under test and records the comparison, so the copy is kept in step
 without waiting for such a board to reach the bench: see the `dfu_part_table`
 record in the README's "DFU images" section.

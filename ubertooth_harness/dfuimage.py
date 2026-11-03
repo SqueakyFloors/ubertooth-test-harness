@@ -476,6 +476,11 @@ READBACK_LINE_PATTERN = (
     r"Reading back (?P<length>\d+) bytes, "
     r"0x(?P<start>[0-9a-fA-F]+)-0x(?P<end>[0-9a-fA-F]+): *(?P<part>[^\n]*)")
 _READBACK_RE = re.compile(READBACK_LINE_PATTERN)
+# The flash figure in that line's tail, whichever way it was reached: "part
+# 0x25011722 (LPC1754) has 128 KiB of flash", and the two assuming forms,
+# "assuming the 128 KiB part this firmware is linked for". Both end in the
+# size, so one pattern reads either.
+_REPORTED_FLASH_RE = re.compile(r"(?P<kib>\d+) KiB")
 
 
 class ReadbackPlan(NamedTuple):
@@ -511,7 +516,33 @@ class ReadbackPlan(NamedTuple):
                             "part in the harness's copy of the fork's part table "
                             f"explains ({sizes}); that length would be the "
                             f"application region of a part with {implied} of flash")
+        problems += self._length_follows_the_reported_part()
         return problems
+
+    def _length_follows_the_reported_part(self) -> list[str]:
+        """Why the length does not follow the flash size the command named.
+
+        The line says both the length and the flash the part has, so the
+        arithmetic between them can be checked rather than assumed. Without
+        this, a length that is wrong for its part but right for some other
+        part passes: 16384 bytes on a 64 KiB part is the application region
+        of a 32 KiB one, and both are in the table.
+        """
+        flash_size = self.reported_flash_size()
+        if flash_size is None:
+            return []
+        expected = upload_length(flash_size)
+        if self.length == expected:
+            return []
+        return [f"the read-back covers {self.length} bytes, but the command "
+                f"reported a part with {describe_flash_size(flash_size)} of "
+                f"flash, whose application region is {expected} bytes"]
+
+    def reported_flash_size(self) -> int | None:
+        """The flash the command said the part has, or None when its line
+        named no figure this can read."""
+        found = _REPORTED_FLASH_RE.search(self.part)
+        return int(found["kib"]) * 1024 if found else None
 
 
 def readback_plan(output: str) -> ReadbackPlan | None:

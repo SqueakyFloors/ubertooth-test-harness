@@ -452,6 +452,87 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         self.assertEqual("unchecked", check.status)
         self.assertIn("dfu_parts_extra.c", check.message)
 
+    def test_the_table_and_the_function_renamed_together_is_still_reported(self):
+        """Renaming both of those would have gone quiet while only they were
+        looked for. The size the function falls back to is the third name,
+        and any one of the three being left makes the tree say it keeps these
+        figures somewhere."""
+        renamed = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c":
+             GROWN_TABLE_C.replace("DFU_PARTS", "LPC_PARTS")
+             + UPLOAD_LENGTH_C.replace("dfu_upload_length",
+                                       "dfu_readback_length")},
+            "the table and the function renamed")
+        check = check_sources(self._sources(renamed))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("no DFU_PARTS table in", check.message)
+
+    def test_a_tree_that_keeps_none_of_these_names_is_passed_over(self):
+        """Measured, not assumed: `dfu_recovery.c` arrived in the fork before
+        the part table did, so 51 of 474 real fork refs have the file and
+        none of these names. Reading the file's presence as a rename made
+        every one of them cry wolf, which is worse than the hole it closed."""
+        old = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c":
+             "/* recovery, before the part table */\n",
+             "host/ubertooth-tools/src/dfu_recovery.h": "/* no figures yet */\n"},
+            "the recovery sources before the part table")
+        check = check_sources(self._sources(old))
+        self.assertEqual("skipped", check.status)
+
+    def test_a_declaration_in_a_document_or_a_string_is_not_a_second_list(self):
+        """What a grep over a tree turns up that is text about code, not
+        code: the fork writes its man pages with fenced C blocks, and a test
+        can hold a declaration in a string literal."""
+        for description, files in (
+            ("a man page quoting the table",
+             {"host/doc/ubertooth-dfu.md":
+              "The table is:\n\n```c\n" + PART_TABLE_C + "```\n"}),
+            ("a declaration inside a string literal",
+             {"host/ubertooth-tools/tests/test_parts.c":
+              'static const char *expected =\n'
+              '    "static const struct dfu_part DFU_PARTS_EXTRA[] = {";\n'}),
+            # Only the array: the fork's comment above the table would close
+            # the one wrapped around it.
+            ("a commented-out second list",
+             {"host/ubertooth-tools/src/dfu_recovery_old.c":
+              "/*\n"
+              + GROWN_TABLE_C[GROWN_TABLE_C.index("static const"):].replace(
+                  "DFU_PARTS[]", "DFU_PARTS_OLD[]")
+              + "\n*/\n"}),
+        ):
+            with self.subTest(description):
+                commit = self._commit_files(files, description)
+                check = check_sources(self._sources(commit))
+                self.assertEqual("passed", check.status, check.message)
+
+    def test_a_second_list_written_with_a_tab_is_still_found(self):
+        """`git grep` is given a POSIX regular expression, which has no \\t
+        escape, so the whitespace class has to be written as one."""
+        tabbed = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_parts_extra.c":
+             GROWN_TABLE_C.replace("DFU_PARTS[] =", "DFU_PARTS_EXTRA[]\t=")},
+            "a second list written with a tab")
+        check = check_sources(self._sources(tabbed))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("dfu_parts_extra.c", check.message)
+
+    def test_figures_renamed_with_a_prefix_are_not_read_as_the_old_ones(self):
+        """Substring containment counted DFU_BOOTLOADER_OFFSET as naming
+        BOOTLOADER_OFFSET, so a fork that namespaced all three and left the
+        old defines behind compared as a match while compiling other
+        values."""
+        namespaced = UPLOAD_LENGTH_C.replace(
+            "BOOTLOADER_OFFSET + BOOTLOADER_SIZE",
+            "DFU_BOOTLOADER_OFFSET + DFU_BOOTLOADER_SIZE").replace(
+            "DFU_ASSUMED_FLASH_SIZE;", "DFU_ASSUMED_FLASH_SIZE_V2;")
+        commit = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c": PART_TABLE_C + namespaced},
+            "the figures namespaced")
+        check = check_sources(self._sources(commit))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("does not name", check.message)
+
     def test_a_host_file_that_only_mentions_the_table_is_not_a_second_list(self):
         """A test that walks the table through its accessors, or a document
         that names it, holds no list of its own. The fork's own host test
@@ -521,7 +602,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         make every run unchecked."""
         bootloader = self._commit_files(
             {"firmware/bootloader/flash.h":
-             GROWN_TABLE_C.replace("DFU_PARTS[]", "DFU_PARTS[]"),
+             GROWN_TABLE_C.replace("DFU_PARTS[]", "DFU_PARTS_BOOTLOADER[]"),
              "firmware/tests/test_bootloader_flash_bounds.cpp":
              "/* reads DFU_PARTS from both tables */\n"},
             "the bootloader's own copy")
@@ -609,8 +690,8 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
     def test_a_commit_with_no_table_is_skipped_not_a_warning(self):
         check = check_sources(self._sources(self.untabled))
         self.assertEqual("skipped", check.status)
-        self.assertIn("names DFU_PARTS nor dfu_upload_length anywhere",
-                      check.message)
+        self.assertIn("names neither " + " nor ".join(dfuparts.TREE_MARKERS)
+                      + " anywhere", check.message)
         self.assertIn("older than the figures", check.message)
         self.assertEqual([], check.details()["fork_flash_sizes"])
 
@@ -644,6 +725,21 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         self.assertIn("FLASH_128K", check.message)
         # A run with no Ubertooth source is no run at all.
         self.assertIsNone(check_sources(()))
+
+    def test_a_record_too_long_to_write_still_leaves_the_run_going(self):
+        """A part name long enough to push the record past the event limit:
+        the record is worth less than the run."""
+        huge = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(
+                GROWN_TABLE_C.replace('"LPC17-1M"', '"' + "L" * 20000 + '"'))},
+            "a part with a very long name")
+        out = self._run_dir()
+        publisher = EventPublisher("run", JsonlEventSink(out / RUN_LOG))
+        dfuparts.record(publisher, self._sources(huge))
+        publisher.emit("run_finished", "passed", {})
+        events = [json.loads(line) for line in (out / RUN_LOG).read_text().splitlines()]
+        self.assertEqual("dfu_part_table", events[0]["event_type"])
+        self.assertEqual("run_finished", events[-1]["event_type"])
 
     def test_nothing_this_module_does_can_end_a_run(self):
         """The promise does not rest on having listed every exception type:

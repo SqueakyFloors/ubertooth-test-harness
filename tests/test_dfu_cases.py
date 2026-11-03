@@ -1013,7 +1013,11 @@ class DfuReadbackLengthTests(unittest.TestCase):
             ["the read-back covers 1024 bytes, which no part in the harness's copy "
              "of the fork's part table explains (32 KiB, 64 KiB, 128 KiB, 256 KiB, "
              "512 KiB); that length would be the application region of a part with "
-             "17 KiB of flash"],
+             "17 KiB of flash",
+             # The same line named a 128 KiB part, so the length does not
+             # follow the part the command itself reported.
+             "the read-back covers 1024 bytes, but the command reported a part "
+             "with 128 KiB of flash, whose application region is 114688 bytes"],
             odd.problems())
         # A plan that does not add up fails the comparison as well.
         self.assertIn("0x4100-0x1fffe is not 114688 bytes",

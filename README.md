@@ -2485,10 +2485,12 @@ given), or `skipped` (the commit names neither `DFU_PARTS` nor
 `dfu_upload_length` anywhere, so it is older than the figures and has none to
 compare with). Only a commit that never had the figures is quiet: a
 comparison that stopped working reports itself, which is the failure this
-check exists to avoid. What it cannot see is the arithmetic itself: a fork
-that still names those three figures and works the length out of them
-differently compares as a match, and the read-back step is what catches that,
-by the length the tool really reports. The CI `build` job runs the same
+check exists to avoid. What it cannot see is the arithmetic itself, so a fork
+that still names all three figures and works the length out of them
+differently compares as a match. The `DFU images` step is what catches that:
+the line a `-u` prints names both the length and the flash the part has, and
+the step checks one against the other, so a length that is wrong for its part
+fails even where it would be right for some other part in the table. The CI `build` job runs the same
 comparison once against the fork's `main` and shows it on the workflow run
 page (`scripts/ci.sh dfu-part-table` runs only that step); its `build` and
 `run-suite` steps then record it without printing it again

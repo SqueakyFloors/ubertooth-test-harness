@@ -60,18 +60,29 @@ SOURCE_FILES = (
 PART_TABLE_FILES = SOURCE_FILES[:2]
 
 # What a tree that has these figures at all names somewhere, whatever it
-# calls the files they are in: the table, and the function whose arithmetic
-# the harness mirrors. A tree that names neither is from before any of this
-# and has nothing to compare with; a tree that names either and whose figures
-# this cannot read has moved them somewhere this does not follow, which is
-# reported rather than passed over.
-TREE_MARKERS = ("DFU_PARTS", "dfu_upload_length")
+# calls the files they are in: the table, the function whose arithmetic the
+# harness mirrors, and the size that function falls back to. A tree that
+# names none of them keeps nothing the harness mirrors, and is passed over; a
+# tree that names any of them and whose figures this cannot read has moved or
+# rewritten them, which is reported. Three names rather than one, because any
+# one of them can be renamed on its own and the check must not fall silent
+# for that.
+TREE_MARKERS = ("DFU_PARTS", "dfu_upload_length", "DFU_ASSUMED_FLASH_SIZE")
 
 # A part list being defined, rather than the table being mentioned: a test
 # that walks it, a comment, or a document names the symbol without holding a
 # list of its own, and reading those as a second list would report a run
-# unchecked over nothing.
-PART_LIST_DEFINITION = r"DFU_PARTS[A-Za-z0-9_]*[ \t]*\[[^]]*\][ \t]*="
+# unchecked over nothing. Written for `git grep --extended-regexp`, which is
+# POSIX ERE and has no \t escape, so whitespace is a character class. A file
+# this matches is then read and has to hold a table parse_part_table() finds,
+# since text alone cannot tell a declaration from a man page quoting one.
+PART_LIST_DEFINITION = r"DFU_PARTS[A-Za-z0-9_]*[[:space:]]*\[[^]]*\][[:space:]]*="
+# The same thing as a Python pattern, for confirming a file git grep found.
+_PART_LIST_DEFINITION_RE = re.compile(
+    r"DFU_PARTS[A-Za-z0-9_]*\s*\[[^]]*\]\s*=")
+# Only a C source can declare one. A document that quotes the table, or a
+# test that holds the declaration in a string, is text about code.
+C_SOURCE_SUFFIXES = (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx")
 
 # The part of the tree whose part list decides a read-back length: the host
 # tool's. The bootloader keeps a table of its own to bound its own read-back
@@ -84,8 +95,9 @@ HOST_TREE = "host/"
 # the fork works them out from something else and the figures read here are
 # no longer the ones it compiles. What this cannot see is the arithmetic
 # itself: a body that still names all three and subtracts one term more
-# compares as a match, and only the read-back step catches that, by the
-# length the tool really reports.
+# compares as a match. The read-back step catches that one, by checking the
+# length the tool reports against the flash the same line says the part has
+# (dfuimage.ReadbackPlan._length_follows_the_reported_part).
 UPLOAD_LENGTH_FUNCTION = "dfu_upload_length"
 _FUNCTION_BODY = re.compile(
     rf"\b{UPLOAD_LENGTH_FUNCTION}\s*\([^)]*\)\s*\{{(.*?)^\}}", re.S | re.M)
@@ -177,7 +189,7 @@ def parse_number(text: str) -> int | None:
     return value
 
 
-def _without_comments(text: str) -> str:
+def _without_comments(text: str, *, strings: bool = True) -> str:
     """``text`` with its C comments blanked out, line for line.
 
     One pass left to right, the way a compiler reads it, because the order
@@ -216,12 +228,18 @@ def _without_comments(text: str) -> str:
             out.append("\n" if char == "\n" else " ")
         else:  # inside a string literal
             if char == "\\" and index + 1 < end:
-                out.append(text[index:index + 2])
+                out.append(text[index:index + 2] if strings else "  ")
                 index += 2
                 continue
             if char == '"':
                 state = "code"
-            out.append(char)
+                out.append(char)
+            else:
+                # Kept for the table, whose part names are string literals;
+                # blanked when the question is whether a file declares
+                # something, since a declaration quoted in a string is text
+                # about code and not code.
+                out.append(char if strings else " ")
         index += 1
     return "".join(out)
 
@@ -367,6 +385,30 @@ def _show(source: Path | str, ref: str, path: str,
     return result.stdout
 
 
+def _holds_a_part_list(source: Path | str, ref: str, path: str,
+                       deadline: Deadline) -> bool:
+    """Whether ``path`` really defines a part list, not just text that reads
+    like one.
+
+    A grep over a tree finds a man page quoting the table in a fenced block,
+    a test holding the declaration in a string literal, and a commented-out
+    copy. None of those is a list the fork compiles, and reporting a run over
+    one would be crying wolf. So the file has to be C, and the declaration
+    has to survive having its comments and its string literals blanked.
+    """
+    if not path.endswith(C_SOURCE_SUFFIXES):
+        return False
+    try:
+        text = _show(source, ref, path, deadline)
+    except RuntimeError:
+        # Unreadable for its own reason, which the caller reports anyway.
+        return True
+    if text is None:
+        return False
+    return _PART_LIST_DEFINITION_RE.search(
+        _without_comments(text, strings=False)) is not None
+
+
 def tree_mentions(source: Path | str, ref: str, pattern: str,
                   deadline: Deadline | None = None) -> list[str]:
     """Files at ``ref`` matching ``pattern``, wherever in the tree they are.
@@ -420,10 +462,18 @@ def fork_parts_at(source: Path | str, ref: str,
     marked = {pattern: tree_mentions(source, ref, pattern, deadline)
               for pattern in TREE_MARKERS}
     if not any(marked.values()):
+        # Nothing this reads is named anywhere in the tree. Whether the files
+        # happen to exist says nothing: dfu_recovery.c arrived before the
+        # part table did, so 51 of 474 real fork refs are such a commit, and
+        # treating the file's presence as a rename made every one of them cry
+        # wolf. The names are the signal, and all of them being gone means
+        # this fork keeps none of what the harness mirrors.
         return None
     defined = tree_mentions(source, ref, PART_LIST_DEFINITION, deadline)
-    elsewhere = sorted(path for path in set(defined) - set(read)
-                       if path.startswith(HOST_TREE))
+    elsewhere = sorted(
+        path for path in set(defined) - set(read)
+        if path.startswith(HOST_TREE) and _holds_a_part_list(source, ref, path, deadline)
+    )
     if elsewhere:
         raise PartTableUnreadable(
             f"a part list is defined in {', '.join(elsewhere)}, which this does "
@@ -474,7 +524,11 @@ def _check_figures_are_the_ones_used(text: str, figures: dict) -> None:
             f"read, so what the fork works a read-back length out of is not "
             "visible here"
         )
-    unused = [name for name in figures if name not in body.group(1)]
+    # Whole words: a fork that namespaced these to DFU_BOOTLOADER_OFFSET or
+    # DFU_ASSUMED_FLASH_SIZE_V2 names none of them, and substring containment
+    # would have read the new names as the old ones.
+    unused = [name for name in figures
+              if not re.search(rf"\b{re.escape(name)}\b", body.group(1))]
     if unused:
         raise PartTableUnreadable(
             f"{UPLOAD_LENGTH_FUNCTION}() does not name "
@@ -569,18 +623,37 @@ def record(publisher, sources: Sequence) -> None:
     anything else is recorded as unchecked rather than left to end the run
     without even a ``run_finished``.
     """
+    # Read before the try, so a handler can name the commit without going
+    # back to the thing that may have raised.
+    commit = ""
+    try:
+        for source in sources:
+            if source.name == "Ubertooth":
+                commit = source.commit
+                break
+    except Exception:  # noqa: BLE001 - see the docstring
+        pass
     try:
         check = check_sources(sources)
     except Exception as error:  # noqa: BLE001 - see the docstring
-        ubertooth = next(
-            (source for source in sources if source.name == "Ubertooth"), None)
         check = PartTableCheck(
             "unchecked",
             f"DFU part table not checked: {type(error).__name__}: {error}",
-            ubertooth.commit if ubertooth is not None else "",
+            commit,
         )
-    if check is not None:
+    if check is None:
+        return
+    try:
         publisher.emit(EVENT, check.status, check.details())
+    except Exception as error:  # noqa: BLE001 - see the docstring
+        # A message too long for one record, say: the record is worth less
+        # than the run, so say what happened in the shortest form there is.
+        publisher.emit(EVENT, "unchecked", {
+            "message": f"DFU part table not recorded: {type(error).__name__}",
+            "ubertooth_commit": commit,
+            "harness_flash_sizes": list(PART_FLASH_SIZES),
+            "fork_flash_sizes": [],
+        })
 
 
 def check_sources(sources: Sequence) -> PartTableCheck | None:
@@ -604,8 +677,9 @@ def check_sources(sources: Sequence) -> PartTableCheck | None:
         markers = " nor ".join(TREE_MARKERS)
         return PartTableCheck(
             "skipped",
-            f"DFU part table not checked: {label} names {markers} anywhere, so "
-            "it is older than the figures and has none to compare with",
+            f"DFU part table not checked: {label} names neither {markers} "
+            "anywhere, so it is older than the figures and has none to "
+            "compare with",
             ubertooth.commit,
         )
     warning = drift_warning(fork, fork_label=label)
