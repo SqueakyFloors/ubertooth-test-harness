@@ -25,7 +25,7 @@ from ubertooth_harness.events import (
 from ubertooth_harness.enumeration import EnumerationError
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
-from ubertooth_harness.leases import describe_queued_resource
+from ubertooth_harness.leases import describe_pairing_lease, describe_queued_resource
 from ubertooth_harness.manifest import ManifestError, RunManifest, json_value
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
@@ -1330,6 +1330,13 @@ class NamedTestSequencer:
                 record = json_value(queued)
                 publisher.emit("lease_queued", "warning", dict(
                     record, message=describe_queued_resource(record, past=True)
+                ))
+            # And the devices the run never named and held because the
+            # registry says they are wired to ones it did (#289).
+            for paired in manifest.lease_pairings:
+                record = json_value(paired)
+                publisher.emit("lease_pairing", "passed", dict(
+                    record, message=describe_pairing_lease(record)
                 ))
         publisher.emit(
             "host_capabilities",

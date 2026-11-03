@@ -260,16 +260,22 @@ holds the other.
   required: it names the lease, as `programmer-<serial>`, taken verbatim as
   registered (a `serial device`, where one is recorded, must be the stable
   `/dev/serial/by-id` path, not `/dev/ttyUSB<n>`, which is assignment order).
+  It has to leave room for that prefix and for the bench's own `bench-`
+  prefix, so 53 characters at most; a longer one is refused when the registry
+  loads, naming the field and the limit.
 - `programs:` is the one board it is wired to. A registry is refused when that
   board is not registered, is not a device the harness leases (a host, a hub:
   there would be no lock to take for it), is attached to another host (leases
   are local to a host, so a pair across two of them would hold nothing),
   already has another programmer, or is the programmer itself, and when the
-  pairing loops back on itself. Its serial has to be its own: a programmer
-  may not take a serial another device is registered with, nor one that
-  spells a file the lease directory keeps for itself (`host-power`,
-  `takeover`), because the bench lock name for a programmer is that serial
-  on its own and a lock of one would be read as a lock of the other.
+  pairing loops back on itself.
+- Its serial has to be its own, as every device's does, and the rule is not
+  this type's: see "One lock file is one device" under [Sharing the
+  bench](#sharing-the-bench). A programmer is the one device whose serial is
+  chosen by whoever labels the adapter rather than read from the hardware,
+  so it is the easiest one to give a name something else already has
+  (harness [#288](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/288),
+  [#290](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/290)).
 - A chain is allowed and is held as one set, for a bench that wires a
   programmer to another programmer's own header: holding any member holds all
   of them.
@@ -279,8 +285,11 @@ holds the other.
   or power-cycles the board, and `scripts/lab/hub-port` on either member's
   port. The three by-hand commands say on standard error which device the
   pairing brought in and why, and `ubertooth-harness boards` prints the
-  pairing under both. A run takes the pair without saying so in its record
-  yet ([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)).
+  pairing under both. A run says the same line before it takes the locks and
+  carries it in its own record: a `lease_pairing` record in `run.jsonl`, a
+  "Leases from a wired pair" row in `report.md`, and the same line in the
+  browser's live view (harness
+  [#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)).
 - The programmer appears in `ubertooth-harness boards` like any other leased
   device, so a holder a reader did not expect is explained where they see it.
 
@@ -700,6 +709,17 @@ debug programmer and the board it programs](#a-debug-programmer-and-the-board-it
 Where the bench's own scripts lock devices with their own per-device files, a
 lease takes those too (`--external-board-lock`). See
 [Sharing boards: leases](../README.md#sharing-boards-leases).
+
+**One lock file is one device.** No two devices may be registered with one
+serial, whatever their types and whichever way each is written: the bench's
+own lock file for a device is named after its plain serial, so a lock of one
+would be read as a lock of the other. Nor may two resources take one lease
+file, which is a danger a duplicate identity does not cover, since a lease
+key is built from one identity field (a DK registered `000123456789` and one
+registered `123456789` are two identities and one key). A registry that does
+either is refused when it is loaded, naming both devices. `host-power` and
+`takeover` are names the lease directory keeps for itself, and no device may
+be registered with one.
 
 For a command you run by hand, [`scripts/lab/hold`](../scripts/lab/README.md)
 takes the leases and names devices the way a bench note does, by serial or by

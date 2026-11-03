@@ -51,7 +51,9 @@ class FakeTools:
     writes its .dfu before the -d image check), help-first (-h prints the
     usage before the stray-word check), no-double-dash (a word after "--"
     is read as an option), repeat-allowed (an option given a value twice is
-    taken, as it was before opt_check_once()).
+    taken, as it was before opt_check_once()), modulation-last-wins
+    (ubertooth-dump takes -c with -l and uses the last of the two, as it did
+    before fork d3429234).
     ``missing`` tools are not installed; ``switch`` False is a library from
     before b6d8ede."""
 
@@ -139,6 +141,20 @@ class FakeTools:
                 else:
                     flags.append((option, value))
                 continue
+            if (tool == "ubertooth-dump" and option in "cl"
+                    and "modulation-last-wins" not in self.bugs):
+                # One capture, one demodulator (fork d3429234): refused here
+                # in the option loop, naming both options as the user wrote
+                # them, so the -d file is never opened and -h never reached.
+                # The same letter twice says the same thing twice, so only a
+                # different modulation clashes.
+                earlier = next((o for o, _v in flags if o in "cl" and o != option),
+                               None)
+                if earlier is not None:
+                    return self._result(
+                        command, 1, "".join(out), "".join(err)
+                        + f"error: -{option} cannot be combined with -{earlier}; "
+                        "a capture uses one modulation\n")
             flags.append((option, None))
             index += 1
         if ("h", None) in flags and "help-first" in self.bugs:
@@ -328,7 +344,11 @@ class CaseTests(unittest.TestCase):
         # word on scan and follow.
         self.assertEqual(13 * 3 + 1 + 3 + 2, len(smoke))
         _a, full = cases("comprehensive")
-        self.assertEqual(len(smoke) + 14 + 6, len(full))
+        # The comprehensive cases: 16 of them here (the checks after the
+        # option loop, both orders of dump's two modulation options, the
+        # four repeated -d cases, and the dfu inputs) and 6 more stray-word
+        # cases on scan and follow.
+        self.assertEqual(len(smoke) + 16 + 6, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
@@ -388,6 +408,15 @@ class CaseTests(unittest.TestCase):
             "follow -d twice with -h", "rx -d twice with -h",
             "dump -d twice with -h", "specan -d twice with -h",
         ]), failed_names(events))
+
+    def test_a_dump_that_takes_both_modulations_fails(self):
+        """Before fork d3429234 -c with -l meant the last of the two and the
+        other was dropped without a word, so the dump ran and wrote its
+        file."""
+        summary, events = run(FakeTools(bugs=("modulation-last-wins",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(["dump -d with -c -l", "dump -d with -l -c"],
+                         failed_names(events))
 
     def test_dfu_temporary_file_left_behind_fails(self):
         summary, events = run(FakeTools(bugs=("temp-left",)))

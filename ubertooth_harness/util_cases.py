@@ -460,7 +460,20 @@ RANGE_RESULT = (
     r"reply PA level   : (?P<reply_pa>\d+)\n"
     r"reply number     : (?P<reply_number>\d+)$"
 )
-RANGE_MISMATCH = r"invalid range test: mismatch on byte \d+"
+# One line of that block on its own, so a check can say that standard output
+# holds the block and nothing besides it.
+RANGE_RESULT_LINE = re.compile(
+    r"^(?:request PA level|request number|reply PA level|reply number)\s+: \d+$")
+# The four values as one string, for the observation that carries `-n`'s
+# result to the `-m` read after it.
+RANGE_RESULT_FIELDS = ("request_pa", "request_number", "reply_pa", "reply_number")
+
+
+def range_result_value(match: re.Match) -> str:
+    """The four result values of a RANGE_RESULT match, in their own order."""
+    return " ".join(match[name] for name in RANGE_RESULT_FIELDS)
+
+
 # The bytes cc2400_rangetest() compares (reply byte n against its request).
 RANGE_COMPARED_FIELDS = (
     ((0, 0), "length"),
@@ -469,6 +482,15 @@ RANGE_COMPARED_FIELDS = (
 )
 REPEATER_START = r"(?m)^Starting repeater$"
 RANGE_TEST_START = r"(?m)^Starting range test$"
+# -n runs the test and waits for it: it prints the result block on standard
+# output and exits 0, or gives up at its own deadline with an error on
+# standard error and exits 1 (fork 1c7f06d6, fork #687; RANGE_TEST_TIMEOUT_S
+# in ubertooth-util.c). It is not the silent starter it was, whose result was
+# read later with -m. The step's deadline has to outlast the tool's own, or a
+# -n the repeater never answered would be killed by the harness and recorded
+# as a command that timed out instead of the tool's own report.
+RANGE_TEST_TOOL_DEADLINE_S = 10
+RANGE_TEST_TIMEOUT_S = RANGE_TEST_TOOL_DEADLINE_S + 5.0
 # Reads the sender's -m until it reports a result or a mismatch, or the
 # deadline passes. Each read whose output or exit status differs from the
 # previous one is logged as one line ("read <n>: exit <code>: <output>") on
@@ -529,8 +551,47 @@ def range_poll_check(stdout) -> str:
     return f"{summary}; last read: {last_read or 'no read logged'}"
 
 
+def range_result_only_check(maximum_pa: int):
+    """`-n`: the result block on standard output, and nothing else there.
+
+    `-n` runs the test and prints the same block `-m` does, so its standard
+    output is those four lines and no others: the `waiting for the
+    repeater...` line it prints while it waits goes to standard error (fork
+    `30c4103f`, fork #1029), and so does every other diagnostic. Any other
+    line fails, which is what `nothing_on_stdout` did for the silent starter
+    this replaced. A list of diagnostic prefixes would not: the progress line
+    begins with none of them, so a regression that put it back on standard
+    output would pass beside a valid result block.
+    """
+    values = range_result_check(maximum_pa)
+
+    def check(stdout) -> str:
+        problems = []
+        reason = values(stdout)
+        if reason:
+            problems.append(reason)
+        lines = [line.strip() for line in text_lines(stdout) if line.strip()]
+        other = [line for line in lines if not RANGE_RESULT_LINE.match(line)]
+        if other:
+            problems.append(
+                f"{other[0]!r} is on stdout, which carries the result block "
+                "alone; progress and diagnostics go to stderr")
+        elif len(lines) != len(RANGE_RESULT_FIELDS):
+            # Result lines and nothing else, but not four of them: a block
+            # printed twice, or a stray line of the right form. The values
+            # above are read from the first block that matches, so without
+            # this a second one would go unread.
+            problems.append(
+                f"{len(lines)} result lines on stdout, not "
+                f"{len(RANGE_RESULT_FIELDS)}: the result block is printed once")
+        return "; ".join(problems)
+
+    return check
+
+
 def range_result_check(maximum_pa: int):
-    """Sender -m: the four result lines, levels 0..maximum_pa, copies 0..15."""
+    """The four result lines -n and -m both print, levels 0..maximum_pa,
+    copies 0..15 (report_range_result in ubertooth-util.c)."""
     def check(stdout) -> str:
         match = search_lines(stdout, RANGE_RESULT)
         if match is None:
@@ -662,17 +723,35 @@ def range_test_cases(arguments, _resources, resource_identities):
         responder_channel.verify(responder, "responder-channel-while-repeating",
                                  "Responder: the repeater keeps the test channel",
                                  "responder channel while repeating", RANGE_CHANNEL),
-        Step("sender-start-range-test", "Sender: start the range test (-n)",
-             _util(sender, "-n"), output_patterns=(RANGE_TEST_START,),
-             output_check=nothing_on_stdout, mutates=True),
+        # -n waits for the round trip and reports it here, so the result is
+        # this step's to check: standard output carries the four result lines
+        # and nothing else, and the result is recorded so the -m read after
+        # the test is held to the same values rather than to any valid block.
+        Step("sender-run-range-test", "Sender: run the range test (-n)",
+             _util(sender, "-n"), timeout_s=RANGE_TEST_TIMEOUT_S,
+             output_patterns=(RANGE_TEST_START,),
+             output_check=range_result_only_check(maximum_pa),
+             observe=Observation("range result", RANGE_RESULT,
+                                 convert=range_result_value),
+             mutates=True),
+        # -n has already waited, so the first read answers: what this step
+        # adds now is the record of how the board answered -m straight after
+        # the test, in its own log, and a bound on how long a board may take
+        # to answer at all. Its deadline is also what covers a fork whose -n
+        # went back to starting the test and returning. The poll's own exit
+        # is not the verdict; its log is.
         Step("sender-wait-for-result",
              f"Sender: read -m until a result appears (up to {RANGE_RESULT_DEADLINE_S} s)",
              range_poll_argv(sender), timeout_s=RANGE_POLL_TIMEOUT_S,
-             # The poll's own exit is not the verdict; its log is.
              expected_returncodes=(0, 1), output_check=range_poll_check),
+        # The board keeps the result -n reported, so this read must give the
+        # same four values and not merely another block in range.
         Step("sender-range-result", "Sender: range-test result",
              _util(sender, "-m"), output_check=range_result_check(maximum_pa),
-             forbidden_patterns=(RANGE_MISMATCH,)),
+             observe=Observation("range result after the test", RANGE_RESULT,
+                                 expected=lambda context: require(
+                                     context, "range result"),
+                                 convert=range_result_value)),
         repeating("responder-repeating-after-test",
                   "Responder: still repeating (RX LED on) and answering USB after the test"),
         Step("responder-no-result", "Responder: the repeater keeps no result",
@@ -701,8 +780,10 @@ def range_test_cases(arguments, _resources, resource_identities):
             _role_cleanup("responder", responder, settings["responder"])
             + _role_cleanup("sender", sender, settings["sender"]),
             expected_state=(
-                "the sender's -m reports request and reply PA levels 0-"
-                f"{maximum_pa} and copy numbers 0-{RANGE_COPIES - 1}; the sender is "
+                "the sender's -n completes the round trip and reports it, and its "
+                "-m reports the same result afterwards: request and reply PA "
+                f"levels 0-{maximum_pa} and copy numbers 0-{RANGE_COPIES - 1}; "
+                "the sender is "
                 f"idle at 2441 MHz once the test ends (both ran at {RANGE_CHANNEL}); "
                 "the responder answers USB while repeating, before -n and after "
                 "the test, keeps no result, and -S returns it to idle at 2441 MHz; "
