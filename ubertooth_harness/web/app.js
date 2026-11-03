@@ -693,7 +693,17 @@
         pushLog(`note: ${text}`);
       }
     }
-<<<<<<< HEAD
+    if (kind === "lease_pairing") {
+      // A device this run never named, held because the registry says it is
+      // permanently wired to one the run did: why a programmer appears
+      // among the leases of a run that asked for a board. The harness sends
+      // the line the report shows.
+      const text = String(details.message ?? "");
+      if (text) {
+        if (!live.pairings.includes(text)) live.pairings.push(text);
+        pushLog(`note: ${text}`);
+      }
+    }
     if (kind === "bootloader_identity") {
       // Which bootloader is under the firmware on this board. A board keeps
       // it through every firmware update, so it is shown beside the board
@@ -718,18 +728,6 @@
     }
     if (kind === "bootloader_stage_finished" && status === "skipped" && details.reason) {
       pushLog(`note: bootloader stage skipped: ${String(details.reason)}`);
-=======
-    if (kind === "lease_pairing") {
-      // A device this run never named, held because the registry says it is
-      // permanently wired to one the run did: why a programmer appears
-      // among the leases of a run that asked for a board. The harness sends
-      // the line the report shows.
-      const text = String(details.message ?? "");
-      if (text) {
-        if (!live.pairings.includes(text)) live.pairings.push(text);
-        pushLog(`note: ${text}`);
-      }
->>>>>>> origin/main
     }
     if (kind === "watchdog") {
       // The firmware reset a board, or did not: a count, never a failure.
