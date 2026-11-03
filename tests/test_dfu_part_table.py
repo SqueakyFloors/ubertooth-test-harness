@@ -526,6 +526,68 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         check = check_sources(self._sources(derived))
         self.assertEqual("passed", check.status, check.message)
 
+    def test_a_declaration_is_not_a_definition(self):
+        """What a C file says about the type without holding a list: an
+        extern declaration, a prototype, a function taking one. Reading any
+        of those as a list reports a run over a table that is right there and
+        matches."""
+        rows = GROWN_TABLE_C[GROWN_TABLE_C.index("static const"):]
+        for description, text in (
+            ("an extern declaration",
+             "extern const struct dfu_part DFU_PARTS[];\n"),
+            ("a prototype",
+             "size_t dfu_part_count(const struct dfu_part parts[]);\n"),
+            ("a helper taking the array",
+             "static const struct dfu_part *find(const struct dfu_part table[], "
+             "uint32_t id) { (void)table; (void)id; return 0; }\n"),
+            ("a list with no part rows in it",
+             "static const uint32_t DFU_PARTS_BY_SIZE[] = { 32, 64, 128 };\n"),
+        ):
+            with self.subTest(description):
+                # Beside the real table, and in a file of its own.
+                for path, body in (
+                    ("host/ubertooth-tools/src/dfu_recovery.c",
+                     _recovery_c(PART_TABLE_C + text)),
+                    ("host/ubertooth-tools/src/ubertooth-dfu.c", text),
+                ):
+                    commit = self._commit_files({path: body}, description)
+                    check = check_sources(self._sources(commit))
+                    self.assertEqual("passed", check.status,
+                                     f"{path}: {check.message}")
+        # And the same text with part rows after it is a list.
+        commit = self._commit_files(
+            {"host/ubertooth-tools/src/lpc18.c":
+             "static const struct dfu_part *const LPC18_PARTS[] = {\n"
+             + rows[rows.index("{"):]},
+            "a pointer array of parts")
+        self.assertEqual("unchecked", check_sources(self._sources(commit)).status)
+
+    def test_a_list_of_a_typedef_name_is_still_found(self):
+        """A fork that typedefs the part type and keeps a table name derived
+        from DFU_PARTS is found by the name; one that changes both is the
+        limit the module writes down."""
+        rows = GROWN_TABLE_C[GROWN_TABLE_C.index("static const"):]
+        typedefed = self._commit_files(
+            {"host/ubertooth-tools/src/lpc18.c":
+             "typedef struct dfu_part dfu_part_t;\n"
+             "static const dfu_part_t DFU_PARTS_LPC18[] = {\n"
+             + rows[rows.index("{"):]},
+            "a typedef and a name derived from the table")
+        self.assertEqual("unchecked",
+                         check_sources(self._sources(typedefed)).status)
+
+    def test_a_test_file_beside_the_sources_is_not_a_second_list(self):
+        rows = GROWN_TABLE_C[GROWN_TABLE_C.index("static const"):]
+        for path in ("host/ubertooth-tools/src/test_dfu_parts.c",
+                     "host/ubertooth-tools/src/dfu_parts_test.c",
+                     "host/ubertooth-tools/unit-tests/fixtures.c"):
+            with self.subTest(path):
+                commit = self._commit_files(
+                    {path: rows.replace("DFU_PARTS[]", "DFU_PARTS_EXPECTED[]")},
+                    "a test fixture beside the sources")
+                check = check_sources(self._sources(commit))
+                self.assertEqual("passed", check.status, check.message)
+
     def test_a_second_list_names_the_file_that_holds_it(self):
         second = self._commit_files(
             {"host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(
@@ -781,8 +843,9 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
     def test_a_commit_with_no_table_is_skipped_not_a_warning(self):
         check = check_sources(self._sources(self.untabled))
         self.assertEqual("skipped", check.status)
-        self.assertIn("names neither " + " nor ".join(dfuparts.TREE_MARKERS)
-                      + " anywhere", check.message)
+        markers = ", ".join(dfuparts.TREE_MARKERS[:-1])
+        self.assertIn(f"names none of {markers}, and "
+                      f"{dfuparts.TREE_MARKERS[-1]} anywhere", check.message)
         self.assertIn("older than the figures", check.message)
         self.assertEqual([], check.details()["fork_flash_sizes"])
 

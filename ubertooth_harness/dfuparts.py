@@ -82,18 +82,35 @@ TREE_MARKERS = ("DFU_PARTS", "dfu_upload_length", "DFU_ASSUMED_FLASH_SIZE")
 # read, and the declaration has to survive having its comments and its
 # string literals blanked: text alone cannot tell a declaration from a man
 # page quoting one.
-PART_LIST_DEFINITION = (
-    r"struct[[:space:]]+dfu_part[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\[")
-# The same thing as a Python pattern, for confirming a file git grep found.
+#
+# Two patterns, because either key alone leaves a list unseen: one on the
+# part type, which finds an array called anything, and one on the table's own
+# name, which finds an array of any type. Both require the array to be
+# given a value, `[...] =`, so a declaration or a prototype that mentions the
+# type is not read as a list -- `extern const struct dfu_part DFU_PARTS[];`
+# and `size_t count(const struct dfu_part parts[])` are not lists.
+PART_LIST_DEFINITIONS = (
+    r"(struct[[:space:]]+dfu_part|dfu_part_t)[[:space:]]*\*?[[:space:]]*"
+    r"(const[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\[[^]]*\][[:space:]]*=",
+    r"DFU_PARTS[A-Za-z0-9_]*[[:space:]]*\[[^]]*\][[:space:]]*=",
+)
+# The same two for confirming a file git grep found. `git grep` matches
+# within a line, so a declaration split over two lines is found only here;
+# that is a miss in the other direction, named with the limits below.
 _PART_LIST_DEFINITION_RE = re.compile(
-    r"struct\s+dfu_part\s+[A-Za-z_][A-Za-z0-9_]*\s*\[")
+    r"(?:(?:struct\s+dfu_part|dfu_part_t)\s*\*?\s*(?:const\s+)?"
+    r"[A-Za-z_][A-Za-z0-9_]*|DFU_PARTS[A-Za-z0-9_]*)\s*\[[^]]*\]\s*=")
 # A C character literal, so a `'"'` in a source cannot be read as the start
 # of a string and swallow the rest of the file.
 _CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\])'")
 # A test's own fixture is not what the tool compiles: the fork's host tests
 # build arrays of their own to compare the table against, and reporting a run
 # over one would be crying wolf.
-TEST_PATH_PARTS = ("/tests/", "/test/")
+TEST_PATH_PARTS = ("/tests/", "/test/", "/unit-tests/", "/unittests/",
+                   "/testing/")
+# A test file that sits beside the sources rather than under a directory of
+# its own, written either way round.
+_TEST_FILE_RE = re.compile(r"(^|/)(test[_-][^/]*|[^/]*[_-]test)\.[A-Za-z.]+$")
 # Nor is a document that quotes the table. These are named rather than C
 # sources being named, so that a list in a generated header's `.in` or in an
 # included fragment still counts: what the tool compiles is not decided by a
@@ -111,10 +128,12 @@ HOST_TREE = "host/"
 # the fork works them out from something else and the figures read here are
 # no longer the ones it compiles. What this cannot see is the arithmetic
 # itself: a body that still names all three and subtracts one term more
-# compares as a match, and so does a fork that renames all three of
-# TREE_MARKERS at once, which leaves nothing here to find. The read-back step
-# catches both, by checking the length the tool reports against the flash the
-# same line says the part has
+# compares as a match. Two other trees are beyond it as well: one that
+# renames all three of TREE_MARKERS at once, which leaves nothing here to
+# find, and a second part list whose type is a typedef under a name of its
+# own AND whose array is not named for the table, which neither key below
+# matches. The read-back step catches all three, by checking the length the
+# tool reports against the flash the same line says the part has
 # (dfuimage.ReadbackPlan._length_follows_the_reported_part).
 UPLOAD_LENGTH_FUNCTION = "dfu_upload_length"
 _FUNCTION_BODY = re.compile(
@@ -436,6 +455,8 @@ def _holds_a_part_list(source: Path | str, ref: str, path: str,
     """
     if any(part in f"/{path}" for part in TEST_PATH_PARTS):
         return False
+    if _TEST_FILE_RE.search(path):
+        return False
     if path.endswith(PROSE_SUFFIXES):
         return False
     # A read that fails raises, rather than being reported as a part list
@@ -443,8 +464,30 @@ def _holds_a_part_list(source: Path | str, ref: str, path: str,
     text = _show(source, ref, path, deadline)
     if text is None:
         return False
-    return _PART_LIST_DEFINITION_RE.search(
-        _without_comments(text, strings=False)) is not None
+    return part_lists_in(text) > 0
+
+
+def part_lists_in(text: str) -> int:
+    """How many part lists ``text`` defines.
+
+    A declaration that matches one of the patterns is only a list when what
+    it is given looks like part entries: rows of an identifier, a name in
+    quotes, and a size. That is what tells the table, and a second list of
+    any type or name, from an array merely named after the table -- a
+    `DFU_PARTS_BY_SIZE[] = { 32, 64, 128 }` holds no names and is no part
+    list. Comments and the insides of strings are blanked first, so a
+    commented-out copy and a declaration quoted in a string count for
+    nothing; the quotes themselves stay, which is what a row is known by.
+    """
+    clean = _without_comments(text, strings=False)
+    lists = 0
+    for found in _PART_LIST_DEFINITION_RE.finditer(clean):
+        tail = clean[found.end():]
+        end = tail.find("};")
+        body = tail if end < 0 else tail[:end]
+        if any(_FIELDS.fullmatch(row) for row in _ROW.findall(body)):
+            lists += 1
+    return lists
 
 
 def tree_mentions(source: Path | str, ref: str, pattern: str,
@@ -482,7 +525,7 @@ def fork_parts_at(source: Path | str, ref: str,
                   deadline: Deadline | None = None) -> ForkParts | None:
     """The part figures at ``ref`` of a fork checkout, or None for none.
 
-    None means one thing: this commit names neither TREE_MARKERS anywhere, so
+    None means one thing: this commit names none of TREE_MARKERS anywhere, so
     it is older than the figures themselves and has none to compare with.
     Every other way of not finding them raises PartTableUnreadable -- the
     table renamed, moved to a file not read here, written another way, a
@@ -507,7 +550,8 @@ def fork_parts_at(source: Path | str, ref: str,
         # wolf. The names are the signal, and all of them being gone means
         # this fork keeps none of what the harness mirrors.
         return None
-    defined = tree_mentions(source, ref, PART_LIST_DEFINITION, deadline)
+    defined = [path for pattern in PART_LIST_DEFINITIONS
+               for path in tree_mentions(source, ref, pattern, deadline)]
     elsewhere = sorted(
         path for path in set(defined) - set(read)
         if path.startswith(HOST_TREE) and _holds_a_part_list(source, ref, path, deadline)
@@ -523,8 +567,7 @@ def fork_parts_at(source: Path | str, ref: str,
     # A second list in the files that were read, which the search above
     # cannot see because these are the files it reads from. One table is
     # compared; a second one beside it would not be.
-    lists = {path: len(_PART_LIST_DEFINITION_RE.findall(
-        _without_comments(texts[path], strings=False))) for path in read}
+    lists = {path: part_lists_in(texts[path]) for path in read}
     if sum(lists.values()) > 1:
         holding = ", ".join(f"{path} ({count})"
                             for path, count in lists.items() if count)
@@ -731,10 +774,10 @@ def check_sources(sources: Sequence,
             "unchecked", f"DFU part table not checked: {error}", ubertooth.commit
         )
     if fork is None:
-        markers = " nor ".join(TREE_MARKERS)
+        markers = ", ".join(TREE_MARKERS[:-1]) + f", and {TREE_MARKERS[-1]}"
         return PartTableCheck(
             "skipped",
-            f"DFU part table not checked: {label} names neither {markers} "
+            f"DFU part table not checked: {label} names none of {markers} "
             "anywhere, so it is older than the figures and has none to "
             "compare with",
             ubertooth.commit,
@@ -776,8 +819,9 @@ def main(argv=None) -> int:
             # Nothing to warn about: this commit is older than the figures,
             # which every release before the part table is. The run record
             # calls this skipped and stays quiet about it too.
-            print(f"{label} names neither {' nor '.join(TREE_MARKERS)}, so it "
-                  "has no part table to compare with")
+            markers = ", ".join(TREE_MARKERS[:-1]) + f", and {TREE_MARKERS[-1]}"
+            print(f"{label} names none of {markers}, so it has no part table "
+                  "to compare with")
             return 0
         else:
             message = drift_warning(fork, fork_label=label)
