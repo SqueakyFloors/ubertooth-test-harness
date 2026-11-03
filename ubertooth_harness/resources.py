@@ -642,15 +642,14 @@ class FileResourceRegistry:
                         f"{resource.type}s {held_by} and {resource.alias} are "
                         f"registered with the same serial '{written}'; one serial "
                         "is one device, whichever way it is written, and the two "
-                        "would be held through one lock file"
+                        "would be held through one of the bench's lock files"
                     )
                 # Neither of them is the mistake on its own, so both are
                 # named: which one is wrong is for whoever wired the bench.
                 raise RegistryError(
-                    f"'{written}' is the serial of both {what} and {this}; a "
-                    "device's lease file and the bench's own lock file are named "
-                    "after that serial, so a lock of one would be read as a lock "
-                    "of the other"
+                    f"'{written}' is the serial of both {what} and {this}; the "
+                    "bench's own lock file for a device is named after its plain "
+                    "serial, so a lock of one would be read as a lock of the other"
                 )
         keys: dict[str, str] = {}
         for resource in ordered:

@@ -906,6 +906,59 @@ class PairRunRecords(PairTestCase):
             "Prog0 is wired to UT_Debug, so the run held it too",
             leases.describe_pairing_lease({"resource": "Prog0", "named": "UT_Debug"}),
         )
+        self.assertEqual(
+            "Prog0 is wired to a device this run named, so the run held it too",
+            leases.describe_pairing_lease({"resource": "Prog0"}),
+        )
+
+    def test_the_record_carries_the_clause_the_registry_gave(self):
+        """Not a second wording of its own: the run says what `hold` says.
+
+        `expand_pairs` returns the aliases it added after the ones it was
+        given, and one clause for each of those in the same order; the
+        records are built from that pairing, so no run can word a pairing
+        differently from the commands a person runs by hand.
+        """
+        registry = self.load(PROGRAMMER)
+        named = leases._named_aliases(self.using_the_target(), registry)
+        held, clauses = registry.expand_pairs(list(named))
+        self.assertEqual(("Prog0",), held[len(named):])
+        self.assertEqual(
+            list(clauses),
+            [record["reason"] for record
+             in leases.pairings_for_invocations(self.using_the_target(), registry)],
+        )
+
+    def test_a_dry_run_says_which_device_a_pairing_would_add(self):
+        """It lists the devices each test binds, so it says this one too."""
+        plan = self.root / "dry.yaml"
+        plan.write_text(textwrap.dedent(f"""\
+            plan: dry pair
+            suites:
+              fast:
+                - Radio setting transitions:
+                    hosts: [Host_Linux]
+                    platforms: [{PLATFORM}]
+                    Ubertooth: UT_Debug
+                    coverage: smoke
+            """), encoding="utf-8")
+        from tests.test_cli import make_source
+
+        source, _short = make_source(self.root)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main([
+                "run-suite", "--plan", str(plan), "--suite", "fast",
+                "--hardware", str(self.write(PROGRAMMER)), "--host", "Host_Linux",
+                "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+                "--output", str(self.root / "dry-runs"), "--dry-run",
+            ])
+        self.assertEqual(0, code, err.getvalue())
+        self.assertIn(
+            "pair: Prog0 is the programmer wired to UT_Debug, so the run would "
+            "hold it too",
+            out.getvalue(),
+        )
 
 
 class PairCommands(PairTestCase):

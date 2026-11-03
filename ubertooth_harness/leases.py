@@ -528,19 +528,6 @@ def expand_pairs(registry, aliases: Sequence[str]) -> tuple[tuple[str, ...], tup
     return expand(list(aliases))
 
 
-def describe_pairing(registry, alias: str, named: str) -> str:
-    """Why holding ``named`` holds ``alias`` too, as a clause.
-
-    The registry's own wording where it has one, so a run's record says what
-    `hold` and `boards` say. A registry that records no pairing at all never
-    reaches this, because nothing was added.
-    """
-    describe = getattr(registry, "describe_pairing", None)
-    if describe is None:
-        return f"{alias} is wired to {named}"
-    return str(describe(alias, named))
-
-
 def pairing_record(alias: str, named: str, reason: str) -> dict:
     """One device a permanent pairing added to a run's leases (#289).
 
@@ -566,7 +553,15 @@ def describe_pairing_lease(record: Mapping) -> str:
     """
     reason = str(record.get("reason") or "")
     if not reason:
-        reason = f"{record.get('resource')} is wired to {record.get('named')}"
+        # A record from somewhere else, or one written before the clause was
+        # carried: it still reads as a sentence, with or without the device
+        # the run asked for.
+        resource = record.get("resource") or "a device"
+        named = record.get("named")
+        reason = (
+            f"{resource} is wired to {named}" if named
+            else f"{resource} is wired to a device this run named"
+        )
     return f"{reason}, so the run held it too"
 
 
@@ -581,7 +576,7 @@ def _observes_every_board(invocation) -> bool:
     )
 
 
-def _named_aliases(invocations: Iterable, registry) -> tuple[str, ...]:
+def _named_aliases(invocations: Sequence, registry) -> tuple[str, ...]:
     """Every device the run itself names, deduplicated, in the order found.
 
     Its roles, the boards it power-isolates, and, for a test that reads
@@ -599,7 +594,7 @@ def _named_aliases(invocations: Iterable, registry) -> tuple[str, ...]:
     return tuple(dict.fromkeys(named))
 
 
-def boards_for_invocations(invocations: Iterable, registry) -> tuple[Board, ...]:
+def boards_for_invocations(invocations: Sequence, registry) -> tuple[Board, ...]:
     """Every board the run touches: its roles, power-isolated and observed boards.
 
     And, for any of them that is one member of a permanently wired pair, the
@@ -617,32 +612,28 @@ def boards_for_invocations(invocations: Iterable, registry) -> tuple[Board, ...]
     return tuple(sorted(found.values(), key=lambda b: b.key))
 
 
-def pairings_for_invocations(invocations: Iterable, registry) -> tuple[dict, ...]:
+def pairings_for_invocations(invocations: Sequence, registry) -> tuple[dict, ...]:
     """Why the run holds each device it never named (#289).
 
     One record per device the pairing added to boards_for_invocations, in
-    that expansion's order, so a run's record and its report explain a
-    programmer leased by a run that asked for a board. Which devices get a
-    record is the registry's expansion and nothing else, so no rule here can
-    disagree with the leases actually taken; each record also names a device
-    the run asked for that the added one is wired to.
+    that expansion's order. Both come from one call to the registry's own
+    expansion: the aliases it adds follow the ones it was given, and its
+    clauses are those added aliases in the same order (``expand_pairs``). So
+    a run reports exactly the devices it leases, in the registry's own
+    wording, which is the wording `hold`, `hub-port` and `boards` print for
+    the same pair; nothing here can word it differently or name a device the
+    leases do not hold.
     """
     named = _named_aliases(invocations, registry)
-    held, _why = expand_pairs(registry, named)
+    held, clauses = expand_pairs(registry, named)
     records = []
-    for alias in held:
-        if alias in named:
-            continue
+    for alias, clause in zip(held[len(named):], clauses):
+        # Which device the run asked for, for a reader who wants the pair
+        # rather than the sentence. The clause above is what is shown.
         source = next(
             (other for other in named if alias in pair_members(registry, other)), ""
         )
-        reason = (
-            describe_pairing(registry, alias, source) if source
-            # A registry whose expansion is not its own pairing: the device
-            # is held, so it is recorded, with what is known of it.
-            else f"{alias} is wired to a device this run named"
-        )
-        records.append(pairing_record(alias, source, reason))
+        records.append(pairing_record(alias, source, clause))
     return tuple(records)
 
 

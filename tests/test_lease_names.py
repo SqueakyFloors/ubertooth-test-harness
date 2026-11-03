@@ -104,21 +104,18 @@ class NamesTestCase(unittest.TestCase):
 class OneLeaseKeyOneDevice(NamesTestCase):
     """Two resources may not take one lease file (#288)."""
 
-    def test_two_dks_whose_serials_differ_only_in_leading_zeros(self):
-        """A J-Link serial is zero-padded by sysfs and not by nrfutil.
+    def test_two_dks_whose_keys_collide_and_whose_serials_do_not(self):
+        """The lease key alone, with nothing in the serials to go on.
 
-        So these are two identities and one lease key, which the identity
-        check above cannot see: it compares whole identity mappings.
+        A J-Link serial is zero-padded by sysfs and not by nrfutil, so the
+        key drops the leading zeros: these two are two serials, two bench
+        lock names, and one lease file. Nothing but the key check sees it.
         """
-        reason = self.refuse(dk("DK_A", "000123456789"), dk("DK_B", "123456789"))
+        reason = self.refuse(dk("DK_A", "000000"), dk("DK_B", "0000000"))
         self.assertIn("DK_A", reason)
         self.assertIn("DK_B", reason)
-        self.assertIn("one serial is one device", reason)
-        # It really is one key, which is what makes it one file.
-        registry = self.load(dk("DK_A", "000123456789"))
-        self.assertEqual(
-            "nrf52840dk-123456789", leases.resource_key(registry.get("DK_A"))
-        )
+        self.assertIn("would both be leased as 'nrf52840dk-0'", reason)
+        self.assertIn("one lease file is one device", reason)
 
     def test_two_peers_registered_with_one_bridge_serial(self):
         """Their other identity fields differ, so only the key is shared."""
@@ -211,6 +208,21 @@ class OneBenchLockNameOneDevice(NamesTestCase):
         registry = self.load(dk("DK_A", "000123456789"))
         self.assertEqual("nrf52840dk-123456789",
                          leases.resource_key(registry.get("DK_A")))
+
+    def test_two_dks_whose_serials_differ_only_in_leading_zeros(self):
+        """sysfs zero-pads a J-Link serial and nrfutil does not.
+
+        So a bench note may name either spelling, both are in that one
+        space, and these two would also take one lease file.
+        """
+        reason = self.refuse(dk("DK_A", "000123456789"), dk("DK_B", "123456789"))
+        self.assertIn("DK_A", reason)
+        self.assertIn("DK_B", reason)
+        self.assertIn("one serial is one device", reason)
+        registry = self.load(dk("DK_A", "000123456789"))
+        self.assertEqual(
+            "nrf52840dk-123456789", leases.resource_key(registry.get("DK_A"))
+        )
 
 
 class BenchLockFileNames(NamesTestCase):

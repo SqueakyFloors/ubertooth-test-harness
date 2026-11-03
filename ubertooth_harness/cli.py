@@ -930,20 +930,23 @@ def _run_suite(args: argparse.Namespace) -> int:
                 "installed; install it, or use --no-flash-build to keep the "
                 "boards' firmware"
             )
+    # A device the registry says is permanently wired to one of the run's own
+    # (a debug programmer and the board it programs) is held with it. Said
+    # wherever the devices are: a dry run lists what the run would hold, and
+    # the run itself says it before it takes the locks and records it (#289).
+    pairings = board_leases.pairings_for_invocations(invocations, registry)
     if args.dry_run:
         return _dry_run(
-            args, catalog, plan, host, invocations, not_applicable, blocked
+            args, catalog, plan, host, invocations, not_applicable, blocked,
+            pairings,
         )
     artifacts = _parse_artifacts(args.artifact)
     run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
     # Power isolation and firmware-writing tests hold the host lock for the
     # whole run; flashing the build first holds it only while writing.
     args.keep_host_lock = board_leases.needs_host_lock(invocations, catalog)
-    # A device the registry says is permanently wired to one of the run's own
-    # (a debug programmer and the board it programs) is held with it. Said
-    # here, as `hold` says it, before the attempt and so before any wait for
-    # those devices; the run's record carries it too (#289).
-    pairings = board_leases.pairings_for_invocations(invocations, registry)
+    # Said as `hold` says it: before the attempt, and so before any wait for
+    # those devices.
     for record in pairings:
         print(f"note: {record['reason']}, so it is held too", file=sys.stderr)
     leases = board_leases.acquire(
@@ -967,7 +970,9 @@ def _run_suite(args: argparse.Namespace) -> int:
         leases.release()
 
 
-def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=()) -> int:
+def _dry_run(
+    args, catalog, plan, host, invocations, not_applicable, blocked=(), pairings=(),
+) -> int:
     """What run-suite would run on this host and what is not applicable.
 
     Capabilities come from the platform and the run options (hostneeds.py
@@ -997,6 +1002,10 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
     elif args.build:
         print("flash before preflight: no ("
               + ("--no-flash-build" if args.no_flash_build else "no board needs it") + ")")
+    # A device no test below names, which the run would hold all the same.
+    # Worded as `boards` words it, under the same label.
+    for record in pairings:
+        print(f"pair: {record['reason']}, so the run would hold it too")
     runs = omitted = 0
     for invocation in invocations:
         definition = catalog.get(invocation.test_name)
