@@ -56,11 +56,16 @@ checkoff, and a countdown/ETA in a web GUI.
   `/api/runs/{id}` (status and events), `/api/runs/{id}/report.md`,
   `/api/runs/{id}/files` and `/api/runs/{id}/file` (the output files the run
   saved, and one bounded page of one; a file that stayed on the target is
-  asked of that run's runner), `/api/runs/{id}/cancel`. `/ws/live` fans out target status changes, run
-  updates, and (with `?run_id=`) one run's events to browsers, best effort: a
+  asked of that run's runner), `/api/runs/{id}/cancel`, and `/api/run-groups`
+  for a run on several hosts at once ([section
+  4b](#4b-run-groups-one-plan-on-several-hosts)). `/ws/live` fans out target
+  status changes, run and group
+  updates, and (with `?run_id=`) one run's events or (with `?group_id=`) a
+  whole group's, to browsers, best effort: a
   browser that falls behind is disconnected, never the runner. `/ws/runner`
   speaks protocol v5. Each run is a flat directory
-  `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with the
+  `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with group
+  records in `groups/` beside them and the
   results directory outside the repository by default
   (`$XDG_DATA_HOME/ubertooth-harness/controller/runs`). `GET /` returns a
   JSON summary; the GUI is at `/ui/` ([section 4](#4-web-gui-controller)).
@@ -351,6 +356,16 @@ resources:
       port: 1
 ```
 
+A resource MAY be recorded as permanently wired to another one: a
+`Debug programmer` names the single device it `programs`. The two are then
+held as one pair, whichever of them a command names, because using either
+without the other spoils a test or leaves a board needing hands on it
+(`FileResourceRegistry.pair_members`, `leases.expand_pairs`;
+[`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs)).
+Validation requires both members on one host, one programmer per device, and
+no self-pairing or loop; expansion is deduplicated, deterministic, and
+terminates on any graph it is given.
+
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
 valid host attachments, type-correct defaults, and valid power relationships.
@@ -381,10 +396,39 @@ either by placement.
 
 A test states what it needs of the unit bound to each hardware role as a
 `PlacementRequirement` (`antenna`, `min_attenuation_db`,
-`max_attenuation_db`), from the plan's `rf:` argument or, failing that, the
-test's own `rf_defaults`. Captures, surveys, and tests that hold a live
-connection default to an ordinary link, so the planner keeps them off an
-attenuated board; a plan's `rf:` overrides that per role. The requirement
+`max_attenuation_db`), from the plan's `rf:` argument, failing that from what
+its `weak link:` argument makes of that role, and failing that from the test's
+own `rf_defaults`. Captures, surveys, and tests that hold a live connection
+default to an ordinary link, so the planner keeps them off an attenuated
+board; a plan's `rf:` or `weak link:` overrides that per role.
+
+`weak link:` (`weaklink.py`) names one role and an attenuation in dB, and it
+speaks for every role of the test: that role at exactly that attenuation with
+its antenna attached, and every other hardware role an ordinary board. That is
+one number in the plan where `rf:` needs a record per role. It refuses a
+second role, so a figure from a run always belongs to one attenuation; a plan
+that wants two placements says so with `rf:`, and a test takes one argument or
+the other, never both. The attenuation a run used is not read back from the
+argument: `resource_placements` carries the placement of every board the
+planner bound, which is what a report quotes — for the boards that record a
+placement. A board with no `rf:` is absent from that record, so under
+`weak link:` the ordinary roles usually leave no trace of having been
+ordinary; what the record shows is the attenuated side and what every role
+was required to be (`placement_requirements`).
+
+`weaklink.unjudgeable` is what a run has to pass: a requirement may leave no
+attenuated link possible (an ordinary board) or pin exactly one attenuation,
+which must be in `weaklink.MEASURED_ATTENUATIONS_DB`. A requirement that
+leaves a band open above 0 dB, which `rf:` can write and `weak link:` cannot,
+is refused too, because which board it binds depends on what the bench
+happens to hold. `plan.check_runnable` applies that to a whole plan for
+`validate-plan`, honoring `runnable: false`; `plan.check_suite_runnable`
+applies it to the one suite a `run-suite` is about to run and does not
+consult the flag, since `runnable: false` says a plan may name those entries,
+not that a run may judge them. Both also refuse a test with no
+implementation. `weaklink.CHECKS` is the list of weak-link checks and what
+each one still needs; none is in a runnable plan, and
+`testplans/weak-link.yaml` is where they wait. The requirement
 narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
 is filtered by the role as well, so a unit that could never take the role is
 not offered as the one that satisfies the placement: `default` prefers the
@@ -633,10 +677,15 @@ Validation and preparation have distinct phases:
    stops the run before preflight (#135). The host lock is held while
    writing, then released unless the run needs it later; the firmware build
    is implied.
-5. Mandatory preflight: verify installed host revision and every selected
-   Ubertooth firmware revision (the application image, or the bare revision
-   older firmware prints), compile identity, and registered serial before
-   the first suite test starts.
+5. Mandatory preflight: verify installed host revision, the libbtbb those
+   tools are linked against, and every selected Ubertooth firmware revision
+   (the application image, or the bare revision older firmware prints),
+   compile identity, and registered serial before the first suite test
+   starts. The libbtbb required is the one the run resolved, or, for a run
+   that resolved none, the `LIBBTBB_REF` the Ubertooth commit sets in its own
+   `install.sh`: the build and link stages cannot tell two libbtbb commits
+   apart, so the version line is the only thing that says which decoder the
+   run measured ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
 
 The `manifest` record is written to run.jsonl before preflight and snapshots requested
 refs, resolved commits, plan/registry/artifact hashes, target host, normalized
@@ -719,9 +768,9 @@ and a self-reset is then only reported (README, "Firmware watchdog").
 
 Every test accepts `platforms:` (`linux`, `macos`, no duplicates), and a step
 that leaves it out runs on every platform. Every test that binds hardware also
-accepts `rf:`, one placement requirement per hardware role (see
-[RF placement](#rf-placement)); a role the test does not bind is refused at
-load. `hosts:` chooses the registered
+accepts `rf:`, one placement requirement per hardware role, and `weak link:`,
+its shorthand (see [RF placement](#rf-placement)); a role the test does not
+bind is refused at load, as is setting both. `hosts:` chooses the registered
 hosts a step may run on; `platforms:` narrows those to the ones that can run
 it, as a test-wide need (`hostneeds.Needs`), so the planner compiles the step
 only for hosts whose platform it lists and records the rest as not applicable.
@@ -756,7 +805,22 @@ differently.
 Hardware a step is *about*, rather than hardware it binds, is a third
 outcome: `resources.MissingRequiredHardware`, raised for `alternate
 Ubertooths` on a host with one registered Ubertooth and for `exclusive
-Ubertooth` where another registered board is on no power controller. The step
+Ubertooth` where another registered board is on no power controller. A step
+may also claim that outcome for the hardware it binds, with
+`required hardware: true` (every test that binds hardware accepts it): the
+absence is usually the registry's own `MissingResource`, for the host or for
+a role, and the planner records it as blocked rather than not applicable. A
+host that can offer only one device for two roles is the planner's own
+finding, since no single lookup failed: it writes that reason itself, and
+raises `MissingRequiredHardware` for it only under `strict_hardware`.
+That is what lets a gate suite name one bench's hardware honestly,
+and `testplans/release.yaml` uses it for `Recover AFH map`; a record for a
+host the registry has not got is carried by the runs of the hosts that are
+here, as `for_host` carries that host's not-applicable records, unless some
+host here runs that test, in which case a run of this suite measures the
+gate and none of them fails on it. The argument decides
+absence only: what a host here cannot run at all is judged first, unchanged.
+The step
 is recorded as `hostneeds.Blocked` (`CompiledSuite.blocked`,
 `blocked_for_host`) and produces no invocation, so the rest of the suite
 compiles and runs; the sequencer emits a `blocked` event per record, counts
@@ -1007,14 +1071,32 @@ by the REST API and `/ws/live`.
   needs a toolchain the target may not have; a suite's `needs_artifacts`
   names an image no build makes, which only `--artifact`
   passes, and the suite line then says a run started here is refused before
-  its tests) → "Run". The controller
+  its tests) → "Run". The plan list is fetched for the chosen target
+  (`GET /api/plans?target=HOST`) and again whenever it changes, keeping the
+  chosen plan and suite: a step whose `hosts:` names other hosts, or whose
+  `platforms:` or test-wide needs the target's platform does not meet, is
+  not compiled for this target, so it is left out of the suite's estimate
+  and of the build options the suite asks for, and is named with the time it
+  takes where it does run (`omitted_tests`, `omitted_estimated_s`). That is
+  the host-level half of what the planner decides; hardware the bench has
+  not got needs the target's resource registry, which the controller has
+  not got. Run is held, with the reason, for a suite a run on that target
+  could not measure: one no step of which runs there, and one holding a step
+  whose own hardware is what it measures (`required hardware:`) whose
+  `hosts:` names no host of the run. `/api/plans` answers that per suite
+  (`runnable_on_target`, `not_runnable_reason`, `blocked_tests`) and
+  `POST /api/targets/{host}/runs` and `POST /api/run-groups` refuse such a
+  request with 422, a group being judged over its hosts together. The
+  controller
   refuses a ref that is not in the list or a full commit ID (422). The run
   request carries the commit listed for the ref (the GUI sends the commit it
   showed; a ref that has moved since is refused with 409 and the page lists
   the refs again), and the runner runs exactly that commit, recording the
   ref name and the commit in the manifest and report. A branch and a tag of
   one name are separate entries, labelled, each with its own commit. When the list cannot be fetched it passes the ref
-  on unchecked and logs a warning. One target per run; a multiselect is a later step.
+  on unchecked and logs a warning. One target per run in the GUI; the API
+already takes several as a run group (4b), and the multiselect is the next
+step.
 - **Live run:** the suite rendered as a checklist that ticks in real time
   from the run's events (✓ passed / ✗ failed / … running / ○ pending, always
   with text, in an `aria-live` region), the stage, elapsed time, Cancel, and a
@@ -1103,6 +1185,78 @@ together in the event loop afterwards, so an API lookup never reads a
 half-updated store and a cancelled learn leaves no samples behind; a learning
 failure costs the countdown accuracy and nothing else. Marking a learned
 estimate in the GUI ("4s, from 10 runs") is the remaining step of issue #137.
+
+### 4b. Run groups: one plan on several hosts
+
+Implemented in the controller: `ubertooth_harness/rungroups.py`, issue #154.
+The GUI side (a host multiselect, a pill per host on every row, a transcript
+tab per host) is the next slice and is not built yet.
+
+A run on several hosts is a **run group**: `POST /api/run-groups` with the
+run request and a `hosts` list starts **one child run per host**, together.
+Each child is an ordinary run with its own runner, boards, leases, run
+directory and `run.jsonl`, so neither the runner protocol nor anything on a
+target changes; `group_id` in the child's `run.json` is the only addition. A
+single-host run (`POST /api/targets/{host}/runs`) stores no group and is
+presented as a **group of one** whose ID is the run's own, so history has one
+shape whatever started a run.
+
+- **One revision.** The ref is resolved once, before any child is started,
+  and every child is sent that commit. A branch that moves while the runs are
+  starting cannot split a group across two commits.
+- **Each host stands on its own.** The requests are sent and awaited
+  concurrently, and a host that is offline, busy, or whose runner rejects the
+  run leaves its reason on that member while the others run. The group then
+  reports `complete: false` and, once nothing is running, `error`: a group
+  that ran on two hosts of three did not do what was asked. A member whose
+  start request has not been answered yet reads `starting`, and the group
+  reads `running`: nothing has gone wrong with that host yet. A group not one
+  host of which started is no group at all — nothing is stored and the caller
+  is told, host by host, why (409, or the one status every host gave) — unless
+  a request timed out, which stays pending and may still be accepted: that
+  group is stored, its host reads `starting` until the request is answered or
+  expires, and a group with no child at all is forgotten once the last such
+  request is gone. A group cancelled while a request was outstanding cancels
+  the child that arrives afterwards as well. A pending request does not
+  survive a controller restart, so a child reported after one is adopted as a
+  run of its own; a late refusal or a lost connection, in the same window,
+  does reach the group and is recorded as that host's reason.
+- **Status is derived, never stored.** `running` while any child is active,
+  `passed` only when every host the group asked for ran and passed, otherwise
+  the worst child outcome (`error` over `failed` over `lost` over `canceled`
+  over `passed`, with a status the code does not know ranking as an error). A
+  stored group record holds only the request, which run each host got, and
+  whether a cancel was asked for, so nothing has to be kept in step with the
+  children.
+- **Cancel applies to the group.** `POST /api/run-groups/{id}/cancel` cancels
+  every active child and reports each host's outcome; a host whose runner is
+  away keeps its own reason and the others are still cancelled, and a host
+  that is still starting has nothing to cancel yet but has the child it
+  accepts next cancelled as it arrives. Only when not one child could be
+  cancelled, and none is starting, is it a refusal.
+- **Per-host step results.** `GET /api/run-groups/{id}` returns one row per
+  step — build, flash, preflight, then the tests in planned order — each with
+  one cell **per host that runs it, and only those**: a step a host does not
+  plan has no cell, which is how a Linux-only test ends up with a Linux cell
+  and no macOS one. What a host plans comes from that run's own `manifest`
+  record, so the planner on each target decides, not the controller. Each
+  cell carries the status, when it started and finished, the elapsed seconds,
+  the reason it failed, the estimate learned for that host, and its parts (a
+  test's invocations, one per board; a flash's boards), which is what a pill
+  that doubles as a progress bar needs. A required test the planner could not
+  compile on a host (`blocked`, #273) has no invocation, so its cell is that
+  planning record and ranks worse than a pass. `progress` counts the cells, so a
+  group of two hosts counts each host's preflight; its summed estimate needs
+  every cell to have one, which a run that flashes its boards has not got,
+  since flashing the run's build is not learned as a stage (4a).
+- **Live.** `/ws/live?group_id=ID` carries every member run's updates and
+  events on one stream (one transcript per host) plus the group's own
+  updates; `?run_id=ID` is unchanged and still carries that one run, with the
+  group it belongs to in its snapshot.
+
+Still open on #154: a plan step no selected host can run fails planning on
+that host instead of being left out there (the plan side of the issue), and
+the GUI slice above.
 
 ---
 

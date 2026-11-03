@@ -422,11 +422,20 @@ def board_key(alias: str, identity: Mapping) -> str:
 _LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
 DK_TYPE = "nRF52840 DK"
 PEER_TYPE = "ESP32 Classic peer"
-LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE)
+# A debug programmer wired to one device's debug or programming header. It is
+# leased like a board: programming a device while another command owns it, or
+# using that device while it is being programmed, corrupts a test or leaves
+# the board needing hands on it, so the two are always held together (see
+# expand_pairs).
+PROGRAMMER_TYPE = "Debug programmer"
+LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE)
 
 
 def resource_key(resource) -> str:
-    """Lock-file key of a leasable resource (Ubertooth, DK, or ESP32 peer)."""
+    """Lock-file key of a leasable resource.
+
+    An Ubertooth, a DK, an ESP32 peer, or a debug programmer.
+    """
     if resource.type == DK_TYPE:
         serial = str(resource.identity.get("jlink serial", "") or "").strip()
         if not serial.isdigit():
@@ -446,7 +455,44 @@ def resource_key(resource) -> str:
                 f"to be leased; registered '{serial}'"
             )
         return f"esp32-{serial}"
+    if resource.type == PROGRAMMER_TYPE:
+        # Taken as registered, as the peer's is: the serial names the adapter
+        # on USB and in its lock file, so one spelling is one device.
+        serial = str(resource.identity.get("serial", "") or "").strip()
+        if not serial or not _LOCK_NAME.fullmatch(serial):
+            raise LeaseError(
+                f"{resource.alias} needs a 'serial' in the hardware registry to be "
+                f"leased; registered '{serial}'"
+            )
+        return f"programmer-{serial}"
     return board_key(resource.alias, resource.identity)
+
+
+def pair_members(registry, alias: str) -> tuple[str, ...]:
+    """The devices a registry says are permanently wired to this one.
+
+    A registry that records no pairing at all answers with nothing, which is
+    every bench that has no programmer registered.
+    """
+    members = getattr(registry, "pair_members", None)
+    return tuple(members(alias)) if members is not None else ()
+
+
+def expand_pairs(registry, aliases: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """These aliases plus each one's permanently wired pair, and why.
+
+    One expansion for every command that holds devices, so a debug programmer
+    and the device it programs are never held apart, whichever of the two was
+    named. Deduplicated and in a deterministic order (the names as given, then
+    each added alias in alias order), so naming both members is harmless and
+    two commands always ask for the same set. The second tuple is one clause
+    per added alias, for the note a command prints before it takes the locks
+    (``FileResourceRegistry.describe_pairing``).
+    """
+    expand = getattr(registry, "expand_pairs", None)
+    if expand is None:
+        return tuple(dict.fromkeys(aliases)), ()
+    return expand(list(aliases))
 
 
 def _observes_every_board(invocation) -> bool:
@@ -461,7 +507,12 @@ def _observes_every_board(invocation) -> bool:
 
 
 def boards_for_invocations(invocations: Iterable, registry) -> tuple[Board, ...]:
-    """Every board the run touches: its roles, power-isolated and observed boards."""
+    """Every board the run touches: its roles, power-isolated and observed boards.
+
+    And, for any of them that is one member of a permanently wired pair, the
+    other member: a run that uses or power-cycles a device with a debug
+    programmer on it holds that programmer too (expand_pairs).
+    """
     found: dict[str, Board] = {}
     for invocation in invocations:
         aliases = [
@@ -471,6 +522,7 @@ def boards_for_invocations(invocations: Iterable, registry) -> tuple[Board, ...]
         aliases += [action.resource_alias for action in invocation.power_isolation]
         if _observes_every_board(invocation):
             aliases += list(registry.resolve_hardware(invocation.host, "Ubertooth", "each"))
+        aliases, _why = expand_pairs(registry, aliases)
         for alias in aliases:
             board = Board(alias, resource_key(registry.get(alias)))
             found.setdefault(board.key, board)

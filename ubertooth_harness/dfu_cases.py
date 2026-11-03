@@ -26,6 +26,13 @@ SqueakyFloors/ubertooth#208: a failed -u read-back (seen once in about 20)
 leaves the board in DFU despite -r. A case step that hits it fails and the
 cleanup returns the board; a cleanup read-back that hits it returns the board
 and fails the cleanup, so the run stops.
+
+A read-back is compared with the image as -d writes it, not with the file:
+the tool fills in the vector checksum and the image check record in the
+image's first block, and how long a dump is follows the part the board
+reports. Both come from the command itself -- the length from the line it
+prints, the two fields from what the writer should have worked out -- and
+every other byte has to match. See dfuimage.readback_problems().
 """
 
 from __future__ import annotations
@@ -60,6 +67,14 @@ _REVISION_PATTERN = (
 )
 # ubertooth-dfu logs this stage before it sends the first block.
 _PROGRAMMING = r"firmware programming attempt"
+# plan_upload() says what a read-back is about to cover before the dots that
+# cover it, because the length follows the part and so differs between
+# boards: 114688 bytes on a 128 KiB part, 245760 on a 256 KiB one. The
+# comparison takes the length from this line rather than assuming a part, so
+# the step records the whole line and fails if the tool printed none. The
+# line's shape comes from dfuimage, which reads the fields back out of it.
+READBACK_RANGE_KEY = "read-back range"
+_READBACK_RANGE_PATTERN = rf"(?P<value>{dfuimage.READBACK_LINE_PATTERN})"
 # ...and this one once the image is accepted, before it opens a device.
 _DEVICE_OPENED = r"DFU \+\d+\.\d+s: operation started"
 # A write, a read-back. Helper steps that run device commands take their
@@ -86,6 +101,10 @@ def _revision(context):
 
 
 _file = case_file
+
+
+def _readback_range(context):
+    return require(context, READBACK_RANGE_KEY)
 
 
 def _helper(*parts):
@@ -205,9 +224,11 @@ def _write_read_back_case(serial, guards):
                        "revision after write"),
         Step("read-back", "ubertooth-dfu -u readback.bin -r",
              _tool("ubertooth-dfu", "-U", serial, "-u", _file("readback.bin"), "-r"),
-             timeout_s=READ_TIMEOUT_S, mutates=True, forbidden_patterns=(_PROGRAMMING,)),
+             timeout_s=READ_TIMEOUT_S, mutates=True, forbidden_patterns=(_PROGRAMMING,),
+             observe=Observation(READBACK_RANGE_KEY, _READBACK_RANGE_PATTERN)),
         _helper_step("compare", "Read-back holds the written image", "check-readback",
-                     _file("readback.bin"), _image, pattern=r"image and 0xff padding match"),
+                     _file("readback.bin"), _image, "--reported", _readback_range,
+                     pattern=r"image and 0xff padding match"),
         _helper_step("returned", "Board back in its application after -u -r", "answers",
                      "--serial", serial, "--revision", _revision, pattern=r"Board answers with the expected revision",
                      timeout_s=dfuimage.step_timeout_s("answers")),

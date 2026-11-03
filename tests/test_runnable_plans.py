@@ -8,7 +8,13 @@ from pathlib import Path
 
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.cli import main
-from ubertooth_harness.plan import PlanError, check_runnable, load_plan, unimplemented_tests
+from ubertooth_harness.plan import (
+    PlanError,
+    check_runnable,
+    load_plan,
+    unimplemented_tests,
+    unjudgeable_attenuations,
+)
 from ubertooth_harness.planner import PlanCompiler
 from ubertooth_harness.resources import FileResourceRegistry
 
@@ -31,6 +37,22 @@ def _write(directory, runnable=""):
     path = Path(directory) / "plan.yaml"
     path.write_text(_PLAN.format(runnable=runnable), encoding="utf-8")
     return path
+
+
+def _asks_for_attenuation(plan, suite, catalog) -> bool:
+    """True when some step of the suite needs an attenuated board.
+
+    The example registry has none (its `rf:` block is commented out), so such
+    a suite cannot compile against it.
+    """
+    for step in plan.steps(suite):
+        definition = catalog.get(step.test_name)
+        wanted = definition.placement_requirements(
+            definition.normalize_arguments(step.arguments)
+        )
+        if any(need.min_attenuation_db for need in wanted.values()):
+            return True
+    return False
 
 
 def _validate(path):
@@ -79,9 +101,17 @@ class RunnablePlanTests(unittest.TestCase):
                 check_runnable(plan, catalog)
             if not plan.runnable:
                 not_runnable.append(path.name)
-                # A not-runnable plan exists for planned tests only.
-                self.assertTrue(unimplemented_tests(plan, catalog), path.name)
-        self.assertEqual(["backlog.yaml", "mac-polling.yaml"], not_runnable)
+                # A not-runnable plan exists for what a runnable one cannot
+                # carry: a planned test with no implementation, or a test
+                # pointed at an attenuation the bench has not been measured
+                # at (both are what check_runnable refuses).
+                self.assertTrue(
+                    unimplemented_tests(plan, catalog)
+                    or unjudgeable_attenuations(plan, catalog),
+                    path.name,
+                )
+        self.assertEqual(["backlog.yaml", "mac-polling.yaml", "weak-link.yaml"],
+                         not_runnable)
 
     def test_every_committed_plan_validates(self):
         for path in sorted(PLANS.glob("*.yaml")):
@@ -96,9 +126,12 @@ class RunnablePlanTests(unittest.TestCase):
         caught (#265): every suite compiles strictly against
         `hardware.example.yaml`, which documents the whole bench.
 
-        `range-weak-link` is the exception: it asks for a board behind a
-        20 dB attenuator, and the example registry carries that `rf:` block
-        commented out, as the optional setup it is.
+        The weak-link suites are the exception: they ask for a board behind an
+        attenuator, and the example registry carries that `rf:` block
+        commented out, as the optional setup it is. They are recognized by
+        what they ask for rather than listed by name, so a suite added to
+        `weak-link.yaml` needs no edit here, and one that stops asking for an
+        attenuated board is compiled like any other.
         """
         catalog = builtin_catalog()
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
@@ -107,19 +140,35 @@ class RunnablePlanTests(unittest.TestCase):
             for path in sorted(PLANS.glob("*.yaml"))
             for suite in load_plan(path, catalog).suites
         ]
-        # The one suite the example bench cannot be asked for; if it is ever
-        # dropped from the plans, this list simply empties.
-        skipped = [name for _path, name in suites if name in ("range-weak-link",)]
+        skipped = [
+            (path, suite) for path, suite in suites
+            if _asks_for_attenuation(load_plan(path, catalog), suite, catalog)
+        ]
+        # Which suites the predicate takes out is itself reviewed: only the
+        # weak-link suites, which ask for a board the example registry
+        # carries commented out. Adding a `weak link:` step to `classic`'s
+        # or `release`'s ordinary suites would otherwise drop that whole
+        # suite from this check without anyone noticing.
+        self.assertEqual(
+            sorted(
+                [(PLANS / "ble.yaml", "ble-weak-link"),
+                 (PLANS / "classic.yaml", "classic-weak-link"),
+                 (PLANS / "range.yaml", "range-weak-link")]
+                + [(PLANS / "weak-link.yaml", suite)
+                   for suite in load_plan(PLANS / "weak-link.yaml", catalog).suites]
+            ),
+            sorted(skipped),
+        )
         compiled = []
         for path, suite in suites:
-            if suite in skipped:
+            if (path, suite) in skipped:
                 continue
             with self.subTest(f"{path.name}:{suite}"):
                 PlanCompiler(catalog, registry).compile_suite(
                     load_plan(path, catalog), suite, strict_hardware=True
                 )
                 compiled.append(suite)
-        # Every suite in the repo, bar those named above: a suite added to a
+        # Every suite in the repo, bar those skipped above: a suite added to a
         # plan is compiled here too, or this fails.
         self.assertEqual(len(suites) - len(skipped), len(compiled))
         self.assertIn("release", compiled)

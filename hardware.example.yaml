@@ -47,8 +47,16 @@ resources:
     # attached, no attenuation). Keep the numbers current when the attenuator
     # or the position changes, because reports quote them as what the run's
     # figures were taken at. A plan then asks for this board with
-    # `rf: {Ubertooth: {min_attenuation_db: 10}}`, and captures, surveys and
-    # follow tests keep away from it on their own.
+    # `weak link: {Ubertooth: 20}`, which also asks for an ordinary board for
+    # every other role of that test; the capture, survey and follow tests
+    # declare an ordinary link as their own default, so they keep away from
+    # it unless a plan says otherwise.
+    #
+    # A bench that runs the committed weak-link suites needs TWO such boards,
+    # one at 20 dB and one at 40 dB: `ble-weak-link` captures a DK advertiser
+    # at both. Register a second attenuated Ubertooth with its own `rf:` block
+    # to run that suite; one board at 20 dB covers `classic-weak-link` and
+    # `range-weak-link` only.
     # rf:
     #   antenna: true
     #   attenuation_db: 20
@@ -143,6 +151,29 @@ resources:
       bridge serial: "fedcba9876543210fedcba9876543210"
       BD_ADDR: "C8:00:00:00:00:02"
       name: UT-ESP32-000002
+
+  # A debug programmer: a USB serial adapter, an SWD probe, or anything else
+  # wired to one board's debug or in-system programming header and left there.
+  # Nothing in the harness drives it; it is registered so that it and the
+  # board it is wired to are never used apart. `programs:` names that board,
+  # and every command that holds either one holds both: programming a board
+  # while another command owns it, or using the board while it is being
+  # programmed, spoils a test or leaves the board needing hands on it. A
+  # power change on either member holds the other too.
+  #
+  # Identify it by the serial its USB descriptor reports, which is what its
+  # lease file is named after (`programmer-<serial>`); `serial device` is
+  # optional and, where the adapter has one, must be the stable
+  # /dev/serial/by-id path rather than /dev/ttyUSB<n>. Both resources must be
+  # attached to the same host, each board has at most one programmer, and the
+  # pairing may not loop back on itself.
+  Prog_Linux0:
+    type: Debug programmer
+    attached to: Host_Linux
+    programs: UT_Linux1
+    identity:
+      serial: REPLACE_WITH_PROGRAMMER_SERIAL
+      # serial device: /dev/serial/by-id/usb-Vendor_Adapter_REPLACE-if00-port0
 
   # StarTech managed hub: switched through its built-in FTDI management
   # controller, which sits on downstream port 4; only ports 1-3 are DUT ports.

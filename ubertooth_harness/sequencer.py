@@ -1134,11 +1134,13 @@ class NamedTestSequencer:
         artifacts. Cases it cannot run are left out before anything runs and
         recorded as not applicable, with ``not_applicable`` (whole tests the
         planner left out of this run: what this host cannot run, and what
-        this bench has not got the hardware for).
+        this registry has not got the hardware for).
 
-        ``blocked`` is the required tests the planner could not compile for
-        this host because the hardware they are about is not registered
-        (hostneeds.Blocked). They are recorded before anything runs, every
+        ``blocked`` is the required tests this run cannot run because the
+        hardware they are about is not registered (hostneeds.Blocked):
+        either not on this host, or, for a step naming a host this registry
+        has not got at all, nowhere this run could reach. They are recorded
+        before anything runs, every
         other test runs as usual, and the run finishes failed: a gate that
         was never measured must not read as a pass.
         """
@@ -1343,6 +1345,10 @@ class NamedTestSequencer:
                     "resource": check.resource_alias,
                     "resource_identity": dict(check.resource_identity),
                     "expected_revision": check.expected_revision,
+                    # Only the host version check has one, and only it says
+                    # which libbtbb the run's tools had to be linked against,
+                    # or why none was required.
+                    **(check.libbtbb.to_details() if check.libbtbb else {}),
                 },
             )
             result = self._run_command(

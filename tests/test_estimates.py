@@ -125,8 +125,10 @@ class EstimateTests(unittest.TestCase):
         soak = self.catalog.get("BLE soak")
         self.assertEqual(1800, soak.estimated_seconds(
             arguments(soak, duration="30m", **{"sample every": "5s"})))
-        hid = self.catalog.get("Uberducky HID")
-        self.assertIsNone(hid.estimated_seconds(arguments(hid, Uberducky="x")))
+        # One with no duration to scale by has no estimate at all.
+        firmware = self.catalog.get("Receive-only firmware")
+        self.assertIsNone(firmware.estimated_seconds(
+            arguments(firmware, **{"Ubertooth": "default"})))
 
     def test_missing_scaling_argument_is_no_estimate_not_an_error(self):
         # A per-duration estimate on a call without a duration argument, and
@@ -166,15 +168,17 @@ class EstimateTests(unittest.TestCase):
         # The release plan run at fork 7bb07c9 took 621.0 s of test time, and
         # Failed capture files (comprehensive, measured on the same macOS
         # host) adds 15.1 s, and Interrupting a capture 18.5 s, the middle of
-        # three runs on the Linux bench host. The release suite is the
-        # non-soak release gate and is kept well inside half an hour of test
-        # time. Every entry in it runs on each registered host, so a test
-        # that needs a device only one host has (the ESP32 Classic peers)
-        # lives in its own plan instead: naming a host here would fail
-        # planning on the others.
+        # three runs on the Linux bench host. Recover AFH map (smoke, two
+        # two-minute captures) adds 520.0 s: it is release coverage, and the
+        # one entry that names the bench host its ESP32 Classic peers are on,
+        # which `required hardware: true` makes safe (#250). Half an hour is
+        # the planning target for the non-soak gate rather than a limit of
+        # the code, and the second assertion is the tripwire for it: a change
+        # that takes the gate past half an hour gets a decision instead of
+        # slipping in (#250).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(654.6, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1174.5, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 

@@ -64,7 +64,10 @@
 - Keep `docs/tests.md` current: a PR that adds a catalog test, removes one, or
   changes what a test checks updates that test's section in the same PR.
   Section headings are the catalog names exactly, so a missing section is easy
-  to spot. Reviewers check for it.
+  to spot. The one exception is the trailing `Out of scope: ...` section, which
+  records what the harness has decided not to test so that a missing catalog
+  entry is not mistaken for an oversight; the file's own intro says so.
+  Reviewers check for it.
 - Run the unit suite with `python scripts/test.py` (one process per module,
   one per core; `--durations 10` for the slowest tests). It is what
   `scripts/ci.sh test` runs. `python -m unittest discover -s tests` runs the

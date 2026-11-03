@@ -56,7 +56,9 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.hostneeds import planned_capabilities, split_cases
-from ubertooth_harness.plan import PlanError, check_runnable, image_label, load_plan
+from ubertooth_harness.plan import (
+    PlanError, check_runnable, check_suite_runnable, image_label, load_plan,
+)
 from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
@@ -827,6 +829,11 @@ def _run_suite(args: argparse.Namespace) -> int:
     external_template = _external_template(args)
     catalog = builtin_catalog()
     plan = load_plan(args.plan, catalog)
+    # Refuse a suite this run could not judge before any board is touched: a
+    # test with no implementation, or one pointed at a link no figure has
+    # been taken over. `runnable: false` lets a plan name those entries; it
+    # does not make them runnable, so the flag is not consulted here.
+    check_suite_runnable(plan, args.suite, catalog)
     registry = FileResourceRegistry.load(args.hardware)
     host = registry.get(args.host)
     if host.type != "Host":
@@ -846,12 +853,13 @@ def _run_suite(args: argparse.Namespace) -> int:
         and (not selected_names or invocation.test_name in selected_names)
     )
     # Whole tests left out at planning (hostneeds.py, planner.py): what this
-    # host cannot run, and what this bench has not got the hardware for.
+    # host cannot run, and what this registry has not got the hardware for.
     not_applicable = tuple(
         item for item in compiled.for_host(args.host)
         if not selected_names or item.test_name in selected_names
     )
-    # Required tests this host has not got the hardware for (planner.py):
+    # Required tests whose hardware is not registered (planner.py): on this
+    # host, or on a host this registry has not got at all. They are
     # recorded, everything else runs, and the run ends failed.
     blocked = tuple(
         item for item in compiled.blocked_for_host(args.host)
@@ -1011,10 +1019,13 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
           f"and {len(not_applicable)} test(s) not applicable"
           + (f", {len(blocked)} test(s) blocked" if blocked else ""))
     if blocked:
+        # Not "on this host": a record may be about a host this registry has
+        # not got, which no run of its own will ever carry. Each line above
+        # names the host it is about.
         print(
-            f"error: {len(blocked)} required test(s) cannot run on {args.host}; "
-            "the run would fail. Register the hardware they need, or run a "
-            "suite without them.",
+            f"error: {len(blocked)} required test(s) of {args.suite} cannot "
+            "run; the run would fail. Register the hardware they need, or run "
+            "a suite without them.",
             file=sys.stderr,
         )
         return 1
@@ -1216,6 +1227,18 @@ def _boards_command(args: argparse.Namespace) -> int:
     ]
     # The host lock is local to the host this runs on, like the leases.
     states.append(board_leases.host_lock_state(directory=args.lease_dir))
+    # Which devices come with which: a reader who finds one held by a command
+    # that named only the other needs to see why (the pair is held as one).
+    for state in states:
+        pair = [
+            {
+                "resource": other,
+                "why": registry.describe_pairing(other, state["resource"]),
+            }
+            for other in board_leases.pair_members(registry, state["resource"])
+        ]
+        if pair:
+            state["pair"] = pair
     if args.json:
         print(json.dumps(states, indent=2, sort_keys=True))
         return 0
@@ -1257,6 +1280,10 @@ def _boards_command(args: argparse.Namespace) -> int:
             print(f"{label:<12} held  {board_leases.describe_holder({})}")
         else:
             print(f"{label:<12} free")
+        for member in state.get("pair", ()):
+            # Held with this one, so a holder a reader did not expect is
+            # explained where they see it.
+            print(f"{'':<12} pair:  {member['why']}, so the two are held together")
         if state.get("waiting"):
             # Commands queued for it: a free board with a queue is somebody
             # else's next, and a held one shows how deep the queue is.
@@ -1359,8 +1386,15 @@ def _lease_command(args: argparse.Namespace) -> int:
         raise HarnessError("lease needs a command after --")
     external_template = _external_template(args)
     registry = FileResourceRegistry.load(args.hardware)
+    # A device wired to a debug programmer is held with it, whichever of the
+    # two was named: using one without the other corrupts a test or leaves a
+    # board needing hands on it. Said before the attempt, which is also when
+    # a wait for either of them starts.
+    aliases, pairing = board_leases.expand_pairs(registry, args.boards)
+    for clause in pairing:
+        print(f"note: {clause}, so it is held too", file=sys.stderr)
     boards = []
-    for alias in args.boards:
+    for alias in aliases:
         resource = registry.get(alias)
         if resource.type not in board_leases.LEASED_TYPES:
             raise HarnessError(
