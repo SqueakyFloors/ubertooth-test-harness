@@ -1344,10 +1344,11 @@ class Rejection:
     # A rejection whose options carry a -U of their own (-U all) must not be
     # given a second one: no option may be given a value twice, so the
     # command would be refused for the repeat and never reach the behavior
-    # the case is named for (harness #292). These commands are refused in the
-    # option loop, before any board is opened, so leaving the selector out
-    # takes nothing away: the board the case guards is untouched either way,
-    # and the steps around the refusal still read it.
+    # the case is named for (harness #292). These commands are refused before
+    # any board is opened -- the -U all check runs after the option loop and
+    # before the lookup -- so leaving the selector out takes nothing away:
+    # the board the case guards is untouched either way, and the steps around
+    # the refusal still read it.
     select: bool = True
 
     def argv(self, serial: str) -> tuple[str, ...]:

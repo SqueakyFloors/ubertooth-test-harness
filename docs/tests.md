@@ -459,9 +459,8 @@ text is the tool's, not the harness's guess.
 Each command names the board it is for with `-U <serial>`, except the two
 `-U all` cases, which bring that selector themselves: no option may be given
 a value twice, so a second `-U` would be refused for the repeat and the case
-could never reach the behavior it is named for. Those two are refused in the
-option loop, before any board is opened, so leaving the selector out takes
-nothing away.
+could never reach the behavior it is named for. Those two are refused before
+any board is opened, so leaving the selector out takes nothing away.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded, which is what catches the two `-U all` cases if a regression let them

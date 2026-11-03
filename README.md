@@ -664,15 +664,17 @@ fixed in `30c4103f`). Nothing has run the suite since, so it has still never
 judged a result. [docs/tests.md](docs/tests.md#two-device-range-test) has the
 measurement and the selection.
 
-On current fork main the `range` suite passes: the sender gets a clean round trip and
-`-m` reports request and reply PA levels and copy numbers (fixed by
+On current fork main the `range` suite passes: the sender gets a clean round trip,
+`-n` reports its request and reply PA levels and copy numbers, and `-m` reads
+the same result back (fixed by
 [ubertooth#601](https://github.com/SqueakyFloors/ubertooth/pull/601); before
 it the reply read back as zeros, [ubertooth#483](https://github.com/SqueakyFloors/ubertooth/issues/483),
 and earlier still no reply came at all, [ubertooth#26](https://github.com/SqueakyFloors/ubertooth/issues/26)).
 On the lab bench (two boards a few centimetres apart, PA 0) 9 of 10 runs pass
 with PA level 0 and copy numbers 0-6; about one run in ten the firmware takes
-a CRC-OK packet that is not a copy of its request and `-m` reports `invalid
-range test: mismatch on byte 0`, so the test fails ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)).
+a CRC-OK packet that is not a copy of its request and `-n` reports `invalid
+range test: mismatch on byte 0` and exits 1, so the test fails there, before
+`-m` is read ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)).
 Since fork `0684c11` ([ubertooth#445](https://github.com/SqueakyFloors/ubertooth/pull/445)) both boards keep answering USB while the
 modes run and `-S` stops the repeater, so the run cleans up and needs no power
 cycle. Before `0684c11` the repeater answered no USB request once started, the

@@ -1,6 +1,7 @@
 """Two-device range test against a fake sender/responder pair of the fork."""
 
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -317,6 +318,15 @@ class RangeResultCheckTests(unittest.TestCase):
                 self.assertIn(other, reason)
         # Nothing at all on stdout is the absent result, named as such.
         self.assertIn("no range test result", only(""))
+        # Lines of the result's own form, but not four of them: a block
+        # printed twice, or one stray line of the right shape. The values are
+        # read from the first block that matches, so a second one would
+        # otherwise go unread.
+        twice = self.RESULT.format(0, 0, 0, 8) + self.RESULT.format(0, 0, 7, 1)
+        self.assertIn("8 result lines on stdout, not 4", only(twice))
+        self.assertIn("5 result lines on stdout, not 4",
+                      only(self.RESULT.format(0, 0, 0, 8)
+                           + "reply number     : 3\n"))
         # The bounds still apply, and both reasons are reported together.
         reason = util_cases.range_result_only_check(2)(
             "note: x\n" + self.RESULT.format(0, 0, 4, 0))
@@ -324,7 +334,6 @@ class RangeResultCheckTests(unittest.TestCase):
         self.assertIn("carries the result block alone", reason)
 
     def test_the_result_value_carries_the_four_numbers(self):
-        import re
         match = re.search(util_cases.RANGE_RESULT, self.RESULT.format(1, 2, 3, 4))
         self.assertEqual("1 2 3 4", util_cases.range_result_value(match))
 

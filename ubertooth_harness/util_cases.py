@@ -472,7 +472,8 @@ RANGE_RESULT_FIELDS = ("request_pa", "request_number", "reply_pa", "reply_number
 def range_result_value(match: re.Match) -> str:
     """The four result values of a RANGE_RESULT match, in their own order."""
     return " ".join(match[name] for name in RANGE_RESULT_FIELDS)
-RANGE_MISMATCH = r"invalid range test: mismatch on byte \d+"
+
+
 # The bytes cc2400_rangetest() compares (reply byte n against its request).
 RANGE_COMPARED_FIELDS = (
     ((0, 0), "length"),
@@ -569,14 +570,20 @@ def range_result_only_check(maximum_pa: int):
         reason = values(stdout)
         if reason:
             problems.append(reason)
-        other = [
-            line.strip() for line in text_lines(stdout)
-            if line.strip() and not RANGE_RESULT_LINE.match(line.strip())
-        ]
+        lines = [line.strip() for line in text_lines(stdout) if line.strip()]
+        other = [line for line in lines if not RANGE_RESULT_LINE.match(line)]
         if other:
             problems.append(
                 f"{other[0]!r} is on stdout, which carries the result block "
                 "alone; progress and diagnostics go to stderr")
+        elif len(lines) != len(RANGE_RESULT_FIELDS):
+            # Result lines and nothing else, but not four of them: a block
+            # printed twice, or a stray line of the right form. The values
+            # above are read from the first block that matches, so without
+            # this a second one would go unread.
+            problems.append(
+                f"{len(lines)} result lines on stdout, not "
+                f"{len(RANGE_RESULT_FIELDS)}: the result block is printed once")
         return "; ".join(problems)
 
     return check
@@ -727,10 +734,15 @@ def range_test_cases(arguments, _resources, resource_identities):
              observe=Observation("range result", RANGE_RESULT,
                                  convert=range_result_value),
              mutates=True),
+        # -n has already waited, so the first read answers: what this step
+        # adds now is the record of how the board answered -m straight after
+        # the test, in its own log, and a bound on how long a board may take
+        # to answer at all. Its deadline is also what covers a fork whose -n
+        # went back to starting the test and returning. The poll's own exit
+        # is not the verdict; its log is.
         Step("sender-wait-for-result",
              f"Sender: read -m until a result appears (up to {RANGE_RESULT_DEADLINE_S} s)",
              range_poll_argv(sender), timeout_s=RANGE_POLL_TIMEOUT_S,
-             # The poll's own exit is not the verdict; its log is.
              expected_returncodes=(0, 1), output_check=range_poll_check),
         # The board keeps the result -n reported, so this read must give the
         # same four values and not merely another block in range.
@@ -739,8 +751,7 @@ def range_test_cases(arguments, _resources, resource_identities):
              observe=Observation("range result after the test", RANGE_RESULT,
                                  expected=lambda context: require(
                                      context, "range result"),
-                                 convert=range_result_value),
-             forbidden_patterns=(RANGE_MISMATCH,)),
+                                 convert=range_result_value)),
         repeating("responder-repeating-after-test",
                   "Responder: still repeating (RX LED on) and answering USB after the test"),
         Step("responder-no-result", "Responder: the repeater keeps no result",
