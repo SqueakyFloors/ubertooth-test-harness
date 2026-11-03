@@ -14,6 +14,8 @@ from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.sequencer import NamedTestSequencer
 from ubertooth_harness.stateful import ATTEMPT_KEY, StateCase, Step
 
+from tests.test_manifest_preflight import make_git_repo
+
 
 class CollectSink:
     def __init__(self):
@@ -84,12 +86,18 @@ def run_contract(directory: Path, invocation):
     hardware = directory / "hardware.yaml"
     plan.write_text("plan\n")
     hardware.write_text("hardware\n")
+    # A real checkout at a real commit, as every resolved source is: preflight
+    # reads the Ubertooth commit's install.sh for the libbtbb its tools must
+    # be linked against. This one has no install.sh, so it pins none and the
+    # host version check has only the Ubertooth revision to require. The short
+    # commit stays `test`, which is the revision the fake tools report.
+    source_path = directory / "source"
     source = SourceRevision(
         "Ubertooth",
-        "/source",
+        str(source_path),
         "https://example.invalid/ubertooth.git",
         "test-ref",
-        "a" * 40,
+        make_git_repo(source_path),
         "test",
     )
     manifest = build_run_manifest(
@@ -182,7 +190,9 @@ class SequencerTests(unittest.TestCase):
             self.assertEqual("run_finished", rows[-1]["event_type"])
             produced = sorted(
                 p.name for p in root.iterdir()
-                if p.name not in ("plan.yaml", "hardware.yaml")
+                # `source` is the checkout run_contract resolved its manifest
+                # from, not something the run wrote.
+                if p.name not in ("plan.yaml", "hardware.yaml", "source")
             )
             self.assertEqual(["report.md", "run.jsonl"], produced)
             report = (root / "report.md").read_text()

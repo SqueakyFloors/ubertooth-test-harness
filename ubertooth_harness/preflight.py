@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.cases import GUARD_ROLE_PREFIX
+from ubertooth_harness import libbtbbpin
 from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness import esp32peer, nrfdk
@@ -88,6 +89,10 @@ class PreflightCheck:
     minimum_api: int | None = None
     # How to fix a firmware revision mismatch; FLASH_FIX when empty.
     fix: str = ""
+    # The libbtbb the host tools must report, for the host version check.
+    # Checked after the patterns above, so its reason can name the revision
+    # the tools reported, not only the pattern that did not match.
+    libbtbb: "LibbtbbIdentity | None" = None
 
     def result_failure(self, result: CommandResult) -> str:
         if result.timed_out:
@@ -133,6 +138,22 @@ class PreflightCheck:
                 return (
                     f"{self.name}: identity mismatch for {target}: "
                     f"output does not match {pattern}"
+                )
+        if self.libbtbb is not None:
+            found = output.search(self.libbtbb.pattern)
+            output.note_pattern(
+                "expected", f"{self.name} libbtbb", self.libbtbb.pattern, found
+            )
+            if found is None:
+                reported = output.search(_LIBBTBB_REPORTED)
+                carries = (
+                    f"libbtbb {reported['value']}" if reported
+                    else "no libbtbb version at all"
+                )
+                return (
+                    f"{self.name}: the host tools on {self.host} report "
+                    f"{carries}, not {self.libbtbb.expected_revision}, which "
+                    f"is {self.libbtbb.origin}: {self.libbtbb.fix}"
                 )
         if self.minimum_api is not None:
             reported = output.search(API_PATTERN)
@@ -188,12 +209,38 @@ _HOST_VERSION_LINE_START = (
 )
 
 
+def libbtbb_version_pattern(expected_revision: str) -> str:
+    """The host version line of tools linked against ``expected_revision``.
+
+    Both versions are on that one line, libbtbb's second, and the revision in
+    its brackets is what libbtbb's own build stamped into
+    ``btbb_get_release()``: the commit the installed library was built from.
+    """
+    return (
+        rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb[ \t]+\S+[ \t]+"
+        rf"\({revision_pattern(expected_revision)}\)"
+    )
+
+
+# The libbtbb half of that line as it was printed, for a reason that has to
+# name the revision found as well as the one wanted.
+_LIBBTBB_REPORTED = (
+    rf"{_HOST_VERSION_LINE_START}\b[^\n]*?\blibbtbb[ \t]+\S+[ \t]+"
+    r"\((?P<value>[^)\n]*)\)"
+)
+
+
 def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
     """Patterns the host tools' version line must match for the resolved sources.
 
     The line is what `ubertooth-util -V` prints first, and what `-H` printed
     on older fork commits, with or without its label. A trailing `*`
     (modified source) does not match.
+
+    Preflight passes only the Ubertooth source and carries the libbtbb half
+    as a LibbtbbIdentity instead, so its reason can name both revisions and
+    where the expectation came from; the build checks its own tools with both
+    (build.py).
     """
     # Spaces and tabs, not \s, so a match cannot run past the end of that
     # line onto the version of something else.
@@ -202,12 +249,92 @@ def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
         rf"\({revision_pattern(ubertooth.expected_revision)}\)",
     )
     if libbtbb is not None:
-        # Both versions are on that one line, libbtbb's second.
-        patterns += (
-            rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb[ \t]+\S+[ \t]+"
-            rf"\({revision_pattern(libbtbb.expected_revision)}\)",
-        )
+        patterns += (libbtbb_version_pattern(libbtbb.expected_revision),)
     return patterns
+
+
+# How to put a libbtbb other than the wanted one right, by run kind.
+LIBBTBB_INSTALL_FIX = (
+    "install libbtbb at that commit over the one the tools load, or name the "
+    "commit the installed library was built from with --libbtbb-source and "
+    "--libbtbb-ref"
+)
+LIBBTBB_BUILT_FIX = (
+    "the run's prefix must come first on PATH and its tools must load the "
+    "libbtbb it built; check the build and run it again"
+)
+LIBBTBB_BUILT_ORIGIN = "the libbtbb this run built"
+
+
+@dataclass(frozen=True)
+class LibbtbbIdentity:
+    """Which libbtbb the run's host tools must report, and where that came from.
+
+    The fork's configure step only looks for a symbol, so neither the build
+    nor the link stage tells two libbtbb commits apart: the version line is
+    the only thing that says which one a tool loads. A run that does not
+    check it can measure a different decoder from the one it reports (#294).
+    """
+
+    expected_revision: str
+    origin: str
+    fix: str
+
+    @property
+    def pattern(self) -> str:
+        return libbtbb_version_pattern(self.expected_revision)
+
+    def describe(self) -> str:
+        return f"{self.expected_revision}, {self.origin}"
+
+
+def libbtbb_identity(ubertooth, libbtbb=None) -> LibbtbbIdentity | None:
+    """Which libbtbb the host tools of this run must be linked against.
+
+    A run that resolved a libbtbb source must load that one. A run that did
+    not has no libbtbb of its own, so the expectation is the ``LIBBTBB_REF``
+    the Ubertooth commit under test sets in its own ``install.sh``: the only
+    statement of which libbtbb that commit is meant to run against.
+
+    None where the Ubertooth commit names no libbtbb at all (fork commits
+    from before the pin landed): nothing is claimed, so nothing is checked.
+    Raises PreflightError where the commit names one that cannot be compared
+    with what the tools report, rather than let a run measure an unverified
+    library.
+    """
+    if libbtbb is not None:
+        return LibbtbbIdentity(
+            libbtbb.expected_revision, LIBBTBB_BUILT_ORIGIN, LIBBTBB_BUILT_FIX
+        )
+    label = f"Ubertooth {ubertooth.short_commit}"
+
+    def refuse(problem: str) -> PreflightError:
+        return PreflightError(
+            "the libbtbb the run's host tools load cannot be checked: "
+            f"{problem}; name the commit the installed library was built "
+            "from with --libbtbb-source and --libbtbb-ref"
+        )
+
+    try:
+        pin = libbtbbpin.fork_pin_at(ubertooth.source_path, ubertooth.commit)
+    except (OSError, RuntimeError) as error:
+        raise refuse(f"{label} has an install.sh that could not be read: {error}") \
+            from error
+    if pin is None:
+        return None
+    if not libbtbbpin.is_commit(pin.ref):
+        # The tools report a commit, so a name that can move is nothing to
+        # compare with: resolving it here would also make the check mean
+        # something different on every run.
+        raise refuse(
+            f"{label} sets LIBBTBB_REF={pin.ref} in install.sh, which is not "
+            "a commit"
+        )
+    return LibbtbbIdentity(
+        f"git-{pin.ref.lower()}",
+        f"the LIBBTBB_REF install.sh sets at {label}",
+        LIBBTBB_INSTALL_FIX,
+    )
 
 
 _NRFDK = str(Path(nrfdk.__file__).resolve())
@@ -343,7 +470,11 @@ class PreflightPolicy:
             libbtbb_source = manifest.source("libbtbb")
         except ManifestError:
             libbtbb_source = None
-        host_patterns = host_version_patterns(ubertooth_source, libbtbb_source)
+        # The Ubertooth half as a pattern; the libbtbb half as an identity of
+        # its own, so a run that builds nothing still has something to hold
+        # the installed library to (#294).
+        host_patterns = host_version_patterns(ubertooth_source)
+        libbtbb = libbtbb_identity(ubertooth_source, libbtbb_source)
 
         established = self._firmware_established_by_suite(invocations)
         # Boards bound only as guards must be present and selectable by serial;
@@ -378,6 +509,7 @@ class PreflightPolicy:
                         fallback_argv=HOST_VERSION_FALLBACK_ARGV,
                         fallback_when_missing=re.escape(HOST_VERSION_LABEL),
                         accepted_returncodes=(0, 1),
+                        libbtbb=libbtbb,
                     )
                 )
             for alias in invocation.resources.values():

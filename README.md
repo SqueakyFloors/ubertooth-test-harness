@@ -1254,7 +1254,9 @@ runs the check once against the fork's `main` (`scripts/ci.sh libbtbb-pin`
 runs only that step) and shows the warning on the workflow run; its `build`
 and `run-suite` steps then record it without printing it again
 (`UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN`). Nothing fails, since another libbtbb
-can be deliberate.
+can be deliberate; what the run's tools actually load is a separate check that
+does fail (see [Which libbtbb the tools
+load](#which-libbtbb-the-tools-load)).
 Only libbtbb's C library is installed and linked (`-DENABLE_PYTHON=OFF` skips
 its Python tools): the Ubertooth tools need nothing else from it.
 
@@ -1380,6 +1382,47 @@ git-a8e65d9, the tools are git-7388776: flash it with this build (the default
 when building)`; a run without `--build` says to build and flash it, and a
 `--no-flash-build` run to leave that option out.
 
+### Which libbtbb the tools load
+
+The pin above is about what a run *builds*. A run that builds nothing tests
+the installed tools, and those are linked against whatever libbtbb is
+installed on that host, which may be another commit entirely: the fork's
+configure step only looks for a symbol, so neither the build nor the link
+stage can tell two libbtbb commits apart. A behavior-only libbtbb commit
+therefore changes what a run measures while everything about the run still
+reads as correct. One such drift cost a bench session chasing a false
+reproduction of a fork regression ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
+
+So mandatory preflight holds the host tools to one libbtbb. Every tool prints
+it on its own version line (`Host tools version: libubertooth 1.07
+(git-6a917ec), libbtbb 1.3 (git-52b2afc)`), where the revision in the second
+pair of brackets is what libbtbb's own build stamped into
+`btbb_get_release()`: the commit the installed library was built from. The
+`Host version` check reads that line and requires:
+
+- the libbtbb the run resolved, when it resolved one (`--libbtbb-source` and
+  `--libbtbb-ref`, with or without `--build`);
+- otherwise the `LIBBTBB_REF` the Ubertooth commit under test sets in its own
+  `install.sh`, which is the only statement of which libbtbb that commit is
+  meant to run against. No option is needed, so an ordinary run on a
+  long-lived runner is held to it too.
+
+A mismatch fails preflight before any measurement, and the reason names the
+revision the tools reported, the one wanted, where that came from, and how to
+fix it (install libbtbb at that commit, or name the installed library's commit
+with `--libbtbb-source`/`--libbtbb-ref`). A library that cannot name a commit
+fails the same way: one built from a tarball reports a release such as
+`2020-12-R1`, and one built from a modified checkout adds a `*`, and neither
+says it is the pinned commit. report.md carries a "libbtbb in the tools" row
+with what was required and whether it was verified, and the run record keeps
+the check so `ubertooth-harness validate` can repeat it.
+
+Two cases require nothing: an Ubertooth commit from before the fork pinned a
+libbtbb claims none, so there is nothing to check. A commit whose pin cannot
+be compared with a revision, a branch or tag name or a pin built from a
+shell variable, refuses the run instead, naming `--libbtbb-source` and
+`--libbtbb-ref` as the way to say which library the installed tools hold.
+
 ## Source identity, manifest, and mandatory preflight
 
 Every named-suite run requires `--ubertooth-source` and `--ubertooth-ref`. The
@@ -1402,7 +1445,9 @@ immutable resource-bound invocations. The sequencer then generates mandatory
 preflight from the selected resources; it does not depend on optional test-plan
 entries:
 
-- `Host version` once per selected host, matched to the resolved source commit;
+- `Host version` once per selected host, matched to the resolved source
+  commit, and to the libbtbb those tools are linked against (see [Which
+  libbtbb the tools load](#which-libbtbb-the-tools-load));
 - firmware version, compile identity, and registered serial once per selected
   Ubertooth, always selected by serial. The firmware version must be the
   application image (`bluetooth_rxtx`) built from the resolved commit, or the

@@ -315,6 +315,37 @@ def _placement_rows(run: _Run) -> list[tuple[str, str]]:
     )]
 
 
+def _libbtbb_in_the_tools(run: _Run) -> str:
+    """Which libbtbb preflight required of the run's host tools, and whether
+    it found it (#294).
+
+    Empty for a run whose host version check had nothing to require: an
+    Ubertooth commit from before the fork pinned a libbtbb, or a record
+    written before this check existed.
+    """
+    wanted, check_id = "", ""
+    for event in run.events:
+        details = event.get("details") or {}
+        if event["event_type"] == "check_started" and details.get("expected_libbtbb"):
+            wanted = str(details["expected_libbtbb"])
+            check_id = str(details.get("check_id", ""))
+            break
+    if not wanted:
+        return ""
+    status = next(
+        (
+            check["status"] for check in run.preflight
+            if (check.get("details") or {}).get("check_id") == check_id
+        ),
+        "",
+    )
+    if status == "passed":
+        return f"{wanted} (verified)"
+    # A check that never ran (the run stopped earlier) has no status here,
+    # so the row says the requirement was not reached rather than met.
+    return f"**{status or 'not reached'}**: {wanted}"
+
+
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     manifest = run.manifest
     rows = []
@@ -390,6 +421,9 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "libbtbb pin",
             message if status == "passed" else f"**{status}**: {message}",
         ))
+    loaded = _libbtbb_in_the_tools(run)
+    if loaded:
+        rows.append(("libbtbb in the tools", loaded))
     build = manifest.get("build") or {}
     if build:
         toolchain = ", ".join(f"{k} {v}" for k, v in sorted(build.get("toolchain", {}).items()))
