@@ -857,14 +857,43 @@ class RequiredHardwareTests(ControllerTestCase):
             self.assertEqual(201, status, payload)
 
     async def test_an_unknown_target_is_still_an_unknown_target(self):
-        # The caller's own mistake is reported before anything about the
-        # suite, however unmeasurable that suite would be there.
+        # A target that never registered is the caller's own mistake, and is
+        # said first, however unmeasurable that suite would be there.
         status, payload, _ = await self.http(
             "POST", "/api/targets/Host_Nowhere/runs",
             {"ref": "main", "plan": "release", "suite": "release"},
         )
         self.assertEqual(404, status, payload)
         self.assertIn("unknown target", payload["detail"])
+
+    async def test_the_suite_is_answered_before_the_targets_state(self):
+        # A request's own faults come before what the target is doing: a
+        # refusal the suite earns does not go away when the target comes
+        # back or finishes its run, so it is the more useful answer. The
+        # ref and the build options are still judged after it, and a suite
+        # the target can measure gets the target's state as before.
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, host="Host_Mac")
+            target = self.controller.targets["Host_Mac"]
+            for state, set_state in (
+                ("offline", lambda: setattr(target, "online", False)),
+                ("busy", lambda: setattr(target, "active_run_id", "run-9")),
+            ):
+                with self.subTest(state):
+                    target.online, target.active_run_id = True, None
+                    set_state()
+                    status, payload, _ = await self.http(
+                        "POST", "/api/targets/Host_Mac/runs",
+                        {"ref": "main", "plan": "release", "suite": "release"},
+                    )
+                    self.assertEqual(422, status, payload)
+                    self.assertIn("Recover AFH map", payload["detail"])
+                    # A suite it could measure is answered about its state.
+                    status, payload, _ = await self.http(
+                        "POST", "/api/targets/Host_Mac/runs",
+                        {"ref": "main", "plan": "fast", "suite": "fast"},
+                    )
+                    self.assertEqual(409, status, payload)
 
 
 class ReviewFixTests(ControllerTestCase):

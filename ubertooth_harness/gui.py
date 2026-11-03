@@ -383,7 +383,7 @@ def omitted_reason(
     )
 
 
-def test_hardware(catalog: TestCatalog, test_name) -> str:
+def bound_hardware(catalog: TestCatalog, test_name) -> str:
     """The hardware a test binds, role by role, for a reader.
 
     ``Ubertooth, ESP32 Classic peer (acceptor), ESP32 Classic peer
@@ -471,7 +471,7 @@ def run_plan_check(
             "name": step.test_name,
             "reason": reasons[0],
             "hosts": list(named),
-            "hardware": test_hardware(catalog, step.test_name),
+            "hardware": bound_hardware(catalog, step.test_name),
             # Required, and not run here because the plan names other hosts:
             # the absence `required hardware:` is about. A platform this run
             # cannot meet is not (see above).
@@ -483,8 +483,12 @@ def run_plan_check(
         })
     blocked: list[dict] = []
     for item in omitted:
-        # One entry per test, and nothing for a test some host here runs:
-        # that run measures the gate (CompiledSuite.blocked_for_host).
+        # One entry per test, and nothing for a test some host of this run
+        # runs: that run measures the gate. The planner's own rule
+        # (CompiledSuite.blocked_for_host) is the same shape over a whole
+        # bench, which is a different question: a third registered host
+        # running the step keeps the bench covered, and leaves this run
+        # unable to measure it, which is what this refusal is about.
         if not item["required"] or item["name"] in running:
             continue
         if any(entry["name"] == item["name"] for entry in blocked):
@@ -509,8 +513,11 @@ def _refusal(
             f"{item['name']} {item['reason']}" for item in omitted[:3]
         )
         rest = len(omitted) - 3
+        # A suite with no steps at all (a hand-written plan) has nothing to
+        # name, so it is said without a list rather than with an empty one.
         return (
-            f"no test of this suite runs on {where}: {named}"
+            f"no test of this suite runs on {where}"
+            + (f": {named}" if named else "")
             + (f"; and {rest} more" if rest > 0 else "")
         )
     if blocked:

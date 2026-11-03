@@ -26,7 +26,7 @@ from ubertooth_harness.gui import (
     parse_ls_remote,
     run_git,
     step_hosts,
-    test_hardware,
+    bound_hardware,
 )
 from ubertooth_harness.gui import _build_needs as build_needs
 from ubertooth_harness.plan import load_plan
@@ -617,11 +617,12 @@ class PlanTests(ControllerTestCase):
                 (suite,) = list_plans(
                     root, target="Host_Mac", platform="macos"
                 )[0]["suites"]
-            # Every one of them is left out of this target's estimate.
-            self.assertEqual(1, len(suite["omitted_tests"]), label)
-            blocked = label == "another host, required"
-            self.assertEqual(not blocked, suite["runnable_on_target"], label)
-            self.assertEqual(1 if blocked else 0, len(suite["blocked_tests"]), label)
+                # Every one of them is left out of this target's estimate.
+                self.assertEqual(1, len(suite["omitted_tests"]))
+                blocked = label == "another host, required"
+                self.assertEqual(not blocked, suite["runnable_on_target"])
+                self.assertEqual(
+                    1 if blocked else 0, len(suite["blocked_tests"]))
 
     def test_a_required_step_a_host_of_the_run_does_run_is_not_blocked(self):
         # Two steps of one test, one of them for this target: that run
@@ -650,12 +651,12 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(
             "Ubertooth, ESP32 Classic peer (acceptor), "
             "ESP32 Classic peer (initiator)",
-            test_hardware(catalog, "Recover AFH map"),
+            bound_hardware(catalog, "Recover AFH map"),
         )
-        self.assertEqual("Ubertooth", test_hardware(catalog, "Ubertooth identity"))
+        self.assertEqual("Ubertooth", bound_hardware(catalog, "Ubertooth identity"))
         # A test that binds no hardware, and one the catalog does not know.
-        self.assertEqual("", test_hardware(catalog, "Host CLI surface"))
-        self.assertEqual("", test_hardware(catalog, "No such test"))
+        self.assertEqual("", bound_hardware(catalog, "Host CLI surface"))
+        self.assertEqual("", bound_hardware(catalog, "No such test"))
 
     def test_which_hosts_a_step_names(self):
         # `hosts: each` names none, so every target runs it; the planner
@@ -1059,7 +1060,11 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("state.plansWanted = target;", body)
         select = self.js[self.js.index("function renderTargetSelect()"):
                          self.js.index("// ----- run setup")]
-        self.assertIn("if (select.value !== state.plansWanted) loadPlans();", select)
+        self.assertIn("select.value !== state.plansWanted", select)
+        # A target that registers while already chosen gains a platform,
+        # which is what the steps are judged by: that is a reload too.
+        self.assertIn("targetPlatform(select.value) !== state.plansPlatform", select)
+        self.assertIn("state.plansPlatform = platform;", body)
         # The operator's plan survives a reload for another target, and so
         # does the suite they chose; choosing a plan takes the suite named
         # after that plan, as before.

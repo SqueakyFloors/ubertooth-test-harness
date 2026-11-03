@@ -52,6 +52,9 @@
     // left cannot replace a newer list.
     plansTarget: "",
     plansWanted: "",
+    // The platform that list was judged by, so a target that registers
+    // after it was fetched is noticed.
+    plansPlatform: null,
     plansToken: 0,
     // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
     refOptions: new Map(),
@@ -186,10 +189,23 @@
       if (targets.some((target) => target.host === current)) select.value = current;
     }
     // The first target to register, or a selection this update replaced,
-    // changes which host the plans belong to; the estimates and the build
-    // options are that host's. Compared with the target a load is under way
-    // for, so an update while one is in flight does not start another.
-    if (select.value !== state.plansWanted) loadPlans();
+    // changes which host the plans belong to; the estimates, the build
+    // options and whether the suite can be measured there are that host's.
+    // A target that registers while already chosen gains a platform, which
+    // changes the same answers, so that is a reload too. Both are compared
+    // with what a load is under way for, so an update while one is in
+    // flight does not start another.
+    if (select.value !== state.plansWanted
+        || targetPlatform(select.value) !== state.plansPlatform) {
+      loadPlans();
+    }
+  }
+
+  // The registry platform a target registered with, or null for one that
+  // has not registered (which is what /api/plans reports for it).
+  function targetPlatform(host) {
+    const target = host ? state.targets.get(host) : null;
+    return target && target.platform ? target.platform : null;
   }
 
   // ----- run setup ---------------------------------------------------------
@@ -243,18 +259,23 @@
     const target = $("target").value;
     const token = ++state.plansToken;
     state.plansWanted = target;
+    // The platform the controller would judge the steps by: a target that
+    // registers after this list was fetched gains one, which is a reload.
+    const platform = targetPlatform(target);
     const query = target ? `?target=${encodeURIComponent(target)}` : "";
     try {
       const data = await api("GET", `/api/plans${query}`);
       if (token !== state.plansToken) return;  // a later target owns the list
       state.plans = data.plans;
       state.plansTarget = target;
+      state.plansPlatform = platform;
       // A failure from an earlier load is not this list's status.
       $("plan-status").textContent = "";
     } catch (error) {
       if (token !== state.plansToken) return;
       state.plans = [];
       state.plansTarget = target;
+      state.plansPlatform = platform;
       $("plan-status").textContent = `Cannot list plans: ${error.message}`;
     }
     const select = $("plan");
