@@ -948,7 +948,10 @@ def _run_suite(args: argparse.Namespace) -> int:
     # Said as `hold` says it: before the attempt, and so before any wait for
     # those devices.
     for record in pairings:
-        print(f"note: {record['reason']}, so it is held too", file=sys.stderr)
+        print(
+            f"note: {board_leases.pairing_reason(record)}, so it is held too",
+            file=sys.stderr,
+        )
     leases = board_leases.acquire(
         board_leases.boards_for_invocations(invocations, registry),
         board_leases.holder_info(
@@ -1005,7 +1008,10 @@ def _dry_run(
     # A device no test below names, which the run would hold all the same.
     # Worded as `boards` words it, under the same label.
     for record in pairings:
-        print(f"pair: {record['reason']}, so the run would hold it too")
+        print(
+            f"pair: {board_leases.pairing_reason(record)}, so the run would hold "
+            "it too"
+        )
     runs = omitted = 0
     for invocation in invocations:
         definition = catalog.get(invocation.test_name)

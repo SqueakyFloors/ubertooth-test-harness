@@ -18,6 +18,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from ubertooth_harness import leases
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
@@ -384,10 +385,12 @@ class BenchLockFileNames(NamesTestCase):
                     )
                 self.assertIn("the harness's own lease file", str(caught.exception))
 
-    def test_a_ticket_carries_the_name_the_bench_s_file_uses(self):
-        """A command that gives way reads the waiter's ticket and probes
-        those files; without the name it would probe one nothing takes and
-        read a held device as free."""
+    def test_a_ticket_records_the_lease_name_a_reader_of_it_uses(self):
+        """A ticket is read for the lease files of its command's set.
+
+        A lab's own lock file is never read from one, so the name the
+        bench uses for a device is not in it; the queue's own file is.
+        """
         board = self.bench_board("ESP_A", BRIDGE)
         queue = leases.TicketQueue(
             self.leases, [board],
@@ -395,45 +398,44 @@ class BenchLockFileNames(NamesTestCase):
             wait_s=60.0,
         )
         self.assertEqual(
-            [{"key": f"bench-{BRIDGE}", "resource": "ESP_A (bench lock)",
-              "external_key": BRIDGE}],
+            [{"key": f"bench-{BRIDGE}", "resource": "ESP_A (bench lock)"}],
             queue.waiting_for,
         )
         read_back = leases.waiting_resources(
             {"waiting_for": queue.waiting_for}, board
         )
         self.assertEqual([f"bench-{BRIDGE}"], [item.key for item in read_back])
-        self.assertEqual([BRIDGE], [item.lock_name for item in read_back])
-        self.assertEqual(
-            self.locks / f"board-{BRIDGE}.lock",
-            leases.external_lock_path(self.template, read_back[0]),
-        )
 
     def test_a_serial_too_long_for_a_lock_file_is_refused(self):
         """Every name built from it has to be one a file can carry.
 
         A key carries its type's prefix and the bench's second name carries
-        its own, so a serial that fits on its own may not. Such a name
-        would be dropped where a ticket is read back, and a command giving
-        way at that device would read a held one as free.
+        its own, so a serial that is a file name on its own may still build
+        one that is not. Such a name would be dropped where a ticket is read
+        back, so the set that ticket's command waits for would read short.
         """
-        for block, alias, field in (
-            (programmer("Prog_A", "p" * 60, "UT_A"), "Prog_A", "serial"),
-            (peer("ESP_A", "e" * 60), "ESP_A", "bridge serial"),
+        for block, field, limit in (
+            (programmer("Prog_A", "p" * 54, "UT_A"), "serial", 53),
+            (peer("ESP_A", "e" * 59), "bridge serial", 58),
         ):
-            with self.subTest(alias=alias):
-                registry = self.load(ubertooth("UT_A", BOARD), block)
-                with self.assertRaises(leases.LeaseError) as caught:
-                    leases.resource_key(registry.get(alias))
-                reason = str(caught.exception)
-                self.assertIn(f"needs a shorter '{field}'", reason)
-                self.assertIn("at most 64 characters", reason)
-        # A serial that leaves room for both prefixes is leased normally.
+            with self.subTest(field=field):
+                reason = self.refuse(ubertooth("UT_A", BOARD), block)
+                self.assertIn(f"'{field}' may be at most {limit} characters", reason)
+        # The longest that fits loads and is leased as itself.
         registry = self.load(ubertooth("UT_A", BOARD),
                              programmer("Prog_A", "p" * 53, "UT_A"))
         self.assertEqual(
             f"programmer-{'p' * 53}", leases.resource_key(registry.get("Prog_A"))
         )
+        # And a registry made in code, which never passed the check above,
+        # is refused where the key is asked for.
+        made = SimpleNamespace(
+            alias="Prog_B", type="Debug programmer",
+            identity={"serial": "p" * 60},
+        )
+        with self.assertRaises(leases.LeaseError) as caught:
+            leases.resource_key(made)
+        self.assertIn("'serial' of at most 53 characters", str(caught.exception))
 
     def test_a_board_needs_no_second_name_at_all(self):
         """Its lease key is its serial, so there is nothing to prefix."""

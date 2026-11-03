@@ -437,8 +437,8 @@ def board_key(alias: str, identity: Mapping) -> str:
 # bridge serial is 32 hex digits itself.
 # A key becomes a file name, so it may hold nothing that would reach
 # another directory or need quoting.
-_LOCK_NAME_CHARS = 64
-_LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,%d}$" % _LOCK_NAME_CHARS)
+LOCK_NAME_CHARS = 64
+_LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,%d}$" % LOCK_NAME_CHARS)
 DK_TYPE = "nRF52840 DK"
 PEER_TYPE = "ESP32 Classic peer"
 # A debug programmer wired to one device's debug or programming header. It is
@@ -502,24 +502,34 @@ def resource_key(resource) -> str:
     return board_key(resource.alias, resource.identity)
 
 
-def _keyed(resource, field: str, prefix: str, serial: str) -> str:
-    """The key, once every file name built from it is one a file can carry.
+def max_serial_chars(prefix: str) -> int:
+    """How long a serial may be for every lock name built from it to fit.
 
-    A prefixed key is longer than the serial it is built from, and so is
-    the bench's second lock name (``bench_lock_key``). A name too long for
-    a lock file is not silently shortened: it would be dropped where a
-    ticket is read back (``waiting_resources``), and a command giving way
-    at that device would then read a held one as free. So it is refused
-    here, where every caller that needs the key asks for it.
+    Its lease key carries its type's prefix and the bench's second lock
+    name carries ``bench-``, and both are file names
+    (``LOCK_NAME_CHARS``). The registry refuses a longer serial where it
+    loads, so a bench learns the limit from the field it wrote rather than
+    from the name the harness built.
     """
-    for name in (prefix + serial, bench_lock_key(serial)):
-        if not _LOCK_NAME.fullmatch(name):
-            raise LeaseError(
-                f"{resource.alias} needs a shorter '{field}' in the hardware "
-                f"registry to be leased: '{name}' is not a name a lock file can "
-                f"carry (letters, digits and _.:+-, at most "
-                f"{_LOCK_NAME_CHARS} characters)"
-            )
+    return LOCK_NAME_CHARS - max(len(prefix), len(BENCH_LOCK_PREFIX))
+
+
+def _keyed(resource, field: str, prefix: str, serial: str) -> str:
+    """The key, once every lock name built from it is one a file can carry.
+
+    The registry refuses such a serial where it loads, so this is the
+    backstop for a registry made in code. A name too long for a lock file
+    is not silently shortened: a ticket records the key, and a reader drops
+    a name that is not one (``waiting_resources``), so the set that ticket's
+    command is waiting for would be read short.
+    """
+    if len(serial) > max_serial_chars(prefix):
+        raise LeaseError(
+            f"{resource.alias} needs a '{field}' of at most "
+            f"{max_serial_chars(prefix)} characters in the hardware registry to "
+            f"be leased, so that its lock file names fit; registered "
+            f"{len(serial)}"
+        )
     return prefix + serial
 
 
@@ -568,19 +578,30 @@ def pairing_record(alias: str, reason: str) -> dict:
     }
 
 
+def pairing_reason(record: Mapping) -> str:
+    """Why this device came with the run's own, as a clause.
+
+    The registry's own words, and what is known of the device where a
+    record carries none (one from somewhere else, or from a registry whose
+    expansion gave no clause). Every line about a pairing is built on this,
+    so none of them can read as a sentence with a hole in it.
+    """
+    reason = str(record.get("reason") or "")
+    if reason:
+        return reason
+    return (
+        f"{record.get('resource') or 'a device'} is wired to a device the run "
+        "named"
+    )
+
+
 def describe_pairing_lease(record: Mapping) -> str:
     """The one line such a record is reported in, for a run that has ended.
 
     Past tense: a report, a transcript and the live view are all read after
     the run has its devices.
     """
-    reason = str(record.get("reason") or "")
-    if not reason:
-        # A record from somewhere else, or one whose clause was dropped: it
-        # still reads as a sentence, with what is known.
-        reason = f"{record.get('resource') or 'a device'} is wired to a device " \
-                 "this run named"
-    return f"{reason}, so the run held it too"
+    return f"{pairing_reason(record)}, so the run held it too"
 
 
 def _observes_every_board(invocation) -> bool:
@@ -928,14 +949,12 @@ class TicketQueue:
             if board.key in queued_keys:
                 continue  # one resource, two entries (a lease and its external lock)
             queued_keys.add(board.key)
-            entry = {"key": board.key, "resource": board.alias}
-            if board.external_key:
-                # The bench's own file for this device is not named after
-                # its key (Board.external_key), and a command that gives way
-                # to this ticket probes that file: without this it would
-                # probe a name nothing takes and read a held device as free.
-                entry["external_key"] = board.external_key
-            self.waiting_for.append(entry)
+            # The key and the alias, which is what a reader of this ticket
+            # uses: the lease files of the set (_blocking) and the names in
+            # the record it may write (queued_record). A lab's own lock file
+            # is never read from a ticket, so the name the bench uses for a
+            # device (Board.external_key) is not recorded here.
+            self.waiting_for.append({"key": board.key, "resource": board.alias})
         self.number = time.time_ns()
         self.name = f"{self.number:020d}-{os.getpid()}-{os.urandom(3).hex()}"
         self.tickets: list[tuple[Path, int]] = []
@@ -1203,14 +1222,7 @@ def waiting_resources(ticket: Mapping, board: Board) -> list[Board]:
             # takes its locks, so it would read as held by a running command.
             continue
         seen.add(key)
-        # The bench's own name for the device, where the ticket records one
-        # and it is a name a file may carry; otherwise the key, as before.
-        external = str(entry.get("external_key") or "")
-        if not _LOCK_NAME.fullmatch(external) or external in (".", ".."):
-            external = ""
-        resources.append(
-            Board(_printable(entry.get("resource")) or key, key, external or None)
-        )
+        resources.append(Board(_printable(entry.get("resource")) or key, key))
     return resources or [board]
 
 

@@ -123,6 +123,7 @@ def _validate_peer(resource) -> None:
             f"{ESP32_CLASSIC_PEER} {alias} identity has unknown key(s) "
             f"{', '.join(unknown)}; use {', '.join(_PEER_IDENTITY_KEYS)}"
         )
+    _refuse_a_long_serial(resource, "bridge serial", "esp32-")
     if not _BRIDGE_SERIAL.fullmatch(resource.identity.get("bridge serial", "")):
         raise RegistryError(
             f"{ESP32_CLASSIC_PEER} {alias} requires a 'bridge serial' identity: "
@@ -201,8 +202,10 @@ def _bench_lock_names(resource) -> tuple[tuple[str, str], ...]:
         if resource.type == NRF52840_DK and serial.isdigit():
             # A DK alone has a second spelling: nrfutil prints its J-Link
             # serial without the leading zeros sysfs pads it with, and a
-            # bench note may name the lock either way. No other type has
-            # one, so an all-digit serial elsewhere reserves nothing.
+            # bench note or a command names the device either way
+            # (`scripts/lab/_bench.resolve`), so two devices may not share
+            # one of those names. No other type has a second spelling, so
+            # an all-digit serial elsewhere reserves nothing.
             names.append((serial.lstrip("0"), written))
     return tuple(item for item in names if item[0])
 
@@ -224,6 +227,28 @@ class _LockName:
     spelling: str
 
 
+def _refuse_a_long_serial(resource, field: str, prefix: str) -> None:
+    """A serial every lock file name built from it still fits.
+
+    A lease key carries its type's prefix and the bench's second lock name
+    carries its own, so a serial that is a file name on its own may still
+    build one that is not. Refused here, where the field it names is in
+    front of whoever wrote it, rather than left to the command that leases
+    the device (``leases.resource_key``, the backstop).
+    """
+    from ubertooth_harness.leases import max_serial_chars
+
+    limit = max_serial_chars(prefix)
+    serial = str(resource.identity.get(field, "") or "").strip()
+    if len(serial) > limit:
+        raise RegistryError(
+            f"{resource.type} {resource.alias} '{field}' may be at most {limit} "
+            f"characters, so that its lease file ('{prefix}<{field}>') and the "
+            f"bench's own lock file both have names a file can carry; "
+            f"registered {len(serial)}"
+        )
+
+
 def _lock_names(resource) -> dict[str, _LockName]:
     """Every name this device is held under, by the name as compared.
 
@@ -239,11 +264,16 @@ def _lock_names(resource) -> dict[str, _LockName]:
         names.setdefault(
             name, _LockName(resource.alias, "serial", describes, written)
         )
-    key = _lease_key_of(resource)
-    if key is not None:
-        names.setdefault(
-            key.lower(), _LockName(resource.alias, "lease", describes, key)
-        )
+    if resource.type in _leased_types():
+        # Only a device the harness leases has a lease name at all.
+        # `resource_key` answers for any resource it is handed, falling
+        # back to a board's serial, so a hub or a host would otherwise
+        # claim a name no command ever locks for it.
+        key = _lease_key_of(resource)
+        if key is not None:
+            names.setdefault(
+                key.lower(), _LockName(resource.alias, "lease", describes, key)
+            )
     return names
 
 
@@ -283,6 +313,7 @@ def _validate_programmer(resource) -> None:
             f"{DEBUG_PROGRAMMER} {alias} identity has unknown key(s) "
             f"{', '.join(unknown)}; use {', '.join(_PROGRAMMER_IDENTITY_KEYS)}"
         )
+    _refuse_a_long_serial(resource, "serial", "programmer-")
     if not _PROGRAMMER_SERIAL.fullmatch(resource.identity.get("serial", "")):
         raise RegistryError(
             f"{DEBUG_PROGRAMMER} {alias} requires a 'serial' identity: the serial "
@@ -686,7 +717,7 @@ class FileResourceRegistry:
             )
         if held.kind == "lease" and claim.kind == "lease":
             return (
-                f"{held.alias} and {claim.alias} would both be leased as "
+                f"{held.describes} and {claim.describes} would both be leased as "
                 f"'{claim.spelling}'; one lease file is one device, so the two "
                 "would be held in turn through it while everything that reads "
                 "the registry treated them as two devices"

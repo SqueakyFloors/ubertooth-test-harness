@@ -931,7 +931,7 @@ class PairRunRecords(PairTestCase):
             leases.describe_pairing_lease({"resource": "Prog0", "reason": "Prog0 is wired to UT_Debug"}),
         )
         self.assertEqual(
-            "Prog0 is wired to a device this run named, so the run held it too",
+            "Prog0 is wired to a device the run named, so the run held it too",
             leases.describe_pairing_lease({"resource": "Prog0"}),
         )
 
@@ -982,7 +982,7 @@ class PairRunRecords(PairTestCase):
         self.assertEqual([{"resource": "Prog0", "reason": ""}],
                          [dict(record) for record in records])
         self.assertEqual(
-            "Prog0 is wired to a device this run named, so the run held it too",
+            "Prog0 is wired to a device the run named, so the run held it too",
             leases.describe_pairing_lease(records[0]),
         )
 
