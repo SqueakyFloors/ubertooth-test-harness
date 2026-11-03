@@ -37,7 +37,11 @@ from ubertooth_harness.learned import (
 )
 from ubertooth_harness.manifest import ManifestError, _safe_repository
 from ubertooth_harness.outputfiles import output_file_list
-from ubertooth_harness.hostneeds import TEST_BUILD_LABEL
+from ubertooth_harness.hostneeds import (
+    TEST_BUILD_LABEL,
+    platform_capabilities,
+    unmet,
+)
 from ubertooth_harness.plan import PlanError, TestStep, image_label, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
 
@@ -302,6 +306,72 @@ def estimate_fields(
     }
 
 
+def step_hosts(arguments: Mapping) -> tuple[str, ...]:
+    """The host aliases a plan step names, or () for ``hosts: each``.
+
+    ``hosts:`` is normalized to ``each`` or a tuple of aliases (catalog.py);
+    the planner reads the singular ``host`` first, so this does too.
+    """
+    selector = arguments.get("host", arguments.get("hosts", "each"))
+    if selector == "each":
+        return ()
+    if isinstance(selector, str):
+        return (selector,)
+    return tuple(str(alias) for alias in selector)
+
+
+def omitted_reason(
+    catalog: TestCatalog,
+    test_name,
+    arguments: Mapping,
+    target: str | None,
+    platform: str | None = None,
+) -> str:
+    """Why a run on ``target`` would not run this step, or ``''``.
+
+    What planning decides for the host itself, in the order it decides it
+    (``PlanCompiler.compile_suite``): a step that names hosts is compiled for
+    the hosts it names and for no other, and then a host whose platform the
+    step does not run on is left out as not applicable. ``platform`` is the
+    target's own (the controller has it from the target's registration);
+    without one only the plan's host naming is read, since nothing else here
+    knows what the target is.
+
+    The absences this cannot answer are the ones that need the target's
+    resource registry, which the controller has not got: hardware no host
+    here has, and a board placed differently from what the test needs. Those
+    steps are counted, and the run itself reports them.
+
+    One of those is why a step is reported as left out rather than as the
+    run's undoing: where every host a step names is in that bench's registry
+    and none of them can run it, compiling the suite is a plan error there
+    and the run is refused outright ("no selected host can run it"). Which
+    hosts that bench has is exactly what is not known here, so what is
+    reported is the one answer that holds either way: this target does not
+    run the step.
+    """
+    if not target:
+        return ""
+    hosts = step_hosts(arguments)
+    if hosts and target not in hosts:
+        return f"runs on {', '.join(hosts)}, not on {target}"
+    if not platform:
+        return ""
+    # Exactly what the planner asks of a host before any hardware: the
+    # platform, and the test-wide needs only the platform can decide
+    # (BlueZ-only tools). Every other capability is unknown here, which
+    # hostneeds reads as met.
+    capabilities = platform_capabilities(target, platform)
+    try:
+        needs = catalog.get(test_name).test_needs(arguments)
+    except CatalogError:
+        return ""
+    return next(
+        (unmet(need, capabilities) for need in needs if unmet(need, capabilities)),
+        "",
+    )
+
+
 def _per_board(catalog: TestCatalog, step: TestStep) -> bool:
     """True when the step runs once per selected board (a role set to each)."""
     try:
@@ -355,11 +425,73 @@ def _build_needs(catalog: TestCatalog, test_name, arguments=None) -> dict:
     }
 
 
+def _total(tests: Sequence[Mapping]) -> float | None:
+    """The tests' estimates added up, or None unless every one has an
+    estimate. 0.0 for no tests at all, which adds up with the other total."""
+    seconds = [test["estimated_s"] for test in tests]
+    if None in seconds:
+        return None
+    return round(float(sum(seconds)), 1)
+
+
+def _suite_view(name: str, tests: Sequence[Mapping]) -> dict:
+    """One suite as /api/plans reports it, for the target the tests were
+    listed for.
+
+    Everything the client acts on is counted over the steps that target
+    would run (``runs_on_target``): the time estimate, the build options to
+    ask for, and the images only ``--artifact`` can pass. What the target
+    does not run costs it nothing and asks nothing of its run. The steps
+    left out are reported beside those, each with the time it would take on
+    the host that does run it, so a total that is smaller than the suite's
+    is accounted for rather than merely smaller.
+
+    With no target nothing is left out, so the fields are what they were:
+    the sum of every step in the suite.
+    """
+    running = [test for test in tests if test["runs_on_target"]]
+    omitted = [test for test in tests if not test["runs_on_target"]]
+    return {
+        "name": name,
+        "tests": list(tests),
+        # Only when every test this target runs has one; build and
+        # preflight excluded. None for a suite with no step for the target,
+        # which is a run the target would refuse (it has nothing to run).
+        "estimated_s": _total(running) if running else None,
+        "unestimated_tests": sum(
+            test["estimated_s"] is None for test in running
+        ),
+        "per_board_tests": sum(test["per_board"] for test in running),
+        # True when any test the target runs needs (or cannot run without)
+        # that build option, so a client that dispatches the suite (the GUI)
+        # can ask for it.
+        **{
+            field: any(test[field] for test in running)
+            for field in _BUILD_NEED_FIELDS
+        },
+        # Every image the suite needs that no build produces.
+        "needs_artifacts": sorted(
+            {label for test in running for label in test["needs_artifacts"]}
+        ),
+        # The steps this target does not run: each one's name, why, and what
+        # it would add where it does run.
+        "omitted_tests": [
+            {"name": test["name"], "reason": test["omitted_reason"],
+             "estimated_s": test["estimated_s"]}
+            for test in omitted
+        ],
+        # Their time together: 0.0 when none is left out, None when one of
+        # them has no estimate.
+        "omitted_estimated_s": _total(omitted),
+    }
+
+
 def list_plans(
     plans_dir: Path,
     *,
     estimates: EstimateStore | None = None,
     target: str | None = None,
+    platform: str | None = None,
 ) -> list[dict]:
     """Every ``<name>.yaml`` plan with its suites, tests and estimates.
 
@@ -379,6 +511,14 @@ def list_plans(
     With a ``target`` host, each test's ``estimated_s`` is what that host's
     own finished runs measured, when enough of them did (see
     ``estimate_fields``); without one it is the catalog estimate, as before.
+
+    A ``target`` also decides which steps the suite's own fields count: a
+    step that target would not run adds nothing to its estimate and asks
+    nothing of its run, and is reported in ``omitted_tests`` instead (see
+    ``omitted_reason`` and ``_suite_view``). ``platform`` is that target's
+    own host platform, which decides a step the target could not run
+    whichever hosts it names. Without a target every step counts, which is
+    the suite's whole time whichever host runs a part of it.
     """
     plans = []
     try:
@@ -397,39 +537,32 @@ def list_plans(
             continue
         suites = []
         for suite, steps in plan.suites.items():
-            tests = [
-                {
+            tests = []
+            for step in steps:
+                reason = omitted_reason(
+                    catalog, step.test_name, step.arguments, target, platform
+                )
+                # A step this target does not run is timed where it does:
+                # for the host it names, when it names exactly one, so the
+                # figure is that host's learned estimate rather than this
+                # target's for a test this target never runs.
+                named = step_hosts(step.arguments)
+                host = target
+                if reason:
+                    host = named[0] if len(named) == 1 else None
+                tests.append({
                     "name": step.test_name,
                     **estimate_fields(catalog, step.test_name, step.arguments,
-                                      estimates=estimates, host=target),
+                                      estimates=estimates, host=host),
                     "per_board": _per_board(catalog, step),
+                    # Whether a run on the target would run this step at all,
+                    # and why not (``omitted_reason``). True for every step
+                    # with no target given.
+                    "runs_on_target": not reason,
+                    "omitted_reason": reason,
                     **_build_needs(catalog, step.test_name, step.arguments),
-                }
-                for step in steps
-            ]
-            seconds = [test["estimated_s"] for test in tests]
-            suites.append({
-                "name": suite,
-                "tests": tests,
-                # Only when every test has one; build and preflight excluded.
-                "estimated_s": (
-                    round(sum(seconds), 1)
-                    if seconds and None not in seconds else None
-                ),
-                "unestimated_tests": seconds.count(None),
-                "per_board_tests": sum(test["per_board"] for test in tests),
-                # True when any test in the suite needs (or cannot run
-                # without) that build option, so a client that dispatches the
-                # suite (the GUI) can ask for it.
-                **{
-                    field: any(test[field] for test in tests)
-                    for field in _BUILD_NEED_FIELDS
-                },
-                # Every image the suite needs that no build produces.
-                "needs_artifacts": sorted(
-                    {label for test in tests for label in test["needs_artifacts"]}
-                ),
-            })
+                })
+            suites.append(_suite_view(suite, tests))
         plans.append({"name": path.stem, "title": plan.name, "error": None,
                       "runnable": plan.runnable, "suites": suites})
     return plans

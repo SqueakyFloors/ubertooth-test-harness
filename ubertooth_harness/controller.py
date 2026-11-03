@@ -134,6 +134,10 @@ UNKNOWN_RUN = 4404
 UNKNOWN_GROUP = 4405
 # Terminal status of a stored run whose target registered without it.
 LOST = "lost"
+# The resource registry's platform for the system a target registers with
+# (platform.system(), from environment.capture). Any other system has no
+# registry platform, so nothing is assumed about it.
+PLATFORM_OF_SYSTEM = {"Darwin": "macos", "Linux": "linux"}
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -223,10 +227,23 @@ class Target:
     last_protocol_error: str | None = None
     last_runner_protocol_error: str | None = None
 
+    @property
+    def platform(self) -> str | None:
+        """The registry platform this target runs on, from the OS it
+        registered with; None for an OS the harness has no platform for.
+
+        The same two names the resource registry uses, because run-suite
+        refuses a host whose registry platform is not the local one, so this
+        is the platform the plans are compiled against on that target.
+        """
+        system = self.os.get("system") if isinstance(self.os, Mapping) else None
+        return PLATFORM_OF_SYSTEM.get(system)
+
     def view(self) -> dict:
         data = dataclasses.asdict(self)
         del data["last_seen"]
         data["status"] = "online" if self.online else "offline"
+        data["platform"] = self.platform
         return data
 
 
@@ -2324,14 +2341,19 @@ def create_app(controller: Controller):
     async def get_plans(target: str | None = None):
         # With a target, each test's estimate is what that host's own
         # finished runs measured; the stages it has learned come with it.
+        # A target that has registered also brings its platform, which says
+        # which steps it would not run at all.
         if target is not None and not valid_identifier(target):
             raise ControllerError("target must be a registry host name", 422)
         estimates = controller.estimates
+        registered = controller.targets.get(target) if target else None
+        platform = registered.platform if registered is not None else None
         plans = await asyncio.to_thread(
-            list_plans, controller.plans_dir, estimates=estimates, target=target
+            list_plans, controller.plans_dir, estimates=estimates, target=target,
+            platform=platform,
         )
         return {
-            "plans": plans, "target": target,
+            "plans": plans, "target": target, "platform": platform,
             "stages": learned_stages(estimates, target),
         }
 

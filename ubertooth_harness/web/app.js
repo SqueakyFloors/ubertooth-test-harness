@@ -47,6 +47,12 @@
     targets: new Map(),
     runs: new Map(),
     plans: [],
+    // The target the plan list on display was loaded for, the one a load is
+    // under way for, and a token so a slower answer for a target already
+    // left cannot replace a newer list.
+    plansTarget: "",
+    plansWanted: "",
+    plansToken: 0,
     // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
     refOptions: new Map(),
     selected: null, // run_id shown in the live view
@@ -171,14 +177,19 @@
     const targets = [...state.targets.values()].sort((a, b) => a.host.localeCompare(b.host));
     if (!targets.length) {
       select.replaceChildren(el("option", { value: "", text: "(no targets registered)" }));
-      return;
+    } else {
+      select.replaceChildren(...targets.map((target) => {
+        const notes = [target.status];
+        if (target.active_run_id) notes.push("busy");
+        return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
+      }));
+      if (targets.some((target) => target.host === current)) select.value = current;
     }
-    select.replaceChildren(...targets.map((target) => {
-      const notes = [target.status];
-      if (target.active_run_id) notes.push("busy");
-      return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
-    }));
-    if (targets.some((target) => target.host === current)) select.value = current;
+    // The first target to register, or a selection this update replaced,
+    // changes which host the plans belong to; the estimates and the build
+    // options are that host's. Compared with the target a load is under way
+    // for, so an update while one is in flight does not start another.
+    if (select.value !== state.plansWanted) loadPlans();
   }
 
   // ----- run setup ---------------------------------------------------------
@@ -223,15 +234,32 @@
     }
   }
 
+  // The plan list belongs to the chosen target: the estimates are what that
+  // host's own runs measured, and a step that names other hosts is not run
+  // there, so it is left out of the suite's estimate and of the build
+  // options the suite asks for. Called at start and whenever the target
+  // changes.
   async function loadPlans() {
+    const target = $("target").value;
+    const token = ++state.plansToken;
+    state.plansWanted = target;
+    const query = target ? `?target=${encodeURIComponent(target)}` : "";
     try {
-      const data = await api("GET", "/api/plans");
+      const data = await api("GET", `/api/plans${query}`);
+      if (token !== state.plansToken) return;  // a later target owns the list
       state.plans = data.plans;
+      state.plansTarget = target;
+      // A failure from an earlier load is not this list's status.
+      $("plan-status").textContent = "";
     } catch (error) {
+      if (token !== state.plansToken) return;
       state.plans = [];
+      state.plansTarget = target;
       $("plan-status").textContent = `Cannot list plans: ${error.message}`;
     }
     const select = $("plan");
+    // What the operator chose is kept across a reload for another target.
+    const current = select.value;
     // Only plans that load and are runnable can be started; a plan of
     // planned tests (runnable: false, e.g. backlog) is listed, not offered.
     const usable = state.plans.filter((plan) => !plan.error && plan.runnable === true);
@@ -247,8 +275,11 @@
       notes.push(`Not runnable (planned tests): ${planned.map((plan) => plan.name).join(", ")}`);
     }
     if (notes.length) $("plan-status").textContent = notes.join(". ");
-    if (usable.some((plan) => plan.name === "fast")) select.value = "fast";
-    renderSuites();
+    const keep = [current, "fast"].find(
+      (name) => name && usable.some((plan) => plan.name === name));
+    if (keep) select.value = keep;
+    // A reload for another target keeps the chosen suite as well.
+    renderSuites(true);
     if (state.live) rebuildChecklist();
   }
 
@@ -257,14 +288,19 @@
     return plan ? plan.suites.find((suite) => suite.name === suiteName) || null : null;
   }
 
-  function renderSuites() {
+  // `keepChoice` is for a reload of the same plan (another target): the
+  // chosen suite stays chosen. When the operator picks a plan, the suite
+  // named after it wins, as it did before.
+  function renderSuites(keepChoice = false) {
     const plan = state.plans.find((item) => item.name === $("plan").value);
     const select = $("suite");
+    const current = select.value;
     const suites = plan ? plan.suites : [];
     select.replaceChildren(...suites.map((suite) =>
       el("option", { value: suite.name, text: `${suite.name} (${suite.tests.length} tests)` })));
-    const same = suites.find((suite) => suite.name === plan?.name);
-    if (same) select.value = same.name;
+    const keep = (keepChoice && suites.find((suite) => suite.name === current))
+      || suites.find((suite) => suite.name === plan?.name);
+    if (keep) select.value = keep.name;
     renderSuiteTests();
   }
 
@@ -287,8 +323,11 @@
   function artifactWarning(suite) {
     const wanted = Array.isArray(suite.needs_artifacts) ? suite.needs_artifacts : [];
     if (!wanted.length) return "";
+    // The steps the chosen target runs, as `suite.needs_artifacts` itself
+    // counts them: a step it does not run needs this run no image.
     const tests = suite.tests
-      .filter((test) => (test.needs_artifacts || []).length)
+      .filter((test) => (test.needs_artifacts || []).length
+        && test.runs_on_target !== false)
       .map((test) => test.name);
     const artifacts = wanted.map((label) => `--artifact "${label}=PATH"`).join(" ");
     return ` This suite also needs ${wanted.join(", ")},`
@@ -298,14 +337,68 @@
       + " it would flash, before it is refused without running a test.";
   }
 
+  // The time the chosen target is expected to spend on the chosen suite,
+  // which counts only the steps that target runs, and then what it does not
+  // run. `learned` says the figure came from that host's own finished runs
+  // rather than the catalog's hand-calibrated estimates.
   function estimateText(suite) {
+    const target = state.plansTarget;
+    const on = target ? ` on ${target}` : "";
+    const running = suite.tests.filter((test) => test.runs_on_target !== false);
+    const parts = [];
     if (suite.estimated_s !== null && suite.estimated_s !== undefined) {
-      const perBoard = suite.per_board_tests
-        ? ` ${suite.per_board_tests} test(s) run once per selected Ubertooth and are counted once here; the live countdown counts every board the run selects.`
-        : "";
-      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the catalog's per-test estimates; build and preflight not included).${perBoard}`;
+      const learned = running.filter((test) => test.estimate_source === "learned").length;
+      const source = learned
+        ? `${learned} of ${running.length} from this target's own finished runs, the rest from the catalog`
+        : "from the catalog's per-test estimates";
+      parts.push(`Estimated test time${on} ${formatSeconds(suite.estimated_s)}`
+        + ` (${source}; build and preflight not included).`);
+      if (suite.per_board_tests) {
+        parts.push(`${suite.per_board_tests} test(s) run once per selected Ubertooth`
+          + " and are counted once here; the live countdown counts every board the run selects.");
+      }
+    } else if (!running.length) {
+      parts.push(`No test of this suite runs${on}, so there is nothing for it to run.`);
+    } else {
+      parts.push(`No time estimate${on}: ${suite.unestimated_tests} of the`
+        + ` ${running.length} tests it would run have no estimated duration,`
+        + " so the live view shows elapsed time only.");
     }
-    return `No time estimate: ${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only.`;
+    const omittedNote = omittedText(suite);
+    if (omittedNote) parts.push(omittedNote);
+    return parts.join(" ");
+  }
+
+  // The steps the chosen target does not run, because the plan names other
+  // hosts for them. Named with the time they take where they do run, so an
+  // estimate smaller than the whole suite's is accounted for rather than
+  // just smaller.
+  function omittedText(suite) {
+    const omitted = Array.isArray(suite.omitted_tests) ? suite.omitted_tests : [];
+    if (!omitted.length) return "";
+    // The known estimates among them, so one step without an estimate does
+    // not hide the time of the rest.
+    const timed = omitted.filter((test) => typeof test.estimated_s === "number");
+    const total = timed.reduce((sum, test) => sum + test.estimated_s, 0);
+    const untimed = omitted.length - timed.length;
+    const missing = untimed ? `${untimed} with no estimate` : "";
+    const counted = timed.length
+      ? `${formatSeconds(total)} of test time where they do run`
+        + (missing ? `, ${missing}` : "")
+      : missing;
+    const adds = counted ? ` (${counted})` : "";
+    // Grouped by reason: a whole suite for another host is one sentence,
+    // not the same reason after every test name.
+    const groups = new Map();
+    for (const test of omitted) {
+      const names = groups.get(test.reason) || [];
+      names.push(test.name);
+      groups.set(test.reason, names);
+    }
+    const named = [...groups.entries()]
+      .map(([reason, names]) => `${names.join(", ")} — ${reason}`).join("; ");
+    return `${omitted.length} test(s) of this suite are not run there${adds}`
+      + ` and are not counted above: ${named}.`;
   }
 
   async function submitRun(event) {
@@ -402,6 +495,13 @@
     const run = state.runs.get(live.run_id);
     const suite = run ? findSuite(run.plan, run.suite) : null;
     let tests = suite ? suite.tests : [];
+    // The plans were listed for the run-setup target, and a step that names
+    // hosts is run only there, so the flag is read only for a run on that
+    // same target. The run's manifest replaces this list as soon as it
+    // arrives, and a test that starts anyway is added when it starts.
+    if (run && run.target === state.plansTarget) {
+      tests = tests.filter((test) => test.runs_on_target !== false);
+    }
     if (run && Array.isArray(run.tests) && run.tests.length) {
       tests = tests.filter((test) => run.tests.includes(test.name));
     }
@@ -1036,8 +1136,14 @@
     });
   }
 
+  // The tests of the suite that need a build option, counted the way
+  // /api/plans counts the suite's own flags: only the steps the chosen
+  // target runs, since a step it does not run must not make it build.
   function neededBy(suite, need) {
-    return suite ? suite.tests.filter((test) => test[need]).map((test) => test.name) : [];
+    if (!suite) return [];
+    return suite.tests
+      .filter((test) => test[need] && test.runs_on_target !== false)
+      .map((test) => test.name);
   }
 
   // Flash and the two build options need Build: each is disabled, with a
@@ -1102,12 +1208,15 @@
         syncBuildOptions();
       });
     }
+    // Another target is another plan listing: its own estimates, and its own
+    // answer to what the suite leaves out and what it must build.
+    $("target").addEventListener("change", loadPlans);
     $("build").addEventListener("change", syncBuildOptions);
     // Flashing builds the firmware image anyway, which the note says.
     $("flash-build").addEventListener("change", syncBuildOptions);
     syncBuildOptions();
     $("refs-reload").addEventListener("click", loadRefs);
-    $("plan").addEventListener("change", renderSuites);
+    $("plan").addEventListener("change", () => renderSuites());
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelRun);
     $("file-previous").addEventListener("click", () => pageOutputFile(-1));
