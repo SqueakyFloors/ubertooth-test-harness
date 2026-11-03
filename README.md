@@ -2222,7 +2222,12 @@ into `<output>/<run-id>/` (plus `build/` with `--build`, `captures/` when
 a capture case ran, and `output/` when a command printed a lot):
 
 - `run.jsonl`: every record, appended and fsynced as it happens. The first
-  records are `run_started` and `manifest` (sources, plan and registry hashes,
+  records are `run_started`, then the comparisons with the fork at the
+  commit under test -- `libbtbb_pin` ([Building the resolved
+  revision](#building-the-resolved-revision)) on a run that builds or names a
+  libbtbb source, and `dfu_part_table`, the flash sizes a DFU read-back is
+  checked against ([DFU images](#dfu-images)), on every run; neither fails a
+  run -- and `manifest` (sources, plan and registry hashes,
   artifacts, invocations, Python/OS environment, and build toolchain), then
   build commands, preflight, and each test's events, including every command
   and its output as it arrives. One `watchdog` record per board per read
@@ -2603,6 +2608,43 @@ without `-U`, which writes nothing. Otherwise the run stops for recovery by
 hand. A read-back can fail and leave the board in DFU (fork #208): in a case
 step that fails the case and the cleanup returns the board; in the cleanup it
 returns the board but fails the cleanup, so the run stops. Other registered boards are guards, read before and after every case.
+
+How long a read-back is follows the part, so the comparison takes the length
+from the range the command printed and checks it against the flash sizes in
+the fork's DFU part table. Those sizes are the harness's own copy of that
+table, which a part the fork adds later would leave behind: a correct
+read-back on such a part would then be reported as a length no part explains.
+To notice that, `run-suite` and `build` read the table out of the fork's
+checkout at the resolved Ubertooth commit and record the comparison as a
+`dfu_part_table` record in run.jsonl and a "DFU part table" row in report.md:
+`passed` (the same flash sizes), `warning` (they differ; it names the part
+whose entry the copy is missing, and the read-back length such a board would
+report), `unchecked` (the figures are not where they are read from: the table
+renamed, moved to another file, a second part list elsewhere, defined twice,
+written in a way the reader does not know, or a read-back length the fork now
+works out from something other than these three figures; the reason is
+given), or `skipped` (the commit names none of `DFU_PARTS`,
+`dfu_upload_length`, and `DFU_ASSUMED_FLASH_SIZE` anywhere, so it is older
+than the figures and has none to compare with). A comparison
+that stopped working reports itself, which is the failure this check exists
+to avoid, and three things are beyond it: the arithmetic, since a fork that
+still names all three figures and works the length out of them differently
+compares as a match; a fork that renames all three at once, which leaves
+nothing to find; and a second part list that is neither of the fork's own
+part type nor named for the table, and whose rows name no part. The `DFU
+images` step is what catches all three: the line a `-u` prints names the
+length and the flash the part has, and the step checks one against the
+other, so a length that is wrong for its part fails even where it would be
+right for some other part in the table. The CI `build` job runs the same
+comparison once against the fork's `main` and shows it on the workflow run
+page (`scripts/ci.sh dfu-part-table` runs only that step); its `build` and
+`run-suite` steps then record it without printing it again
+(`UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN`). A difference and an unreadable
+table are also printed on
+stderr and shown in the browser live view; a match and a skip leave the
+report row to say so. Nothing fails on this: the read-back check stays the
+harness's copy, so a length no part explains is still loud, and the warning
+is what says to add the entry (`ubertooth_harness/dfuparts.py`).
 
 ## Target runner service
 

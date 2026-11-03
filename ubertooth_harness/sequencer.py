@@ -8,6 +8,7 @@ import time
 from typing import Mapping, Sequence
 
 from ubertooth_harness.cancellation import CancellationToken
+from ubertooth_harness import dfuparts
 from ubertooth_harness.catalog import (
     WATCHDOG_LIMIT_ARGUMENT,
     CatalogError,
@@ -1304,6 +1305,11 @@ class NamedTestSequencer:
                     manifest.plan_name, manifest.suite, manifest.host, manifest.sources
                 ),
             )
+            # A run that builds records this before its build, where the
+            # caller opened the record; one that uses installed tools has no
+            # earlier record of its own, and the comparison holds for it just
+            # the same (#283).
+            dfuparts.record(publisher, manifest.sources)
         publisher.emit(
             "manifest",
             "passed",

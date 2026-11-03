@@ -50,7 +50,7 @@ from ubertooth_harness.flash import (
     HarnessError,
 )
 from ubertooth_harness import leases as board_leases
-from ubertooth_harness import libbtbbpin
+from ubertooth_harness import dfuparts, libbtbbpin
 from ubertooth_harness.manifest import (
     FileIdentity,
     GitRevisionResolver,
@@ -291,8 +291,13 @@ def _resolve_sources(args: argparse.Namespace):
 
 
 def _terminal_sink() -> TerminalEventSink:
-    """The live stderr stream; quiet about a libbtbb pin check already shown."""
-    quiet = {libbtbbpin.EVENT} if os.environ.get(libbtbbpin.SHOWN_ENV) else set()
+    """The live stderr stream; quiet about a check whose caller already showed
+    it, so a CI job that runs the comparison itself does not print it again
+    for the build and the suite."""
+    quiet = set()
+    for module in (libbtbbpin, dfuparts):
+        if os.environ.get(module.SHOWN_ENV):
+            quiet.add(module.EVENT)
     return TerminalEventSink(sys.stderr, quiet_events=quiet)
 
 
@@ -305,6 +310,19 @@ def _record_libbtbb_pin(publisher, sources) -> None:
     check = libbtbbpin.check_sources(sources)
     if check is not None:
         publisher.emit(libbtbbpin.EVENT, check.status, check.details())
+
+
+def _record_dfu_part_table(publisher, sources) -> None:
+    """Record how the flash sizes a DFU read-back is checked against compare
+    with the fork's own part table.
+
+    The harness keeps its own copy of those sizes, so a part the fork adds
+    later would turn a correct read-back into a failure: the record names the
+    entry the copy is missing and the run goes on (#283). A run this command
+    does not open the record for gets it from the sequencer instead, so every
+    run carries it exactly once.
+    """
+    dfuparts.record(publisher, sources)
 
 
 def _record_lease_takeovers(publisher, leases) -> None:
@@ -366,6 +384,7 @@ def _build_command(args: argparse.Namespace) -> int:
     publisher = open_run_publisher(output, generate_run_id(), _terminal_sink())
     publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
     _record_libbtbb_pin(publisher, sources)
+    _record_dfu_part_table(publisher, sources)
     try:
         result = _build(
             sources, output, args.with_firmware, publisher, args.with_python, run_dir=output
@@ -1295,6 +1314,7 @@ def _run_leased(
             _record_lease_queued(publisher, leases)
             _record_lease_pairings(publisher, pairings)
             _record_libbtbb_pin(publisher, sources)
+            _record_dfu_part_table(publisher, sources)
         except BaseException as error:
             _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
             raise

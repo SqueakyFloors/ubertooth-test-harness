@@ -143,6 +143,13 @@ class TerminalEventSink:
                 self.stream.write(f"[libbtbb pin] {message}\n")
             else:
                 self.stream.write(f"warning: {message}\n")
+        elif event.event_type == "dfu_part_table":
+            # Only what a reader can act on: the flash sizes a DFU read-back
+            # is checked against differ from the fork's part table, or the
+            # comparison stopped working. A match, and a fork commit from
+            # before the table, leave the report row to say so (#283).
+            if event.status in ("warning", "unchecked"):
+                self.stream.write(f"warning: {details.get('message', '')}\n")
         elif event.event_type == "watchdog":
             for line in details.get("warnings", []):
                 self.stream.write(f"warning: {line}\n")
