@@ -1340,9 +1340,19 @@ class Rejection:
     options: tuple[str, ...]
     error: str  # regex for the tool's own error text
     smoke: bool = False
+    # Whether the command names the test's board with its own -U selector.
+    # A rejection whose options carry a -U of their own (-U all) must not be
+    # given a second one: no option may be given a value twice, so the
+    # command would be refused for the repeat and never reach the behavior
+    # the case is named for (harness #292). These commands are refused in the
+    # option loop, before any board is opened, so leaving the selector out
+    # takes nothing away: the board the case guards is untouched either way,
+    # and the steps around the refusal still read it.
+    select: bool = True
 
     def argv(self, serial: str) -> tuple[str, ...]:
-        return (self.tool, "-U", serial) + self.options
+        selector = ("-U", serial) if self.select else ()
+        return (self.tool,) + selector + self.options
 
 
 REJECTIONS = (
@@ -1352,10 +1362,17 @@ REJECTIONS = (
               r"error: frequency must be 2402-2480 MHz"),
     Rejection("util-channel-index-79", "ubertooth-util", ("-C79",),
               r"error: channel must be 0-78"),
+    # -U all brings its own selector, so these two run without the test's
+    # (select=False): "ubertooth-util -U <serial> -U all -a5" is refused for
+    # the repeated -U and says nothing about what -U all supports.
     Rejection("util-all-with-setter", "ubertooth-util", ("-U", "all", "-a5"),
-              r"error: -U all only supports the read-only queries"),
+              r"(?m)^error: -U all only supports the read-only queries -b, -v, "
+              r"-p and -s; select one device with -U<index\|serial> for other "
+              r"options$", select=False),
     Rejection("util-all-with-mode", "ubertooth-util", ("-U", "all", "-x"),
-              r"error: -U all only supports the read-only queries"),
+              r"(?m)^error: -U all only supports the read-only queries -b, -v, "
+              r"-p and -s; select one device with -U<index\|serial> for other "
+              r"options$", select=False),
     # Strict whole-number parsing (fork 658730c, SqueakyFloors/ubertooth#172):
     # a non-numeric, partly numeric, or out-of-range value is an error, not 0
     # or a query.
@@ -1413,9 +1430,12 @@ REJECTIONS = (
               r"error: advertising channel index must be 37-39 \(got 40\)"),
     # One "error: " line on stderr since fork e4f1dc5 (fork #377), it was
     # "Error: MAC address is wrong length" on stdout; no usage text after it
-    # since 12211ce (fork #406).
+    # since 12211ce (fork #406). The line names the address the option asks
+    # for ("target") rather than the kind of value it is, since fork cad4ff67
+    # (#776): every option that takes an address names its own.
     Rejection("btle-bad-target-mac", "ubertooth-btle", ("-tnot-a-mac",),
-              r"error: MAC address must be xx:xx:xx:xx:xx:xx \(got not-a-mac\)"),
+              r"(?m)^error: target address must be xx:xx:xx:xx:xx:xx "
+              r"\(got not-a-mac\)$"),
     Rejection("ego-length-0", "ubertooth-ego", ("-l0",),
               r"error: capture length must be 1-48 \(got 0\)", smoke=True),
     Rejection("ego-length-49", "ubertooth-ego", ("-l49",),
@@ -1428,8 +1448,13 @@ REJECTIONS = (
               r"error: Bluetooth address must be xx:xx:xx:xx:xx:xx \(got not-an-address\)"),
     Rejection("rx-uap-without-lap", "ubertooth-rx", ("-u", "12"),
               r"error: -u <UAP> requires -l <LAP>", smoke=True),
+    # The refusal says why survey mode takes no address, and names both
+    # options it refuses, since fork 89c0ac79 (#498), which gave every tool
+    # one way of reporting a bad command line; it was "No address should be
+    # specified for survey mode" with no "error: " before it.
     Rejection("rx-survey-with-address", "ubertooth-rx", ("-z", "-l", "123456"),
-              r"No address should be specified for survey mode"),
+              r"(?m)^error: survey mode \(-z\) discovers addresses, so it cannot "
+              r"be given -l or -u$"),
     Rejection("specan-lower-below-band", "ubertooth-specan", ("-l", "2401"),
               r"error: lower frequency must be 2402-2480 MHz", smoke=True),
     Rejection("specan-upper-above-band", "ubertooth-specan", ("-u", "2481"),

@@ -136,7 +136,10 @@ def _dump_check(step_id, name, file_name, fmt, *, min_records=0, types="br,keep-
 # device and exits 0. Each access code found prints
 # "systime=<s> ch=<index> LAP=<hex6> err=<n> clkn=... s=.. n=.. snr=..";
 # libbtbb may add lines of its own (UAP and clock progress). -z then prints
-# "Survey Results" and one ??:??:[UAP:]LAP line per piconet. Without -c it
+# "Survey Results" on standard error and one ??:??:[UAP:]LAP line per piconet
+# on standard output (fork ubertooth-rx.c:1486: the heading is for a person
+# reading along, so standard output holds only the addresses a script parses,
+# as ubertooth-scan prints "Scan results:"). Without -c it
 # sweeps every channel; -c <index> fixes one. -e caps the access-code errors
 # reported. -r/-q create BR/EDR PCAPNG/PCAP files (link type 255) at start;
 # -d writes one full 68-byte record per packet found (possibly none).
@@ -167,6 +170,12 @@ SURVEY_LINE = re.compile(
     r"^\?\?:\?\?:(?:\?\?|[0-9A-F]{2}):"
     r"(?P<lap>[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2})$"
 )
+# The heading the survey results are listed under. It goes to standard error,
+# so a -z step asks for it in its patterns (which read both streams) and the
+# stdout checks below refuse it: a heading among the addresses is what the
+# fork's split was made to prevent.
+SURVEY_HEADING = "Survey Results"
+SURVEY_HEADING_PATTERN = rf"(?m)^{SURVEY_HEADING}$"
 
 
 def packet_check(*, channel=None, max_errors=None, survey=False):
@@ -176,7 +185,7 @@ def packet_check(*, channel=None, max_errors=None, survey=False):
         problems = []
         channels = set()
         worst = 0
-        results_seen = False
+        heading = False
         bad_results = 0
         for line in text_lines(output):
             match = PACKET_LINE.match(line)
@@ -185,11 +194,16 @@ def packet_check(*, channel=None, max_errors=None, survey=False):
                 # the survey block was read in the same pass.
                 channels.add(int(match["ch"]))
                 worst = max(worst, int(match["err"]))
-            elif results_seen:
-                if not SURVEY_LINE.match(line):
+            elif survey and line.strip():
+                # A survey's standard output is packet lines and addresses;
+                # the heading and every other diagnostic belong on standard
+                # error. The step's patterns are what require the heading
+                # there, since a run with no piconet in range lists no
+                # address at all.
+                if line.strip() == SURVEY_HEADING:
+                    heading = True
+                elif not SURVEY_LINE.match(line):
                     bad_results += 1
-            elif line == "Survey Results":
-                results_seen = True
         if channel is not None:
             other = sorted(channels - {channel})
             if other:
@@ -197,11 +211,14 @@ def packet_check(*, channel=None, max_errors=None, survey=False):
         if max_errors is not None and worst > max_errors:
             problems.append(f"a packet with {worst} access-code errors (max {max_errors})")
         if survey:
-            if not results_seen:
-                problems.append("no 'Survey Results' line")
-            elif bad_results:
+            if heading:
                 problems.append(
-                    f"{bad_results} survey lines that are not piconet addresses")
+                    f"the {SURVEY_HEADING!r} heading is on stdout, among the "
+                    "addresses a script parses")
+            if bad_results:
+                problems.append(
+                    f"{bad_results} stdout lines that are neither packet lines "
+                    "nor piconet addresses")
         return "; ".join(problems)
 
     return check
@@ -329,8 +346,9 @@ def classic_receive_cases(arguments, _resources, resource_identities):
     absent = ABSENT_SERIAL if serial != ABSENT_SERIAL else "0" * 32
     cases = [
         _rx_case(serial, n, "rx-survey-timeout", "Survey (-z -t) ends by itself",
-                 ("-z",), "survey results listed",
-                 check=packet_check(survey=True)),
+                 ("-z",), "survey results listed under the heading on stderr",
+                 check=packet_check(survey=True),
+                 patterns=(SURVEY_HEADING_PATTERN,)),
         _rx_case(serial, n, "rx-capture-pcapng", "PCAPNG capture (-r)", (),
                  "-r wrote a pcapng file with link type 255",
                  files=(("-r", "rx.pcapng"),),
@@ -559,10 +577,13 @@ def raw_receive_cases(arguments, _resources, resource_identities):
         cases += [
             _dump_case(serial, n, "dump-le", "LE modulation (-l)", ("-l",), "full",
                        modulation="LE"),
-            _dump_case(serial, n, "dump-le-then-classic", "-l -c: the last (-c) wins",
-                       ("-l", "-c"), "full", modulation="basic rate"),
-            _dump_case(serial, n, "dump-classic-then-le", "-c -l: the last (-l) wins",
-                       ("-c", "-l"), "full", modulation="LE"),
+            # Each modulation option on its own, now that the two together
+            # are refused: a capture uses one demodulator, so -c and -l in
+            # one command line are no longer the last one with the other
+            # dropped (fork d3429234, #650). The refusal itself needs no
+            # board and is in Refused command lines.
+            _dump_case(serial, n, "dump-classic", "Basic rate modulation (-c)",
+                       ("-c",), "full", modulation="basic rate"),
             _ego_case(serial, n, "ego-length-1", "E-GO capture length -l 1", ("-l", "1"),
                       length=1),
             _ego_case(serial, n, "ego-length-48", "E-GO capture length -l 48", ("-l", "48"),
@@ -746,8 +767,10 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
         _replay_case("replay-survey", "-i -z lists both piconets", (
             _fixture_step(base),
             _replay_step("ubertooth-rx -i <fixture> -z", ("-z",),
-                         check=rxreplay.survey_check(survey)),
-        ), "Survey Results: LAP A with its UAP, LAP B without one"),
+                         check=rxreplay.survey_check(survey),
+                         patterns=(SURVEY_HEADING_PATTERN,)),
+        ), "the heading on stderr and, on stdout, LAP A with its UAP and "
+           "LAP B without one"),
         _replay_case("replay-lap-filter", f"-i -l {_B}: only that LAP", (
             _fixture_step(base),
             _replay_step(f"ubertooth-rx -i <fixture> -l {_B}", ("-l", _B),

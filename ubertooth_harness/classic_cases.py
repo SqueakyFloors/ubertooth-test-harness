@@ -51,6 +51,7 @@ from ubertooth_harness.receive_cases import (
     EARLY_EXIT_S,
     EXIT_SLACK_S,
     PACKET_LINE,
+    SURVEY_HEADING_PATTERN,
     SURVEY_LINE,
     packet_check,
     seconds_arg,
@@ -258,13 +259,15 @@ def _packet_laps(output) -> list[str]:
 
 
 def _survey_laps(output) -> set[str]:
-    """The LAPs of the survey results, in the form -l takes."""
+    """The LAPs of the survey results, in the form -l takes.
+
+    Standard output carries the addresses and nothing introducing them: the
+    heading is on standard error (ubertooth-rx.c), where the step's patterns
+    read it. So an address line counts wherever it is, and ``packet_check``
+    beside this one is what refuses a heading that arrived here.
+    """
     found = set()
-    results = False
     for line in text_lines(output):
-        if not results:
-            results = line == "Survey Results"
-            continue
         match = SURVEY_LINE.match(line)
         if match:
             found.add(match["lap"].replace(":", "").lower())
@@ -460,7 +463,7 @@ def _pair_patterns(acceptor, initiator, *, audio=False) -> tuple[str, ...]:
 
 def _capture_case(serial, acceptor, initiator, seconds, *, case_id, name,
                   options, check, expected_state, files=(), verify=(),
-                  audio=False):
+                  audio=False, patterns=()):
     """One bounded ubertooth-rx run while the pair streams, or carries audio."""
     argv = (_audio_argv if audio else _stream_argv)(
         acceptor, initiator, serial, seconds, options, files)
@@ -477,7 +480,10 @@ def _capture_case(serial, acceptor, initiator, seconds, *, case_id, name,
              # A floor on the capture's own run belongs to the driver, which
              # times the child; this step's duration is the whole session.
              mutates=True,
-             output_patterns=_pair_patterns(acceptor, initiator, audio=audio),
+             # ``patterns`` read both streams, which is where a -z case asks
+             # for the survey heading: the tool's stderr is this command's.
+             output_patterns=(_pair_patterns(acceptor, initiator, audio=audio)
+                              + tuple(patterns)),
              output_check=check),
         _stop(serial),
         *verify,
@@ -513,6 +519,7 @@ def known_classic_cases(arguments, resources, resource_identities):
                 name=f"ubertooth-rx -z lists the pair's central LAP {central}",
                 options=("-z",),
                 check=_all(packet_check(survey=True), survey_lists(central)),
+                patterns=(SURVEY_HEADING_PATTERN,),
                 expected_state=f"the survey results list LAP {central}"),
         capture(case_id="sweep",
                 name="ubertooth-rx with no target reports the pair's packets",
@@ -526,6 +533,7 @@ def known_classic_cases(arguments, resources, resource_identities):
             name=f"ubertooth-rx -z -r (PCAPNG) lists LAP {central} and writes a file",
             options=("-z",),
             check=_all(packet_check(survey=True), survey_lists(central)),
+            patterns=(SURVEY_HEADING_PATTERN,),
             expected_state=(f"the survey results list LAP {central}; -r wrote "
                             f"a pcapng file with link type {LINKTYPE_BREDR} "
                             f"and {MIN_PACKETS}+ packets in it"),
@@ -544,6 +552,7 @@ def known_classic_cases(arguments, resources, resource_identities):
             options=("-z",),
             check=_all(packet_check(survey=True), survey_lists(acceptor["lap"]),
                        survey_omits(central)),
+            patterns=(SURVEY_HEADING_PATTERN,),
             expected_state=f"the survey results list LAP {acceptor['lap']} and "
                            f"not {central}"))
     return tuple(cases)
@@ -742,6 +751,7 @@ def record_fields_cases(arguments, resources, resource_identities):
             name="A survey's records carry the UAP it recovered as it went",
             options=("-z",),
             check=_all(packet_check(survey=True), survey_lists(central)),
+            patterns=(SURVEY_HEADING_PATTERN,),
             expected_state=(
                 f"the pcapng holds {MIN_PACKETS}+ records, at least "
                 f"{MIN_SURVEY_UAP_RECORDS} of them carrying a UAP the survey "

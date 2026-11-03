@@ -101,6 +101,8 @@ class ReplayRx:
     after a device is opened, and ignored with -i). ``bugs``
     switches on a misbehavior per case: decoys, no-uap, wrong-uap, ignores-l,
     ignores-e, link-type, no-capture, dump-mangled, survey-no-uap,
+    survey-heading-on-stdout (the heading among the addresses on standard
+    output, as it was before the fork split the two streams),
     partial-record, empty-fails, missing-exit-0, u-fails, wrong-u-confirms,
     dump-open-exit-0, dump-open-usage, dump-open-stray (leaves a file beside
     the fixture), dump-open-touches (rewrites the fixture),
@@ -231,8 +233,15 @@ class ReplayRx:
                         else:
                             notes.append("CLK6 = 0x0 found after 2 total packets.")
                             notes.append("26523 initial CLK1-27 candidates")
+        survey_heading = ""
         if "-z" in options:
-            lines.append("Survey Results")
+            # The heading is standard error and the addresses standard output
+            # (ubertooth-rx.c), so a script reading stdout gets the list
+            # alone. survey-heading-on-stdout puts it back among them.
+            if "survey-heading-on-stdout" in self.bugs:
+                lines.append("Survey Results")
+            else:
+                survey_heading = "Survey Results\n"
             for survey_lap in dict.fromkeys(int(line.split("LAP=")[1][:6], 16)
                                             for line in lines if "LAP=" in line):
                 text = f"{survey_lap:06X}"
@@ -245,7 +254,8 @@ class ReplayRx:
         self._write_outputs(options, found, dumped)
         return self._result(command, 1 if partial else 0,
                             "".join(line + "\n" for line in lines),
-                            notice + partial + "".join(note + "\n" for note in notes))
+                            notice + partial + survey_heading
+                            + "".join(note + "\n" for note in notes))
 
     def _write_outputs(self, options, found, dumped):
         link = 1 if "link-type" in self.bugs else 255
@@ -516,10 +526,16 @@ class CheckTests(unittest.TestCase):
         self.assertRegex(note, rxreplay.uap_note(0x6B))
         self.assertRegex(note, rxreplay.ANY_UAP_NOTE)
         self.assertNotRegex(note, rxreplay.uap_note(0x6C))
+        # The heading is on stderr, which this check does not see: every
+        # line here that is not a packet line is an address the survey
+        # listed, so a heading among them is a listed "address" and a
+        # failure.
         survey = rxreplay.survey_check({"??:??:6B:5A:3C:96"})
-        self.assertEqual("", survey("x\nSurvey Results\n??:??:6B:5A:3C:96\n"))
-        self.assertIn("no 'Survey Results'", survey(""))
-        self.assertIn("survey listed", survey("Survey Results\n??:??:??:5A:3C:96\n"))
+        self.assertEqual("", survey(self.lines(want) + "??:??:6B:5A:3C:96\n"))
+        self.assertIn("survey listed nothing", survey(""))
+        self.assertIn("survey listed", survey("??:??:??:5A:3C:96\n"))
+        self.assertIn("heading is on stdout",
+                      survey("Survey Results\n??:??:6B:5A:3C:96\n"))
 
     def test_systime_check(self):
         want = rxreplay.expected_packets()
@@ -632,6 +648,7 @@ class ReplayCaseTests(unittest.TestCase):
                            "-i -l 5a3c96 -q: only that LAP captured"},
             "dump-mangled": {"-i -d writes the packet records back"},
             "survey-no-uap": {"-i -z lists both piconets"},
+            "survey-heading-on-stdout": {"-i -z lists both piconets"},
             "partial-record": {"-i of a file whose last record is cut"},
             "empty-fails": {"-i of an empty file"},
             "missing-exit-0": {"-i of a missing file"},

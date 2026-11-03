@@ -114,15 +114,38 @@ class RangeBoard(FakeUbertooth):
             repeating = any(
                 board.mode == "repeater" and board.state["channel"] == self.state["channel"]
                 for serial, board in self.air.boards.items() if serial != self.serial)
+            start = "Starting range test\n"
             if not repeating or self.air.result is None:
-                self.mode = "waiting"  # listens for a reply that never comes
-            else:
-                self.result = (("mismatch", self.air.mismatch)
-                               if self.air.mismatch is not None else self.air.result)
-                self.mode = "range"
-                self._stop_mode()  # the test ends by itself: idle reset
-                self.state["pa"] = "7"
-            return self._result(command, 0, "", "Starting range test\n", on_output)
+                # -n waits for the reply itself (fork 1c7f06d6, fork #687).
+                # With none in range it gives up at its own deadline, stops
+                # the board, and says so; a board that stops answering USB
+                # ends the wait on the third failed poll instead. Either way
+                # the wait reports on standard error and exits 1.
+                self.mode = "waiting"
+                if not self.sender_answers_usb:
+                    # The board answers nothing, so the stop the wait tries
+                    # does not land either and it says so; the board is left
+                    # listening, as a wedged board is.
+                    return self._result(
+                        command, 1, "", start + "error: range test result read "
+                        "failed; the range test has not been stopped; -S stops "
+                        "it\n", on_output)
+                self._stop_mode()
+                return self._result(
+                    command, 1, "", start
+                    + f"error: no reply from the repeater within "
+                    f"{util_cases.RANGE_TEST_TOOL_DEADLINE_S} s: start one in "
+                    "range with ubertooth-util -e, or wait longer with -n "
+                    "<seconds>; the range test has been stopped\n", on_output)
+            self.result = (("mismatch", self.air.mismatch)
+                           if self.air.mismatch is not None else self.air.result)
+            self.mode = "range"
+            self._stop_mode()  # the test ends by itself: idle reset
+            self.state["pa"] = "7"
+            # The same result block -m prints, from the same function, so a
+            # result reads the same whichever asked for it.
+            code, stdout, stderr = self.range_report()
+            return self._result(command, code, stdout, start + stderr, on_output)
         return super()._util(command, options, on_output)
 
 
@@ -246,7 +269,12 @@ class RangeCatalogTests(unittest.TestCase):
                         cleanup.index("sender-cleanup-stop"))
         ids = [step.step_id for step in case.steps]
         self.assertLess(ids.index("responder-start-repeater"),
-                        ids.index("sender-start-range-test"))
+                        ids.index("sender-run-range-test"))
+        # -n waits for the round trip itself, so its step outlasts the
+        # tool's own deadline rather than cutting the wait short.
+        test = case.steps[ids.index("sender-run-range-test")]
+        self.assertEqual(util_cases.RANGE_TEST_TIMEOUT_S, test.timeout_s)
+        self.assertGreater(test.timeout_s, util_cases.RANGE_TEST_TOOL_DEADLINE_S)
         poll = case.steps[ids.index("sender-wait-for-result")]
         self.assertEqual(util_cases.range_poll_argv(A), poll.argv)
         self.assertEqual(util_cases.RANGE_POLL_TIMEOUT_S, poll.timeout_s)
@@ -426,42 +454,49 @@ class RangeExecutionTests(unittest.TestCase):
         self.assertIn("responder-cleanup-stop", failed)
         self.assertNotIn(("ubertooth-util", "-U", A, "-n"), sender.commands)
 
-    def test_a_wedged_sender_fails_at_the_wait_after_the_repeater_answered(self):
+    def test_a_wedged_sender_fails_at_the_range_test_after_the_repeater_answered(self):
+        # -n polls the board itself, so a board that stops answering USB
+        # ends the wait there, with the tool's own reason.
         _air, sender, responder = pair(Air(result=None))
         sender.sender_answers_usb = False
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
         (before,) = steps(events, step_id="responder-repeating")
         self.assertEqual("passed", before.status)
-        self.assertEqual("sender-wait-for-result", failed_steps(events)[0])
-        (wait,) = steps(events, step_id="sender-wait-for-result")
-        self.assertIn("last read: exit 1: no Ubertooth found", wait.details["reason"])
+        self.assertEqual("sender-run-range-test", failed_steps(events)[0])
+        (test,) = steps(events, step_id="sender-run-range-test")
+        self.assertIn("command exited 1", test.details["reason"])
+        self.assertEqual([], steps(events, step_id="sender-wait-for-result"))
 
-    def test_no_reply_fails_at_the_wait_and_still_cleans_up(self):
+    def test_no_reply_fails_at_the_range_test_and_still_cleans_up(self):
         _air, sender, responder = pair(Air(result=None))
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
-        self.assertEqual(["sender-wait-for-result"], failed_steps(events))
-        (wait,) = steps(events, step_id="sender-wait-for-result")
-        self.assertIn("no range test result within 10 s (40 reads); last read: "
-                      "exit 0: no range test result yet", wait.details["reason"])
+        self.assertEqual(["sender-run-range-test"], failed_steps(events))
+        (test,) = steps(events, step_id="sender-run-range-test")
+        self.assertIn("command exited 1", test.details["reason"])
+        # The tool's own report is in the step's output, and the board it
+        # stopped is idle again.
         self.assertIsNone(responder.mode)
         self.assertIsNone(sender.mode)
 
     def test_a_mismatch_fails_naming_the_field(self):
+        # -n reports the corrupted reply itself and exits 1, so the test
+        # fails there; the poll's own reading of a mismatch is covered by
+        # range_poll_check's own tests.
         _air, sender, responder = pair(Air(mismatch=17))
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
-        self.assertEqual(["sender-wait-for-result"], failed_steps(events))
-        (wait,) = steps(events, step_id="sender-wait-for-result")
-        self.assertIn("differs from the request at byte 17 (sender serial number byte 15)",
-                      wait.details["reason"])
+        self.assertEqual(["sender-run-range-test"], failed_steps(events))
+        (test,) = steps(events, step_id="sender-run-range-test")
+        self.assertIn("command exited 1", test.details["reason"])
 
     def test_level_above_the_plan_maximum_fails(self):
+        # -n prints the result block, so the plan's maximum is checked there.
         _air, sender, responder = pair(Air(result=(0, 0, 4, 2)))
         summary, events, _report = self.run_pair(sender, responder, maximum_pa=3)
         self.assertFalse(summary.passed)
-        (result,) = steps(events, step_id="sender-range-result")
+        (result,) = steps(events, step_id="sender-run-range-test")
         self.assertIn("reply got through only at PA level 4", result.details["reason"])
 
     def test_old_result_is_cleared_before_the_test(self):
@@ -471,7 +506,7 @@ class RangeExecutionTests(unittest.TestCase):
         sender.result = (0, 0, 0, 0)
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
-        self.assertEqual(["sender-wait-for-result"], failed_steps(events))
+        self.assertEqual(["sender-run-range-test"], failed_steps(events))
 
     def test_other_boards_are_guarded(self):
         air, sender, responder = pair()

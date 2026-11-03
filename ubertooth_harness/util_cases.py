@@ -469,6 +469,15 @@ RANGE_COMPARED_FIELDS = (
 )
 REPEATER_START = r"(?m)^Starting repeater$"
 RANGE_TEST_START = r"(?m)^Starting range test$"
+# -n runs the test and waits for it: it prints the result block on standard
+# output and exits 0, or gives up at its own deadline with an error on
+# standard error and exits 1 (fork 1c7f06d6, fork #687; RANGE_TEST_TIMEOUT_S
+# in ubertooth-util.c). It is not the silent starter it was, whose result was
+# read later with -m. The step's deadline has to outlast the tool's own, or a
+# -n the repeater never answered would be killed by the harness and recorded
+# as a command that timed out instead of the tool's own report.
+RANGE_TEST_TOOL_DEADLINE_S = 10
+RANGE_TEST_TIMEOUT_S = RANGE_TEST_TOOL_DEADLINE_S + 5.0
 # Reads the sender's -m until it reports a result or a mismatch, or the
 # deadline passes. Each read whose output or exit status differs from the
 # previous one is logged as one line ("read <n>: exit <code>: <output>") on
@@ -529,8 +538,22 @@ def range_poll_check(stdout) -> str:
     return f"{summary}; last read: {last_read or 'no read logged'}"
 
 
+def _all_checks(*checks):
+    """One Step.output_check running each of ``checks`` over the same output.
+
+    The line source can be iterated more than once (outputfiles.LineSource),
+    so each check reads the whole of it, and every reason is reported rather
+    than only the first.
+    """
+    def check(output) -> str:
+        return "; ".join(
+            reason for reason in (one(output) for one in checks) if reason)
+    return check
+
+
 def range_result_check(maximum_pa: int):
-    """Sender -m: the four result lines, levels 0..maximum_pa, copies 0..15."""
+    """The four result lines -n and -m both print, levels 0..maximum_pa,
+    copies 0..15 (report_range_result in ubertooth-util.c)."""
     def check(stdout) -> str:
         match = search_lines(stdout, RANGE_RESULT)
         if match is None:
@@ -662,9 +685,16 @@ def range_test_cases(arguments, _resources, resource_identities):
         responder_channel.verify(responder, "responder-channel-while-repeating",
                                  "Responder: the repeater keeps the test channel",
                                  "responder channel while repeating", RANGE_CHANNEL),
-        Step("sender-start-range-test", "Sender: start the range test (-n)",
-             _util(sender, "-n"), output_patterns=(RANGE_TEST_START,),
-             output_check=nothing_on_stdout, mutates=True),
+        # -n waits for the round trip and reports it here, so the result is
+        # this step's to check: its progress line is on standard error and
+        # standard output carries the four result lines and nothing else.
+        Step("sender-run-range-test", "Sender: run the range test (-n)",
+             _util(sender, "-n"), timeout_s=RANGE_TEST_TIMEOUT_S,
+             output_patterns=(RANGE_TEST_START,),
+             forbidden_patterns=(RANGE_MISMATCH,),
+             output_check=_all_checks(no_diagnostics_on_stdout,
+                                      range_result_check(maximum_pa)),
+             mutates=True),
         Step("sender-wait-for-result",
              f"Sender: read -m until a result appears (up to {RANGE_RESULT_DEADLINE_S} s)",
              range_poll_argv(sender), timeout_s=RANGE_POLL_TIMEOUT_S,
@@ -701,8 +731,10 @@ def range_test_cases(arguments, _resources, resource_identities):
             _role_cleanup("responder", responder, settings["responder"])
             + _role_cleanup("sender", sender, settings["sender"]),
             expected_state=(
-                "the sender's -m reports request and reply PA levels 0-"
-                f"{maximum_pa} and copy numbers 0-{RANGE_COPIES - 1}; the sender is "
+                "the sender's -n completes the round trip and reports it, and its "
+                "-m reports the same result afterwards: request and reply PA "
+                f"levels 0-{maximum_pa} and copy numbers 0-{RANGE_COPIES - 1}; "
+                "the sender is "
                 f"idle at 2441 MHz once the test ends (both ran at {RANGE_CHANNEL}); "
                 "the responder answers USB while repeating, before -n and after "
                 "the test, keeps no result, and -S returns it to idle at 2441 MHz; "

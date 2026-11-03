@@ -310,8 +310,11 @@ class FakeUbertooth:
             elif option == "t" and value != "none" and not re.fullmatch(
                 r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}(?:/\d+)?", value
             ):
-                return fail("error: MAC address must be xx:xx:xx:xx:xx:xx"
-                            f" (got {value})\nUsage:")
+                # Every option that takes an address names its own since
+                # fork cad4ff67 (#776), and no usage text follows the line
+                # since 12211ce (#406).
+                return fail("error: target address must be xx:xx:xx:xx:xx:xx"
+                            f" (got {value})")
         if leftover and self.reject_strays:
             return fail(f"error: unexpected argument '{leftover[0]}'")
         if get_aa and set_aa:

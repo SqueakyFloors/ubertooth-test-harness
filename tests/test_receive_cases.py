@@ -47,9 +47,11 @@ class ReceiveUbertooth(ToolUbertooth):
     rx-link-type, rx-dump-trailing, rx-sweep-notice (-s
     prints the notice it printed before 5ac22a8), rx-sweep-overrides-channel
     (-s sweeps although -c names a channel),
-    rx-no-survey, afh-zero-map (#187), afh-no-message, afh-exits-0, afh-exits-early,
+    rx-no-survey, rx-survey-heading-on-stdout (the survey heading among the
+    addresses on standard output, as it was before the fork split the two
+    streams), afh-zero-map (#187), afh-no-message, afh-exits-0, afh-exits-early,
     afh-r-silent, afh-segfault (#185),
-    dump-trailing, dump-bits-garbage, dump-ignores-l, dump-first-wins,
+    dump-trailing, dump-bits-garbage, dump-ignores-l,
     dump-stalls, ego-exits, ego-ignores-channel, ego-ignores-length,
     ego-accepts-bad-ac, reject:<tool>:<option>; fork #318: stale-le-into-dump
     (a dump starts with two LE records), stale-br-into-dump (with a BR record
@@ -134,8 +136,18 @@ class ReceiveUbertooth(ToolUbertooth):
                 ch = int(channel)
             lines.append(f"systime=1 ch={ch:2d} LAP=9e8b33 err={min(index, errors)} clkn=1 "
                          "clk_offset=1 s=-40 n=-55 snr=15")
+        # The survey's addresses are standard output; its heading is
+        # standard error (ubertooth-rx.c), so a script parsing stdout reads
+        # the list and nothing else. rx-survey-heading-on-stdout prints the
+        # heading among the addresses, as the tool did before the split.
+        survey = []
         if "-z" in options and "rx-no-survey" not in self.bugs:
-            lines += ["Survey Results", "??:??:??:9E:8B:33", "??:??:47:9E:8B:33"]
+            survey = ["Survey Results"]
+            addresses = ["??:??:??:9E:8B:33", "??:??:47:9E:8B:33"]
+            if "rx-survey-heading-on-stdout" in self.bugs:
+                lines += ["Survey Results"] + addresses
+            else:
+                lines += addresses
         for index, option in enumerate(options):
             if option in ("-r", "-q", "-d"):
                 path = options[index + 1]
@@ -149,8 +161,10 @@ class ReceiveUbertooth(ToolUbertooth):
                     if "rx-dump-trailing" in self.bugs:
                         data += b"\0\0\0"
                 Path(path).write_bytes(data)
-        # libbtbb writes its notes to stderr (libbtbb bf878df2).
+        # libbtbb writes its notes to stderr (libbtbb bf878df2), and so
+        # does the survey heading.
         stderr = "UAP = 0x47 found after 3 total packets.\n"
+        stderr += "".join(line + "\n" for line in survey)
         if "-s" in options and "rx-sweep-notice" in self.bugs:
             stderr += "sweep mode is now the default and the -s argument is deprecated\n"
         self._run_mode("2402" if channel is None else str(2402 + int(channel)))
@@ -196,8 +210,12 @@ class ReceiveUbertooth(ToolUbertooth):
     # ubertooth-dump ------------------------------------------------------
     def _dump(self, command, serial, options, timeout_s, on_output):
         modulations = [o for o in options if o in ("-c", "-l")]
-        if "dump-first-wins" in self.bugs:
-            modulations = modulations[:1]
+        if len({*modulations}) > 1:
+            # One capture, one demodulator (fork d3429234): the pair is
+            # refused in the option loop, before the -d file is opened.
+            # Refused command lines is where that is a case; nothing here
+            # asks for both, so reaching this is the test's own mistake.
+            raise AssertionError(f"ubertooth-dump refuses {' '.join(modulations)}")
         if "dump-ignores-l" in self.bugs:
             modulations = [m for m in modulations if m != "-l"]
         le = bool(modulations) and modulations[-1] == "-l"
@@ -289,7 +307,7 @@ class ReceiveCaseGenerationTests(unittest.TestCase):
         _a, smoke = cases_for(RAW, "smoke")
         self.assertEqual(["dump-full", "dump-bitstream", "ego-rx"], [c.case_id for c in smoke])
         _a, full = cases_for(RAW, "comprehensive")
-        self.assertEqual(11, len(full))
+        self.assertEqual(10, len(full))
         self.assertEqual("stale-packets-across-mode-change", full[-1].case_id)
         self.assertTrue(all(isinstance(c, StateCase) for c in full))
 
@@ -356,6 +374,7 @@ class ClassicReceiveTests(unittest.TestCase):
             "rx-ignores-timeout": rx,
             "rx-exits-early": rx,
             "rx-no-survey": ["Survey (-z -t) ends by itself"],
+            "rx-survey-heading-on-stdout": ["Survey (-z -t) ends by itself"],
             "rx-link-type": ["PCAPNG capture (-r)", "PCAP capture (-q)"],
             "rx-dump-trailing": ["Packet dump (-d)"],
             "rx-ignores-channel": ["Fixed channel (-c 39)", "-s -c 39: the channel wins"],
@@ -391,7 +410,7 @@ class RawReceiveTests(unittest.TestCase):
 
     def test_each_case_can_fail(self):
         dumps = ["Full records to a file (-d)", "LE modulation (-l)",
-                 "-l -c: the last (-c) wins", "-c -l: the last (-l) wins"]
+                 "Basic rate modulation (-c)"]
         egos = ["E-GO continuous receive (-r -c 2440)", "E-GO capture length -l 1",
                 "E-GO capture length -l 48", "E-GO access code -a 630f9ffe"]
         stale = "No packets from the previous mode, BLE and BR alternated 5 times"
@@ -405,8 +424,7 @@ class RawReceiveTests(unittest.TestCase):
             "stale-into-ble": [stale],
             "dump-stalls": dumps + ["Bitstream to a file (-b -d)"],
             "dump-bits-garbage": ["Bitstream to a file (-b -d)"],
-            "dump-ignores-l": ["LE modulation (-l)", "-c -l: the last (-l) wins"],
-            "dump-first-wins": ["-l -c: the last (-c) wins", "-c -l: the last (-l) wins"],
+            "dump-ignores-l": ["LE modulation (-l)"],
             "ego-exits": egos,
             "ego-ignores-channel": egos,
             "ego-ignores-length": ["E-GO capture length -l 1", "E-GO capture length -l 48"],
@@ -582,11 +600,16 @@ class CheckerTests(unittest.TestCase):
         mixed = absent.replace("snr=none", "snr=1")
         self.assertEqual("", receive_cases.packet_check(channel=39)(
             mixed.format(ch=5, err=2) + "\n"))
+        # The survey's heading is on standard error, so standard output
+        # carries the addresses alone: no address at all is a survey that
+        # found no piconet, and the heading here is the split undone.
         survey = receive_cases.packet_check(survey=True)
-        self.assertEqual("", survey("Survey Results\n??:??:47:9E:8B:33\n"))
-        self.assertEqual("", survey("Survey Results\n"))
-        self.assertIn("not piconet addresses", survey("Survey Results\n9e8b33\n"))
-        self.assertIn("no 'Survey Results'", survey(""))
+        self.assertEqual("", survey("??:??:47:9E:8B:33\n"))
+        self.assertEqual("", survey(""))
+        self.assertIn("neither packet lines nor piconet addresses",
+                      survey("9e8b33\n"))
+        self.assertIn("heading is on stdout",
+                      survey("Survey Results\n??:??:47:9E:8B:33\n"))
 
     def test_afh_no_packets_message(self):
         # The fork's own message for -l 446688 -u 22 -t 3 (ubertooth-afh.c).
