@@ -480,6 +480,47 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         check = check_sources(self._sources(old))
         self.assertEqual("skipped", check.status)
 
+    def test_a_second_list_in_the_files_that_are_read_is_reported(self):
+        """The tree search cannot see this one: these are the files it reads
+        the table out of. A second array beside the table parses as the one
+        table, so the run compared the sizes of one list and not the other."""
+        second = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(
+                PART_TABLE_C
+                + GROWN_TABLE_C[GROWN_TABLE_C.index("static const"):].replace(
+                    "DFU_PARTS[]", "DFU_PARTS_LPC18XX[]"))},
+            "a second list beside the table")
+        check = check_sources(self._sources(second))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("part lists are defined in", check.message)
+
+    def test_a_test_fixture_is_not_a_second_list(self):
+        """The fork's host tests build arrays of their own to compare the
+        table against, and a test fixture is not what the tool compiles."""
+        fixture = self._commit_files(
+            {"host/ubertooth-tools/tests/test_dfu_recovery.c":
+             "#include \"dfu_recovery.h\"\n"
+             + GROWN_TABLE_C[GROWN_TABLE_C.index("static const"):].replace(
+                 "DFU_PARTS[]", "DFU_PARTS_EXPECTED[]")},
+            "a host test fixture")
+        check = check_sources(self._sources(fixture))
+        self.assertEqual("passed", check.status, check.message)
+
+    def test_a_sized_table_is_the_same_table(self):
+        sized = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c":
+             _recovery_c(PART_TABLE_C.replace("DFU_PARTS[]",
+                                              "DFU_PARTS[DFU_PART_COUNT]"))},
+            "the table with its size spelled out")
+        check = check_sources(self._sources(sized))
+        self.assertEqual("passed", check.status, check.message)
+
+    def test_a_character_literal_does_not_swallow_the_rest_of_a_file(self):
+        quote = PART_TABLE_C.replace(
+            "static const struct dfu_part",
+            "static const char quote = '\"';\nstatic const struct dfu_part")
+        self.assertEqual(14, len(parse_part_table(quote)))
+
     def test_a_declaration_in_a_document_or_a_string_is_not_a_second_list(self):
         """What a grep over a tree turns up that is text about code, not
         code: the fork writes its man pages with fenced C blocks, and a test
@@ -581,18 +622,23 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         """Several git commands, one budget: a per-command timeout would let
         the check hold a run for a multiple of it, and by then the run has
         its boards."""
-        clock = iter([0.0, 0.0, 5.0, 14.0, 99.0, 99.0, 99.0])
+        clock = iter([0.0, 0.0, 5.0, 14.0, 99.0])
         deadline = dfuparts.Deadline(15.0, clock=lambda: next(clock))
         self.assertEqual(15.0, deadline.remaining())
         self.assertEqual(10.0, deadline.remaining())
         self.assertEqual(1.0, deadline.remaining())
-        # Spent, but never zero: a command given no time would raise where
-        # it should run.
-        self.assertGreater(deadline.remaining(), 0)
-        with self.assertRaisesRegex(RuntimeError, "this check is given"):
-            dfuparts.fork_parts_at(
-                self.repo, self.tabled,
-                dfuparts.Deadline(0.0, clock=lambda: 10.0))
+        # Spent is spent: handing out a sliver would let every command left
+        # start and run, and the budget would not be a budget.
+        with self.assertRaisesRegex(RuntimeError, "is spent"):
+            deadline.remaining()
+        # A budget that is spent by the time the check starts reading: the
+        # check reports it instead of running the commands anyway.
+        times = iter([0.0] + [100.0] * 20)
+        check = check_sources(
+            self._sources(self.tabled),
+            deadline=dfuparts.Deadline(15.0, clock=lambda: next(times)))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("is spent", check.message)
 
     def test_the_bootloaders_own_copy_of_the_table_is_not_a_second_list(self):
         """The fork's bootloader keeps the same table to bound its own
@@ -892,6 +938,31 @@ class ReadbackMessageTests(unittest.TestCase):
              "copy of the fork's part table explains (32 KiB, 64 KiB, 128 KiB, "
              "256 KiB, 512 KiB); that length would be the application region of a "
              "part with 1024 KiB of flash"],
+            plan.problems(),
+        )
+
+    def test_a_length_right_for_another_part_is_wrong_for_this_one(self):
+        """16384 bytes is a 32 KiB part's application region, so it is a
+        length the table explains; on the 64 KiB part the command named, it
+        is still wrong. Without this, a fork that changed the arithmetic
+        passed both the source check and the step."""
+        plan = dfuimage.readback_plan(
+            "Reading back 16384 bytes, 0x4000-0x7fff: part 0x25001121 "
+            "(LPC1752) has 64 KiB of flash\n")
+        self.assertEqual(
+            ["the read-back covers 16384 bytes, but the command reported a part "
+             "with 64 KiB of flash, whose application region is 49152 bytes"],
+            plan.problems(),
+        )
+
+    def test_a_line_that_names_no_flash_figure_is_reported(self):
+        """Every wording the fork prints ends in the flash the figure came
+        from. One that does not would switch this check off quietly."""
+        plan = dfuimage.readback_plan(
+            "Reading back 114688 bytes, 0x4000-0x1ffff: part 0x25011722\n")
+        self.assertEqual(
+            ["the read-back line does not say how much flash the part has, so "
+             "114688 bytes cannot be checked against it: 'part 0x25011722'"],
             plan.problems(),
         )
 

@@ -530,7 +530,13 @@ class ReadbackPlan(NamedTuple):
         """
         flash_size = self.reported_flash_size()
         if flash_size is None:
-            return []
+            # Every wording plan_upload() has ends in the flash the figure
+            # came from. One that does not is a line this cannot check the
+            # length against, which is said rather than passed over: it would
+            # otherwise switch this check off without anyone noticing.
+            return ["the read-back line does not say how much flash the part "
+                    f"has, so {self.length} bytes cannot be checked against "
+                    f"it: {self.part!r}"]
         expected = upload_length(flash_size)
         if self.length == expected:
             return []

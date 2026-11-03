@@ -80,9 +80,16 @@ PART_LIST_DEFINITION = r"DFU_PARTS[A-Za-z0-9_]*[[:space:]]*\[[^]]*\][[:space:]]*
 # The same thing as a Python pattern, for confirming a file git grep found.
 _PART_LIST_DEFINITION_RE = re.compile(
     r"DFU_PARTS[A-Za-z0-9_]*\s*\[[^]]*\]\s*=")
+# A C character literal, so a `'"'` in a source cannot be read as the start
+# of a string and swallow the rest of the file.
+_CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\])'")
 # Only a C source can declare one. A document that quotes the table, or a
 # test that holds the declaration in a string, is text about code.
 C_SOURCE_SUFFIXES = (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx")
+# A test's own fixture is not what the tool compiles: the fork's host tests
+# build arrays of their own to compare the table against, and reporting a run
+# over one would be crying wolf.
+TEST_PATH_PARTS = ("/tests/", "/test/")
 
 # The part of the tree whose part list decides a read-back length: the host
 # tool's. The bootloader keeps a table of its own to bound its own read-back
@@ -95,8 +102,10 @@ HOST_TREE = "host/"
 # the fork works them out from something else and the figures read here are
 # no longer the ones it compiles. What this cannot see is the arithmetic
 # itself: a body that still names all three and subtracts one term more
-# compares as a match. The read-back step catches that one, by checking the
-# length the tool reports against the flash the same line says the part has
+# compares as a match, and so does a fork that renames all three of
+# TREE_MARKERS at once, which leaves nothing here to find. The read-back step
+# catches both, by checking the length the tool reports against the flash the
+# same line says the part has
 # (dfuimage.ReadbackPlan._length_follows_the_reported_part).
 UPLOAD_LENGTH_FUNCTION = "dfu_upload_length"
 _FUNCTION_BODY = re.compile(
@@ -105,7 +114,10 @@ _FUNCTION_BODY = re.compile(
 # `static const struct dfu_part DFU_PARTS[] = { ... };`. The table ends at the
 # `};` that closes it, which is the only one at the start of a line (an entry
 # line ends in `},`), so a brace inside the table cannot end it.
-_TABLE = re.compile(r"\bDFU_PARTS\b\s*\[\]\s*=\s*\{(.*?)^[ \t]*\}[ \t]*;", re.S | re.M)
+# The brackets may hold a size: `DFU_PARTS[DFU_PART_COUNT] = {` is the same
+# table, and refusing it would report a run over an ordinary edit.
+_TABLE = re.compile(
+    r"\bDFU_PARTS\b\s*\[[^]]*\]\s*=\s*\{(.*?)^[ \t]*\}[ \t]*;", re.S | re.M)
 # One braced row of the table body, and the three fields a row must hold:
 # `{ 0x25011722, "LPC1754", 128 * 1024 },`. A row is matched as a whole, so a
 # row written any other way is reported rather than passed over.
@@ -140,9 +152,16 @@ class Deadline:
         self._ends_at = clock() + budget_s
 
     def remaining(self) -> float:
-        """What is left, never zero: a command given no time at all would
-        raise where it should run."""
-        return max(self._ends_at - self._clock(), 0.001)
+        """What is left of the budget.
+
+        Spent is spent: this raises rather than handing out a sliver, or each
+        command left would still start and the budget would not be a budget.
+        """
+        left = self._ends_at - self._clock()
+        if left <= 0:
+            raise RuntimeError(
+                f"the {self.budget_s:.0f}s this check is given is spent")
+        return left
 
 
 class PartEntry(NamedTuple):
@@ -210,6 +229,14 @@ def _without_comments(text: str, *, strings: bool = True) -> str:
                 out.append("  ")
                 index += 2
                 continue
+            if char == "'":
+                # A character literal, `'"'` among them, which must not be
+                # read as a string starting and swallow the rest of the file.
+                found = _CHAR_LITERAL.match(text, index)
+                if found:
+                    out.append(found.group(0))
+                    index = found.end()
+                    continue
             if char == '"':
                 state = "string"
             out.append(char)
@@ -398,11 +425,11 @@ def _holds_a_part_list(source: Path | str, ref: str, path: str,
     """
     if not path.endswith(C_SOURCE_SUFFIXES):
         return False
-    try:
-        text = _show(source, ref, path, deadline)
-    except RuntimeError:
-        # Unreadable for its own reason, which the caller reports anyway.
-        return True
+    if any(part in f"/{path}" for part in TEST_PATH_PARTS):
+        return False
+    # A read that fails raises, rather than being reported as a part list
+    # nothing here ever saw.
+    text = _show(source, ref, path, deadline)
     if text is None:
         return False
     return _PART_LIST_DEFINITION_RE.search(
@@ -482,6 +509,17 @@ def fork_parts_at(source: Path | str, ref: str,
             "host tools is one this has not compared"
         )
     joined = "\n".join(texts[path] for path in read)
+    # A second list in the files that were read, which the search above
+    # cannot see because these are the files it reads from. One table is
+    # compared; a second one beside it would not be.
+    lists = _PART_LIST_DEFINITION_RE.findall(
+        _without_comments(joined, strings=False))
+    if len(lists) > 1:
+        raise PartTableUnreadable(
+            f"{len(lists)} part lists are defined in "
+            f"{' and '.join(read)}, and only the DFU_PARTS table is compared, "
+            "so the others are lists this has not looked at"
+        )
     parts = parse_part_table(joined)
     if parts is None:
         raise PartTableUnreadable(
@@ -656,7 +694,8 @@ def record(publisher, sources: Sequence) -> None:
         })
 
 
-def check_sources(sources: Sequence) -> PartTableCheck | None:
+def check_sources(sources: Sequence,
+                  deadline: Deadline | None = None) -> PartTableCheck | None:
     """Compare the harness's copy with the fork's table at a run's Ubertooth
     commit (manifest.SourceRevision objects).
 
@@ -668,7 +707,7 @@ def check_sources(sources: Sequence) -> PartTableCheck | None:
     label = f"Ubertooth {ubertooth.short_commit}"
 
     try:
-        fork = fork_parts_at(ubertooth.source_path, ubertooth.commit)
+        fork = fork_parts_at(ubertooth.source_path, ubertooth.commit, deadline)
     except (OSError, RuntimeError) as error:
         return PartTableCheck(
             "unchecked", f"DFU part table not checked: {error}", ubertooth.commit
