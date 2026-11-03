@@ -814,10 +814,12 @@ class PairRunRecords(PairTestCase):
         js = (web / "app.js").read_text(encoding="utf-8")
         self.assertIn('kind === "lease_pairing"', js)
         self.assertIn('$("live-pairings").hidden = live.pairings.length === 0;', js)
-        self.assertIn(
-            "Leases from a wired pair",
-            (web / "index.html").read_text(encoding="utf-8"),
-        )
+        html = (web / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Leases from a wired pair", html)
+        # The elements the view writes into: without them every render
+        # would fail on a null, and the tests would not notice.
+        for element in ('id="live-pairings"', 'id="pairings"'):
+            self.assertIn(element, html)
 
     def test_a_manifest_carries_the_pairing_the_report_reads(self):
         """The run record's own key, and the path a run without --build takes.

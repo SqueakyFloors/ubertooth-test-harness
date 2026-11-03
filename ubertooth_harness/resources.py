@@ -107,11 +107,12 @@ _PEER_IDENTITY_KEYS = ("bridge serial", "BD_ADDR", "LAP", "UAP", "name",
                        "serial device")
 # The bridge's serial as its /dev/serial/by-id name carries it. udev takes
 # that from the USB iSerial string as the device reports it, and a CP210x
-# serial can be reprogrammed to any string, so the case and the length are
-# the board's to choose: only the characters a by-id name can hold are
-# required here. It is used verbatim, in the device path and in the lease
-# key, so what is registered is what is looked for.
-_BRIDGE_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
+# serial can be reprogrammed to any string, so the case is the board's to
+# choose: only the characters a by-id name can hold are required here. It is
+# used verbatim, in the device path and in the lease key, so what is
+# registered is what is looked for. How long it may be is one rule in one
+# place, about the lock files it names (_refuse_a_long_serial).
+_BRIDGE_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]+$")
 
 
 def _validate_peer(resource) -> None:
@@ -123,13 +124,15 @@ def _validate_peer(resource) -> None:
             f"{ESP32_CLASSIC_PEER} {alias} identity has unknown key(s) "
             f"{', '.join(unknown)}; use {', '.join(_PEER_IDENTITY_KEYS)}"
         )
-    _refuse_a_long_serial(resource, "bridge serial", "esp32-")
     if not _BRIDGE_SERIAL.fullmatch(resource.identity.get("bridge serial", "")):
         raise RegistryError(
             f"{ESP32_CLASSIC_PEER} {alias} requires a 'bridge serial' identity: "
             "the serial as its /dev/serial/by-id name holds it (letters, "
             "digits, and _.:+- only)"
         )
+    # After the shape, as a programmer's is: how long a name may be is the
+    # rule about the lock files, not about what a serial looks like.
+    _refuse_a_long_serial(resource, "bridge serial", "esp32-")
     # Both boards' addresses are needed: the initiator calls the acceptor's,
     # and every case checks the tool's output against the central's LAP and UAP.
     if not _ADDRESS_48.fullmatch(resource.identity.get("BD_ADDR", "")):
@@ -161,8 +164,9 @@ _PROGRAMMER_IDENTITY_KEYS = ("serial", "serial device")
 # The programmer's own serial, as its USB descriptor reports it. Taken
 # verbatim, as a peer's bridge serial is: the same string names its lease
 # file, so one spelling is one device. Only the characters a file name can
-# hold are allowed.
-_PROGRAMMER_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
+# hold are allowed; how long it may be is one rule in one place, about the
+# lock files it names (_refuse_a_long_serial).
+_PROGRAMMER_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]+$")
 
 
 # The files in a lease directory that are not a device's, by the name a
@@ -200,12 +204,15 @@ def _bench_lock_names(resource) -> tuple[tuple[str, str], ...]:
             continue
         names.append((serial, written))
         if resource.type == NRF52840_DK and serial.isdigit():
-            # A DK alone has a second spelling: nrfutil prints its J-Link
-            # serial without the leading zeros sysfs pads it with, and a
-            # bench note or a command names the device either way
-            # (`scripts/lab/_bench.resolve`), so two devices may not share
-            # one of those names. No other type has a second spelling, so
-            # an all-digit serial elsewhere reserves nothing.
+            # A DK's J-Link serial is the one serial a lock file is named
+            # after in two spellings: nrfutil prints it without the leading
+            # zeros sysfs pads it with, and `scripts/lab/hold` takes the
+            # name a bench note would use. An all-digit serial of another
+            # type names only one file, so it reserves only itself. (A
+            # stripped all-digit serial of any type still *names* a device
+            # to `scripts/lab/_bench.resolve`; two devices that share one
+            # are refused when a command resolves the name, which says so
+            # and names them both.)
             names.append((serial.lstrip("0"), written))
     return tuple(item for item in names if item[0])
 
@@ -313,13 +320,16 @@ def _validate_programmer(resource) -> None:
             f"{DEBUG_PROGRAMMER} {alias} identity has unknown key(s) "
             f"{', '.join(unknown)}; use {', '.join(_PROGRAMMER_IDENTITY_KEYS)}"
         )
-    _refuse_a_long_serial(resource, "serial", "programmer-")
     if not _PROGRAMMER_SERIAL.fullmatch(resource.identity.get("serial", "")):
         raise RegistryError(
             f"{DEBUG_PROGRAMMER} {alias} requires a 'serial' identity: the serial "
             "its USB descriptor reports, which is also what its lease file is "
             "named after (letters, digits, and _.:+- only)"
         )
+    # After the shape, so a serial that is both is reported as the shape it
+    # is: the length a name may be is the rule about the files, not about
+    # what a serial looks like.
+    _refuse_a_long_serial(resource, "serial", "programmer-")
     device = resource.identity.get("serial device")
     if device is not None and not is_stable_serial_device(device):
         raise RegistryError(
@@ -708,12 +718,16 @@ class FileResourceRegistry:
     def _one_name(self, name: str, held: "_LockName", claim: "_LockName") -> str:
         """Why these two devices cannot both be registered under one name."""
         if held.kind == "reserved":
+            has_it = (
+                f"is registered with the serial '{claim.spelling}'"
+                if claim.kind == "serial"
+                else f"would be leased as '{claim.spelling}'"
+            )
             return (
-                f"{claim.describes} is registered with the serial "
-                f"'{claim.spelling}', which is the name the lease directory keeps "
-                f"for {held.describes}; a device registered under one of the "
-                "harness's own file names is a registry mistake, so give it the "
-                "serial its own hardware reports"
+                f"{claim.describes} {has_it}, which is the name the lease "
+                f"directory keeps for {held.describes}; a device registered under "
+                "one of the harness's own file names is a registry mistake, so "
+                "give it the serial its own hardware reports"
             )
         if held.kind == "lease" and claim.kind == "lease":
             return (

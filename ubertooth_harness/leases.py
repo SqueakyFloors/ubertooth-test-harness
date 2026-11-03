@@ -477,7 +477,7 @@ def resource_key(resource) -> str:
                 f"{resource.alias} needs a 'jlink serial' in the hardware registry "
                 f"to be leased; registered '{serial}'"
             )
-        return f"nrf52840dk-{int(serial)}"
+        return _keyed(resource, "jlink serial", "nrf52840dk-", str(int(serial)))
     if resource.type == PEER_TYPE:
         # Taken as registered: the same string names the device path, so a
         # board leased under one spelling and opened under another would be
@@ -655,13 +655,12 @@ def pairings_for_invocations(invocations: Sequence, registry) -> tuple[dict, ...
     """Why the run holds each device it never named (#289).
 
     One record per device the pairing added to boards_for_invocations, in
-    that expansion's order. Both come from one call to the registry's own
-    expansion, which answers with the aliases to hold and one clause per
-    alias it added, in the same order (``expand_pairs``). So a run reports
-    exactly the devices it leases, in the registry's own wording, which is
+    that expansion's order. Both read it from the registry, which answers
+    with the aliases to hold and one clause per alias it added, in the same
+    order (``expand_pairs``), and answers the same way twice. So a run
+    reports the devices it leases, in the registry's own wording, which is
     the wording `hold`, `hub-port` and `boards` print for the same pair;
-    nothing here can word it differently or name a device the leases do not
-    hold.
+    nothing here can word it differently or decide which devices come in.
     """
     named = _named_aliases(invocations, registry)
     held, clauses = expand_pairs(registry, named)
