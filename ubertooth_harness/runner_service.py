@@ -469,11 +469,15 @@ class RunnerService:
                 argv.append("--no-flash-build")
             # The same options the command line takes: --with-firmware
             # records the run's "test build" image (which tests that check or
-            # write an image need), --with-python builds the Python tools.
-            # The protocol refuses either without build, so there is no
-            # combination here that run-suite would reject.
+            # write an image need), --with-btbr the alternate "btbr build"
+            # image beside it (which only the btbr console test flashes), and
+            # --with-python builds the Python tools. The protocol refuses any
+            # of them without build, so there is no combination here that
+            # run-suite would reject.
             if message["with_firmware"]:
                 argv.append("--with-firmware")
+            if message["with_btbr"]:
+                argv.append("--with-btbr")
             if message["with_python"]:
                 # Bare, as the documented command line has it: run-suite
                 # then uses python3 on the target's PATH.

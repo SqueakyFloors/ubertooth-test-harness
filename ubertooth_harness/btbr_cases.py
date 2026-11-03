@@ -29,8 +29,11 @@ that it establishes the firmware on its board, which keeps it last on that
 board and stops a later test from running on an image this one put there.
 
 Both images come from the run manifest, so they are of the same commit as the
-host tools: `--build --with-firmware` builds and records both (build.py), and
-`--artifact "btbr build=PATH"` names one by hand.
+host tools. A firmware build makes the application image; the alternate one
+is added when the run asked for it (`--with-btbr`) or when a selected test
+declares it needs it, which this test does below, so `--build --with-firmware
+--with-python` carries both (build.py). `--artifact "btbr build=PATH"` names
+one by hand.
 """
 
 from __future__ import annotations

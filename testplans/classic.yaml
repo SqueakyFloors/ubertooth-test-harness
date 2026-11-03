@@ -113,7 +113,9 @@ suites:
   #
   # The run has to carry both firmware images and the Python tools, because
   # `ubertooth-btbr` is one of them: `run-suite --build --with-firmware
-  # --with-python`. Passing the images by hand works too
+  # --with-python`. The alternate image is named by this test, so a run that
+  # selected it builds that image too; `--with-btbr` asks for it outright.
+  # Passing the images by hand works too
   # (`--artifact "btbr build=PATH" --artifact "test build=PATH"`), but the
   # tool still needs `--with-python`, and without either the case is left out
   # as not applicable rather than failing.

@@ -781,6 +781,28 @@ class PlanTests(ControllerTestCase):
         firmware = suites[("firmware", "firmware")]
         self.assertEqual((True, False), (firmware["needs_firmware_build"],
                                          firmware["needs_python_tools"]))
+        # The alternate btbr image is carried in its own right, so the GUI
+        # can offer it: the btbr suite is the only one that asks for it, and
+        # it cannot run without it (#279).
+        btbr = suites[("classic", "btbr")]
+        self.assertEqual((True, True, True, True, True, True), (
+            btbr["needs_firmware_build"], btbr["requires_firmware_build"],
+            btbr["needs_btbr_build"], btbr["requires_btbr_build"],
+            btbr["needs_python_tools"], btbr["requires_python_tools"],
+        ))
+        self.assertEqual(
+            {"Classic btbr console"},
+            {test["name"] for test in btbr["tests"] if test["needs_btbr_build"]},
+        )
+        # No other suite of any committed plan asks for it, and the image is
+        # one a build makes, so it is never an --artifact the GUI must warn
+        # about.
+        self.assertEqual(
+            {("classic", "btbr"), ("classic", "btbr-comprehensive"),
+             ("classic", "btbr-long")},
+            {key for key, suite in suites.items() if suite["needs_btbr_build"]},
+        )
+        self.assertEqual([], btbr["needs_artifacts"])
 
     def test_the_images_a_step_names_decide_what_its_suite_needs(self):
         # Flash reliability's plan entry lists the images it flashes, so a
@@ -815,8 +837,9 @@ class PlanTests(ControllerTestCase):
                 )
 
     def test_a_suite_of_tests_that_need_nothing_built_says_so(self):
-        fields = ("needs_firmware_build", "needs_python_tools",
-                  "requires_firmware_build", "requires_python_tools")
+        fields = ("needs_firmware_build", "needs_btbr_build",
+                  "needs_python_tools", "requires_firmware_build",
+                  "requires_btbr_build", "requires_python_tools")
         self.assertEqual([], build_needs(builtin_catalog(), "Host version")
                          ["needs_artifacts"])
         with tempfile.TemporaryDirectory() as directory:
@@ -826,12 +849,12 @@ class PlanTests(ControllerTestCase):
                 encoding="utf-8",
             )
             (suite,) = list_plans(root)[0]["suites"]
-        self.assertEqual([False] * 4, [suite[field] for field in fields])
-        self.assertEqual([False] * 4, [suite["tests"][0][field] for field in fields])
+        self.assertEqual([False] * 6, [suite[field] for field in fields])
+        self.assertEqual([False] * 6, [suite["tests"][0][field] for field in fields])
         # A test the catalog does not know needs nothing either, rather than
         # the listing failing over it.
         self.assertEqual(
-            [False] * 4,
+            [False] * 6,
             [build_needs(builtin_catalog(), "No such test")[field] for field in fields],
         )
 
@@ -1102,9 +1125,10 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("test.runs_on_target !== false", checklist)
 
     def test_the_build_options_are_offered_explained_and_sent(self):
-        # Both options are on the form, each with the note the operator reads
-        # about what it costs, and each is sent only with Build (#257).
+        # Every option is on the form, each with the note the operator reads
+        # about what it costs, and each is sent only with Build (#257, #279).
         for option, name in (("with-firmware", "with_firmware"),
+                             ("with-btbr", "with_btbr"),
                              ("with-python", "with_python")):
             self.assertRegex(
                 self.html,
@@ -1117,10 +1141,11 @@ class PageWiringTests(unittest.TestCase):
             self.assertIn(
                 f'{name}: $("build").checked && $("{option}").checked,', self.js
             )
-        # Neither is ticked by default: a suite that needs one ticks it.
-        for option in ("with-firmware", "with-python"):
+        # None is ticked by default: a suite that needs one ticks it.
+        for option in ("with-firmware", "with-btbr", "with-python"):
             self.assertNotRegex(self.html, rf'id="{option}"[^>]*\bchecked\b')
         for field in ("needs_firmware_build", "requires_firmware_build",
+                      "needs_btbr_build", "requires_btbr_build",
                       "needs_python_tools", "requires_python_tools"):
             self.assertIn(f'"{field}"', self.js)
         # A step the chosen target does not run must not tick, hold, or send
