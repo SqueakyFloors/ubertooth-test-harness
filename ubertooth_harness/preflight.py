@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.cases import GUARD_ROLE_PREFIX
+from ubertooth_harness import bootloader as bootloader_identity
 from ubertooth_harness import libbtbbpin
 from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
@@ -59,6 +60,9 @@ NO_FLASH_FIX = (
     "flash it with this build (the default when building: leave out "
     "--no-flash-build, or tick Flash the firmware to the boards first in the GUI)"
 )
+# The check that reads which bootloader is under the firmware above. Its name
+# is what the report and the GUI show, so it is stated once.
+BOOTLOADER_CHECK_NAME = "Bootloader identity"
 
 
 @dataclass(frozen=True)
@@ -94,12 +98,35 @@ class PreflightCheck:
     # Checked after the patterns above, so its reason can name the revision
     # the tools reported, not only the pattern that did not match.
     libbtbb: "LibbtbbIdentity | None" = None
+    # What the run requires of this board's bootloader, for the check that
+    # reads `ubertooth-util -B` (bootloader.py). The identities involved are
+    # not revisions, so this check writes its own reason rather than going
+    # through the firmware wording below.
+    bootloader: bootloader_identity.BootloaderExpectation | None = None
 
     def result_failure(self, result: CommandResult) -> str:
         if result.timed_out:
             return f"{self.name}: command timed out"
         if result.cancelled:
             return f"{self.name}: command canceled"
+        if self.bootloader is not None:
+            # `-B` exits 1 for a board whose firmware refuses the read and for
+            # a version block this host would not read, and the answer itself
+            # says which, so the reason comes from the line rather than the
+            # exit status.
+            output = output_of(result)
+            line = bootloader_identity.IDENTITY_LINE_PATTERN
+            found = output.search(line)
+            output.note_pattern("observed", self.name, line, found)
+            for pattern in self.expected_patterns:
+                if pattern != line:
+                    output.note_pattern(
+                        "expected", self.name, pattern, output.search(pattern)
+                    )
+            failure = self.bootloader.failure(
+                self.resource_alias, bootloader_identity.identity_from_match(found)
+            )
+            return f"{self.name}: {failure}" if failure else ""
         if result.returncode not in self.accepted_returncodes:
             return f"{self.name}: command exited {result.returncode}"
         output = output_of(result)
@@ -505,9 +532,15 @@ class PreflightPolicy:
         manifest: RunManifest,
         *,
         firmware_fix: str = "",
+        bootloader: bootloader_identity.BootloaderExpectation | None = None,
     ) -> tuple[PreflightCheck, ...]:
-        """The run's preflight checks; ``firmware_fix`` says how to fix a
-        board whose firmware is not the run's revision (FLASH_FIX by default)."""
+        """The run's preflight checks.
+
+        ``firmware_fix`` says how to fix a board whose firmware is not the
+        run's revision (FLASH_FIX by default). ``bootloader`` adds the
+        bootloader identity check to every board whose firmware this preflight
+        requires; it is left out for a run whose resolved commit cannot report
+        a bootloader at all (bootloader.supported_at)."""
         if not invocations:
             raise PreflightError("preflight requires at least one invocation")
         if not manifest.matches_invocations(invocations):
@@ -625,6 +658,23 @@ class PreflightPolicy:
                     device_checks += (
                         ("Guard firmware API", common + ("-v",), (r"Firmware version:",)),
                     )
+                if (
+                    bootloader is not None
+                    and alias in tested
+                    and alias not in established
+                ):
+                    # Which bootloader is underneath the firmware this run
+                    # just required. Not for a guard-only board, whose
+                    # firmware may be older than the read, nor for a board a
+                    # firmware-writing test establishes itself: both can be
+                    # carrying firmware that refuses the request.
+                    device_checks += (
+                        (
+                            BOOTLOADER_CHECK_NAME,
+                            bootloader_identity.identity_argv(selected_serial),
+                            bootloader.patterns(),
+                        ),
+                    )
                 for name, argv, patterns in device_checks:
                     sequence += 1
                     checks.append(
@@ -642,10 +692,17 @@ class PreflightPolicy:
                             argv=argv,
                             expected_patterns=patterns,
                             expected_revision=expected,
+                            timeout_s=(
+                                bootloader_identity.IDENTITY_TIMEOUT_S
+                                if name == BOOTLOADER_CHECK_NAME else 5.0
+                            ),
                             minimum_api=(
                                 minimum_api if name == "Guard firmware API" else None
                             ),
                             fix=firmware_fix,
+                            bootloader=(
+                                bootloader if name == BOOTLOADER_CHECK_NAME else None
+                            ),
                         )
                     )
         return tuple(checks)

@@ -465,6 +465,10 @@
       flash_build: $("build").checked && $("flash-build").checked,
       with_firmware: $("build").checked && $("with-firmware").checked,
       with_python: $("build").checked && $("with-python").checked,
+      // Check and Update compare the board against a bootloader built from
+      // the ref, which run-suite refuses without a build; the controller
+      // refuses it too, so Build off means Record.
+      bootloader: $("build").checked ? $("bootloader").value : "record",
     };
     if (!host || !body.ref || !body.plan || !body.suite) {
       status.textContent = "Choose a ref, plan, suite and target first.";
@@ -493,13 +497,25 @@
     }
   }
 
+  // One bootloader identity record as a reader reads it. A board whose
+  // region carries no version block has only the hash to go on, which is what
+  // the harness puts in `detail`.
+  function bootloaderText(identity) {
+    if (!identity) return "not reported";
+    const crc = String(identity.region_crc32 ?? "");
+    if (identity.has_version_block) {
+      return `${String(identity.version ?? "")} ${String(identity.build ?? "")}, CRC32:${crc}`;
+    }
+    return `${String(identity.detail ?? identity.generation ?? "")}, CRC32:${crc}`;
+  }
+
   // ----- live run ----------------------------------------------------------
 
   function newLive(runId) {
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
-      invocations: null, boards: new Map(), queued: [],
+      invocations: null, boards: new Map(), queued: [], bootloaderExpected: "",
     };
   }
 
@@ -568,6 +584,7 @@
     live.byInvocation = new Map();
     live.boards = new Map();
     live.queued = [];
+    live.bootloaderExpected = "";
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
     live.events = [];
@@ -667,6 +684,25 @@
         if (!live.queued.includes(text)) live.queued.push(text);
         pushLog(`note: ${text}`);
       }
+    }
+    if (kind === "bootloader_identity") {
+      // Which bootloader is under the firmware on this board. A board keeps
+      // it through every firmware update, so it is shown beside the board
+      // rather than as a step of the run.
+      const serial = String(details.serial ?? "");
+      const board = live.boards.get(serial) || {
+        resource: String(details.resource ?? ""), serial, resets: 0, state: "", warning: "",
+      };
+      board.bootloader = bootloaderText(details.installed);
+      board.bootloaderStatus = String(details.status ?? "");
+      live.boards.set(serial, board);
+      if (details.expected) {
+        live.bootloaderExpected = bootloaderText(details.expected);
+      }
+      if (status === "failed" && details.reason) pushLog(`error: ${String(details.reason)}`);
+    }
+    if (kind === "bootloader_stage_finished" && status === "skipped" && details.reason) {
+      pushLog(`note: bootloader stage skipped: ${String(details.reason)}`);
     }
     if (kind === "watchdog") {
       // The firmware reset a board, or did not: a count, never a failure.
@@ -964,7 +1000,17 @@
             : board.state === "absent" ? "; did not answer"
             : `; watchdog ${board.state}`),
       }),
+      board.bootloader ? el("span", {
+        className: board.bootloaderStatus === "stale"
+          || board.bootloaderStatus === "unreadable" ? "reason" : "board-bootloader",
+        text: `; bootloader ${board.bootloader}`
+          + (board.bootloaderStatus === "updated" ? " (installed by this run)" : ""),
+      }) : null,
       board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
+    const expectedNote = $("bootloader-expected");
+    expectedNote.hidden = !live.bootloaderExpected || boards.length === 0;
+    expectedNote.textContent = live.bootloaderExpected
+      ? `This run expects bootloader ${live.bootloaderExpected}.` : "";
 
     // Devices that were free while this run waited for its turn, and the
     // command that had the turn: why a run can start late with the bench
@@ -1208,11 +1254,20 @@
   //
   // Called whenever Build, Flash, a box, the plan, the suite or the plan
   // list changes.
+  // The note's own words, kept so syncBuildOptions can add a sentence to
+  // them without reading back what it added last time.
+  let bootloaderNoteText = "";
+
   function syncBuildOptions() {
     const build = $("build").checked;
     const flashing = build && $("flash-build").checked;
     $("flash-build").disabled = !build;
     $("flash-build-note").hidden = build;
+    // Check and Update build a bootloader from the ref, so without Build the
+    // only thing a run can do is record what each board has.
+    const bootloaderChoice = $("bootloader");
+    bootloaderChoice.disabled = !build;
+    if (!build) bootloaderChoice.value = "record";
     const suite = findSuite($("plan").value, $("suite").value);
     const suiteName = $("suite").value;
     for (const option of BUILD_OPTIONS) {
@@ -1240,10 +1295,14 @@
       if (!build) sentences.push("Needs Build.");
       $(`${option.id}-note`).textContent = sentences.join(" ");
     }
+    const bootloaderNote = $("bootloader-note");
+    bootloaderNote.textContent = bootloaderNoteText
+      + (build ? "" : " Without Build a run can only record what is installed.");
   }
 
   function start() {
     $("run-form").addEventListener("submit", submitRun);
+    bootloaderNoteText = $("bootloader-note").textContent;
     for (const option of BUILD_OPTIONS) {
       option.cost = $(`${option.id}-note`).textContent;
       option.chosen = $(option.id).checked;
@@ -1261,6 +1320,7 @@
     $("build").addEventListener("change", syncBuildOptions);
     // Flashing builds the firmware image anyway, which the note says.
     $("flash-build").addEventListener("change", syncBuildOptions);
+    $("bootloader").addEventListener("change", syncBuildOptions);
     syncBuildOptions();
     $("refs-reload").addEventListener("click", loadRefs);
     $("plan").addEventListener("change", () => renderSuites());

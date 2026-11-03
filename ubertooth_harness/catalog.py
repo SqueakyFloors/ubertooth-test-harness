@@ -1151,6 +1151,15 @@ def builtin_catalog() -> TestCatalog:
         _device_test("Firmware version", "Firmware revision"),
         _device_test("Firmware compile info", "Firmware compile identity"),
         _device_test("Device serial", "Microcontroller serial"),
+        # Which bootloader is under the application firmware. Preflight reads
+        # it on every run whose commit has the read at all, which is what no
+        # catalog case can do: a case cannot tell whether the commit under
+        # test has `ubertooth-util -B`, and against one that has not it would
+        # fail on a board that is perfectly set up (bootloader.py).
+        _device_test(
+            "Bootloader identity",
+            "Which bootloader is installed under the application firmware",
+        ),
         _device_test("Part ID", "Microcontroller part ID"),
         _device_test("Board ID", "Ubertooth board ID"),
         TestDefinition(

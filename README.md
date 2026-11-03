@@ -1228,12 +1228,16 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --libbtbb-source /path/to/libbtbb \
   --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
   --build [--no-flash-build] [--with-firmware] [--with-python[=PYTHON]] \
+  [--bootloader record|check|update] \
   --output runs
 ```
 
 A `--build` run also flashes its boards with the firmware it built before
 preflight, unless `--no-flash-build`; see [Flashing the boards with the run's
-build](#flashing-the-boards-with-the-runs-build).
+build](#flashing-the-boards-with-the-runs-build). Every run also reads which
+bootloader is underneath that firmware, and `--bootloader` says what to do
+about an older one; see [The boards'
+bootloaders](#the-boards-bootloaders).
 
 The examples here and the default in `scripts/ci.sh` use one commit of the
 [`SqueakyFloors/libbtbb`](https://github.com/SqueakyFloors/libbtbb) fork: the
@@ -1440,6 +1444,57 @@ as stays unique in that repository. So a requirement taken from the full
 commit, which is what a run that resolved its own libbtbb has, is still
 satisfied by the library's seven-digit stamp; what the full commit buys is
 that a library reporting more digits must agree on all of them.
+### The boards' bootloaders
+
+A board's bootloader is the first 16 KiB of its flash. `ubertooth-dfu` runs
+from there, so an ordinary firmware write cannot replace it: a board keeps the
+bootloader it came with until somebody installs another one over a serial
+in-system programming adapter or JTAG on its header. The Ubertooth fork reports
+which one a board has on `ubertooth-util -B`, and every run reads it
+([#298](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/298)).
+
+`--bootloader` says what the run does about it:
+
+- `record` (the default) reads `-B` after the firmware checks and records the
+  version, the build string, and the CRC-32 of the whole region, for every
+  board whose firmware preflight requires. Nothing is compared and nothing is
+  written: installing a bootloader is physical and cannot be undone over USB,
+  so a bench run and the release suite never do it by implication.
+- `check` also builds the bootloader from the run's own Ubertooth source and
+  fails the run when a board is on an older or different one. All three of the
+  version, the build string, and the region hash must agree; the version
+  alone is never enough, because two different 2.00 images are two different
+  bootloaders.
+- `update` installs that bootloader on a stale board whose registry pairs it
+  with a [debug programmer](docs/hardware.md), writes it once, and then
+  requires `-B` to report exactly what was written and the application to
+  still report the run's revision. A stale board with no programmer fails, and
+  the reason names the missing capability rather than trying USB.
+
+`check` and `update` need `--build` and `arm-none-eabi-gcc`; `update` also
+needs `lpc21isp` and a programmer with a `serial device` in the registry, and
+takes the [host lock](#the-host-lock) with the board and its programmer for
+the write. A failed write is a hard failure that keeps every command and its
+output and is never retried: a second attempt over a half-written region would
+make the board's state less knowable, not more.
+
+**What "current" means.** Not the resolved commit's bootloader, but the newest
+commit reachable from it that touched the sources the bootloader image is
+built from. The build string the bootloader carries is the whole repository's
+revision at build time, so pinning the artifact to the resolved commit would
+change its identity on every unrelated commit and demand a physical write to
+every board on most days for no change in behavior. The pin, the paths it
+watches, and the sources the bootloader's own makefile names all go in the run
+manifest, and a makefile that starts building from a path outside those is
+refused rather than quietly leaving the pin stale.
+
+**Record:** `bootloader_build_started`/`bootloader_build_finished` for the
+artifact, `bootloader_stage_started`/`bootloader_stage_finished` for the
+stage, one `bootloader_identity` per board, and
+`bootloader_update_started`/`bootloader_update_finished` around a write. Every
+command is recorded with phase `bootloader` or `bootloader-update`. report.md
+has a "Bootloader" section with a row per board, and the GUI shows each
+board's bootloader in its board list.
 
 ## Source identity, manifest, and mandatory preflight
 

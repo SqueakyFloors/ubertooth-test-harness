@@ -26,6 +26,7 @@ from ubertooth_harness.build import (
     require_tools,
     resolve_python,
 )
+from ubertooth_harness import bootloader
 from ubertooth_harness.cancellation import CancellationToken
 
 from ubertooth_harness.environment import (
@@ -420,6 +421,14 @@ def _parser() -> argparse.ArgumentParser:
         "before preflight (flashing is the default when building; it also "
         "builds the firmware)",
     )
+    run_suite.add_argument(
+        "--bootloader", choices=bootloader.MODES, default=bootloader.MODE_RECORD,
+        help="what to do about each board's bootloader: record what is "
+        "installed (the default), check it against a bootloader built from "
+        "the run's own source, or install that one on a stale board whose "
+        "registry pairs it with a debug programmer. check and update need "
+        "--build",
+    )
     _add_lease_options(run_suite)
 
     boards = subparsers.add_parser(
@@ -700,6 +709,7 @@ def _prepare_run(
 ):
     """Build (when requested), then the manifest and preflight checks."""
     built = None
+    wrote_firmware = False
     executor = SubprocessCommandExecutor(_test_environment(sources, None))
     if args.build:
         built = _build(
@@ -724,7 +734,23 @@ def _prepare_run(
             )
         # Every test command runs the tools just built, not installed ones.
         executor = SubprocessCommandExecutor(_test_environment(sources, built.plan))
-        _flash_build(args, sources, built, executor, publisher, run_dir, leases)
+        wrote_firmware = _flash_build(
+            args, sources, built, executor, publisher, run_dir, leases
+        )
+    expectation = None
+    mode = getattr(args, "bootloader", None)
+    if mode is not None:
+        expectation, bootloader_artifact = _bootloader_stage(
+            args, sources, built, executor, publisher, run_dir, leases
+        )
+        if bootloader_artifact is not None:
+            artifacts += (
+                FileIdentity.from_path(
+                    bootloader.ARTIFACT_NAME, bootloader_artifact.region_path
+                ),
+            )
+    if wrote_firmware or mode == bootloader.MODE_UPDATE:
+        _release_flash_host_lock(args, leases)
     manifest = build_run_manifest(
         run_id=run_id,
         plan_name=plan.name,
@@ -746,7 +772,9 @@ def _prepare_run(
         fix = NO_FLASH_FIX
     else:
         fix = FLASH_FIX
-    preflight_checks = preflight_policy.compile(invocations, manifest, firmware_fix=fix)
+    preflight_checks = preflight_policy.compile(
+        invocations, manifest, firmware_fix=fix, bootloader=expectation
+    )
     return manifest, preflight_checks, executor, built
 
 
@@ -766,7 +794,7 @@ def _flash_build(args, sources, built, executor, publisher, run_dir, leases) -> 
         publisher.emit("build_flash_finished", "skipped", {
             "reason": reason, "expected_revision": "", "boards": [],
         })
-        return
+        return False
     ubertooth = next(source for source in sources if source.name == "Ubertooth")
     with _signals_cancel(CancellationToken()) as token:
         BuildFlasher(executor).run(
@@ -774,8 +802,82 @@ def _flash_build(args, sources, built, executor, publisher, run_dir, leases) -> 
             output_dir=run_dir, cancellation=token,
             host_lock=leases is not None and leases.holds_host_lock(),
         )
+    return True
+
+
+def _release_flash_host_lock(args, leases) -> None:
+    """Give this host's firmware lock back, unless the run needs it later.
+
+    Flashing the build and installing a bootloader both write flash and both
+    hold the lock, so it is released after the later of the two rather than
+    between them.
+    """
     if leases is not None and not getattr(args, "keep_host_lock", True):
         leases.release_host_lock()
+
+
+def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases):
+    """Read, compare, or install each board's bootloader after the firmware.
+
+    Returns what preflight should require of the boards' bootloaders, and the
+    artifact it was compared against (None when the run only records what is
+    installed). The read itself is preflight's; what happens here is the
+    artifact build and, in ``update`` mode, the write.
+    """
+    mode = args.bootloader
+    boards = tuple(getattr(args, "bootloader_boards", ()))
+    ubertooth = next(source for source in sources if source.name == "Ubertooth")
+    if not bootloader.supported_at(ubertooth):
+        # A fork commit from before `ubertooth-util -B`. Nothing can be read,
+        # so nothing is required of the boards; the run says so rather than
+        # failing a check its own tools cannot answer.
+        reason = (
+            f"Ubertooth {ubertooth.short_commit} has no bootloader read "
+            "(ubertooth-util -B)"
+        )
+        if mode in bootloader.COMPARING_MODES:
+            raise HarnessError(f"--bootloader {mode} needs a commit that has it: {reason}")
+        if publisher is not None:
+            publisher.emit("bootloader_stage_finished", "skipped", {
+                "mode": mode, "reason": reason, "expected": None, "boards": [],
+            })
+        return None, None
+    if not boards:
+        if publisher is not None:
+            publisher.emit("bootloader_stage_finished", "skipped", {
+                "mode": mode, "reason": "no board needs the run's firmware",
+                "expected": None, "boards": [],
+            })
+        return None, None
+    artifact = None
+    if mode in bootloader.COMPARING_MODES:
+        artifact = bootloader.BootloaderArtifactBuilder(executor).build(
+            ubertooth, publisher,
+            checkout=built.plan.work_dir / "src" / "ubertooth",
+            work_dir=run_dir / "bootloader",
+            output_dir=run_dir,
+        )
+    if mode == bootloader.MODE_UPDATE:
+        with _signals_cancel(CancellationToken()) as token:
+            summary = bootloader.BootloaderUpdater(executor).run(
+                boards, publisher, mode=mode, artifact=artifact,
+                output_dir=run_dir,
+                application_revision=ubertooth.expected_revision,
+                cancellation=token,
+                holds_host_lock=leases is not None and leases.holds_host_lock(),
+            )
+        if summary.status == "canceled":
+            raise FlashCancelled(f"the bootloader stage was canceled: {summary.reason}")
+        if summary.status != "passed":
+            raise HarnessError(summary.reason)
+    return (
+        bootloader.BootloaderExpectation(
+            mode=mode,
+            expected=artifact.identity() if artifact else None,
+            boards={board.alias: board for board in boards},
+        ),
+        artifact,
+    )
 
 
 def _test_environment(sources, plan) -> dict:
@@ -886,9 +988,17 @@ def _run_suite(args: argparse.Namespace) -> int:
         raise HarnessError("--build requires --libbtbb-source and --libbtbb-ref")
     if args.no_flash_build and not args.build:
         raise HarnessError("--no-flash-build requires --build")
+    if args.bootloader in bootloader.COMPARING_MODES and not args.build:
+        raise HarnessError(
+            f"--bootloader {args.bootloader} compares each board against a "
+            "bootloader built from the run's own source, so it requires --build"
+        )
     args.flash_boards = ()
     # Both images unless the firmware build is turned on only to flash.
     args.firmware_images = FIRMWARE_IMAGES
+    needs_firmware = PreflightPolicy(registry, catalog).boards_needing_firmware(
+        invocations
+    )
     if args.build and not args.no_flash_build:
         # The boards whose firmware preflight requires get the run's own
         # firmware first; that needs the firmware build.
@@ -897,7 +1007,38 @@ def _run_suite(args: argparse.Namespace) -> int:
                 alias,
                 str(registry.get(alias).identity.get("serial", "")).strip().lower(),
             )
-            for alias in PreflightPolicy(registry, catalog).boards_needing_firmware(invocations)
+            for alias in needs_firmware
+        )
+    # The boards whose bootloader this run reads, compares, or installs: the
+    # ones whose firmware preflight requires, which is where the bootloader
+    # read can be answered at all.
+    args.bootloader_boards = bootloader.boards_for_bootloader(
+        registry, needs_firmware
+    )
+    if args.bootloader == bootloader.MODE_UPDATE:
+        without = [
+            board.alias for board in args.bootloader_boards
+            if not board.can_be_programmed
+        ]
+        if without and len(without) == len(args.bootloader_boards):
+            # Say so before a build: on this bench the mode could only ever
+            # fail, and the registry is what has to change.
+            raise HarnessError(
+                "--bootloader update can install a bootloader only through a "
+                "debug programmer the registry pairs with the board, and "
+                + ", ".join(without)
+                + " has none; register the programmer ('programs: <board>' with "
+                "a 'serial device'), or use --bootloader check"
+            )
+    if (
+        args.bootloader in bootloader.COMPARING_MODES
+        and not args.dry_run
+        and "arm-none-eabi-gcc" in missing_tools(_detected_platform(), True)
+    ):
+        raise HarnessError(
+            f"--bootloader {args.bootloader} builds the bootloader from the "
+            "run's own source, and arm-none-eabi-gcc is not installed; install "
+            "it, or use --bootloader record"
         )
     if args.flash_boards and not args.with_firmware:
         # Flashing needs the firmware build, but only the image it writes:
@@ -931,8 +1072,13 @@ def _run_suite(args: argparse.Namespace) -> int:
         ),
         directory=args.lease_dir,
         wait_s=args.wait_for_boards * 60,
-        # Power isolation and firmware writes hold this host's lock too.
-        host_lock=args.keep_host_lock or bool(args.flash_boards),
+        # Power isolation and firmware writes hold this host's lock too, and
+        # a bootloader write is a firmware write through another port.
+        host_lock=(
+            args.keep_host_lock
+            or bool(args.flash_boards)
+            or args.bootloader == bootloader.MODE_UPDATE
+        ),
         external_template=external_template,
     )
     try:
@@ -974,6 +1120,17 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
     elif args.build:
         print("flash before preflight: no ("
               + ("--no-flash-build" if args.no_flash_build else "no board needs it") + ")")
+    print(f"bootloader: {args.bootloader}" + "".join(
+        f"\n  {board.alias} ({board.serial}): "
+        + (
+            f"programmer {board.programmer_alias} on {board.programmer_device}"
+            if board.can_be_programmed
+            else f"programmer {board.programmer_alias}, no serial device registered"
+            if board.has_programmer
+            else "no programmer registered; check-only"
+        )
+        for board in getattr(args, "bootloader_boards", ())
+    ))
     runs = omitted = 0
     for invocation in invocations:
         definition = catalog.get(invocation.test_name)

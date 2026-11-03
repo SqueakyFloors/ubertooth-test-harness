@@ -25,10 +25,11 @@ from typing import Any, Callable, Mapping
 # Version 2 added ``commit`` to the run message (version 1 runners resolved
 # the ref name in their own checkout); version 3 added ``flash_build``;
 # version 4 added the ``run_file`` request and its two answers; version 5
-# added ``with_firmware`` and ``with_python`` to the run message. There is no
-# negotiation: a message of any other version is refused, so a controller and
-# a runner of different versions never work together (DESIGN.md section 2).
-PROTOCOL_VERSION = 5
+# added ``with_firmware`` and ``with_python`` to the run message; version 6
+# added ``bootloader``. There is no negotiation: a message of any other
+# version is refused, so a controller and a runner of different versions never
+# work together (DESIGN.md section 2).
+PROTOCOL_VERSION = 6
 # Bounds what the runner accepts from the controller. Outbound events may be
 # larger (the manifest record is bounded at 1 MiB).
 MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
@@ -139,6 +140,15 @@ def _test_names(value) -> bool:
     )
 
 
+def _bootloader_mode(value) -> bool:
+    """What a run is asked to do about its boards' bootloaders.
+
+    The same three words ``run-suite --bootloader`` takes, named here rather
+    than imported so the wire schema stays a statement of its own.
+    """
+    return value in ("record", "check", "update")
+
+
 def _run_event(value) -> bool:
     return (
         isinstance(value, dict)
@@ -240,6 +250,10 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
     # each one true adds that option to the run's build (run-suite
     # ``--with-firmware``, ``--with-python``), and each requires ``build``,
     # exactly as run-suite requires ``--build`` for them (see _run_options).
+    # ``bootloader`` is run-suite ``--bootloader``: ``record`` what each board
+    # has, ``check`` it against a bootloader built from the run's source, or
+    # ``update`` a stale board through the programmer its registry pairs with
+    # it. The last two need ``build`` as well.
     "run": {
         "request_id": _identifier,
         "ref": _git_ref,
@@ -251,6 +265,7 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "flash_build": _boolean,
         "with_firmware": _boolean,
         "with_python": _boolean,
+        "bootloader": _bootloader_mode,
     },
     # Cooperatively cancel the active run.
     "cancel": {
@@ -366,6 +381,10 @@ def _run_options(message: Mapping) -> str:
     for field in ("with_firmware", "with_python"):
         if message[field] and not message["build"]:
             return f"{field} requires build"
+    # `check` and `update` compare a board against a bootloader built from the
+    # run's own source, which run-suite refuses without --build.
+    if message["bootloader"] in ("check", "update") and not message["build"]:
+        return f"bootloader {message['bootloader']} requires build"
     return ""
 
 

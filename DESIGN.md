@@ -117,7 +117,7 @@ Controller → target runner:
 
 | Type | Fields |
 |------|--------|
-| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then), `with_firmware` and `with_python` (bool: the run's build also builds and records the firmware image, and builds the Python tools, passing `--with-firmware` and `--with-python`; `run-suite` takes neither without `--build`, so either one true without `build` is rejected as a message the receiver could not act on) |
+| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then), `with_firmware` and `with_python` (bool: the run's build also builds and records the firmware image, and builds the Python tools, passing `--with-firmware` and `--with-python`; `run-suite` takes neither without `--build`, so either one true without `build` is rejected as a message the receiver could not act on), `bootloader` (`record`, `check` or `update`: what the run does about its boards' bootloaders, passed as `--bootloader`; `check` and `update` compare against a bootloader built from the run's own source, which `run-suite` refuses without `--build`, so either one without `build` is rejected the same way) |
 | `cancel` | `run_id`, `reason` |
 | `run_file` | `request_id`, `run_id`, `path` (a path that run's own run.jsonl records), `offset` and `limit` in bytes (`limit` at most 256 KiB, since the page travels in one message) |
 
@@ -646,15 +646,27 @@ Validation and preparation have distinct phases:
    stops the run before preflight (#135). The host lock is held while
    writing, then released unless the run needs it later; the firmware build
    is implied.
+   Once that firmware is current, the run reads which bootloader is under it
+   on the same boards (`ubertooth-util -B`). `--bootloader check` and `update`
+   build that bootloader from the newest commit, reachable from the resolved
+   one, that touched the sources the image is built from, and compare its
+   version, build string and region CRC-32 with what the board reports;
+   `update` installs it on a stale board through the debug programmer the
+   registry pairs with that board, holding the host lock, and requires the
+   read-back to match. A stale board with no programmer fails with the missing
+   capability named: a bootloader is not written over USB here. A failed write
+   is a hard failure and is never retried (#298).
 5. Mandatory preflight: verify installed host revision, the libbtbb those
    tools are linked against, and every selected Ubertooth firmware revision
    (the application image, or the bare revision older firmware prints),
-   compile identity, and registered serial before the first suite test
-   starts. The libbtbb required is the one the run resolved, or, for a run
-   that resolved none, the `LIBBTBB_REF` the Ubertooth commit sets in its own
-   `install.sh`: the build and link stages cannot tell two libbtbb commits
-   apart, so the version line is the only thing that says which decoder the
-   run measured ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
+   compile identity, registered serial, and the bootloader under that firmware
+   before the first suite test starts. The libbtbb required is the one the run
+   resolved, or, for a run that resolved none, the `LIBBTBB_REF` the Ubertooth
+   commit sets in its own `install.sh`: the build and link stages cannot tell
+   two libbtbb commits apart, so the version line is the only thing that says
+   which decoder the run measured ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
+   The bootloader identity is recorded on every run, and compared only in the
+   two modes above (#298).
 
 The `manifest` record is written to run.jsonl before preflight and snapshots requested
 refs, resolved commits, plan/registry/artifact hashes, target host, normalized

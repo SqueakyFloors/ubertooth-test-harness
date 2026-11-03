@@ -441,7 +441,13 @@ suites:
             events = [json.loads(line) for line in
                       (output / "pin-cli-run" / "run.jsonl").read_text().splitlines()]
             kinds = [event["event_type"] for event in events]
-            self.assertEqual(["run_started", "libbtbb_pin", "manifest"], kinds[:3])
+            # The bootloader stage records that it did nothing: this fixture's
+            # fork source has no `ubertooth-util -B` for it to read.
+            self.assertEqual(
+                ["run_started", "libbtbb_pin", "bootloader_stage_finished",
+                 "manifest"],
+                kinds[:4],
+            )
             self.assertEqual(1, kinds.count("run_started"))
             self.assertEqual("warning", events[1]["status"])
             self.assertEqual("0" * 40, events[1]["details"]["fork_pin_ref"])
