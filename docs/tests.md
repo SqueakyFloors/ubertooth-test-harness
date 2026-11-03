@@ -2856,12 +2856,19 @@ its own serial.
 tree**, with the startable check in it, and which has a `power:` mapping in
 the registry on a `USB power controller` that can switch VBUS per port, plus
 every other registered board as guards. The bootloader is the precondition
-that matters most and the one the harness cannot check: `ubertooth-dfu`
-writes the application region only, a bootloader is replaced over ISP or
-JTAG, and no host tool reads a board's bootloader version yet. On a board
-carrying the factory bootloader this test does not fail — it bricks the
-board, which then needs its P4 entry pin bridged, because that bootloader
-jumps into the erased vectors it was given. Required: `platforms:`, because the verdict is a USB
+that matters most: `ubertooth-dfu` writes the application region only, so a
+bootloader is installed over a programmer on the board's in-system
+programming header. On a board carrying the factory bootloader this test does
+not fail — it bricks the board, which then needs its P4 entry pin bridged,
+because that bootloader jumps into the erased vectors it was given. So the
+committed plan names the board the registry pairs with a `Debug programmer`,
+which is also what gives that board a recovery path, and holding the board
+holds the programmer with it. Read the bootloader before and after
+(`ubertooth-util -U <serial> -B`); once
+[#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303) is
+in, `--bootloader check` makes the run refuse a board whose bootloader is not
+the one the run's sources build, and `--bootloader update` installs it over
+that programmer first. Required: `platforms:`, because the verdict is a USB
 enumeration check and that is fail-closed on Linux only, and
 `USB power controller:`, the hub the board must be on. A plan pointed at the
 wrong hub fails planning rather than switching whatever is on that hub's

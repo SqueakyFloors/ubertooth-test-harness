@@ -18,12 +18,24 @@ suites:
   # bridged by hand at the bench. Nothing the harness can do reaches such a
   # board, so a run nobody is watching could leave one unusable.
   #
-  # The board's bootloader is the precondition, and the harness cannot check
-  # it: the verdict is about the bootloader already in flash, ubertooth-dfu
-  # writes the application region only, and no host tool reads a bootloader
-  # version yet. On a board whose bootloader came from this tree the test is
-  # a test; on a board with the factory bootloader it is a way to brick it.
-  # Know which board the registry's default is before running this.
+  # The board's bootloader is the precondition. The verdict is about the
+  # bootloader already in flash, and ubertooth-dfu writes the application
+  # region only: a bootloader is installed over a programmer on the board's
+  # in-system programming header. On a board whose bootloader came from this
+  # tree the test is a test; on a board with the factory bootloader it is a
+  # way to brick it.
+  #
+  # So this step names the board the registry pairs with a `Debug programmer`
+  # rather than taking the host's default: that pairing is what makes a
+  # recovery over ISP possible without re-cabling, and holding the board
+  # holds the programmer with it (#287). Check the alias against your own
+  # registry before the run -- it is `UT_Linux1` in hardware.example.yaml,
+  # paired with `Prog_Linux0`.
+  #
+  # Once #303 is in, run this with `--bootloader check` and the run itself
+  # refuses a board whose bootloader is not the one the run's sources build;
+  # `--bootloader update` installs it over that programmer first. Until then
+  # read it by hand: `ubertooth-util -U <serial> -B`, before and after.
   #
   # Requires: --allow-destructive (a person passes it; the runner service
   # never does, so no dispatched run and no GUI click can start this test),
@@ -40,5 +52,8 @@ suites:
     - Reset into invalid application:
         hosts: [Host_Linux]
         platforms: [linux]
-        Ubertooth: default
+        # The board a debug programmer is wired to, so a bootloader can be
+        # read and reinstalled without re-cabling, and so a board that does
+        # fault has its own recovery path at hand.
+        Ubertooth: UT_Linux1
         USB power controller: Hub_Linux0

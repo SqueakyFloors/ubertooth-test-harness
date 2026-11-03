@@ -1058,9 +1058,12 @@ class RunRequirementTests(unittest.TestCase):
         self.registry = FileResourceRegistry.load(registry_file(root))
         plan = self.plan = root / "power.yaml"
         plan.write_text(
+            # The committed plan names the bench's programmer-paired board
+            # and its hub; this fixture's registry calls them something else.
             Path("testplans/power.yaml").read_text(encoding="utf-8")
-            .replace("Ubertooth: default", f"Ubertooth: {BOARD}")
-            .replace("Hub_Linux0", CONTROLLER),
+            .replace("Ubertooth: UT_Linux1", f"Ubertooth: {BOARD}")
+            .replace("USB power controller: Hub_Linux0",
+                     f"USB power controller: {CONTROLLER}"),
             encoding="utf-8",
         )
         self.catalog = builtin_catalog()

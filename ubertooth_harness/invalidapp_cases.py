@@ -16,10 +16,11 @@ region only, and a bootloader is replaced over ISP or JTAG. So the board has
 to be one whose bootloader came from this tree with the startable check in
 it. A board carrying the factory bootloader, or one from before that check,
 jumps into the erased vectors and faults on every power-up -- the failure
-this test is written to catch, on a board that never had the fix. There is
-no way to read a board's bootloader version over USB yet, so the harness
-cannot check this and the person running it has to know which board they
-are on.
+this test is written to catch, on a board that never had the fix. So the
+plan names a board the registry pairs with a debug programmer: that board can
+have a bootloader installed and read back over its programming header, and
+holding it holds the programmer with it, which is the recovery path if it
+does fault. `ubertooth-util -B` reports what a board has.
 
 Why it is destructive. If the bootloader does start the unstartable image,
 the board faults, stops answering USB, and needs the P4 entry pin bridged by
