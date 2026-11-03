@@ -1334,9 +1334,9 @@ class NamedTestSequencer:
                     "resource_identity": dict(check.resource_identity),
                     "expected_revision": check.expected_revision,
                     # Only the host version check has one, and only it says
-                    # which libbtbb the run's tools had to be linked against.
-                    **({"expected_libbtbb": check.libbtbb.describe()}
-                       if check.libbtbb is not None else {}),
+                    # which libbtbb the run's tools had to be linked against,
+                    # or why none was required.
+                    **(check.libbtbb.to_details() if check.libbtbb else {}),
                 },
             )
             result = self._run_command(

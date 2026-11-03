@@ -139,7 +139,7 @@ class PreflightCheck:
                     f"{self.name}: identity mismatch for {target}: "
                     f"output does not match {pattern}"
                 )
-        if self.libbtbb is not None:
+        if self.libbtbb is not None and self.libbtbb.required:
             found = output.search(self.libbtbb.pattern)
             output.note_pattern(
                 "expected", f"{self.name} libbtbb", self.libbtbb.pattern, found
@@ -253,10 +253,20 @@ def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
     return patterns
 
 
-# How to put a libbtbb other than the wanted one right, by run kind.
+# How to put a libbtbb other than the wanted one right, by run kind. The
+# installed-library fixes name building or installing that commit first: a
+# library the run did not resolve is compared against a commit, so a library
+# that reports a release string instead (one built from a tarball) cannot be
+# made to match by naming any ref at all.
 LIBBTBB_INSTALL_FIX = (
-    "install libbtbb at that commit over the one the tools load, or name the "
-    "commit the installed library was built from with --libbtbb-source and "
+    "install libbtbb built from that commit's checkout over the one the tools "
+    "load, or run with --build so the run builds it; where the installed "
+    "library was built from a different commit on purpose, name that commit "
+    "with --libbtbb-source and --libbtbb-ref"
+)
+LIBBTBB_RESOLVED_FIX = (
+    "install libbtbb built from that commit's checkout over the one the tools "
+    "load, or name the commit the installed library was built from with "
     "--libbtbb-ref"
 )
 LIBBTBB_BUILT_FIX = (
@@ -264,6 +274,7 @@ LIBBTBB_BUILT_FIX = (
     "libbtbb it built; check the build and run it again"
 )
 LIBBTBB_BUILT_ORIGIN = "the libbtbb this run built"
+LIBBTBB_RESOLVED_ORIGIN = "the libbtbb this run resolved (--libbtbb-ref)"
 
 
 @dataclass(frozen=True)
@@ -274,11 +285,19 @@ class LibbtbbIdentity:
     nor the link stage tells two libbtbb commits apart: the version line is
     the only thing that says which one a tool loads. A run that does not
     check it can measure a different decoder from the one it reports (#294).
+
+    ``expected_revision`` is empty where the run requires no libbtbb at all,
+    which is itself worth recording: a reader of such a run must be able to
+    see that nothing held its tools to a library, and why.
     """
 
     expected_revision: str
     origin: str
-    fix: str
+    fix: str = ""
+
+    @property
+    def required(self) -> bool:
+        return bool(self.expected_revision)
 
     @property
     def pattern(self) -> str:
@@ -287,24 +306,42 @@ class LibbtbbIdentity:
     def describe(self) -> str:
         return f"{self.expected_revision}, {self.origin}"
 
+    def to_details(self) -> dict:
+        """What a run record says about this requirement.
 
-def libbtbb_identity(ubertooth, libbtbb=None) -> LibbtbbIdentity | None:
+        Two different fields, because "this library was required" and "no
+        library was required, for this reason" are different facts and a
+        reader of the run must be able to tell them apart (#294).
+        """
+        if not self.required:
+            return {"libbtbb_not_checked": self.origin}
+        return {"expected_libbtbb": self.describe()}
+
+
+def libbtbb_identity(ubertooth, libbtbb=None, *, built=False) -> LibbtbbIdentity:
     """Which libbtbb the host tools of this run must be linked against.
 
-    A run that resolved a libbtbb source must load that one. A run that did
-    not has no libbtbb of its own, so the expectation is the ``LIBBTBB_REF``
-    the Ubertooth commit under test sets in its own ``install.sh``: the only
-    statement of which libbtbb that commit is meant to run against.
+    A run that resolved a libbtbb source must load that one, whether it built
+    it (``built``) or named the commit its installed library was built from. A
+    run that resolved none has no libbtbb of its own, so the expectation is
+    the ``LIBBTBB_REF`` the Ubertooth commit under test sets in its own
+    ``install.sh``: the only statement of which libbtbb that commit is meant
+    to run against.
 
-    None where the Ubertooth commit names no libbtbb at all (fork commits
-    from before the pin landed): nothing is claimed, so nothing is checked.
-    Raises PreflightError where the commit names one that cannot be compared
-    with what the tools report, rather than let a run measure an unverified
-    library.
+    The full commit is compared wherever one is known, not the abbreviation:
+    a short hash would also accept a longer one that merely starts with it.
+
+    An identity requiring nothing comes back where the Ubertooth commit names
+    no libbtbb at all (fork commits from before the pin landed); nothing is
+    claimed, so nothing is checked, and the run says so. PreflightError is
+    raised where the commit names one that cannot be compared with what the
+    tools report, rather than let a run measure an unverified library.
     """
     if libbtbb is not None:
         return LibbtbbIdentity(
-            libbtbb.expected_revision, LIBBTBB_BUILT_ORIGIN, LIBBTBB_BUILT_FIX
+            f"git-{libbtbb.commit.lower()}",
+            LIBBTBB_BUILT_ORIGIN if built else LIBBTBB_RESOLVED_ORIGIN,
+            LIBBTBB_BUILT_FIX if built else LIBBTBB_RESOLVED_FIX,
         )
     label = f"Ubertooth {ubertooth.short_commit}"
 
@@ -317,11 +354,18 @@ def libbtbb_identity(ubertooth, libbtbb=None) -> LibbtbbIdentity | None:
 
     try:
         pin = libbtbbpin.fork_pin_at(ubertooth.source_path, ubertooth.commit)
+    except libbtbbpin.PinUnreadable as error:
+        # A pin the file does name, but as a shell expansion: the problem is
+        # the value, not reading the file, and the message must say so.
+        raise refuse(f"{label} has a pin this cannot use: {error}") from error
     except (OSError, RuntimeError) as error:
         raise refuse(f"{label} has an install.sh that could not be read: {error}") \
             from error
     if pin is None:
-        return None
+        return LibbtbbIdentity(
+            "", f"{label} sets no LIBBTBB_REF in install.sh, so the libbtbb "
+            "the tools load was not checked"
+        )
     if not libbtbbpin.is_commit(pin.ref):
         # The tools report a commit, so a name that can move is nothing to
         # compare with: resolving it here would also make the check mean
@@ -474,7 +518,9 @@ class PreflightPolicy:
         # its own, so a run that builds nothing still has something to hold
         # the installed library to (#294).
         host_patterns = host_version_patterns(ubertooth_source)
-        libbtbb = libbtbb_identity(ubertooth_source, libbtbb_source)
+        libbtbb = libbtbb_identity(
+            ubertooth_source, libbtbb_source, built=bool(manifest.build)
+        )
 
         established = self._firmware_established_by_suite(invocations)
         # Boards bound only as guards must be present and selectable by serial;

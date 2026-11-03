@@ -28,6 +28,7 @@ from ubertooth_harness.preflight import (
     HOST_VERSION_FALLBACK_ARGV,
     HOST_VERSION_LABEL,
     LIBBTBB_BUILT_ORIGIN,
+    LIBBTBB_RESOLVED_ORIGIN,
     PreflightCheck,
     PreflightError,
     PreflightPolicy,
@@ -716,14 +717,69 @@ class HostToolsLibbtbbTests(unittest.TestCase):
 
     def test_an_ubertooth_commit_that_pins_nothing_requires_nothing(self):
         # Fork commits from before the pin landed claim no libbtbb, so there
-        # is nothing to hold the installed library to.
+        # is nothing to hold the installed library to. The run says so rather
+        # than staying silent: that is the condition #294 is about.
         for install_sh in (None, "#!/bin/sh\necho hi\n"):
             with self.subTest(install_sh=install_sh):
                 check = self.host_check(install_sh)
-                self.assertIsNone(check.libbtbb)
+                self.assertFalse(check.libbtbb.required)
                 self.assertEqual(
                     "", check.result_failure(self.answer(check, libbtbb="git-other"))
                 )
+                (reason,) = check.libbtbb.to_details().values()
+                self.assertIn("sets no LIBBTBB_REF", reason)
+                self.assertEqual(
+                    ["libbtbb_not_checked"], list(check.libbtbb.to_details())
+                )
+
+    def test_a_run_that_required_nothing_says_so_in_the_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, source, manifest, checks = prepare_preflight(directory)
+            invocations = make_invocations()[:1]
+
+            summary = NamedTestSequencer(
+                FakeExecutor(source.expected_revision), event_sink=CollectSink()
+            ).run(
+                invocations,
+                root / "run",
+                run_id="preflight-run",
+                manifest=manifest.with_invocations(invocations),
+                preflight_checks=checks[:1],
+            )
+
+            self.assertTrue(summary.passed)
+            report = (root / "run" / "report.md").read_text()
+            self.assertIn(
+                "| libbtbb in the tools | **not checked**: ", report
+            )
+            self.assertIn("sets no LIBBTBB_REF", report)
+
+    def test_a_failure_on_the_ubertooth_revision_does_not_blame_the_library(self):
+        # The check stops at the first pattern it cannot match, so a run that
+        # failed on the tools' own revision never compared the library. The
+        # report must not report that as a libbtbb failure.
+        with tempfile.TemporaryDirectory() as directory:
+            root, source, manifest, checks = prepare_preflight(
+                directory, install_sh=f'LIBBTBB_REF="{self.PIN}"\n'
+            )
+            invocations = make_invocations()[:1]
+
+            summary = NamedTestSequencer(
+                FakeExecutor("git-0000000", libbtbb="git-52b2afc"),
+                event_sink=CollectSink(),
+            ).run(
+                invocations,
+                root / "run",
+                run_id="preflight-run",
+                manifest=manifest.with_invocations(invocations),
+                preflight_checks=checks[:1],
+            )
+
+            self.assertFalse(summary.passed)
+            self.assertIn("identity mismatch", summary.failure_reason)
+            report = (root / "run" / "report.md").read_text()
+            self.assertIn("| libbtbb in the tools | **not reached**: ", report)
+            self.assertNotIn("| libbtbb in the tools | **failed**", report)
 
     def test_the_ubertooth_revision_is_reported_before_the_libbtbb_one(self):
         # Tools from another commit are the bigger problem, and the reason
@@ -821,10 +877,68 @@ class HostToolsLibbtbbTests(unittest.TestCase):
 
         # The pin is not read at all: the run built a libbtbb of its own, and
         # whether that one is the fork's pin is the libbtbb_pin record's
-        # question (#85), not preflight's.
-        identity = libbtbb_identity(ubertooth, libbtbb)
-        self.assertEqual(f"git-{self.OTHER[:7]}", identity.expected_revision)
+        # question (#85), not preflight's. The full commit is what is
+        # required, since a short hash would also accept a longer one that
+        # merely starts with it.
+        identity = libbtbb_identity(ubertooth, libbtbb, built=True)
+        self.assertEqual(f"git-{self.OTHER}", identity.expected_revision)
         self.assertEqual(LIBBTBB_BUILT_ORIGIN, identity.origin)
+        # A run that resolved that libbtbb without building it says so
+        # instead, which is what a deployed runner's unticked-Build run does:
+        # it passes --libbtbb-source and --libbtbb-ref to every run.
+        resolved = libbtbb_identity(ubertooth, libbtbb)
+        self.assertEqual(LIBBTBB_RESOLVED_ORIGIN, resolved.origin)
+        self.assertNotIn("build", resolved.fix)
+
+    def test_a_pin_is_compared_on_every_digit_it_carries(self):
+        # A pin the fork wrote abbreviated identifies only those digits, and
+        # git abbreviates to a length that is unique in the repository, so a
+        # longer hash starting with them is that same commit.
+        short = self.host_check(f'LIBBTBB_REF="{self.PIN[:7]}"\n')
+        self.assertEqual("", short.result_failure(self.answer(short)))
+        self.assertEqual(
+            "", short.result_failure(self.answer(short, libbtbb=f"git-{self.PIN[:12]}"))
+        )
+        self.assertIn(
+            "report libbtbb git-52b2afd",
+            short.result_failure(self.answer(short, libbtbb="git-52b2afd")),
+        )
+        # A full pin is compared on all forty, so a longer hash that merely
+        # starts with its first digits is turned down.
+        full = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        other = f"git-{self.PIN[:7]}0000000000"
+        self.assertIn(
+            f"report libbtbb {other}",
+            full.result_failure(self.answer(full, libbtbb=other)),
+        )
+
+    def test_an_uppercase_pin_still_matches_the_hash_the_library_reports(self):
+        check = self.host_check(f'LIBBTBB_REF="{self.PIN.upper()}"\n')
+
+        self.assertEqual(f"git-{self.PIN}", check.libbtbb.expected_revision)
+        self.assertEqual("", check.result_failure(self.answer(check)))
+
+    def test_only_the_host_version_line_can_satisfy_the_requirement(self):
+        # The other lines of the `-V` answer name libbtbb too, and one of
+        # them carries a path that can hold anything.
+        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        elsewhere = CommandResult(
+            HOST_VERSION_ARGV, 0,
+            f"Host tools version: libubertooth 1.1 ({check.expected_revision})\n"
+            f"libbtbb loaded from: /build/libbtbb 1.3 (git-52b2afc)/lib.so\n",
+            "", 0.01, False,
+        )
+
+        self.assertIn("no libbtbb version at all", check.result_failure(elsewhere))
+
+    def test_a_libbtbb_only_mismatch_does_not_ask_the_older_option(self):
+        # `-H` prints the same line from the same function, so asking it
+        # again would only report the mismatch twice.
+        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        result = self.answer(check, libbtbb="git-0176769")
+
+        self.assertTrue(check.result_failure(result))
+        self.assertFalse(check.needs_fallback(result))
 
     def test_a_checkout_that_cannot_be_read_refuses_the_run(self):
         gone = SourceRevision(

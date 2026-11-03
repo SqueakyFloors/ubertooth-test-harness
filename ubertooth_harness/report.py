@@ -24,7 +24,7 @@ from ubertooth_harness.leases import (
     describe_takeover,
 )
 from ubertooth_harness import outputfiles
-from ubertooth_harness.outputfiles import output_file_list
+from ubertooth_harness.outputfiles import CHECKS_EVENT, output_file_list
 from ubertooth_harness.rawlog import (
     NOTE,
     RECORD_OUTPUT_BYTES,
@@ -319,17 +319,22 @@ def _libbtbb_in_the_tools(run: _Run) -> str:
     """Which libbtbb preflight required of the run's host tools, and whether
     it found it (#294).
 
-    Empty for a run whose host version check had nothing to require: an
-    Ubertooth commit from before the fork pinned a libbtbb, or a record
-    written before this check existed.
+    Empty only for a record written before this check existed. A run that
+    required nothing says so: that is the condition #294 is about, and a
+    reader must be able to tell it from a run that verified its library.
     """
-    wanted, check_id = "", ""
+    wanted = not_checked = check_id = ""
     for event in run.events:
         details = event.get("details") or {}
-        if event["event_type"] == "check_started" and details.get("expected_libbtbb"):
-            wanted = str(details["expected_libbtbb"])
+        if event["event_type"] != "check_started":
+            continue
+        if details.get("expected_libbtbb") or details.get("libbtbb_not_checked"):
+            wanted = str(details.get("expected_libbtbb", ""))
+            not_checked = str(details.get("libbtbb_not_checked", ""))
             check_id = str(details.get("check_id", ""))
             break
+    if not_checked:
+        return f"**not checked**: {not_checked}"
     if not wanted:
         return ""
     status = next(
@@ -341,9 +346,29 @@ def _libbtbb_in_the_tools(run: _Run) -> str:
     )
     if status == "passed":
         return f"{wanted} (verified)"
-    # A check that never ran (the run stopped earlier) has no status here,
-    # so the row says the requirement was not reached rather than met.
-    return f"**{status or 'not reached'}**: {wanted}"
+    # The check can fail on the Ubertooth revision and stop before it reads
+    # the libbtbb half, and a check that never ran has no status at all.
+    # Either way the requirement was not reached, and saying it failed would
+    # blame the library for something it was never compared against.
+    if status and _compared_libbtbb(run, check_id):
+        return f"**{status}**: {wanted}"
+    return f"**not reached**: {wanted}"
+
+
+def _compared_libbtbb(run: _Run, check_id: str) -> bool:
+    """Did the host version check get as far as reading the libbtbb half?
+
+    The check records every pattern it reads, so its own record is what says
+    whether this comparison happened (outputfiles.py).
+    """
+    for event in run.events:
+        details = event.get("details") or {}
+        if event["event_type"] != CHECKS_EVENT or details.get("check_id") != check_id:
+            continue
+        for check in details.get("checks") or []:
+            if str((check or {}).get("name", "")).endswith(" libbtbb"):
+                return True
+    return False
 
 
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:

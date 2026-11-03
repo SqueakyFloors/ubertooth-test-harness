@@ -1397,31 +1397,44 @@ So mandatory preflight holds the host tools to one libbtbb. Every tool prints
 it on its own version line (`Host tools version: libubertooth 1.07
 (git-6a917ec), libbtbb 1.3 (git-52b2afc)`), where the revision in the second
 pair of brackets is what libbtbb's own build stamped into
-`btbb_get_release()`: the commit the installed library was built from. The
-`Host version` check reads that line and requires:
+`btbb_get_release()`: the commit the installed library was built from. That
+string comes from a function in libbtbb, so it describes the library the tools
+load and not one they were compiled against. The `Host version` check reads
+that line and requires:
 
 - the libbtbb the run resolved, when it resolved one (`--libbtbb-source` and
-  `--libbtbb-ref`, with or without `--build`);
+  `--libbtbb-ref`, with or without `--build`), by its full commit;
 - otherwise the `LIBBTBB_REF` the Ubertooth commit under test sets in its own
   `install.sh`, which is the only statement of which libbtbb that commit is
-  meant to run against. No option is needed, so an ordinary run on a
-  long-lived runner is held to it too.
+  meant to run against. No option is needed, so a `run-suite` started by hand
+  is held to it too. A run from a deployed runner resolves the same commit
+  already, since `scripts/deploy.sh` passes `--libbtbb-source` and
+  `--libbtbb-ref fork-pin` to every run, build or not.
 
 A mismatch fails preflight before any measurement, and the reason names the
 revision the tools reported, the one wanted, where that came from, and how to
-fix it (install libbtbb at that commit, or name the installed library's commit
-with `--libbtbb-source`/`--libbtbb-ref`). A library that cannot name a commit
-fails the same way: one built from a tarball reports a release such as
-`2020-12-R1`, and one built from a modified checkout adds a `*`, and neither
-says it is the pinned commit. report.md carries a "libbtbb in the tools" row
-with what was required and whether it was verified, and the run record keeps
-the check so `ubertooth-harness validate` can repeat it.
+fix it. A library that cannot name a commit fails the same way: one built from
+a tarball reports a release such as `2020-12-R1`, and one built from a
+modified checkout adds a `*`, and neither says it is the pinned commit. Those
+two can only be put right by installing a libbtbb built from a clean checkout
+of that commit, or by running with `--build`; naming a ref cannot help, since
+what the check compares is always a commit. report.md carries a "libbtbb in
+the tools" row with what was required and whether it was verified, and the run
+record keeps the check so `ubertooth-harness validate` can repeat it.
 
-Two cases require nothing: an Ubertooth commit from before the fork pinned a
-libbtbb claims none, so there is nothing to check. A commit whose pin cannot
-be compared with a revision, a branch or tag name or a pin built from a
-shell variable, refuses the run instead, naming `--libbtbb-source` and
-`--libbtbb-ref` as the way to say which library the installed tools hold.
+An Ubertooth commit from before the fork pinned a libbtbb claims none, so
+there is nothing to check; the run records that and the report row says **not
+checked** with the reason, rather than leaving a reader to guess whether the
+library was verified. A commit whose pin cannot be compared with a revision, a
+branch or tag name or a pin built from a shell variable, refuses the run
+instead, naming `--libbtbb-source` and `--libbtbb-ref` as the way to say which
+library the installed tools hold.
+
+A pin the fork wrote abbreviated is compared on the digits it carries, which
+is what an abbreviation means: git shortens a hash only as far as stays unique
+in that repository, so a longer hash starting with those digits is the same
+commit. Where the run resolved the libbtbb itself, the full commit is
+compared and no such slack is left.
 
 ## Source identity, manifest, and mandatory preflight
 
