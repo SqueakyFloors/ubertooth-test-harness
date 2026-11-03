@@ -24,11 +24,13 @@ print a difference, or a comparison that stopped working, on stderr.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 from typing import NamedTuple, Sequence
 
 from ubertooth_harness.dfuimage import (
@@ -48,11 +50,30 @@ SOURCE_FILES = (
     "host/ubertooth-tools/src/dfu.h",
 )
 
-# The file the table itself lives in. Whether it is there is what tells a
-# commit from before the DFU recovery sources from one whose table this can
-# no longer find: the first has nothing to compare with, the second is a
-# difference to report.
+# The files the table and the two figures beside it are read out of.
 PART_TABLE_FILES = SOURCE_FILES[:2]
+
+# What a tree that has these figures at all names somewhere, whatever it
+# calls the files they are in: the table, and the function whose arithmetic
+# the harness mirrors. A tree that names neither is from before any of this
+# and has nothing to compare with; a tree that names either and whose figures
+# this cannot read has moved them somewhere this does not follow, which is
+# reported rather than passed over.
+TREE_MARKERS = ("DFU_PARTS", "dfu_upload_length")
+
+# The part of the tree whose part list decides a read-back length: the host
+# tool's. The bootloader keeps a table of its own to bound its own read-back
+# (firmware/bootloader/flash.h), and a firmware unit test in the fork fails
+# if the two disagree, so a part list under firmware/ is already held to the
+# host's and is not this module's to compare.
+HOST_TREE = "host/"
+
+# The function the three figures are read for. Its body has to name them, or
+# the fork works them out from something else and the figures read here are
+# no longer the ones it compiles.
+UPLOAD_LENGTH_FUNCTION = "dfu_upload_length"
+_FUNCTION_BODY = re.compile(
+    rf"\b{UPLOAD_LENGTH_FUNCTION}\s*\([^)]*\)\s*\{{(.*?)^\}}", re.S | re.M)
 
 # `static const struct dfu_part DFU_PARTS[] = { ... };`. The table ends at the
 # `};` that closes it, which is the only one at the start of a line (an entry
@@ -68,7 +89,8 @@ _FIELDS = re.compile(
 _LITERAL = re.compile(r"(0[xX][0-9a-fA-F]+|\d+)[uUlL]*")
 # A fork checkout on an unresponsive filesystem must not hold up a run that
 # already has the bench: this is advisory, so it gives up instead. One read
-# per file in SOURCE_FILES, so the whole check is bounded by three of these.
+# per file in SOURCE_FILES and one search per TREE_MARKERS entry, so the
+# whole check is bounded by five of these.
 GIT_TIMEOUT_S = 10.0
 
 
@@ -307,31 +329,30 @@ def _show(source: Path | str, ref: str, path: str) -> str | None:
     return result.stdout
 
 
-def _part_table_mentions(source: Path | str, ref: str) -> list[str]:
-    """Files at ``ref`` that name DFU_PARTS, wherever in the tree they are.
+def tree_mentions(source: Path | str, ref: str, pattern: str) -> list[str]:
+    """Files at ``ref`` naming ``pattern``, wherever in the tree they are.
 
-    This is what tells a commit from before the part table from one that
-    moved it: the first names it nowhere, the second names it somewhere this
-    module does not read. Without that, a fork that moved both files would
-    read as having no table, and a check that says nothing is the one failure
-    this must not have.
+    Read on every check, because where these figures are is not something to
+    assume: a tree that names them only in files this does not read has moved
+    them, and both of those have to be told from a tree that names them
+    nowhere, which is simply older than all of this.
     """
     try:
         result = subprocess.run(
             ["git", "-C", str(source), "grep", "--name-only", "--fixed-strings",
-             "DFU_PARTS", ref],
+             pattern, ref],
             capture_output=True, text=True, check=False, errors="replace",
             timeout=GIT_TIMEOUT_S, env={**os.environ, "LC_ALL": "C"},
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(
-            f"searching {ref} in {source} for DFU_PARTS took longer than "
+            f"searching {ref} in {source} for {pattern} took longer than "
             f"{GIT_TIMEOUT_S:.0f}s"
         ) from None
     # git grep exits 1 for no match, and above that for a real failure.
     if result.returncode > 1:
         raise RuntimeError(
-            f"cannot search {ref} in {source} for DFU_PARTS: {result.stderr.strip()}"
+            f"cannot search {ref} in {source} for {pattern}: {result.stderr.strip()}"
         )
     # Each line is `<ref>:<path>`; the ref is the caller's own.
     return [line.split(":", 1)[-1] for line in result.stdout.splitlines() if line]
@@ -340,53 +361,80 @@ def _part_table_mentions(source: Path | str, ref: str) -> list[str]:
 def fork_parts_at(source: Path | str, ref: str) -> ForkParts | None:
     """The part figures at ``ref`` of a fork checkout, or None for none.
 
-    None means this commit names DFU_PARTS nowhere at all, so it is from
-    before the part table and there is nothing to compare with. Every other
-    way of not finding the figures raises PartTableUnreadable -- the table
-    renamed, moved to a file not read here, or written another way -- so a
-    comparison that stopped working is reported rather than taken for a
-    commit without a table. Git errors other than a missing path raise
-    RuntimeError.
+    None means one thing: this commit names neither TREE_MARKERS anywhere, so
+    it is older than the figures themselves and has none to compare with.
+    Every other way of not finding them raises PartTableUnreadable -- the
+    table renamed, moved to a file not read here, written another way, a
+    second list elsewhere, or the length worked out from something other than
+    the three figures read here. A check that cannot see the figures says so;
+    only a tree that never had them is passed over. Git errors other than a
+    missing path raise RuntimeError.
     """
     texts = {path: _show(source, ref, path) for path in SOURCE_FILES}
-    if all(texts[path] is None for path in PART_TABLE_FILES):
-        elsewhere = _part_table_mentions(source, ref)
-        if not elsewhere:
-            return None
-        files = " nor ".join(PART_TABLE_FILES)
+    read = [path for path in SOURCE_FILES if texts[path] is not None]
+    # Where the tree keeps these figures, rather than where this module hopes
+    # they are. Read on every check, so a second list in a file this does not
+    # read is as visible as a table that moved out of the files it reads.
+    marked = {pattern: tree_mentions(source, ref, pattern)
+              for pattern in TREE_MARKERS}
+    if not any(marked.values()):
+        return None
+    elsewhere = sorted(path for path in set(marked["DFU_PARTS"]) - set(read)
+                       if path.startswith(HOST_TREE))
+    if elsewhere:
         raise PartTableUnreadable(
-            f"there is neither {files} here, and DFU_PARTS appears in "
-            f"{', '.join(elsewhere)}, so the table moved somewhere this does "
-            "not read"
+            f"DFU_PARTS appears in {', '.join(elsewhere)}, which this does not "
+            f"read: the flash sizes come from {' and '.join(PART_TABLE_FILES)}, "
+            "so a part list elsewhere in the host tools is one this has not "
+            "compared"
         )
-    joined = "\n".join(text for text in texts.values() if text is not None)
+    joined = "\n".join(texts[path] for path in read)
     parts = parse_part_table(joined)
     if parts is None:
-        present = ", ".join(path for path in PART_TABLE_FILES
-                            if texts[path] is not None)
-        # Reported, not taken for a commit without a table: the two cannot be
-        # told apart from the sources, and treating a comparison that stopped
-        # working as nothing to compare is how drift would walk past it.
         raise PartTableUnreadable(
-            f"no DFU_PARTS table in {present}, which this reads the flash sizes "
-            "out of: either this commit is from before the table, or the table "
-            "was renamed, moved, or written in a way this does not recognize"
+            f"no DFU_PARTS table in {' or '.join(PART_TABLE_FILES)}, which this "
+            "reads the flash sizes out of, though this commit has the DFU "
+            "recovery sources: the table was renamed, moved, or written in a "
+            "way this does not recognize"
         )
-    assumed = parse_define(joined, "DFU_ASSUMED_FLASH_SIZE")
-    offset = parse_define(joined, "BOOTLOADER_OFFSET")
-    size = parse_define(joined, "BOOTLOADER_SIZE")
-    missing = [name for name, value in (
-        ("DFU_ASSUMED_FLASH_SIZE", assumed),
-        ("BOOTLOADER_OFFSET", offset),
-        ("BOOTLOADER_SIZE", size),
-    ) if value is None]
+    figures = {}
+    for name in ("DFU_ASSUMED_FLASH_SIZE", "BOOTLOADER_OFFSET", "BOOTLOADER_SIZE"):
+        figures[name] = parse_define(joined, name)
+    missing = [name for name, value in figures.items() if value is None]
     if missing:
         raise PartTableUnreadable(
             f"a DFU part table is there, but {' and '.join(missing)} "
             f"{'is' if len(missing) == 1 else 'are'} not, so the read-back "
             "lengths cannot be worked out from it"
         )
-    return ForkParts(parts, assumed, offset + size)
+    _check_figures_are_the_ones_used(joined, figures)
+    return ForkParts(parts, figures["DFU_ASSUMED_FLASH_SIZE"],
+                     figures["BOOTLOADER_OFFSET"] + figures["BOOTLOADER_SIZE"])
+
+
+def _check_figures_are_the_ones_used(text: str, figures: dict) -> None:
+    """Refuse figures the fork no longer works a read-back length out of.
+
+    Reading three `#define`s says what they are, not that they are still what
+    the length follows. A fork that takes the region from a new symbol and
+    leaves these behind at their old values would compare as a match while
+    every length differed. So the function the harness mirrors has to name
+    them itself: that is the one place their meaning lives.
+    """
+    body = _FUNCTION_BODY.search(text)
+    if body is None:
+        raise PartTableUnreadable(
+            f"the figures are here, but no {UPLOAD_LENGTH_FUNCTION}() this can "
+            f"read, so what the fork works a read-back length out of is not "
+            "visible here"
+        )
+    unused = [name for name in figures if name not in body.group(1)]
+    if unused:
+        raise PartTableUnreadable(
+            f"{UPLOAD_LENGTH_FUNCTION}() does not name "
+            f"{' or '.join(sorted(unused))} any more, so the fork works a "
+            "read-back length out of something other than the figures read here"
+        )
 
 
 def drift_warning(fork: ForkParts | None, *,
@@ -476,9 +524,12 @@ def record(publisher, sources: Sequence) -> None:
     try:
         check = check_sources(sources)
     except Exception as error:  # noqa: BLE001 - see the docstring
+        ubertooth = next(
+            (source for source in sources if source.name == "Ubertooth"), None)
         check = PartTableCheck(
             "unchecked",
-            f"DFU part table not checked: {type(error).__name__}: {error}", "",
+            f"DFU part table not checked: {type(error).__name__}: {error}",
+            ubertooth.commit if ubertooth is not None else "",
         )
     if check is not None:
         publisher.emit(EVENT, check.status, check.details())
@@ -502,10 +553,11 @@ def check_sources(sources: Sequence) -> PartTableCheck | None:
             "unchecked", f"DFU part table not checked: {error}", ubertooth.commit
         )
     if fork is None:
+        markers = " nor ".join(TREE_MARKERS)
         return PartTableCheck(
             "skipped",
-            f"DFU part table not checked: {label} names DFU_PARTS nowhere, so it "
-            "is from before the part table and has none to compare with",
+            f"DFU part table not checked: {label} names {markers} anywhere, so "
+            "it is older than the figures and has none to compare with",
             ubertooth.commit,
         )
     warning = drift_warning(fork, fork_label=label)
@@ -519,3 +571,45 @@ def check_sources(sources: Sequence) -> PartTableCheck | None:
         ubertooth.commit,
         fork.flash_sizes,
     )
+
+
+def main(argv=None) -> int:
+    """Compare the harness's copy with one fork commit, from the command line.
+
+    `scripts/ci.sh dfu-part-table` runs this against the fork's main, so a
+    part the fork adds shows up on the workflow run page and not only in the
+    run record of whoever happens to start a run next.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m ubertooth_harness.dfuparts",
+        description="warn when the DFU flash sizes differ from the fork's part table",
+    )
+    parser.add_argument("--ubertooth-source", type=Path, required=True)
+    parser.add_argument("--ubertooth-ref", default="HEAD")
+    args = parser.parse_args(argv)
+    label = f"Ubertooth {args.ubertooth_ref}"
+    try:
+        fork = fork_parts_at(args.ubertooth_source, args.ubertooth_ref)
+    except (OSError, RuntimeError) as error:
+        message = str(error)
+    else:
+        if fork is None:
+            message = (f"{label} names neither {' nor '.join(TREE_MARKERS)}, so "
+                       "it has no part table to compare with")
+        else:
+            message = drift_warning(fork, fork_label=label)
+            if message is None:
+                sizes = ", ".join(describe_flash_size(size)
+                                  for size in fork.flash_sizes)
+                print(f"the DFU flash sizes match {label}'s part table ({sizes})")
+                return 0
+    # A warning, not a failure: the read-back check itself stays loud, and a
+    # fork that has moved on is for someone to follow, not for CI to block.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title=DFU part table::{message}")
+    print(f"warning: {message}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

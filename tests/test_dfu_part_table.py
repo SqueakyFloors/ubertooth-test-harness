@@ -7,6 +7,7 @@ writes those figures fails here rather than in a run.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -77,8 +78,30 @@ DFU_H = """\
 #define BOOTLOADER_SIZE 0x4000
 """
 
+# dfu_upload_length() as the fork writes it: the function the three figures
+# are read for, and the one place that says they are still what a read-back
+# length follows.
+UPLOAD_LENGTH_C = """\
+uint32_t dfu_upload_length(uint32_t flash_size)
+{
+	const uint32_t application = BOOTLOADER_OFFSET + BOOTLOADER_SIZE;
+
+	if (flash_size == 0)
+		flash_size = DFU_ASSUMED_FLASH_SIZE;
+	if (flash_size <= application)
+		return 0;
+	return flash_size - application;
+}
+"""
+
+def _recovery_c(table: str = PART_TABLE_C) -> str:
+    """A whole dfu_recovery.c: a part table and the function the three
+    figures are read for, which the fork keeps in this file together."""
+    return table + UPLOAD_LENGTH_C
+
+
 FORK_FILES = {
-    "host/ubertooth-tools/src/dfu_recovery.c": PART_TABLE_C,
+    "host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(),
     "host/ubertooth-tools/src/dfu_recovery.h": RECOVERY_H,
     "host/ubertooth-tools/src/dfu.h": DFU_H,
 }
@@ -401,25 +424,91 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         self.assertEqual("unchecked", check.status)
         self.assertIn("DFU_PARTS appears in", check.message)
         self.assertIn("dfu_parts.c", check.message)
-        self.assertIn("moved somewhere this does not read", check.message)
+        self.assertIn("which this does not read", check.message)
+
+    def test_a_table_moved_and_renamed_is_still_reported(self):
+        """Searching for the table's own name is not enough on its own: a
+        fork that renames the symbol as well is found by the function whose
+        arithmetic the harness mirrors, which is still there."""
+        moved = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_parts.c":
+             GROWN_TABLE_C.replace("DFU_PARTS", "LPC_PARTS"),
+             "host/ubertooth-tools/src/dfu_parts.h": RECOVERY_H + UPLOAD_LENGTH_C},
+            "the table renamed and moved",
+            removed=("host/ubertooth-tools/src/dfu_recovery.c",
+                     "host/ubertooth-tools/src/dfu_recovery.h"))
+        check = check_sources(self._sources(moved))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("no DFU_PARTS table in", check.message)
+
+    def test_a_second_part_list_elsewhere_is_reported(self):
+        """Today's table where it belongs, and another part list in a file
+        this does not read: the sizes this compared are not all of them."""
+        extra = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_parts_extra.c":
+             GROWN_TABLE_C.replace("DFU_PARTS[]", "DFU_PARTS_EXTRA[]")},
+            "a second part list")
+        check = check_sources(self._sources(extra))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("dfu_parts_extra.c", check.message)
+
+    def test_the_bootloaders_own_copy_of_the_table_is_not_a_second_list(self):
+        """The fork's bootloader keeps the same table to bound its own
+        read-back, and a firmware unit test there fails if the two disagree,
+        so it is already held to the host's and is not this module's to
+        compare. Today's fork has it, so reading it as a second list would
+        make every run unchecked."""
+        bootloader = self._commit_files(
+            {"firmware/bootloader/flash.h":
+             GROWN_TABLE_C.replace("DFU_PARTS[]", "DFU_PARTS[]"),
+             "firmware/tests/test_bootloader_flash_bounds.cpp":
+             "/* reads DFU_PARTS from both tables */\n"},
+            "the bootloader's own copy")
+        check = check_sources(self._sources(bootloader))
+        self.assertEqual("passed", check.status)
+
+    def test_figures_the_fork_no_longer_works_the_length_out_of_are_reported(self):
+        """The three figures are read by name; that they are still what a
+        read-back length follows is what the function body says. A fork that
+        computes the region from something else and leaves these behind would
+        otherwise compare as a match while every length differed."""
+        for description, body in (
+            ("the region from a new symbol",
+             UPLOAD_LENGTH_C.replace("BOOTLOADER_OFFSET + BOOTLOADER_SIZE",
+                                     "APPLICATION_REGION_START")),
+            ("the assumed size from a new symbol",
+             UPLOAD_LENGTH_C.replace("DFU_ASSUMED_FLASH_SIZE", "LINKED_FLASH_SIZE")),
+        ):
+            with self.subTest(description):
+                commit = self._commit_files(
+                    {"host/ubertooth-tools/src/dfu_recovery.c":
+                     PART_TABLE_C + body}, description)
+                check = check_sources(self._sources(commit))
+                self.assertEqual("unchecked", check.status)
+                self.assertIn("works a read-back length out of something other",
+                              check.message)
+
+    def test_the_figures_must_be_worked_out_somewhere_this_can_see(self):
+        commit = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c": PART_TABLE_C},
+            "no upload length function here")
+        check = check_sources(self._sources(commit))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("no dfu_upload_length() this can read", check.message)
 
     def test_a_table_that_moved_or_was_renamed_is_reported_not_skipped(self):
         """The failure this check must never have: the comparison stops
         working and says nothing, so drift walks past it."""
-        for message, files in (
-            ("renamed", {"host/ubertooth-tools/src/dfu_recovery.c":
-                         PART_TABLE_C.replace("DFU_PARTS[]", "DFU_PART_TABLE[]")}),
-            ("moved elsewhere", {"host/ubertooth-tools/src/dfu_recovery.c":
-                                 "/* the table lives in dfu_parts.c now */\n"}),
-        ):
-            with self.subTest(message):
-                commit = self._commit_files(files, f"table {message}")
-                check = check_sources(self._sources(commit))
-                self.assertEqual("unchecked", check.status)
-                self.assertIn("no DFU_PARTS table in", check.message)
-                self.assertIn("renamed, moved, or written in a way", check.message)
-                # Only the files the table could be in, not every file read.
-                self.assertNotIn("src/dfu.h", check.message)
+        renamed = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c":
+             _recovery_c(PART_TABLE_C.replace("DFU_PARTS[]", "DFU_PART_TABLE[]"))},
+            "table renamed")
+        check = check_sources(self._sources(renamed))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("no DFU_PARTS table in", check.message)
+        self.assertIn("renamed, moved, or written in a way", check.message)
+        # Only the files the table could be in, not every file read.
+        self.assertNotIn("src/dfu.h", check.message)
 
     def test_a_reindented_table_is_still_read(self):
         indented = PART_TABLE_C.replace("\n};", "\n\t};")
@@ -448,7 +537,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
 
     def test_a_run_against_a_grown_table_warns_and_records_both_sides(self):
         grown = self._commit_files(
-            {"host/ubertooth-tools/src/dfu_recovery.c": GROWN_TABLE_C},
+            {"host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(GROWN_TABLE_C)},
             "a part with more flash")
         check = check_sources(self._sources(grown))
         self.assertEqual("warning", check.status)
@@ -459,8 +548,9 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
     def test_a_commit_with_no_table_is_skipped_not_a_warning(self):
         check = check_sources(self._sources(self.untabled))
         self.assertEqual("skipped", check.status)
-        self.assertIn("names DFU_PARTS nowhere", check.message)
-        self.assertIn("from before the part table", check.message)
+        self.assertIn("names DFU_PARTS nor dfu_upload_length anywhere",
+                      check.message)
+        self.assertIn("older than the figures", check.message)
         self.assertEqual([], check.details()["fork_flash_sizes"])
 
     def test_a_byte_that_is_not_utf8_does_not_raise_out_of_the_check(self):
@@ -469,7 +559,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         path = self.repo / "host/ubertooth-tools/src/dfu_recovery.c"
         _git(self.repo, "checkout", "-q", "-b", "latin1", self.tabled)
         try:
-            path.write_bytes(PART_TABLE_C.encode() + b"/* Ren\xe9 */\n")
+            path.write_bytes(_recovery_c().encode() + b"/* Ren\xe9 */\n")
             _git(self.repo, "add", str(path.relative_to(self.repo)))
             _git(self.repo, "commit", "-q", "-m", "a byte that is not UTF-8")
             commit = _git(self.repo, "rev-parse", "HEAD")
@@ -486,7 +576,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         self.assertIn("DFU part table not checked:", check.message)
         unreadable = self._commit_files(
             {"host/ubertooth-tools/src/dfu_recovery.c":
-             PART_TABLE_C.replace("128 * 1024", "FLASH_128K")},
+             _recovery_c(PART_TABLE_C.replace("128 * 1024", "FLASH_128K"))},
             "a table written another way")
         check = check_sources(self._sources(unreadable))
         self.assertEqual("unchecked", check.status)
@@ -512,7 +602,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
 
     def test_the_check_is_recorded_in_run_jsonl_and_report_md(self):
         grown = self._commit_files(
-            {"host/ubertooth-tools/src/dfu_recovery.c": GROWN_TABLE_C},
+            {"host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(GROWN_TABLE_C)},
             "a part with more flash")
         out = self._run_dir()
         publisher = EventPublisher("run", JsonlEventSink(out / RUN_LOG))
@@ -562,6 +652,69 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
               / "app.js").read_text(encoding="utf-8")
         self.assertIn('kind === "dfu_part_table" && (status === "warning" '
                       '|| status === "unchecked")', js)
+
+
+class CommandLineTests(_ForkRepo, unittest.TestCase):
+    """`python -m ubertooth_harness.dfuparts`, and the CI step that runs it."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def _main(self, ref: str, github: bool = False):
+        out, err = io.StringIO(), io.StringIO()
+        env = {"GITHUB_ACTIONS": "true" if github else ""}
+        with mock.patch.dict(os.environ, env), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = dfuparts.main(["--ubertooth-source", str(self.repo),
+                                  "--ubertooth-ref", ref])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_match_says_so_and_names_the_sizes(self):
+        code, out, err = self._main(self.tabled)
+        self.assertEqual((0, ""), (code, err))
+        self.assertIn("32 KiB, 64 KiB, 128 KiB, 256 KiB, 512 KiB", out)
+
+    def test_a_difference_warns_on_the_run_page_and_still_exits_zero(self):
+        grown = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(GROWN_TABLE_C)},
+            "a part with more flash")
+        code, out, err = self._main(grown, github=True)
+        self.assertEqual(0, code)
+        self.assertTrue(out.startswith("::warning title=DFU part table::"), out)
+        self.assertIn("LPC17-1M", err)
+
+    def test_a_commit_without_the_figures_and_a_bad_ref_both_warn(self):
+        for ref in (self.untabled, "no-such-ref"):
+            with self.subTest(ref=ref[:7]):
+                code, out, err = self._main(ref)
+                self.assertEqual((0, ""), (code, out))
+                self.assertIn("warning:", err)
+
+    def test_the_ci_step_runs_it_once_before_the_build(self):
+        text = (self.ROOT / "scripts" / "ci.sh").read_text()
+        body = text[text.index("run_build() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertEqual(1, body.count('check_dfu_part_table "$ut"'))
+        self.assertLess(body.index('check_dfu_part_table "$ut"'),
+                        body.index("-m ubertooth_harness build"))
+        self.assertIn("dfu-part-table)", text)
+
+    def test_the_ci_step_warns_with_the_missing_entry_and_passes(self):
+        grown = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c": _recovery_c(GROWN_TABLE_C)},
+            "a part with more flash")
+        result = subprocess.run(
+            ["sh", "scripts/ci.sh", "dfu-part-table"], cwd=self.ROOT,
+            capture_output=True, text=True,
+            env={**os.environ, "UBERTOOTH_SOURCE": str(self.repo),
+                 "UBERTOOTH_REF": grown, "GITHUB_ACTIONS": "true",
+                 "CI_TEMP": str(self._run_dir())},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("=== ci: DFU part table against the fork's own ===",
+                      result.stdout)
+        warning = next(line for line in result.stdout.splitlines()
+                       if line.startswith("::warning title=DFU part table::"))
+        self.assertIn("LPC17-1M", warning)
 
 
 class ReadbackMessageTests(unittest.TestCase):

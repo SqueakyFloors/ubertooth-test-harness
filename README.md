@@ -2081,12 +2081,11 @@ a capture case ran, and `output/` when a command printed a lot):
 
 - `run.jsonl`: every record, appended and fsynced as it happens. The first
   records are `run_started`, then the comparisons with the fork at the
-  commit under test -- `dfu_part_table`, the flash sizes a DFU read-back is
-  checked against ([DFU images](#dfu-images)), on every run, and
-  `libbtbb_pin` ([Building the resolved
+  commit under test -- `libbtbb_pin` ([Building the resolved
   revision](#building-the-resolved-revision)) on a run that builds or names a
-  libbtbb source; neither fails a run -- and `manifest`
-  (sources, plan and registry hashes,
+  libbtbb source, and `dfu_part_table`, the flash sizes a DFU read-back is
+  checked against ([DFU images](#dfu-images)), on every run; neither fails a
+  run -- and `manifest` (sources, plan and registry hashes,
   artifacts, invocations, Python/OS environment, and build toolchain), then
   build commands, preflight, and each test's events, including every command
   and its output as it arrives. One `watchdog` record per board per read
@@ -2479,12 +2478,18 @@ checkout at the resolved Ubertooth commit and record the comparison as a
 `passed` (the same flash sizes), `warning` (they differ; it names the part
 whose entry the copy is missing, and the read-back length such a board would
 report), `unchecked` (the figures are not where they are read from: the table
-renamed, moved to another file, defined twice, or written in a way the reader
-does not know; the reason is given), or `skipped` (the commit names
-`DFU_PARTS` nowhere, so it is from before the part table and has none to
-compare with). Only a commit with no table at all is quiet: a comparison that
-stopped working reports itself, which is the failure this check exists to
-avoid. A difference and an unreadable table are also printed on
+renamed, moved to another file, a second part list elsewhere, defined twice,
+written in a way the reader does not know, or a read-back length the fork now
+works out from something other than these three figures; the reason is
+given), or `skipped` (the commit names neither `DFU_PARTS` nor
+`dfu_upload_length` anywhere, so it is older than the figures and has none to
+compare with). Only a commit that never had the figures is quiet: a
+comparison that stopped working reports itself, which is the failure this
+check exists to avoid. The CI `build` job runs the same comparison once
+against the fork's `main` and shows it on the workflow run page
+(`scripts/ci.sh dfu-part-table` runs only that step). A difference and an
+unreadable table are also printed
+on
 stderr and shown in the browser live view; a match and a skip leave the
 report row to say so. Nothing fails on this: the read-back check stays the
 harness's copy, so a length no part explains is still loud, and the warning
