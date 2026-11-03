@@ -1162,6 +1162,18 @@ def _boards_command(args: argparse.Namespace) -> int:
     ]
     # The host lock is local to the host this runs on, like the leases.
     states.append(board_leases.host_lock_state(directory=args.lease_dir))
+    # Which devices come with which: a reader who finds one held by a command
+    # that named only the other needs to see why (the pair is held as one).
+    for state in states:
+        pair = [
+            {
+                "resource": other,
+                "why": registry.describe_pairing(other, state["resource"]),
+            }
+            for other in board_leases.pair_members(registry, state["resource"])
+        ]
+        if pair:
+            state["pair"] = pair
     if args.json:
         print(json.dumps(states, indent=2, sort_keys=True))
         return 0
@@ -1203,6 +1215,10 @@ def _boards_command(args: argparse.Namespace) -> int:
             print(f"{label:<12} held  {board_leases.describe_holder({})}")
         else:
             print(f"{label:<12} free")
+        for member in state.get("pair", ()):
+            # Held with this one, so a holder a reader did not expect is
+            # explained where they see it.
+            print(f"{'':<12} pair:  {member['why']}, so the two are held together")
         if state.get("waiting"):
             # Commands queued for it: a free board with a queue is somebody
             # else's next, and a held one shows how deep the queue is.
@@ -1305,8 +1321,15 @@ def _lease_command(args: argparse.Namespace) -> int:
         raise HarnessError("lease needs a command after --")
     external_template = _external_template(args)
     registry = FileResourceRegistry.load(args.hardware)
+    # A device wired to a debug programmer is held with it, whichever of the
+    # two was named: using one without the other corrupts a test or leaves a
+    # board needing hands on it. Said before the attempt, which is also when
+    # a wait for either of them starts.
+    aliases, pairing = board_leases.expand_pairs(registry, args.boards)
+    for clause in pairing:
+        print(f"note: {clause}, so it is held too", file=sys.stderr)
     boards = []
-    for alias in args.boards:
+    for alias in aliases:
         resource = registry.get(alias)
         if resource.type not in board_leases.LEASED_TYPES:
             raise HarnessError(

@@ -9,6 +9,11 @@ leading zeros, which is how ``nrfutil`` and sysfs each print it.
 That is what a bench note or another agent's message gives you, so it is what
 this takes; ``ubertooth-harness lease`` wants registry aliases.
 
+A device the registry says is permanently wired to another one -- a debug
+programmer and the board it programs -- is held together with it, whichever of
+the two is named, in the same all-or-nothing attempt. Naming both is harmless.
+The note on standard error says which device a pair brought in and why.
+
 Everything else is the harness's own lease machinery. For the device types the
 harness leases this script resolves the names and runs
 ``ubertooth-harness lease``, so the locks, their order, the all-or-nothing
@@ -188,13 +193,28 @@ def main(argv: list[str] | None = None) -> int:
     args, command = parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         registry = FileResourceRegistry.load(args.hardware)
-        resources = [resolve(registry, name) for name in args.devices.split(",")]
+        named = [resolve(registry, name) for name in args.devices.split(",")]
+        # A device permanently wired to a debug programmer is held with it,
+        # whichever of the two was named, and naming both is harmless: the
+        # expansion deduplicates. The harness decides the set, so `hold` and
+        # a run can never hold different halves of a pair.
+        aliases, pairing = leases.expand_pairs(
+            registry, [resource.alias for resource in named]
+        )
+        resources = [registry.get(alias) for alias in aliases]
         # LeaseError too: a registry can load and still hold a serial no lock
         # file can be named after.
         keys = {resource.alias: lock_key(resource) for resource in resources}
         extra = extra_boards(resources)
     except (RegistryError, leases.LeaseError) as error:
         return _fail(error)
+
+    # Said here, whichever way the locks are taken below, and before the
+    # attempt, which is also when a wait for any of them starts. The
+    # delegate is handed the expanded devices, so its own expansion adds
+    # nothing and it says nothing either: one note, in one place.
+    for clause in pairing:
+        print(f"note: {clause}, so it is held too", file=sys.stderr)
 
     # With nothing extra to take, this is purely a wrapper: the harness holds
     # every lock, decides the host lock, and runs the command.

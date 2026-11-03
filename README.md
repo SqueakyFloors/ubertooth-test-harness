@@ -1961,6 +1961,55 @@ find them busy and refuse (it fails, it does not hang). Use
 `--external-board-lock ''` there, or drop the wrapper and let the harness
 take both locks.
 
+### A device and its debug programmer: one pair
+
+A bench may leave a programmer wired to one board's debug or programming
+header (a USB serial adapter, an SWD probe). The two are one piece of
+hardware as far as using either goes: programming the board while another
+command owns it, or using the board while it is being programmed, spoils a
+test or leaves the board needing hands on it. So the registry records the
+pairing, and every command that holds one member holds the other
+([#286](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/286)):
+
+```yaml
+  Prog_Linux0:
+    type: Debug programmer
+    attached to: Host_Linux
+    programs: UT_Linux1          # the one board it is wired to
+    identity:
+      serial: A000AA00           # leased as programmer-A000AA00
+```
+
+Whichever member a command names, both are taken in the same all-or-nothing
+attempt, in the usual lock order, and naming both is harmless. That holds for
+`ubertooth-harness lease`, [`scripts/lab/hold`](scripts/lab/README.md), a
+`run-suite` that binds or power-cycles the board, and
+`scripts/lab/hub-port` on either member's port. The three commands a person
+runs by hand say on standard error which device the pairing brought in and why
+(`note: Prog_Linux0 is the programmer wired to UT_Linux1, so it is held
+too`), so a holder nobody asked for is never a mystery, and `boards` prints
+the pairing under both devices. A run holds the pair the same way, and its
+record does not yet say why it took the programmer
+([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)):
+
+```
+Prog_Linux0  free
+             pair:  UT_Linux1 is the device Prog_Linux0 programs, so the two are held together
+UT_Linux1    free
+             pair:  Prog_Linux0 is the programmer wired to UT_Linux1, so the two are held together
+```
+
+The registry is refused when a pairing cannot be real: a target that is not
+registered, is not a device the harness leases, sits on another host (leases
+are local to one host), or already has a programmer, a programmer whose
+serial another device is registered with or which spells a file the lease
+directory keeps for itself, a programmer that names itself or more than one
+target, a `programs:` on anything that is not a `Debug programmer`, and a
+pairing that loops back on itself. A chain of pairs is allowed and is held as
+one set. No test binds a programmer and the harness
+never drives one; see
+[`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs).
+
 ## MAC polling workload soak
 
 [`testplans/mac-polling.yaml`](testplans/mac-polling.yaml) contains one dedicated `MAC polling soak` item.

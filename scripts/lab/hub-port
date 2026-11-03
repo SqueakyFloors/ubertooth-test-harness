@@ -21,7 +21,10 @@ USBHub3+, 1 to 3 on a StarTech managed hub.
 It holds the harness's host power/firmware lock while it switches, so it can
 never overlap a run that is flashing or switching power, and it refuses a port
 whose registered device someone is holding, naming the holder, so it cannot
-cut power under another run or another person. `--force` switches without
+cut power under another run or another person. A device permanently wired to
+another -- a board and its debug programmer -- is held with it, because
+cutting the board's power while it is being programmed leaves it needing hands
+on it. `--force` switches without
 holding the device, for one that is wedged and whose holder has given up on
 it; it cannot then say who holds it.
 
@@ -245,17 +248,34 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
         # have its power cut. An empty port has nothing to hold.
         device = device_on_port(registry, resource.alias, args.port)
         boards = []
+        pairing = ()
         if device is not None and not args.force:
-            # Both of its lock names, exactly as `hold` takes them, so a bench
-            # script holding either one is met here too.
-            boards = [device_board(device)]
-            second = bench_lock_board(device)
-            if second is not None:
-                boards.append(second)
+            # Every device held with this one: a board wired to a debug
+            # programmer comes with it, because cutting the board's power
+            # while it is being programmed leaves it needing hands on it.
+            aliases, pairing = leases.expand_pairs(registry, [device.alias])
+            for alias in aliases:
+                # Both lock names of each, exactly as `hold` takes them, so a
+                # bench script holding either one is met here too.
+                held = registry.get(alias)
+                boards.append(device_board(held))
+                second = bench_lock_board(held)
+                if second is not None:
+                    boards.append(second)
+        for clause in pairing:
+            print(
+                f"note: {clause}, so it is held while the port is switched",
+                file=sys.stderr,
+            )
         if device is not None and args.force:
+            # Every device the switch leaves unprotected, not only the one on
+            # the port: a member of a pair is held with it, so --force leaves
+            # the other one unheld too.
+            unheld, _why = leases.expand_pairs(registry, [device.alias])
             print(
                 f"note: switching port {args.port} without holding "
-                f"{device.alias}, which may be in use (--force)",
+                + ", ".join(unheld)
+                + ", which may be in use (--force)",
                 file=sys.stderr,
             )
         controller = controller_from_resource(resource, allow_real_changes=True)

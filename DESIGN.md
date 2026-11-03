@@ -356,6 +356,16 @@ resources:
       port: 1
 ```
 
+A resource MAY be recorded as permanently wired to another one: a
+`Debug programmer` names the single device it `programs`. The two are then
+held as one pair, whichever of them a command names, because using either
+without the other spoils a test or leaves a board needing hands on it
+(`FileResourceRegistry.pair_members`, `leases.expand_pairs`;
+[`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs)).
+Validation requires both members on one host, one programmer per device, and
+no self-pairing or loop; expansion is deduplicated, deterministic, and
+terminates on any graph it is given.
+
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
 valid host attachments, type-correct defaults, and valid power relationships.

@@ -50,6 +50,20 @@ key the harness will use when it does.
 A name that matches two devices is refused rather than resolved to the first
 one, so a short name can never quietly select the wrong device.
 
+A device the registry says is permanently wired to another one -- a board and
+its debug programmer (`programs:` in the registry) -- is held together with
+it, whichever of the two is named, in the same all-or-nothing attempt. Naming
+both is harmless; the note on standard error says which device the pairing
+brought in and why:
+
+```sh
+.venv/bin/python scripts/lab/hold UT_Linux1 -- lpc21isp -control ...
+note: Prog_Linux0 is the programmer wired to UT_Linux1, so it is held too
+```
+
+That replaces nesting one lock inside another by hand, which can wait for the
+second while already holding the first.
+
 `UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK` is how a bench whose own scripts lock
 devices with per-device `flock` files keeps both sides honest: every hold
 takes that file too. Point it at the bench's existing lock files.
@@ -188,7 +202,10 @@ port's state afterwards so you can see the result.
 
 It holds the port's registered device as well, so it cannot cut power under
 another run or another person, and a device already held is reported with its
-holder's name rather than switched. `--wait SECONDS` sets how long it waits
+holder's name rather than switched. A device wired to a debug programmer
+holds that programmer too, and the other way round: cutting a board's power
+while it is being programmed leaves it needing hands on it. `--wait SECONDS`
+sets how long it waits
 for either lock (two minutes by default, since a run holds the host lock
 across a build and a flash); `--wait 0` reports the holder after about a
 second rather than waiting. `--force`

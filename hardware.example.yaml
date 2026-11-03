@@ -147,6 +147,29 @@ resources:
       BD_ADDR: "C8:00:00:00:00:02"
       name: UT-ESP32-000002
 
+  # A debug programmer: a USB serial adapter, an SWD probe, or anything else
+  # wired to one board's debug or in-system programming header and left there.
+  # Nothing in the harness drives it; it is registered so that it and the
+  # board it is wired to are never used apart. `programs:` names that board,
+  # and every command that holds either one holds both: programming a board
+  # while another command owns it, or using the board while it is being
+  # programmed, spoils a test or leaves the board needing hands on it. A
+  # power change on either member holds the other too.
+  #
+  # Identify it by the serial its USB descriptor reports, which is what its
+  # lease file is named after (`programmer-<serial>`); `serial device` is
+  # optional and, where the adapter has one, must be the stable
+  # /dev/serial/by-id path rather than /dev/ttyUSB<n>. Both resources must be
+  # attached to the same host, each board has at most one programmer, and the
+  # pairing may not loop back on itself.
+  Prog_Linux0:
+    type: Debug programmer
+    attached to: Host_Linux
+    programs: UT_Linux1
+    identity:
+      serial: REPLACE_WITH_PROGRAMMER_SERIAL
+      # serial device: /dev/serial/by-id/usb-Vendor_Adapter_REPLACE-if00-port0
+
   # StarTech managed hub: switched through its built-in FTDI management
   # controller, which sits on downstream port 4; only ports 1-3 are DUT ports.
   # Use the stable /dev/serial/by-id path (required). Needs pyserial, see
