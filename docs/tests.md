@@ -2615,15 +2615,15 @@ its dump measured against a guess.
 
 The length still has to be one the fork's part table explains, and the
 harness keeps its own copy of the flash sizes in that table. A length outside
-it fails the step and names the part it implies (`the read-back covers
-1032192 bytes, the application region of a part with 1024 KiB of flash: no
-such part in the harness's copy of the fork's part table (32 KiB, 64 KiB,
-128 KiB, 256 KiB, 512 KiB)`), so a part the fork added later shows up as the
-entry to add rather than as an unexplained figure. Every run also reads the
-table out of the fork's checkout at the commit under test and records the
-comparison, so the copy is kept in step without waiting for such a board to
-reach the bench: see the `dfu_part_table` record in the README's "DFU images"
-section.
+it fails the step and says which flash size it would belong to (`the read-back
+covers 1032192 bytes, which no part in the harness's copy of the fork's part
+table explains (32 KiB, 64 KiB, 128 KiB, 256 KiB, 512 KiB); that length would
+be the application region of a part with 1024 KiB of flash`), so a part the
+fork added later shows up as the entry to add rather than as an unexplained
+figure. Every run also reads the table out of the fork's checkout at the
+commit under test and records the comparison, so the copy is kept in step
+without waiting for such a board to reach the bench: see the `dfu_part_table`
+record in the README's "DFU images" section.
 
 All three arrived on the fork's main after the earlier releases, so the case
 expects them: the range line in `10c3381`

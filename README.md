@@ -2080,7 +2080,11 @@ into `<output>/<run-id>/` (plus `build/` with `--build`, `captures/` when
 a capture case ran, and `output/` when a command printed a lot):
 
 - `run.jsonl`: every record, appended and fsynced as it happens. The first
-  records are `run_started` and `manifest` (sources, plan and registry hashes,
+  records are `run_started`, then the two comparisons with the fork at the
+  commit under test -- `libbtbb_pin` ([libbtbb](#libbtbb)) and
+  `dfu_part_table`, the flash sizes a DFU read-back is checked against
+  ([DFU images](#dfu-images)), neither of which fails a run -- and `manifest`
+  (sources, plan and registry hashes,
   artifacts, invocations, Python/OS environment, and build toolchain), then
   build commands, preflight, and each test's events, including every command
   and its output as it arrives. One `watchdog` record per board per read
@@ -2472,12 +2476,17 @@ checkout at the resolved Ubertooth commit and record the comparison as a
 `dfu_part_table` record in run.jsonl and a "DFU part table" row in report.md:
 `passed` (the same flash sizes), `warning` (they differ; it names the part
 whose entry the copy is missing, and the read-back length such a board would
-report), `unchecked` (the figures could not be read at that commit; the reason
-is given) or `skipped` (a fork commit from before the table). A difference and
-an unreadable table are also printed on stderr and shown in the browser live
-view. Nothing fails on this: the read-back check stays the harness's copy, so
-a length no part explains is still loud, and the warning is what says to add
-the entry (`ubertooth_harness/dfuparts.py`).
+report), `unchecked` (the figures are not where they are read from: the table
+renamed or moved, written in a way the reader does not know, or a fork commit
+from before it; the reason is given), or `skipped` (the commit has no
+`dfu_recovery.c` or `dfu_recovery.h` at all, so there is nothing to compare
+with). The loud status is deliberate where the two cannot be told apart: a
+comparison that quietly stopped working is the failure this check exists to
+avoid. A difference and an unreadable table are also printed on
+stderr and shown in the browser live view; a match and a skip leave the
+report row to say so. Nothing fails on this: the read-back check stays the
+harness's copy, so a length no part explains is still loud, and the warning
+is what says to add the entry (`ubertooth_harness/dfuparts.py`).
 
 ## Target runner service
 

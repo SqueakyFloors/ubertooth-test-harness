@@ -1010,9 +1010,10 @@ class DfuReadbackLengthTests(unittest.TestCase):
         odd = dfuimage.readback_plan("Reading back 1024 bytes, 0x4000-0x43ff: part "
                                      "0x25011722 (LPC1754) has 128 KiB of flash\n")
         self.assertEqual(
-            ["the read-back covers 1024 bytes, the application region of a part "
-             "with 17 KiB of flash: no such part in the harness's copy of the "
-             "fork's part table (32 KiB, 64 KiB, 128 KiB, 256 KiB, 512 KiB)"],
+            ["the read-back covers 1024 bytes, which no part in the harness's copy "
+             "of the fork's part table explains (32 KiB, 64 KiB, 128 KiB, 256 KiB, "
+             "512 KiB); that length would be the application region of a part with "
+             "17 KiB of flash"],
             odd.problems())
         # A plan that does not add up fails the comparison as well.
         self.assertIn("0x4100-0x1fffe is not 114688 bytes",
@@ -1138,9 +1139,8 @@ class DfuReadbackRunTests(unittest.TestCase):
         for flags, reason in (
             ({"no_plan_line": True}, "the read-back did not report the range it covers"),
             ({"odd_plan_line": True},
-             "the read-back covers 1024 bytes, the application region of a part "
-             "with 17 KiB of flash: no such part in the harness's copy of the "
-             "fork's part table"),
+             "the read-back covers 1024 bytes, which no part in the harness's copy "
+             "of the fork's part table explains"),
         ):
             with self.subTest(**flags):
                 board, code, output = self.restore_with(**flags)

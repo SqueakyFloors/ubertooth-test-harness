@@ -658,9 +658,11 @@
       // The libbtbb differs from the fork's install.sh pin, or was not compared.
       pushLog(`warning: ${String(details.message ?? "")}`);
     }
-    if (kind === "dfu_part_table" && status !== "passed") {
+    if (kind === "dfu_part_table" && (status === "warning" || status === "unchecked")) {
       // The flash sizes a DFU read-back is checked against differ from the
-      // fork's own part table, or were not compared.
+      // fork's own part table, or the comparison stopped working. A match,
+      // and a commit without a table, leave the report row to say so, as
+      // the terminal stream does (events.py).
       pushLog(`warning: ${String(details.message ?? "")}`);
     }
     if (kind === "lease_queued") {

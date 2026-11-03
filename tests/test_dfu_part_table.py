@@ -82,12 +82,13 @@ FORK_FILES = {
     "host/ubertooth-tools/src/dfu.h": DFU_H,
 }
 
-# One more part, with flash no entry in the harness's copy has: an
-# LPC1788-sized part, the difference this check is for.
+# One more part, with more flash than any entry in the harness's copy has:
+# the difference this check is for. No LPC175x/176x part has 1 MiB, which is
+# the point -- it stands for whatever part the fork adds next.
+GROWN_PART = '\t{ 0x281D3747, "LPC17-1M", 1024 * 1024 },\n'
 GROWN_TABLE_C = PART_TABLE_C.replace(
     '\t{ 0x26113F37, "LPC1769", 512 * 1024 },\n',
-    '\t{ 0x26113F37, "LPC1769", 512 * 1024 },\n'
-    '\t{ 0x281D3747, "LPC1788", 512 * 2048 },\n',
+    '\t{ 0x26113F37, "LPC1769", 512 * 1024 },\n' + GROWN_PART,
 )
 
 GIT_ENV = {
@@ -121,12 +122,18 @@ class ParseTests(unittest.TestCase):
             ("0x4000", 0x4000), ("0x0", 0), ("128", 128), ("128u", 128),
             ("128 * 1024", 128 * 1024), ("(128u * 1024u)", 128 * 1024),
             ("16 * 1024 * 1024", 16 * 1024 * 1024), ("0x25011722", 0x25011722),
+            # C reads a leading zero as octal.
+            ("010", 8), ("0100 * 2", 128),
         ):
             with self.subTest(text):
                 self.assertEqual(value, parse_number(text))
 
     def test_a_figure_this_cannot_read_is_none_not_a_guess(self):
-        for text in ("", "   ", "flash_size(part)", "1 + 2", "128 << 10", "FOO"):
+        """None, never an exception: this runs inside a run that must not
+        fail on an advisory check."""
+        for text in ("", "   ", "flash_size(part)", "1 + 2", "128 << 10", "FOO",
+                     # Not a C literal at all: 8 and 9 are not octal digits.
+                     "08", "0779"):
             with self.subTest(text):
                 self.assertIsNone(parse_number(text))
 
@@ -162,8 +169,32 @@ class ParseTests(unittest.TestCase):
         with self.assertRaisesRegex(PartTableUnreadable, r"LPC1756.*FLASH_256K"):
             parse_part_table(text)
         empty = "static const struct dfu_part DFU_PARTS[] = {\n};\n"
-        with self.assertRaisesRegex(PartTableUnreadable, "no entry this can read"):
+        with self.assertRaisesRegex(PartTableUnreadable, "holds no entry"):
             parse_part_table(empty)
+
+    def test_a_row_written_another_way_is_reported_not_passed_over(self):
+        """Every row has to be accounted for. A row this cannot read would
+        otherwise drop a part and leave the comparison reporting a match,
+        which is the whole failure #283 is about."""
+        for description, row in (
+            ("a fourth column", '\t{ 0x281D3747, "LPC17-1M", 1024 * 1024, 1 },\n'),
+            ("a name that is not a literal", '\t{ 0x281D3747, NULL, 1024 * 1024 },\n'),
+            ("a name from a macro", '\t{ 0x281D3747, PART_NAME, 1024 * 1024 },\n'),
+            ("designated initializers",
+             '\t{ .part_id = 0x281D3747, .flash_size = 1024 * 1024 },\n'),
+            ("a macro instead of a row", '\tLPC_PART(0x281D3747, "LPC17-1M", 1024),\n'),
+            ("two fields", '\t{ 0x281D3747, 1024 * 1024 },\n'),
+        ):
+            with self.subTest(description):
+                text = PART_TABLE_C.replace(
+                    '\t{ 0x26113F37, "LPC1769", 512 * 1024 },\n',
+                    '\t{ 0x26113F37, "LPC1769", 512 * 1024 },\n' + row)
+                with self.assertRaises(PartTableUnreadable):
+                    parse_part_table(text)
+
+    def test_an_array_whose_name_merely_ends_in_the_tables_is_not_the_table(self):
+        text = PART_TABLE_C.replace("DFU_PARTS[]", "BOOTLOADER_DFU_PARTS[]")
+        self.assertIsNone(parse_part_table(text))
 
     def test_defines_are_read_and_a_missing_one_is_none(self):
         self.assertEqual(128 * 1024,
@@ -191,11 +222,20 @@ class DriftWarningTests(unittest.TestCase):
         grown = _fork_parts(parts=parse_part_table(GROWN_TABLE_C))
         warning = drift_warning(grown, fork_label="Ubertooth abc1234")
         self.assertIn("Ubertooth abc1234", warning)
-        self.assertIn("LPC1788", warning)
+        self.assertIn("LPC17-1M", warning)
         self.assertIn("1024 KiB of flash", warning)
         self.assertIn("PART_FLASH_SIZES does not list", warning)
         # The read-back such a board would report, which is what fails today.
         self.assertIn(f"{dfuimage.upload_length(1024 * 1024)} bytes", warning)
+
+    def test_the_quoted_length_follows_the_forks_own_application_region(self):
+        """A fork that moved both the table and the bootloader region: the
+        length a board reports is the fork's arithmetic, not the copy's."""
+        moved = _fork_parts(parts=parse_part_table(GROWN_TABLE_C),
+                            application_offset=0x8000)
+        warning = drift_warning(moved)
+        self.assertIn(f"read-back of {1024 * 1024 - 0x8000} bytes", warning)
+        self.assertIn("its application region starts at 0x8000", warning)
 
     def test_a_size_the_fork_dropped_is_reported_too(self):
         smaller = _fork_parts(parts=tuple(
@@ -218,32 +258,60 @@ class DriftWarningTests(unittest.TestCase):
 
 
 class _ForkRepo:
-    """A throwaway fork: one commit before the part table, then one with it."""
+    """A throwaway fork, built once for the class: one commit before the DFU
+    recovery sources, then one holding them.
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.repo = Path(self.tmp.name) / "ubertooth"
-        self.repo.mkdir()
-        _git(self.repo, "init", "-q", "-b", "main")
-        (self.repo / "README").write_text("before the part table\n")
-        _git(self.repo, "add", "README")
-        _git(self.repo, "commit", "-q", "-m", "no part table yet")
-        self.untabled = _git(self.repo, "rev-parse", "HEAD")
-        self.tabled = self._commit_files(FORK_FILES, "the part table")
+    A test that needs another commit takes a branch of its own, so `main`
+    stays at the base commit and no test depends on another's order.
+    """
 
-    def _commit_files(self, files: dict[str, str], message: str) -> str:
+    _branches = 0
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._tmp.cleanup)
+        cls.repo = Path(cls._tmp.name) / "ubertooth"
+        cls.repo.mkdir()
+        _git(cls.repo, "init", "-q", "-b", "main")
+        (cls.repo / "README").write_text("before the DFU recovery sources\n")
+        _git(cls.repo, "add", "README")
+        _git(cls.repo, "commit", "-q", "-m", "no DFU recovery sources yet")
+        cls.untabled = _git(cls.repo, "rev-parse", "HEAD")
+        cls.tabled = cls._commit(FORK_FILES, (), "the DFU recovery sources")
+
+    @classmethod
+    def _commit(cls, files: dict[str, str], removed, message: str) -> str:
         for name, text in files.items():
-            path = self.repo / name
+            path = cls.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
-            _git(self.repo, "add", name)
-        _git(self.repo, "commit", "-q", "-m", message)
-        return _git(self.repo, "rev-parse", "HEAD")
+            _git(cls.repo, "add", name)
+        for name in removed:
+            _git(cls.repo, "rm", "-q", name)
+        _git(cls.repo, "commit", "-q", "-m", message)
+        return _git(cls.repo, "rev-parse", "HEAD")
+
+    def _commit_files(self, files: dict[str, str], message: str,
+                      removed: tuple[str, ...] = ()) -> str:
+        """A commit over the base holding ``files``, on a branch of its own."""
+        type(self)._branches += 1
+        branch = f"case-{type(self)._branches}"
+        _git(self.repo, "checkout", "-q", "-b", branch, self.tabled)
+        try:
+            return self._commit(files, removed, message)
+        finally:
+            _git(self.repo, "checkout", "-q", "main")
 
     def _sources(self, commit: str):
         return (SourceRevision("Ubertooth", str(self.repo), "", "main",
                                commit, commit[:7]),)
+
+    def _run_dir(self) -> Path:
+        out = tempfile.TemporaryDirectory()
+        self.addCleanup(out.cleanup)
+        return Path(out.name)
 
 
 class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
@@ -254,12 +322,42 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         self.assertEqual(dfuimage.PART_FLASH_SIZES, fork.flash_sizes)
         self.assertEqual((128 * 1024, 0x4000),
                          (fork.assumed_flash_size, fork.application_offset))
-        # A commit from before the table has nothing to compare with.
-        self.assertIsNone(fork_parts_at(self.repo, self.untabled))
 
     def test_a_bad_ref_raises_rather_than_reading_as_no_table(self):
         with self.assertRaises(RuntimeError):
             fork_parts_at(self.repo, "no-such-ref")
+
+    def test_a_commit_without_the_recovery_sources_has_nothing_to_compare(self):
+        """The one thing None means. dfu.h is older than the part table, so a
+        commit that has only that still counts as having no table."""
+        self.assertIsNone(fork_parts_at(self.repo, self.untabled))
+        only_dfu_h = self._commit_files(
+            {}, "before dfu_recovery.c",
+            removed=("host/ubertooth-tools/src/dfu_recovery.c",
+                     "host/ubertooth-tools/src/dfu_recovery.h"))
+        self.assertIsNone(fork_parts_at(self.repo, only_dfu_h))
+
+    def test_a_table_that_moved_or_was_renamed_is_reported_not_skipped(self):
+        """The failure this check must never have: the comparison stops
+        working and says nothing, so drift walks past it."""
+        for message, files in (
+            ("renamed", {"host/ubertooth-tools/src/dfu_recovery.c":
+                         PART_TABLE_C.replace("DFU_PARTS[]", "DFU_PART_TABLE[]")}),
+            ("moved elsewhere", {"host/ubertooth-tools/src/dfu_recovery.c":
+                                 "/* the table lives in dfu_parts.c now */\n"}),
+        ):
+            with self.subTest(message):
+                commit = self._commit_files(files, f"table {message}")
+                check = check_sources(self._sources(commit))
+                self.assertEqual("unchecked", check.status)
+                self.assertIn("no DFU_PARTS table in", check.message)
+                self.assertIn("renamed or moved", check.message)
+                # Only the files the table could be in, not every file read.
+                self.assertNotIn("src/dfu.h", check.message)
+
+    def test_a_reindented_table_is_still_read(self):
+        indented = PART_TABLE_C.replace("\n};", "\n\t};")
+        self.assertEqual(14, len(parse_part_table(indented)))
 
     def test_a_table_without_the_figures_beside_it_is_reported(self):
         commit = self._commit_files(
@@ -288,14 +386,15 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
             "a part with more flash")
         check = check_sources(self._sources(grown))
         self.assertEqual("warning", check.status)
-        self.assertIn("LPC1788", check.message)
+        self.assertIn("LPC17-1M", check.message)
         self.assertEqual(list(dfuimage.PART_FLASH_SIZES) + [1024 * 1024],
                          check.details()["fork_flash_sizes"])
 
     def test_a_commit_with_no_table_is_skipped_not_a_warning(self):
         check = check_sources(self._sources(self.untabled))
         self.assertEqual("skipped", check.status)
-        self.assertIn("no DFU part table to compare with", check.message)
+        self.assertIn("so there is no part table to compare with", check.message)
+        self.assertIn("dfu_recovery.c", check.message)
         self.assertEqual([], check.details()["fork_flash_sizes"])
 
     def test_the_check_says_why_it_could_not_run(self):
@@ -318,8 +417,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         grown = self._commit_files(
             {"host/ubertooth-tools/src/dfu_recovery.c": GROWN_TABLE_C},
             "a part with more flash")
-        out = Path(self.tmp.name) / "run"
-        out.mkdir()
+        out = self._run_dir()
         publisher = EventPublisher("run", JsonlEventSink(out / RUN_LOG))
         publisher.emit("run_started", "running", {})
         cli._record_dfu_part_table(publisher, self._sources(grown))
@@ -329,13 +427,12 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         record = events[1]
         self.assertEqual(("dfu_part_table", "warning"),
                          (record["event_type"], record["status"]))
-        self.assertIn("LPC1788", record["details"]["message"])
+        self.assertIn("LPC17-1M", record["details"]["message"])
         report = (out / REPORT).read_text()
-        self.assertRegex(report, r"\| DFU part table \| \*\*warning\*\*: .*LPC1788")
+        self.assertRegex(report, r"\| DFU part table \| \*\*warning\*\*: .*LPC17-1M")
 
     def test_a_match_is_recorded_without_a_warning_row(self):
-        out = Path(self.tmp.name) / "match"
-        out.mkdir()
+        out = self._run_dir()
         publisher = EventPublisher("run", JsonlEventSink(out / RUN_LOG))
         publisher.emit("run_started", "running", {})
         cli._record_dfu_part_table(publisher, self._sources(self.tabled))
@@ -357,15 +454,17 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
             return stream.getvalue()
 
         self.assertEqual("warning: sizes differ\n", shown("warning"))
-        # Nothing a reader can act on: a match, and a fork commit from
-        # before the part table, leave the report row to say so.
+        self.assertEqual("warning: sizes differ\n", shown("unchecked"))
+        # Nothing a reader can act on: a match, and a commit without the
+        # table, leave the report row to say so.
         self.assertEqual("", shown("passed"))
         self.assertEqual("", shown("skipped"))
-        self.assertEqual("warning: sizes differ\n", shown("unchecked"))
-        # The browser live view shows the same difference.
+        # The browser live view shows the same two, and stays quiet about the
+        # same two.
         js = (Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
               / "app.js").read_text(encoding="utf-8")
-        self.assertIn('kind === "dfu_part_table" && status !== "passed"', js)
+        self.assertIn('kind === "dfu_part_table" && (status === "warning" '
+                      '|| status === "unchecked")', js)
 
 
 class ReadbackMessageTests(unittest.TestCase):
@@ -374,11 +473,12 @@ class ReadbackMessageTests(unittest.TestCase):
     def test_the_message_names_the_part_size_the_length_implies(self):
         plan = dfuimage.readback_plan(
             "Reading back 1032192 bytes, 0x4000-0xfffff: part 0x281D3747 "
-            "(LPC1788) has 1024 KiB of flash\n")
+            "(LPC17-1M) has 1024 KiB of flash\n")
         self.assertEqual(
-            ["the read-back covers 1032192 bytes, the application region of a part "
-             "with 1024 KiB of flash: no such part in the harness's copy of the "
-             "fork's part table (32 KiB, 64 KiB, 128 KiB, 256 KiB, 512 KiB)"],
+            ["the read-back covers 1032192 bytes, which no part in the harness's "
+             "copy of the fork's part table explains (32 KiB, 64 KiB, 128 KiB, "
+             "256 KiB, 512 KiB); that length would be the application region of a "
+             "part with 1024 KiB of flash"],
             plan.problems(),
         )
 

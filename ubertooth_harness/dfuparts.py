@@ -18,8 +18,8 @@ Nothing here fails a run. The read-back check stays the harness's own copy,
 so a length no part explains is still loud; this is what says to add the
 entry. `run-suite` and `build` record it for the Ubertooth commit they
 resolve as a `dfu_part_table` record in run.jsonl (status passed, warning,
-unchecked or skipped; report.md shows it, as does the browser live view) and
-print anything but a match on stderr.
+unchecked, or skipped; report.md shows it, as does the browser live view) and
+print a difference, or a comparison that stopped working, on stderr.
 """
 
 from __future__ import annotations
@@ -49,15 +49,29 @@ SOURCE_FILES = (
     "host/ubertooth-tools/src/dfu.h",
 )
 
-# `static const struct dfu_part DFU_PARTS[] = { ... };`. The table ends at a
-# closing brace at the start of a line, so a brace inside it cannot end it.
-_TABLE = re.compile(r"DFU_PARTS\[\]\s*=\s*\{(.*?)^\};", re.S | re.M)
-# One entry: `{ 0x25011722, "LPC1754", 128 * 1024 },`.
-_ENTRY = re.compile(r"\{\s*([^,{}]+?)\s*,\s*\"([^\"]*)\"\s*,\s*([^,{}]+?)\s*,?\s*\}")
+# The file the table itself lives in. Whether it is there is what tells a
+# commit from before the DFU recovery sources from one whose table this can
+# no longer find: the first has nothing to compare with, the second is a
+# difference to report.
+PART_TABLE_FILES = SOURCE_FILES[:2]
+
+# `static const struct dfu_part DFU_PARTS[] = { ... };`. The table ends at the
+# `};` that closes it, which is the only one at the start of a line (an entry
+# line ends in `},`), so a brace inside the table cannot end it.
+_TABLE = re.compile(r"\bDFU_PARTS\b\s*\[\]\s*=\s*\{(.*?)^[ \t]*\}[ \t]*;", re.S | re.M)
+# One braced row of the table body, and the three fields a row must hold:
+# `{ 0x25011722, "LPC1754", 128 * 1024 },`. A row is matched as a whole, so a
+# row written any other way is reported rather than passed over.
+_ROW = re.compile(r"\{([^{}]*)\}")
+_FIELDS = re.compile(
+    r"\s*(?P<id>[^,]+?)\s*,\s*\"(?P<name>[^\"]*)\"\s*,\s*(?P<flash>[^,]+?)\s*,?\s*")
 # An integer literal with the suffixes C allows on one: `0x4000`, `128u`.
 _LITERAL = re.compile(r"(0[xX][0-9a-fA-F]+|\d+)[uUlL]*")
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 _LINE_COMMENT = re.compile(r"//[^\n]*")
+# A fork checkout on an unresponsive filesystem must not hold up a run that
+# already has the bench: this is advisory, so it gives up instead.
+GIT_TIMEOUT_S = 30.0
 
 
 class PartTableUnreadable(RuntimeError):
@@ -82,7 +96,8 @@ def parse_number(text: str) -> int | None:
     These figures are written as a literal or as literals multiplied
     together, with optional `u` suffixes and parentheses: `0x4000`,
     `128 * 1024`, `(128u * 1024u)`. A figure written any other way is
-    reported by the caller rather than guessed at.
+    reported by the caller rather than guessed at, so this returns None for
+    anything it cannot read and raises nothing.
     """
     stripped = text.replace("(", " ").replace(")", " ").strip()
     if not stripped:
@@ -92,7 +107,18 @@ def parse_number(text: str) -> int | None:
         found = _LITERAL.fullmatch(factor.strip())
         if found is None:
             return None
-        value *= int(found.group(1), 0)
+        literal = found.group(1)
+        # C reads a leading zero as octal, which Python's base 0 refuses.
+        if literal[:2].lower() == "0x":
+            base = 16
+        elif len(literal) > 1 and literal[0] == "0":
+            base = 8
+        else:
+            base = 10
+        try:
+            value *= int(literal, base)
+        except ValueError:
+            return None
     return value
 
 
@@ -100,26 +126,53 @@ def _without_comments(text: str) -> str:
     return _LINE_COMMENT.sub(" ", _BLOCK_COMMENT.sub(" ", text))
 
 
+def _table_rows(body: str) -> list[str]:
+    """The braced rows of a table body, refusing a body with anything else.
+
+    Every row of the table has to be accounted for. A row written without
+    braces -- a macro call, say -- leaves text between the braced rows, and
+    that is reported: reading such a table as the rows it happened to
+    recognize would hide a part, which is the difference this is here to find.
+    """
+    rows, between = [], []
+    end = 0
+    for found in _ROW.finditer(body):
+        between.append(body[end:found.start()])
+        rows.append(found.group(1))
+        end = found.end()
+    between.append(body[end:])
+    leftover = "".join(between).replace(",", "").strip()
+    if leftover:
+        raise PartTableUnreadable(
+            "the DFU_PARTS table holds a row this cannot read "
+            f"({' '.join(leftover.split())[:80]})"
+        )
+    return rows
+
+
 def parse_part_table(text: str) -> tuple[PartEntry, ...] | None:
     """The DFU_PARTS entries in ``text``, or None when it holds no table.
 
-    An entry written in a way this cannot read raises PartTableUnreadable:
-    dropping it would hide exactly the difference this is here to find.
+    An entry written in a way this cannot read raises PartTableUnreadable,
+    and so does a table whose rows are not all entries: dropping one would
+    hide exactly the difference this is here to find.
     """
     found = _TABLE.search(text)
     if found is None:
         return None
     entries = []
-    for part_id, name, flash_size in _ENTRY.findall(_without_comments(found.group(1))):
-        identifier, size = parse_number(part_id), parse_number(flash_size)
-        if identifier is None or size is None:
+    for row in _table_rows(_without_comments(found.group(1))):
+        fields = _FIELDS.fullmatch(row)
+        identifier = parse_number(fields["id"]) if fields else None
+        size = parse_number(fields["flash"]) if fields else None
+        if fields is None or identifier is None or size is None:
             raise PartTableUnreadable(
-                f"the DFU_PARTS entry for {name or 'an unnamed part'} is written "
-                f"in a way this cannot read ({part_id.strip()}, {flash_size.strip()})"
+                "a DFU_PARTS entry is written in a way this cannot read "
+                f"({{{' '.join(row.split())}}})"
             )
-        entries.append(PartEntry(identifier, name, size))
+        entries.append(PartEntry(identifier, fields["name"], size))
     if not entries:
-        raise PartTableUnreadable("DFU_PARTS holds no entry this can read")
+        raise PartTableUnreadable("the DFU_PARTS table holds no entry")
     return tuple(entries)
 
 
@@ -169,11 +222,19 @@ def _show(source: Path | str, ref: str, path: str) -> str | None:
     Git runs under ``LC_ALL=C``, since a missing path is told from a failure
     by git's own wording.
     """
-    result = subprocess.run(
-        ["git", "-C", str(source), "show", f"{ref}:{path}"],
-        capture_output=True, text=True, check=False,
-        env={**os.environ, "LC_ALL": "C"},
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source), "show", f"{ref}:{path}"],
+            capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_S,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except subprocess.TimeoutExpired:
+        # A run that reaches here already holds its boards, so this gives up
+        # rather than waiting on the checkout.
+        raise RuntimeError(
+            f"reading {path} at {ref} in {source} took longer than "
+            f"{GIT_TIMEOUT_S:.0f}s"
+        ) from None
     if result.returncode != 0:
         if "does not exist" in result.stderr or "exists on disk, but not in" in result.stderr:
             return None
@@ -186,19 +247,29 @@ def _show(source: Path | str, ref: str, path: str) -> str | None:
 def fork_parts_at(source: Path | str, ref: str) -> ForkParts | None:
     """The part figures at ``ref`` of a fork checkout, or None for none.
 
-    None covers a fork commit from before the part table landed, which has no
-    figures to compare with. Git errors other than a missing path raise
-    RuntimeError; a tree that has the table but not the two figures derived
-    from it alongside raises PartTableUnreadable, since that is a tree this
-    module no longer knows how to read rather than one without a table.
+    None means only one thing: this commit has no DFU recovery sources at
+    all, so there is nothing to compare with. A commit that has them and
+    whose figures this cannot find -- the table renamed, moved to a file not
+    listed here, or written another way -- raises PartTableUnreadable, so a
+    comparison that stopped working is reported and not taken for a commit
+    without a table. Git errors other than a missing path raise RuntimeError.
     """
-    texts = [_show(source, ref, path) for path in SOURCE_FILES]
-    if not any(text is not None for text in texts):
+    texts = {path: _show(source, ref, path) for path in SOURCE_FILES}
+    if all(texts[path] is None for path in PART_TABLE_FILES):
         return None
-    joined = "\n".join(text for text in texts if text is not None)
+    joined = "\n".join(text for text in texts.values() if text is not None)
     parts = parse_part_table(joined)
     if parts is None:
-        return None
+        present = ", ".join(path for path in PART_TABLE_FILES
+                            if texts[path] is not None)
+        # Reported, not taken for a commit without a table: the two cannot be
+        # told apart from the sources, and treating a comparison that stopped
+        # working as nothing to compare is how drift would walk past it.
+        raise PartTableUnreadable(
+            f"no DFU_PARTS table in {present}, which this reads the flash sizes "
+            "out of: either this commit is from before the table, or the table "
+            "was renamed or moved"
+        )
     assumed = parse_define(joined, "DFU_ASSUMED_FLASH_SIZE")
     offset = parse_define(joined, "BOOTLOADER_OFFSET")
     size = parse_define(joined, "BOOTLOADER_SIZE")
@@ -220,9 +291,11 @@ def drift_warning(fork: ForkParts | None, *,
                   fork_label: str = "the Ubertooth fork") -> str | None:
     """A one-line warning when the harness's figures differ from the fork's.
 
-    Each difference says what the fork has, what the harness copy has, and
-    what it costs a run, so a reader knows which entry to add without going
-    to the fork's source.
+    Each difference says what the fork has and what the harness copy has,
+    so a reader knows which entry to put right without going to the fork's
+    source, and what it costs a run where it costs anything: a part the copy
+    lacks fails a read-back it should pass, while a size the fork has dropped
+    only leaves the copy stale.
     """
     if fork is None:
         return None
@@ -232,16 +305,18 @@ def drift_warning(fork: ForkParts | None, *,
         if flash_size in known:
             continue
         labels = ", ".join(fork.labels_for(flash_size))
+        # The length such a board really reports follows the fork's own
+        # application region, which may have moved along with the table.
+        length = max(flash_size - fork.application_offset, 0)
         problems.append(
             f"it has {labels} with {describe_flash_size(flash_size)} of flash, which "
-            f"PART_FLASH_SIZES does not list, so a correct read-back of "
-            f"{upload_length(flash_size)} bytes on such a part would be reported as "
-            "a length no part explains"
+            f"PART_FLASH_SIZES does not list, so a correct read-back of {length} "
+            "bytes on such a part would be reported as a length no part explains"
         )
     for flash_size in sorted(known - set(fork.flash_sizes)):
         problems.append(
             f"PART_FLASH_SIZES lists {describe_flash_size(flash_size)}, which no part "
-            "in its table has"
+            "in its table has any more, so the copy is stale"
         )
     if fork.assumed_flash_size != ASSUMED_FLASH_SIZE:
         problems.append(
@@ -301,9 +376,11 @@ def check_sources(sources: Sequence) -> PartTableCheck | None:
             "unchecked", f"DFU part table not checked: {error}", ubertooth.commit
         )
     if fork is None:
+        files = " or ".join(PART_TABLE_FILES)
         return PartTableCheck(
             "skipped",
-            f"DFU part table not checked: {label} has no DFU part table to compare with",
+            f"DFU part table not checked: {label} has no {files}, so there is no "
+            "part table to compare with",
             ubertooth.commit,
         )
     warning = drift_warning(fork, fork_label=label)

@@ -501,14 +501,16 @@ class ReadbackPlan(NamedTuple):
             sizes = ", ".join(describe_flash_size(size) for size in PART_FLASH_SIZES)
             # A part the fork's table has grown since PART_FLASH_SIZES was
             # written lands here, which is the drift this is meant to report
-            # rather than pass. Naming the flash size this length implies
+            # rather than pass. The flash size this length would belong to
             # says which entry the copy is missing, rather than leaving a
-            # reader to work it back from the figure (#283).
+            # reader to work it back from the figure; it is put as a
+            # consequence, since a tool that misprinted the length lands here
+            # too and then describes no part at all (#283).
             implied = describe_flash_size(self.length + APPLICATION_OFFSET)
-            problems.append(f"the read-back covers {self.length} bytes, the "
-                            f"application region of a part with {implied} of "
-                            "flash: no such part in the harness's copy of the "
-                            f"fork's part table ({sizes})")
+            problems.append(f"the read-back covers {self.length} bytes, which no "
+                            "part in the harness's copy of the fork's part table "
+                            f"explains ({sizes}); that length would be the "
+                            f"application region of a part with {implied} of flash")
         return problems
 
 
