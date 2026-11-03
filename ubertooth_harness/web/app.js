@@ -177,14 +177,14 @@
     const targets = [...state.targets.values()].sort((a, b) => a.host.localeCompare(b.host));
     if (!targets.length) {
       select.replaceChildren(el("option", { value: "", text: "(no targets registered)" }));
-      return;
+    } else {
+      select.replaceChildren(...targets.map((target) => {
+        const notes = [target.status];
+        if (target.active_run_id) notes.push("busy");
+        return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
+      }));
+      if (targets.some((target) => target.host === current)) select.value = current;
     }
-    select.replaceChildren(...targets.map((target) => {
-      const notes = [target.status];
-      if (target.active_run_id) notes.push("busy");
-      return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
-    }));
-    if (targets.some((target) => target.host === current)) select.value = current;
     // The first target to register, or a selection this update replaced,
     // changes which host the plans belong to; the estimates and the build
     // options are that host's. Compared with the target a load is under way
@@ -323,8 +323,11 @@
   function artifactWarning(suite) {
     const wanted = Array.isArray(suite.needs_artifacts) ? suite.needs_artifacts : [];
     if (!wanted.length) return "";
+    // The steps the chosen target runs, as `suite.needs_artifacts` itself
+    // counts them: a step it does not run needs this run no image.
     const tests = suite.tests
-      .filter((test) => (test.needs_artifacts || []).length)
+      .filter((test) => (test.needs_artifacts || []).length
+        && test.runs_on_target !== false)
       .map((test) => test.name);
     const artifacts = wanted.map((label) => `--artifact "${label}=PATH"`).join(" ");
     return ` This suite also needs ${wanted.join(", ")},`
@@ -379,7 +382,7 @@
     const total = timed.reduce((sum, test) => sum + test.estimated_s, 0);
     const untimed = omitted.length - timed.length;
     const missing = untimed ? `${untimed} with no estimate` : "";
-    const counted = total
+    const counted = timed.length
       ? `${formatSeconds(total)} of test time where they do run`
         + (missing ? `, ${missing}` : "")
       : missing;

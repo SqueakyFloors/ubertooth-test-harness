@@ -471,7 +471,7 @@ class PlanTests(ControllerTestCase):
             self.assertEqual(
                 [], [t["name"] for t in suite["tests"] if not t["runs_on_target"]])
 
-    def test_a_step_for_another_host_asks_that_targets_run_for_nothing(self):
+    def test_a_step_for_another_host_ticks_no_build_option_here(self):
         # The build options and the images only --artifact can pass are the
         # suite's as the chosen target would run it: a step the target does
         # not run must not tick a build option or warn about an image.
@@ -523,6 +523,26 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(0, suite["unestimated_tests"])
         self.assertEqual(2, len(suite["omitted_tests"]))
         self.assertGreater(suite["omitted_estimated_s"], 0)
+
+    def test_an_omitted_step_with_no_estimate_leaves_their_total_unknown(self):
+        # The omitted total follows the same rule as the suite's own: it is
+        # the sum only when every one of them has an estimate. The steps
+        # are still named, each with its own (null here).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bench.yaml").write_text(
+                "plan: Bench\nsuites:\n  bench:\n"
+                "    - Host CLI surface:\n        hosts: [Host_Linux]\n"
+                "    - Receive-only firmware:\n        hosts: [Host_Linux]\n"
+                "        Ubertooth: default\n",
+                encoding="utf-8",
+            )
+            (suite,) = list_plans(root, target="Host_Mac")[0]["suites"]
+        self.assertIsNone(suite["omitted_estimated_s"])
+        self.assertEqual(
+            [("Host CLI surface", 3.6), ("Receive-only firmware", None)],
+            [(test["name"], test["estimated_s"]) for test in suite["omitted_tests"]],
+        )
 
     def test_which_hosts_a_step_names(self):
         # `hosts: each` names none, so every target runs it; the planner
@@ -1040,6 +1060,9 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("suite.needs_artifacts", body)
         self.assertIn("no build makes", body)
         self.assertIn('--artifact "${label}=PATH"', body)
+        # Named for the steps the chosen target runs, as the suite's own
+        # needs_artifacts counts them.
+        self.assertIn("test.runs_on_target !== false", body)
         # What such a run costs before it is refused, so Run is not pressed
         # expecting a quick refusal.
         self.assertIn("builds first, and flashes whatever", body)
