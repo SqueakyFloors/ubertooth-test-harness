@@ -201,6 +201,16 @@ _EXTENDED_NAME = re.compile(r"^\tDevice Name: (?P<name>.*)$")
 _EXTENDED_LMP = re.compile(
     r"^\tLMP Version: .+ \(0x[0-9a-f]+\) LMP Subversion: 0x[0-9a-f]+$")
 
+# An established link in `hcitool con`: one line per link, naming its type and
+# its state. `state 1` is BlueZ's connected state; `state 2` is a page still
+# in flight, which is what the scan's own name reads leave behind and what the
+# kernel times out by itself. Measured on the bench: a scan left three such
+# pending links, one of them to the `00:00:<UAP>:<LAP>` address it assembles
+# from a survey result, and all three were gone shortly after. So only an
+# established link is held against a run -- that is a peer this host is
+# keeping, which is what this check is for.
+ESTABLISHED_LINK = r"(?m)^\s*[<>]\s+(?:ACL|SCO|eSCO|LE)\s.*\sstate 1\s"
+
 # ---------------------------------------------------------------------------
 # The adapter, from the registry
 
@@ -271,13 +281,13 @@ def _adapter_up_step(step_id: str, hci: dict) -> Step:
 
 
 def _adapter_free_step(step_id: str, name: str, hci: dict) -> Step:
-    """The adapter holds no link at all.
+    """The adapter holds no established link.
 
-    Any link, not the peers' addresses alone, for two reasons. ``-x`` pages
-    the address the scan assembles from a survey result, which is
-    ``00:00:<UAP>:<LAP>`` and so is not a registered address at all, and that
-    is the link most likely to be left behind, since the tool drops it
-    best-effort. And a link to either peer cannot survive the step anyway:
+    Any address, not the peers' alone, for two reasons. The scan pages the
+    address it assembles from a survey result, which is
+    ``00:00:<UAP>:<LAP>`` and so is not a registered address at all -- the
+    bench showed exactly that one left behind. And a link to either peer
+    cannot survive the step anyway:
     ``esp32peer.py stream`` resets both boards on its way out, whatever
     happened, and a reset drops every link a board holds.
 
@@ -294,9 +304,7 @@ def _adapter_free_step(step_id: str, name: str, hci: dict) -> Step:
         ("hcitool", "-i", hci["device"], "con"),
         timeout_s=ADAPTER_READ_S,
         output_patterns=(r"(?m)^Connections:",),
-        # One line per link, each naming its type; `Connections:` alone is a
-        # free controller.
-        forbidden_patterns=(r"(?m)^\s*[<>]\s+(?:ACL|SCO|eSCO|LE)\s",),
+        forbidden_patterns=(ESTABLISHED_LINK,),
     )
 
 
@@ -505,7 +513,8 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
         *_read_originals(serial, MODE_RESET_SETTINGS),
         _adapter_up_step("adapter-up", hci),
         _adapter_free_step(
-            "adapter-idle", f"{hci['device']} starts with no link at all", hci),
+            "adapter-idle",
+            f"{hci['device']} starts with no established link", hci),
         Step("pair-and-run",
              f"The pair streams while {' '.join(command)} runs, capturing for "
              f"{seconds} s inside a {seconds + extra_s:g} s window",
@@ -525,7 +534,8 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
         # driver's own release has already reset them, so what is left to
         # catch here is a link to anything else.
         (_adapter_free_step(
-            "adapter-free", f"{hci['device']} holds no link at all", hci),
+            "adapter-free",
+            f"{hci['device']} holds no established link", hci),
          # And is still the adapter it was. `hcitool con` lists links only for
          # a controller that is up, so without this an adapter that went down
          # during the case, or came back as another hciN, would read as free.
@@ -533,7 +543,8 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
          _reset_step("reset-initiator", initiator, INITIATOR_ROLE),
          _reset_step("reset-acceptor", acceptor, ACCEPTOR_ROLE))
         + _cleanup(serial, MODE_RESET_SETTINGS),
-        expected_state=(expected_state + f"; no link left on {hci['device']}, "
+        expected_state=(expected_state + "; no established link left on "
+                        f"{hci['device']}, "
                         "which is still up at its registered address; "
                         "both peers reset to their boot state; "
                         "channel, squelch, and LEDs restored"),

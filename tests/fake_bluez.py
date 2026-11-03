@@ -53,11 +53,17 @@ def hciconfig(up: bool = True, address: str = ADAPTER_ADDRESS,
     ))
 
 
-def hcitool_con(*addresses: str) -> str:
-    """``hcitool -i <device> con``: the links the controller holds."""
+def hcitool_con(*addresses: str, state: int = 1) -> str:
+    """``hcitool -i <device> con``: the links the controller holds.
+
+    ``state`` is BlueZ's connection state: 1 is connected, 2 a page still in
+    flight, which is what the scan's own name reads leave behind. The
+    link-mode flags after it are elided, since nothing reads them.
+    """
     lines = ["Connections:"]
     for index, address in enumerate(addresses):
-        lines.append(f"\t> ACL {address} handle {42 + index} state 1 lm ...")
+        lines.append(
+            f"\t< ACL {address} handle {3840 + index} state {state} lm ...")
     return "\n".join(lines) + "\n"
 
 

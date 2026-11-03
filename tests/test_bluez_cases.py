@@ -568,10 +568,10 @@ class AdapterStepTests(unittest.TestCase):
         self.assertNotRegex(fake_bluez.hciconfig(up=False),
                             re.compile(r"(?m)^\s+UP\b"))
 
-    def test_any_link_left_on_the_adapter_fails_the_read(self):
-        """Any link, not the peers' addresses: -x pages the 00:00: address
-        the scan assembles, and a link to a peer cannot survive the driver's
-        own reset of both boards."""
+    def test_an_established_link_on_the_adapter_fails_the_read(self):
+        """Any address, not the peers' alone: the scan pages the 00:00:
+        address it assembles, and a link to a peer cannot survive the
+        driver's own reset of both boards."""
         case = follow_cases()["follow-target"]
         for step_id in ("adapter-idle", "adapter-free"):
             step = next(s for s in list(case.steps) + list(case.cleanup)
@@ -584,6 +584,15 @@ class AdapterStepTests(unittest.TestCase):
                         any(re.search(pattern, text)
                             for pattern in step.forbidden_patterns),
                         f"a link to {address} was not caught")
+
+    def test_a_page_still_in_flight_is_not_held_against_the_run(self):
+        """The scan's own name reads leave pending links the kernel times
+        out; the bench showed three of them, gone shortly after."""
+        case = follow_cases()["follow-target"]
+        step = next(s for s in case.cleanup if s.step_id == "adapter-free")
+        pending = fake_bluez.hcitool_con(ACCEPTOR_ADDRESS,
+                                         "00:00:0D:E9:C5:BA", state=2)
+        self.patterns(step, pending)
 
 
 class OutputCheckTests(unittest.TestCase):
