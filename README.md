@@ -2084,8 +2084,8 @@ a capture case ran, and `output/` when a command printed a lot):
   commit under test -- `dfu_part_table`, the flash sizes a DFU read-back is
   checked against ([DFU images](#dfu-images)), on every run, and
   `libbtbb_pin` ([Building the resolved
-  revision](#building-the-resolved-revision)) on a run that builds; neither
-  fails a run -- and `manifest`
+  revision](#building-the-resolved-revision)) on a run that builds or names a
+  libbtbb source; neither fails a run -- and `manifest`
   (sources, plan and registry hashes,
   artifacts, invocations, Python/OS environment, and build toolchain), then
   build commands, preflight, and each test's events, including every command
@@ -2479,11 +2479,11 @@ checkout at the resolved Ubertooth commit and record the comparison as a
 `passed` (the same flash sizes), `warning` (they differ; it names the part
 whose entry the copy is missing, and the read-back length such a board would
 report), `unchecked` (the figures are not where they are read from: the table
-renamed or moved, written in a way the reader does not know, or a fork commit
-from before it; the reason is given), or `skipped` (the commit has no
-`dfu_recovery.c` or `dfu_recovery.h` at all, so there is nothing to compare
-with). The loud status is deliberate where the two cannot be told apart: a
-comparison that quietly stopped working is the failure this check exists to
+renamed, moved to another file, defined twice, or written in a way the reader
+does not know; the reason is given), or `skipped` (the commit names
+`DFU_PARTS` nowhere, so it is from before the part table and has none to
+compare with). Only a commit with no table at all is quiet: a comparison that
+stopped working reports itself, which is the failure this check exists to
 avoid. A difference and an unreadable table are also printed on
 stderr and shown in the browser live view; a match and a skip leave the
 report row to say so. Nothing fails on this: the read-back check stays the

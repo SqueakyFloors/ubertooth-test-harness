@@ -66,8 +66,6 @@ _FIELDS = re.compile(
     r"\s*(?P<id>[^,]+?)\s*,\s*\"(?P<name>[^\"]*)\"\s*,\s*(?P<flash>[^,]+?)\s*,?\s*")
 # An integer literal with the suffixes C allows on one: `0x4000`, `128u`.
 _LITERAL = re.compile(r"(0[xX][0-9a-fA-F]+|\d+)[uUlL]*")
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
-_LINE_COMMENT = re.compile(r"//[^\n]*")
 # A fork checkout on an unresponsive filesystem must not hold up a run that
 # already has the bench: this is advisory, so it gives up instead. One read
 # per file in SOURCE_FILES, so the whole check is bounded by three of these.
@@ -123,7 +121,52 @@ def parse_number(text: str) -> int | None:
 
 
 def _without_comments(text: str) -> str:
-    return _LINE_COMMENT.sub(" ", _BLOCK_COMMENT.sub(" ", text))
+    """``text`` with its C comments blanked out, line for line.
+
+    One pass left to right, the way a compiler reads it, because the order
+    matters: a `/*` inside a `//` comment opens nothing, and neither opens
+    inside a string literal. Stripping the two kinds in separate passes let
+    such a `/*` run on to the next `*/` and swallow a table row with it.
+    A comment becomes spaces and keeps its newlines, so what is left still
+    lines up with the file.
+    """
+    out: list[str] = []
+    state = "code"
+    index, end = 0, len(text)
+    while index < end:
+        char, pair = text[index], text[index:index + 2]
+        if state == "code":
+            if pair in ("//", "/*"):
+                state = "line" if pair == "//" else "block"
+                out.append("  ")
+                index += 2
+                continue
+            if char == '"':
+                state = "string"
+            out.append(char)
+        elif state == "line":
+            # A newline ends it. C continues a line comment over a trailing
+            # backslash; not following that leaves more text to read rather
+            # than less, so a row can only become loud, never disappear.
+            state = "code" if char == "\n" else state
+            out.append(char if char == "\n" else " ")
+        elif state == "block":
+            if pair == "*/":
+                state = "code"
+                out.append("  ")
+                index += 2
+                continue
+            out.append("\n" if char == "\n" else " ")
+        else:  # inside a string literal
+            if char == "\\" and index + 1 < end:
+                out.append(text[index:index + 2])
+                index += 2
+                continue
+            if char == '"':
+                state = "code"
+            out.append(char)
+        index += 1
+    return "".join(out)
 
 
 def _table_rows(body: str) -> list[str]:
@@ -190,14 +233,23 @@ def parse_define(text: str, name: str) -> int | None:
     A define that is there and is not a figure this can read raises
     PartTableUnreadable, for the same reason a table entry does.
     """
-    found = re.search(rf"^[ \t]*#[ \t]*define[ \t]+{re.escape(name)}[ \t]+(.+)$",
-                      _without_comments(text), re.M)
-    if found is None:
+    found = re.findall(rf"^[ \t]*#[ \t]*define[ \t]+{re.escape(name)}[ \t]+(.+)$",
+                       _without_comments(text), re.M)
+    if not found:
         return None
-    value = parse_number(found.group(1))
+    values = {parse_number(value) for value in found}
+    if len(values) > 1:
+        # Two definitions, one per branch of an #if, or one per file: which
+        # of them the fork compiles is not this module's to choose, for the
+        # same reason two tables are not.
+        raise PartTableUnreadable(
+            f"{name} is defined {len(found)} times here, with different values, "
+            "so which one the fork compiles is not clear"
+        )
+    value = values.pop()
     if value is None:
         raise PartTableUnreadable(
-            f"{name} is not a figure this can read ({found.group(1).strip()})"
+            f"{name} is not a figure this can read ({found[0].strip()})"
         )
     return value
 
@@ -255,21 +307,58 @@ def _show(source: Path | str, ref: str, path: str) -> str | None:
     return result.stdout
 
 
+def _part_table_mentions(source: Path | str, ref: str) -> list[str]:
+    """Files at ``ref`` that name DFU_PARTS, wherever in the tree they are.
+
+    This is what tells a commit from before the part table from one that
+    moved it: the first names it nowhere, the second names it somewhere this
+    module does not read. Without that, a fork that moved both files would
+    read as having no table, and a check that says nothing is the one failure
+    this must not have.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source), "grep", "--name-only", "--fixed-strings",
+             "DFU_PARTS", ref],
+            capture_output=True, text=True, check=False, errors="replace",
+            timeout=GIT_TIMEOUT_S, env={**os.environ, "LC_ALL": "C"},
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"searching {ref} in {source} for DFU_PARTS took longer than "
+            f"{GIT_TIMEOUT_S:.0f}s"
+        ) from None
+    # git grep exits 1 for no match, and above that for a real failure.
+    if result.returncode > 1:
+        raise RuntimeError(
+            f"cannot search {ref} in {source} for DFU_PARTS: {result.stderr.strip()}"
+        )
+    # Each line is `<ref>:<path>`; the ref is the caller's own.
+    return [line.split(":", 1)[-1] for line in result.stdout.splitlines() if line]
+
+
 def fork_parts_at(source: Path | str, ref: str) -> ForkParts | None:
     """The part figures at ``ref`` of a fork checkout, or None for none.
 
-    None means this commit has neither of PART_TABLE_FILES, so there is
-    nothing here to read a table out of. A commit that has one of them and
-    no table this can find raises PartTableUnreadable, so a comparison that
-    stopped working is reported rather than taken for a commit from before
-    the table. Moving the table to another file is caught that way while
-    either file is still there, and read as None when neither is: the two
-    cannot be told apart from the sources, so the record says both readings.
-    Git errors other than a missing path raise RuntimeError.
+    None means this commit names DFU_PARTS nowhere at all, so it is from
+    before the part table and there is nothing to compare with. Every other
+    way of not finding the figures raises PartTableUnreadable -- the table
+    renamed, moved to a file not read here, or written another way -- so a
+    comparison that stopped working is reported rather than taken for a
+    commit without a table. Git errors other than a missing path raise
+    RuntimeError.
     """
     texts = {path: _show(source, ref, path) for path in SOURCE_FILES}
     if all(texts[path] is None for path in PART_TABLE_FILES):
-        return None
+        elsewhere = _part_table_mentions(source, ref)
+        if not elsewhere:
+            return None
+        files = " nor ".join(PART_TABLE_FILES)
+        raise PartTableUnreadable(
+            f"there is neither {files} here, and DFU_PARTS appears in "
+            f"{', '.join(elsewhere)}, so the table moved somewhere this does "
+            "not read"
+        )
     joined = "\n".join(text for text in texts.values() if text is not None)
     parts = parse_part_table(joined)
     if parts is None:
@@ -378,8 +467,19 @@ def record(publisher, sources: Sequence) -> None:
     checked against whatever fork commit a run resolves, and the harness's
     copy falling behind costs a run with installed tools just as much. The
     caller that emitted ``run_started`` records it, so it lands once.
+
+    Nothing here fails a run, and that holds whatever a fork tree or a bug
+    in this module throws: the statuses above cover what is foreseen, and
+    anything else is recorded as unchecked rather than left to end the run
+    without even a ``run_finished``.
     """
-    check = check_sources(sources)
+    try:
+        check = check_sources(sources)
+    except Exception as error:  # noqa: BLE001 - see the docstring
+        check = PartTableCheck(
+            "unchecked",
+            f"DFU part table not checked: {type(error).__name__}: {error}", "",
+        )
     if check is not None:
         publisher.emit(EVENT, check.status, check.details())
 
@@ -402,12 +502,10 @@ def check_sources(sources: Sequence) -> PartTableCheck | None:
             "unchecked", f"DFU part table not checked: {error}", ubertooth.commit
         )
     if fork is None:
-        files = " nor ".join(PART_TABLE_FILES)
         return PartTableCheck(
             "skipped",
-            f"DFU part table not checked: {label} has neither {files}, so this "
-            "commit is from before the part table or has moved it somewhere "
-            "this does not read",
+            f"DFU part table not checked: {label} names DFU_PARTS nowhere, so it "
+            "is from before the part table and has none to compare with",
             ubertooth.commit,
         )
     warning = drift_warning(fork, fork_label=label)

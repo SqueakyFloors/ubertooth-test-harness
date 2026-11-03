@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from ubertooth_harness import cli, dfuimage, dfuparts
 from ubertooth_harness.dfuparts import (
@@ -208,6 +209,23 @@ class ParseTests(unittest.TestCase):
         self.assertIn(1024 * 1024,
                       [part.flash_size for part in parse_part_table(commented)])
 
+    def test_a_block_comment_opened_inside_a_line_comment_swallows_nothing(self):
+        """C reads comments left to right: a `/*` inside a `//` comment opens
+        nothing. Stripping the two kinds in separate passes let one run on to
+        the next `*/` and take a table row with it."""
+        text = PART_TABLE_C.replace(
+            '\t{ 0x26113F37, "LPC1769", 512 * 1024 },\n',
+            '\t{ 0x26113F37, "LPC1769", 512 * 1024 },\n'
+            '\t// a new part, see /* UM10360\n'
+            + GROWN_PART +
+            '\t/* end */\n')
+        sizes = {part.flash_size for part in parse_part_table(text)}
+        self.assertIn(1024 * 1024, sizes)
+
+    def test_a_comment_opened_inside_a_string_opens_nothing(self):
+        text = PART_TABLE_C.replace('"LPC1769"', '"LPC1769 /*"')
+        self.assertEqual(14, len(parse_part_table(text)))
+
     def test_two_tables_at_once_are_reported_not_chosen_between(self):
         """A table kept behind `#if 0` is not a comment, so both are there;
         which one a read-back follows is not this module's to decide."""
@@ -228,6 +246,19 @@ class ParseTests(unittest.TestCase):
     def test_a_define_this_cannot_read_is_reported(self):
         with self.assertRaisesRegex(PartTableUnreadable, r"not a figure this can read"):
             parse_define("#define BOOTLOADER_SIZE (SECTOR * 4)\n", "BOOTLOADER_SIZE")
+
+    def test_two_definitions_of_one_figure_are_reported(self):
+        """One per branch of an `#if`, or one per file once the files are read
+        together: which the fork compiles is not this module's to choose, as
+        it is not for two tables."""
+        with self.assertRaisesRegex(PartTableUnreadable, "defined 2 times"):
+            parse_define("#if FOO\n#define BOOTLOADER_SIZE 0x8000\n#else\n"
+                         "#define BOOTLOADER_SIZE 0x4000\n#endif\n",
+                         "BOOTLOADER_SIZE")
+        # The same figure twice is no ambiguity.
+        self.assertEqual(0x4000, parse_define(
+            "#define BOOTLOADER_SIZE 0x4000\n#define BOOTLOADER_SIZE 0x4000\n",
+            "BOOTLOADER_SIZE"))
 
 
 class DriftWarningTests(unittest.TestCase):
@@ -346,7 +377,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         with self.assertRaises(RuntimeError):
             fork_parts_at(self.repo, "no-such-ref")
 
-    def test_a_commit_without_the_recovery_sources_has_nothing_to_compare(self):
+    def test_a_commit_that_names_the_table_nowhere_has_nothing_to_compare(self):
         """The one thing None means. dfu.h is older than the part table, so a
         commit that has only that still counts as having no table."""
         self.assertIsNone(fork_parts_at(self.repo, self.untabled))
@@ -355,6 +386,22 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
             removed=("host/ubertooth-tools/src/dfu_recovery.c",
                      "host/ubertooth-tools/src/dfu_recovery.h"))
         self.assertIsNone(fork_parts_at(self.repo, only_dfu_h))
+
+    def test_a_table_moved_out_of_both_files_is_reported_not_skipped(self):
+        """The quiet failure this check must not have: moving both files
+        would otherwise read as a commit from before the table, which says
+        nothing, while the fork compiles flash sizes the copy lacks."""
+        moved = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_parts.c": GROWN_TABLE_C,
+             "host/ubertooth-tools/src/dfu_parts.h": RECOVERY_H},
+            "the table in files of its own",
+            removed=("host/ubertooth-tools/src/dfu_recovery.c",
+                     "host/ubertooth-tools/src/dfu_recovery.h"))
+        check = check_sources(self._sources(moved))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("DFU_PARTS appears in", check.message)
+        self.assertIn("dfu_parts.c", check.message)
+        self.assertIn("moved somewhere this does not read", check.message)
 
     def test_a_table_that_moved_or_was_renamed_is_reported_not_skipped(self):
         """The failure this check must never have: the comparison stops
@@ -412,10 +459,8 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
     def test_a_commit_with_no_table_is_skipped_not_a_warning(self):
         check = check_sources(self._sources(self.untabled))
         self.assertEqual("skipped", check.status)
-        # Both readings, since the sources cannot tell them apart.
-        self.assertIn("has neither", check.message)
-        self.assertIn("from before the part table or has moved it", check.message)
-        self.assertIn("dfu_recovery.c", check.message)
+        self.assertIn("names DFU_PARTS nowhere", check.message)
+        self.assertIn("from before the part table", check.message)
         self.assertEqual([], check.details()["fork_flash_sizes"])
 
     def test_a_byte_that_is_not_utf8_does_not_raise_out_of_the_check(self):
@@ -448,6 +493,22 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         self.assertIn("FLASH_128K", check.message)
         # A run with no Ubertooth source is no run at all.
         self.assertIsNone(check_sources(()))
+
+    def test_nothing_this_module_does_can_end_a_run(self):
+        """The promise does not rest on having listed every exception type:
+        whatever comes out of the comparison is recorded, and the run goes
+        on."""
+        out = self._run_dir()
+        publisher = EventPublisher("run", JsonlEventSink(out / RUN_LOG))
+        with mock.patch.object(dfuparts, "check_sources",
+                               side_effect=MemoryError("out of memory")):
+            dfuparts.record(publisher, self._sources(self.tabled))
+        publisher.emit("run_finished", "passed", {})
+        events = [json.loads(line) for line in (out / RUN_LOG).read_text().splitlines()]
+        self.assertEqual(("dfu_part_table", "unchecked"),
+                         (events[0]["event_type"], events[0]["status"]))
+        self.assertIn("MemoryError: out of memory", events[0]["details"]["message"])
+        self.assertEqual("run_finished", events[-1]["event_type"])
 
     def test_the_check_is_recorded_in_run_jsonl_and_report_md(self):
         grown = self._commit_files(
