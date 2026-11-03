@@ -409,6 +409,32 @@ class BenchLockFileNames(NamesTestCase):
             leases.external_lock_path(self.template, read_back[0]),
         )
 
+    def test_a_serial_too_long_for_a_lock_file_is_refused(self):
+        """Every name built from it has to be one a file can carry.
+
+        A key carries its type's prefix and the bench's second name carries
+        its own, so a serial that fits on its own may not. Such a name
+        would be dropped where a ticket is read back, and a command giving
+        way at that device would read a held one as free.
+        """
+        for block, alias, field in (
+            (programmer("Prog_A", "p" * 60, "UT_A"), "Prog_A", "serial"),
+            (peer("ESP_A", "e" * 60), "ESP_A", "bridge serial"),
+        ):
+            with self.subTest(alias=alias):
+                registry = self.load(ubertooth("UT_A", BOARD), block)
+                with self.assertRaises(leases.LeaseError) as caught:
+                    leases.resource_key(registry.get(alias))
+                reason = str(caught.exception)
+                self.assertIn(f"needs a shorter '{field}'", reason)
+                self.assertIn("at most 64 characters", reason)
+        # A serial that leaves room for both prefixes is leased normally.
+        registry = self.load(ubertooth("UT_A", BOARD),
+                             programmer("Prog_A", "p" * 53, "UT_A"))
+        self.assertEqual(
+            f"programmer-{'p' * 53}", leases.resource_key(registry.get("Prog_A"))
+        )
+
     def test_a_board_needs_no_second_name_at_all(self):
         """Its lease key is its serial, so there is nothing to prefix."""
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lab"))

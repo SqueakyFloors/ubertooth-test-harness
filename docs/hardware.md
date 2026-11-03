@@ -260,6 +260,9 @@ holds the other.
   required: it names the lease, as `programmer-<serial>`, taken verbatim as
   registered (a `serial device`, where one is recorded, must be the stable
   `/dev/serial/by-id` path, not `/dev/ttyUSB<n>`, which is assignment order).
+  It has to leave room for that prefix and for the bench's own `bench-`
+  prefix, so 53 characters at most; a longer one is refused where the device
+  is leased, naming the limit.
 - `programs:` is the one board it is wired to. A registry is refused when that
   board is not registered, is not a device the harness leases (a host, a hub:
   there would be no lock to take for it), is attached to another host (leases

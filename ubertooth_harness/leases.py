@@ -437,7 +437,8 @@ def board_key(alias: str, identity: Mapping) -> str:
 # bridge serial is 32 hex digits itself.
 # A key becomes a file name, so it may hold nothing that would reach
 # another directory or need quoting.
-_LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
+_LOCK_NAME_CHARS = 64
+_LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,%d}$" % _LOCK_NAME_CHARS)
 DK_TYPE = "nRF52840 DK"
 PEER_TYPE = "ESP32 Classic peer"
 # A debug programmer wired to one device's debug or programming header. It is
@@ -487,7 +488,7 @@ def resource_key(resource) -> str:
                 f"{resource.alias} needs a 'bridge serial' in the hardware registry "
                 f"to be leased; registered '{serial}'"
             )
-        return f"esp32-{serial}"
+        return _keyed(resource, "bridge serial", "esp32-", serial)
     if resource.type == PROGRAMMER_TYPE:
         # Taken as registered, as the peer's is: the serial names the adapter
         # on USB and in its lock file, so one spelling is one device.
@@ -497,8 +498,29 @@ def resource_key(resource) -> str:
                 f"{resource.alias} needs a 'serial' in the hardware registry to be "
                 f"leased; registered '{serial}'"
             )
-        return f"programmer-{serial}"
+        return _keyed(resource, "serial", "programmer-", serial)
     return board_key(resource.alias, resource.identity)
+
+
+def _keyed(resource, field: str, prefix: str, serial: str) -> str:
+    """The key, once every file name built from it is one a file can carry.
+
+    A prefixed key is longer than the serial it is built from, and so is
+    the bench's second lock name (``bench_lock_key``). A name too long for
+    a lock file is not silently shortened: it would be dropped where a
+    ticket is read back (``waiting_resources``), and a command giving way
+    at that device would then read a held one as free. So it is refused
+    here, where every caller that needs the key asks for it.
+    """
+    for name in (prefix + serial, bench_lock_key(serial)):
+        if not _LOCK_NAME.fullmatch(name):
+            raise LeaseError(
+                f"{resource.alias} needs a shorter '{field}' in the hardware "
+                f"registry to be leased: '{name}' is not a name a lock file can "
+                f"carry (letters, digits and _.:+-, at most "
+                f"{_LOCK_NAME_CHARS} characters)"
+            )
+    return prefix + serial
 
 
 def pair_members(registry, alias: str) -> tuple[str, ...]:

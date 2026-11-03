@@ -953,6 +953,39 @@ class PairRunRecords(PairTestCase):
              in leases.pairings_for_invocations(self.using_the_target(), registry)],
         )
 
+    def test_a_registry_that_gives_no_clause_still_names_its_devices(self):
+        """A registry from elsewhere need not follow expand_pairs' contract.
+
+        The run holds the device either way, so it is recorded either way,
+        with what is known rather than with another device's reason.
+        """
+        class OddRegistry:
+            def __init__(self, inner):
+                self.inner = inner
+                self.resources = inner.resources
+
+            def get(self, alias):
+                return self.inner.get(alias)
+
+            def resolve_hardware(self, *args, **kwargs):
+                return self.inner.resolve_hardware(*args, **kwargs)
+
+            def pair_members(self, alias):
+                return self.inner.pair_members(alias)
+
+            def expand_pairs(self, aliases):
+                # The devices to hold, and no clause for the added one.
+                return self.inner.expand_pairs(aliases)[0], ()
+
+        registry = OddRegistry(self.load(PROGRAMMER))
+        records = leases.pairings_for_invocations(self.using_the_target(), registry)
+        self.assertEqual([{"resource": "Prog0", "reason": ""}],
+                         [dict(record) for record in records])
+        self.assertEqual(
+            "Prog0 is wired to a device this run named, so the run held it too",
+            leases.describe_pairing_lease(records[0]),
+        )
+
     def test_a_dry_run_says_which_device_a_pairing_would_add(self):
         """It lists the devices each test binds, so it says this one too."""
         plan = self.root / "dry.yaml"
