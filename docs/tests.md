@@ -97,6 +97,34 @@ cases need an ordinary link declares that as its own default, so a plan does
 not have to; the plan's `rf:` overrides the default role by role. The sections
 below name the default where a test has one.
 
+**Weak link.** `weak link:` is the shorthand for the usual case, one role at
+an attenuation in dB: `weak link: {Ubertooth: 20}` asks for a board at exactly
+20 dB with its antenna attached, and for an ordinary board for every other
+role of the test, which is what makes the attenuation of a run's figures a
+single number in the plan
+([`weaklink.py`](../ubertooth_harness/weaklink.py)). It names exactly one
+role, because a figure from a run where two boards were attenuated would
+belong to neither attenuation; a plan that really wants two placements has
+`rf:`, and a test takes one argument or the other, never both. Exactly that
+attenuation, not at least: a figure measured behind 20 dB says nothing about a
+bench with 10 dB or 40 dB in the path, so a bench carrying a different
+attenuator is told what the check needs rather than run against numbers taken
+elsewhere. The attenuation a run used is not read back from the argument: the
+planner records the placement of each board it bound, and the report quotes
+that beside the figures.
+
+A **runnable** plan may only ask for a link a figure has been taken over:
+either no attenuation at all, or exactly one attenuation the bench has been
+measured at, today 20 dB alone (`weaklink.MEASURED_ATTENUATIONS_DB`). A test's
+floors were set over whatever link it last ran, so running it behind an
+uncharacterized attenuator would judge it against figures taken elsewhere. A
+bare `min_attenuation_db`, which only `rf:` can write, is refused there as
+well, since which board it binds depends on what the bench holds.
+`validate-plan` applies this to a whole plan and `run-suite` to the suite it
+is about to run, so a suite is refused before a board is touched.
+[`testplans/weak-link.yaml`](../testplans/weak-link.yaml) is where those
+entries wait, and it says what each one needs.
+
 **Coverage profiles.** A test with a `coverage:` argument takes `smoke` or
 `comprehensive`. Smoke keeps one case per behavior; comprehensive adds the
 combinations, the edge values, and the cases that pin specific fork fixes, so
@@ -753,12 +781,38 @@ were all 0 or 1, and five with the roles swapped reported one level 2. The
 suite does not narrow the bound; what it adds is which board answers, and that
 the case runs at all with an attenuated responder.
 
-The responder is pinned to exactly 20 dB with its antenna attached, not a
-range, because that is the one configuration measured. A bench with a
-different attenuator fails planning with the requirement in the message, which
-is more use than a run judged against figures taken elsewhere. Distance cannot
-be pinned, since an `rf` requirement has no distance key, so a board at 20 dB
-much further away is still selected and may need a higher level.
+The suite writes that as `weak link: {responder: 20}`, which pins the
+responder to exactly 20 dB with its antenna attached and the sender to an
+ordinary board. Exactly, not a range, because the figures below belong to one
+attenuation each.
+
+**20 dB against 40 dB, measured 2026-11-02.** One ordinary sender and one
+firmware revision on both sides (`bluetooth_rxtx git-31228b05`, API 1.57,
+verified on each board inside the hold), six rounds per responder, each
+responder about a meter away behind its own attenuator:
+
+| responder | request PA level per round | reply PA level per round |
+|---|---|---|
+| 20 dB | 0, 0, 0, 0, 0, 0 | 0, 0, 0, 1, 1, 0 |
+| 40 dB | 0, 0, 1, 0, 1, 1 | 3, 3, 2, 3, 3, 1 |
+
+All twelve rounds completed with a clean round trip and no `mismatch on
+byte`. The figure that moves is the **reply** PA level — the level the
+attenuated board has to transmit at to be heard — which reaches 1 behind
+20 dB and 3 behind 40 dB. The request level barely moves, because that
+direction is an ordinary sender reaching an attenuated receiver rather than
+the reverse.
+
+Two consequences. 40 dB is a usable measurement point: it neither loses the
+link nor leaves the levels indistinguishable. But reply level 3 is exactly
+`maximum PA level`'s default bound here, so a 40 dB entry would sit on the
+bound and needs that argument raised rather than inherited. The copy numbers
+(`request number`, `reply number`) are not a discriminator at this sample
+size: they ranged over 0 to 15 at both attenuations. A bench with a different attenuator fails planning with the
+requirement in the message, which is more use than a run judged against
+figures taken elsewhere. Distance cannot be pinned, since a placement
+requirement has no distance key, so a board at 20 dB much further away is
+still selected and may need a higher level.
 
 **Known limits.** On an ordinary bench the boards sit centimeters apart, so a
 working link gets through at a low PA level and a pass at level 0 says little
@@ -780,6 +834,109 @@ reaches it; one a meter away behind 20 dB does not. The run stops there,
 before `-m` is read, so this suite has never judged a result; the PA levels
 above come from driving `-e`, `-n`, and `-m` by hand. It is committed so the
 fork fix is verified by a suite rather than by a one-off script.
+
+## Transmit power steps
+
+**What it does.** Nothing yet: a catalog entry for holding one board's
+transmitter at each PA level the plan lists while the attenuated board reads
+the channel it transmits on, so the RSSI step per level is a figure.
+
+**Theory of operation.** The PA level is the one transmit-side quantity the
+firmware sets directly (`FREND.PA_LEVEL`, 0 for about -25 dBm up to 7 for
+about 0 dBm), so a receiver at a fixed attenuation should read a signal that
+rises with it. Both halves have to be held for that to mean anything: the
+level, which the sender sets with `ubertooth-util -a<level>` before entering
+its continuous transmit mode (`-t`), and the attenuation, which the registry
+records and `weak link:` pins. With neither held, a reading is whatever the
+bench was doing.
+
+The receiver's reading would come from `ubertooth-specan` over a narrow range
+around the sender's channel, read per frequency rather than as a band mean.
+The band mean is what cannot work, and that part is measured: three 10-second
+`ubertooth-specan -g` sweeps per board put the attenuated board 1.1 dB from
+an ordinary one, with 0.1 dB of run-to-run spread, because most of a sweep is
+the receiver's own noise floor
+([#217](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/217)). A
+peak at a frequency a sender is holding is a different measurement from the
+floor across the band.
+
+Why the attenuated board rather than any two boards is the issue's own
+reasoning, not a measurement here: attenuation is what keeps the receiver out
+of saturation at bench distance, and
+[#168](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/168)
+records a receiver at PA 7 from an adjacent board wedging until a power
+cycle. Whether the levels in fact separate on this board at this attenuation
+is one of the things a first run would answer.
+
+**Hardware and arguments.** A `sender` and a `receiver` (both Ubertooth) on
+one named `host:`, a required `allow RF transmission: true` because the sender
+transmits, `PA levels:` (an ascending list of at least two distinct levels
+0-7), a `channel:` in MHz for both boards to hold, and a `duration:`, which
+is the whole test as it is everywhere else rather than a time per level — the
+catalog's wall-time estimate reads it that way. `weak link: {receiver: 20}`
+is how a plan puts the attenuated board on the receiving side.
+
+**Expected outcome.** No implementation; only a `runnable: false` plan may
+name it. What it would judge is the RSSI difference between consecutive
+levels, and nothing has measured that at any attenuation, so the figure is not
+written down here or anywhere else.
+
+**Known limits.** Any figure is specific to this bench: a step measured at
+20 dB and a meter says nothing about another distance or another attenuator,
+which is why the attenuation is pinned rather than bounded. Nothing says yet
+whether the levels separate cleanly enough to put a floor on the step, or
+whether `-t`'s carrier reads the same way as modulated traffic would. The
+continuous transmit mode is also the one mode on this board no test runs
+today: `Ubertooth util conflicts` only checks that `-t` is refused when it is
+combined with another mode. Tracked as part of
+[#168](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/168).
+
+## Receiver sensitivity
+
+**What it does.** Nothing yet: a catalog entry for holding a sender at one
+known PA level while the attenuated board reports what it hears.
+
+**Theory of operation.** Not established, and the gap is on the receiving
+side. What is settled is why a driven sender is needed at all: the figures the
+tools report — `ubertooth-rx`'s `s=`, `n=` and `snr=` beside each packet, and
+`ubertooth-specan`'s RSSI per frequency — mean something only when the
+transmitter's level is known and held. Against ambient traffic the signal is
+whatever happened to be on the air, and how much of a piconet a sweeping
+receiver hears varies widely between runs, which is why the Classic tests
+carry floors rather than counts.
+
+What is not settled is which reading to take, because the two candidates do
+not line up. The per-packet figures come from packet lines, so they need the
+sender to put real Bluetooth packets on the air, and the only level-settable
+transmitter here is an Ubertooth whose continuous transmit mode (`-t`) sends a
+carrier rather than packets. A spectrum reading does work against a carrier,
+but it measures the band, not whether a packet decoded, so it is a transmit
+power measurement again rather than sensitivity. The ESP32 peers do put real
+packets on the air, and their transmit level is not ours to set. Which of
+those three the test should use is the open question.
+
+One thing the record format does help with: a packet line either carries the
+board's own background estimate for its channel or says `none` for both noise
+and ratio, never one of each, so a run can tell a measured floor from an
+absent one.
+
+**Hardware and arguments.** A `sender` and a `receiver` (both Ubertooth) on
+one named `host:`, a required `allow RF transmission: true`, one `PA level:`
+(0-7) for the sender to hold, a `channel:` in MHz for both boards, and a
+`duration:`. `weak link: {receiver: 20}` puts the attenuated board on the
+receiving side.
+
+**Expected outcome.** No implementation; only a `runnable: false` plan may
+name it. The figure it would judge — the level at which packets stop arriving,
+or a floor on the signal — has not been measured from a held transmitter at
+any attenuation.
+
+**Known limits.** One attenuator gives one point, and a sensitivity curve
+wants more: 30 dB and 40 dB would be the second and third. A pass would say
+nothing about absolute sensitivity in dBm either, since the attenuation and
+the path loss at a meter are both known only as the registry records them by
+hand. Tracked as part of
+[#168](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/168).
 
 ## BLE monitor
 
@@ -1810,7 +1967,9 @@ and both declaring both roles, because the comprehensive coverage exchanges
 them. `coverage:` and a required `duration:`; the pair streams 200 bytes every
 20 ms whatever the duration is. Linux only: a peer is reached through
 `/dev/serial/by-id`. Nothing flashes a peer, so each board must already run
-`utesp-1.0.0` or a later 1.x image, which mandatory preflight checks.
+`utesp-1.0.0` or a later 1.x image, which mandatory preflight checks. The
+Ubertooth defaults to needing an ordinary link, so a plan has to say
+`weak link:` to point it at the attenuated board.
 
 **Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
 central's LAP in its survey results, and a run with no target reports at least
@@ -1853,7 +2012,8 @@ the tool while the pair streams.
 
 **Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
 and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
-required `duration:`, Linux only.
+required `duration:`, Linux only, and an ordinary link for the Ubertooth by
+default.
 
 **Expected outcome.** Smoke runs 2 cases: `-l <central LAP> -u <central UAP>`
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
@@ -2213,9 +2373,10 @@ attenuated or more distant receiver) if a run's skirt makes it ambiguous.
 `Ubertooth` and two ESP32 Classic peers as `acceptor` and `initiator`,
 `coverage:`, a required `duration:` (the capture window), Linux only. The
 peers must run `utesp-1.3.0` or a later 1.x image, which is where `afh` and
-the link map arrived; an older one fails the case naming what it found. No
-`rf:` default, so a plan may place the receiver anywhere; two minutes is the
-capture window both plans that hold it use.
+the link map arrived; an older one fails the case naming what it found. The
+Ubertooth defaults to needing an ordinary link, as the other two Classic
+tests do, so a plan asking for the attenuated receiver has to say so; two
+minutes is the capture window both plans that hold it use.
 
 The release plan holds it too, as the `smoke` profile, and it is the one
 entry there that names a bench host, because the peers are on one host. It

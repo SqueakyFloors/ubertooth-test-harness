@@ -394,7 +394,7 @@ class PlanTests(ControllerTestCase):
         self.assertIsNone(fast["error"])
         # Plans of planned tests are listed but marked not runnable.
         self.assertEqual(
-            {"backlog", "mac-polling"},
+            {"backlog", "mac-polling", "weak-link"},
             {name for name, plan in plans.items() if plan["runnable"] is not True},
         )
         self.assertIs(True, fast["runnable"])

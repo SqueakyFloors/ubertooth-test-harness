@@ -7,6 +7,7 @@ from typing import Mapping
 
 import yaml
 
+from ubertooth_harness import weaklink
 from ubertooth_harness.catalog import CatalogError, TestCatalog, builtin_catalog
 
 
@@ -137,27 +138,98 @@ def load_plan(path: Path | str, catalog: TestCatalog | None = None) -> Plan:
     return Plan(name, MappingProxyType(normalized_suites), runnable)
 
 
-def unimplemented_tests(plan: Plan, catalog: TestCatalog | None = None) -> tuple[str, ...]:
+def _steps_of(plan: Plan, suite: str | None):
+    """Every step of the plan, or of one named suite."""
+    if suite is None:
+        return [step for steps in plan.suites.values() for step in steps]
+    return list(plan.suites.get(suite, ()))
+
+
+def unimplemented_tests(
+    plan: Plan, catalog: TestCatalog | None = None, suite: str | None = None
+) -> tuple[str, ...]:
     """Tests the plan names that have no implementation, in plan order."""
     test_catalog = catalog or builtin_catalog()
     names = []
-    for steps in plan.suites.values():
-        for step in steps:
-            if not test_catalog.get(step.test_name).implemented and step.test_name not in names:
-                names.append(step.test_name)
+    for step in _steps_of(plan, suite):
+        if not test_catalog.get(step.test_name).implemented and step.test_name not in names:
+            names.append(step.test_name)
     return tuple(names)
 
 
-def check_runnable(plan: Plan, catalog: TestCatalog | None = None) -> None:
-    """Refuse a runnable plan that names a test with no implementation:
-    run-suite would refuse its suite. Planned tests go in a plan with
-    ``runnable: false`` (testplans/backlog.yaml)."""
-    if not plan.runnable:
-        return
-    missing = unimplemented_tests(plan, catalog)
+def unjudgeable_attenuations(
+    plan: Plan, catalog: TestCatalog | None = None, suite: str | None = None
+) -> Mapping[str, tuple[str, ...]]:
+    """Per test, the placements it asks for that no run could judge.
+
+    A test's pass or fail figures were set over whatever link it last ran, so
+    pointing it at an attenuation the bench has never been measured at would
+    judge it against figures taken somewhere else
+    (``weaklink.MEASURED_ATTENUATIONS_DB``). The reason is read from the
+    placement requirements rather than from the argument that produced them,
+    so the ``rf:`` spelling is judged exactly like ``weak link:``, including
+    a loose bound that would let an unmeasured board be bound.
+    """
+    test_catalog = catalog or builtin_catalog()
+    found = {}
+    for step in _steps_of(plan, suite):
+        definition = test_catalog.get(step.test_name)
+        asked = definition.placement_requirements(step.arguments)
+        for role, want in sorted(asked.items()):
+            reason = weaklink.unjudgeable(want)
+            if reason:
+                found.setdefault(step.test_name, []).append(f"{role} {reason}")
+    return MappingProxyType({
+        name: tuple(reasons) for name, reasons in found.items()
+    })
+
+
+def _refuse_unrunnable(plan: Plan, catalog, suite: str | None, what: str) -> None:
+    missing = unimplemented_tests(plan, catalog, suite)
     if missing:
         raise PlanError(
-            f"plan {plan.name} names tests with no implementation: "
+            f"{what} names tests with no implementation: "
             + ", ".join(missing)
             + "; move them to a plan with 'runnable: false' (testplans/backlog.yaml)"
         )
+    unjudgeable = unjudgeable_attenuations(plan, catalog, suite)
+    if unjudgeable:
+        named = "; ".join(
+            f"{name}: " + ", ".join(reasons)
+            for name, reasons in unjudgeable.items()
+        )
+        raise PlanError(
+            f"{what} asks for a link no figure has been taken over: {named}. "
+            "The bench is measured at "
+            f"{weaklink.describe_attenuations(weaklink.MEASURED_ATTENUATIONS_DB)}"
+            ", so a test pointed anywhere else would be judged against "
+            "figures from another link; those entries wait in a plan with "
+            "'runnable: false' (testplans/weak-link.yaml)"
+        )
+
+
+def check_runnable(plan: Plan, catalog: TestCatalog | None = None) -> None:
+    """Refuse a runnable plan that cannot judge what it would run.
+
+    Two ways it cannot: a test with no implementation, whose suite run-suite
+    would refuse; and a test pointed at a link no figure has been taken over.
+    Both wait in a plan with ``runnable: false`` (testplans/backlog.yaml,
+    testplans/weak-link.yaml), which is why a plan declaring that is left
+    alone here.
+    """
+    if not plan.runnable:
+        return
+    _refuse_unrunnable(plan, catalog, None, f"plan {plan.name}")
+
+
+def check_suite_runnable(
+    plan: Plan, suite: str, catalog: TestCatalog | None = None
+) -> None:
+    """The same two refusals for the one suite a run is about to run.
+
+    ``runnable: false`` is not a licence to run the suite anyway, so the flag
+    is not consulted: it says a plan may *name* these entries, not that a run
+    may judge them. Per suite rather than per plan, so a plan is not refused
+    for an entry in a suite this run does not touch.
+    """
+    _refuse_unrunnable(plan, catalog, suite, f"suite '{suite}' of plan {plan.name}")
