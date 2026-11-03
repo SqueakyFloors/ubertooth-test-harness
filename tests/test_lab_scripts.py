@@ -34,6 +34,10 @@ PEER = LAB / "peer"
 
 UT_SERIAL = "0123456789abcdef0123456789abcdef"
 UT2_SERIAL = "fedcba9876543210fedcba9876543210"
+# The board a debug programmer is wired to, and the programmer's own serial.
+UT3_SERIAL = "99887766554433221100aabbccddeeff"
+PROG_SERIAL = "A000AA00"
+PROG_KEY = f"programmer-{PROG_SERIAL}"
 BRIDGE = "a1b2c3d400000000a1b2c3d400000000"
 BRIDGE2 = "d4c3b2a111111111d4c3b2a111111111"
 JLINK = "000123456789"
@@ -60,6 +64,23 @@ REGISTRY = textwrap.dedent(
         attached to: Host_Linux
         identity:
           serial: {UT2_SERIAL}
+      UT_Dbg:
+        type: Ubertooth
+        attached to: Host_Linux
+        identity:
+          serial: {UT3_SERIAL}
+        power:
+          controller: Hub0
+          port: 2
+      Prog0:
+        type: Debug programmer
+        attached to: Host_Linux
+        programs: UT_Dbg
+        identity:
+          serial: "{PROG_SERIAL}"
+        power:
+          controller: Hub0
+          port: 6
       DK0:
         type: nRF52840 DK
         attached to: Host_Linux
@@ -187,6 +208,9 @@ class HoldResolution(Bench):
             ("123456789", "DK0"),  # nrfutil drops the leading zeros
             (BRIDGE, "ESP0"),
             (BRIDGE[:8], "ESP0"),
+            (PROG_SERIAL, "Prog0"),
+            (PROG_SERIAL.lower(), "Prog0"),
+            (PROG_SERIAL[:4], "Prog0"),
         ):
             with self.subTest(name=name):
                 self.assertEqual(alias, hold.resolve(registry, name).alias)
@@ -250,6 +274,16 @@ class HoldLockKeys(Bench):
         peer = registry.get("ESP0")
         if peer.type in leases.LEASED_TYPES:
             self.assertEqual(leases.resource_key(peer), hold.lock_key(peer))
+
+    def test_a_programmer_is_held_by_its_own_key_and_its_bench_name(self):
+        import _bench
+
+        programmer = self.load_registry().get("Prog0")
+        self.assertEqual(PROG_KEY, hold.lock_key(programmer))
+        # As registered, not lowercased: the bench's own lock file is named
+        # after the same string the lease key carries.
+        self.assertEqual(PROG_SERIAL, _bench.plain_serial(programmer))
+        self.assertEqual(PROG_SERIAL, _bench.bench_lock_board(programmer).key)
 
     def test_a_type_this_does_not_hold_is_refused(self):
         from ubertooth_harness.resources import RegistryError
@@ -473,6 +507,57 @@ class HoldRuns(Bench):
             f"{checks}\n"
             f"pathlib.Path({str(self.root / out_name)!r}).write_text(' '.join(out))\n"
         )
+
+    def test_a_board_wired_to_a_programmer_holds_it_too(self):
+        """Either name takes both: the pair is one piece of hardware here."""
+        paths = (
+            self.leases / f"{UT3_SERIAL}.lock",
+            self.leases / f"{PROG_KEY}.lock",
+            self.locks / f"board-{UT3_SERIAL}.lock",
+            self.locks / f"board-{PROG_KEY}.lock",
+            # The bench's older name for the programmer, as registered.
+            self.locks / f"board-{PROG_SERIAL}.lock",
+        )
+        for device, expected_note in (
+            ("UT_Dbg", "Prog0 is the programmer wired to UT_Dbg"),
+            ("Prog0", "UT_Dbg is the device Prog0 programs"),
+            (PROG_SERIAL, "UT_Dbg is the device Prog0 programs"),
+        ):
+            with self.subTest(device=device):
+                status, _, err = self.run_hold(
+                    device,
+                    [sys.executable, "-c", self.busy_script(paths, "pair.txt")],
+                )
+                self.assertEqual(0, status, err)
+                self.assertEqual(
+                    "busy " * (len(paths) - 1) + "busy",
+                    (self.root / "pair.txt").read_text(),
+                )
+                self.assertIn(expected_note, err)
+                self.assertIn("so it is held too", err)
+
+    def test_naming_both_members_of_a_pair_is_harmless(self):
+        status, _, err = self.run_hold("UT_Dbg,Prog0", [sys.executable, "-c", "pass"])
+        self.assertEqual(0, status, err)
+        self.assertNotIn("is held too", err)
+
+    def test_a_held_programmer_refuses_a_hold_of_the_board_it_programs(self):
+        holder = leases.acquire(
+            [leases.Board("Prog0", PROG_KEY)],
+            leases.holder_info(run_id=None, owner="bob", purpose="programming it"),
+            directory=self.leases,
+        )
+        self.addCleanup(holder.release)
+        marker = self.root / "pair-ran"
+        status, _, err = self.run_hold(
+            "UT_Dbg", [sys.executable, "-c", f"open({str(marker)!r}, 'w')"],
+            extra=("--wait-for-boards", "0"),
+        )
+        self.assertEqual(2, status)
+        self.assertFalse(marker.exists())
+        self.assertIn("bob", err)
+        # Why a command that named one device was refused another's holder.
+        self.assertIn("Prog0 is the programmer wired to UT_Dbg", err)
 
     def test_a_mixed_hold_holds_every_device_in_one_attempt(self):
         paths = (
@@ -788,6 +873,53 @@ class HubPortSwitches(Bench):
         self.assertEqual([], self.controller.calls)
         self.assertIn("bob", err)
 
+    def test_a_programmer_is_held_while_its_board_s_port_is_switched(self):
+        """UT_Dbg is on port 2, with Prog0 wired to it.
+
+        Cutting the board's power while it is being programmed leaves it
+        needing hands on it, so the programmer is held for the switch.
+        """
+        seen = {}
+
+        def switch(controller, port, action, seconds, sleep=None):
+            seen["states"] = leases.board_states(
+                [leases.Board("Prog0", PROG_KEY)], directory=self.leases
+            )
+            controller.set_power_enabled(port, False)
+
+        original = hub_port.switch
+        hub_port.switch = switch
+        self.addCleanup(setattr, hub_port, "switch", original)
+        status, _, err = self.run_hub_port(["Hub0", "off", "2"])
+        self.assertEqual(0, status, err)
+        self.assertTrue(seen["states"][0]["held"])
+        self.assertIn("Prog0 is the programmer wired to UT_Dbg", err)
+
+    def test_it_refuses_a_port_whose_device_s_programmer_someone_holds(self):
+        holder = leases.acquire(
+            [leases.Board("Prog0", PROG_KEY)],
+            leases.holder_info(run_id=None, owner="bob", purpose="programming it"),
+            directory=self.leases,
+        )
+        self.addCleanup(holder.release)
+        status, _, err = self.run_hub_port(["Hub0", "cycle", "2"])
+        self.assertEqual(2, status)
+        self.assertEqual([], self.controller.calls)
+        self.assertIn("bob", err)
+
+    def test_it_refuses_the_programmer_s_own_port_while_its_board_is_held(self):
+        """Prog0 is on port 6: the pair holds both ways."""
+        holder = leases.acquire(
+            [leases.Board("UT_Dbg", UT3_SERIAL)],
+            leases.holder_info(run_id=None, owner="bob", purpose="a capture"),
+            directory=self.leases,
+        )
+        self.addCleanup(holder.release)
+        status, _, err = self.run_hub_port(["Hub0", "cycle", "6"])
+        self.assertEqual(2, status)
+        self.assertEqual([], self.controller.calls)
+        self.assertIn("bob", err)
+
     def test_force_switches_a_held_port_and_says_so(self):
         holder = leases.acquire(
             [leases.Board("UT0", UT_SERIAL)],
@@ -800,6 +932,15 @@ class HubPortSwitches(Bench):
         self.assertEqual([("power", 3, False)], self.controller.calls)
         self.assertIn("--force", err)
         self.assertIn("UT0", err)
+
+    def test_force_names_every_device_it_leaves_unheld(self):
+        """A pair member is unheld too, so the warning has to name it."""
+        status, _, err = self.run_hub_port(["Hub0", "off", "2", "--force"])
+        self.assertEqual(0, status, err)
+        self.assertEqual([("power", 2, False)], self.controller.calls)
+        self.assertIn("UT_Dbg", err)
+        self.assertIn("Prog0", err)
+        self.assertIn("--force", err)
 
     def test_an_empty_port_is_switched_with_no_holder_check(self):
         status, _, err = self.run_hub_port(["Hub0", "off", "7"])

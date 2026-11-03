@@ -356,6 +356,16 @@ resources:
       port: 1
 ```
 
+A resource MAY be recorded as permanently wired to another one: a
+`Debug programmer` names the single device it `programs`. The two are then
+held as one pair, whichever of them a command names, because using either
+without the other spoils a test or leaves a board needing hands on it
+(`FileResourceRegistry.pair_members`, `leases.expand_pairs`;
+[`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs)).
+Validation requires both members on one host, one programmer per device, and
+no self-pairing or loop; expansion is deduplicated, deterministic, and
+terminates on any graph it is given.
+
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
 valid host attachments, type-correct defaults, and valid power relationships.
@@ -386,10 +396,39 @@ either by placement.
 
 A test states what it needs of the unit bound to each hardware role as a
 `PlacementRequirement` (`antenna`, `min_attenuation_db`,
-`max_attenuation_db`), from the plan's `rf:` argument or, failing that, the
-test's own `rf_defaults`. Captures, surveys, and tests that hold a live
-connection default to an ordinary link, so the planner keeps them off an
-attenuated board; a plan's `rf:` overrides that per role. The requirement
+`max_attenuation_db`), from the plan's `rf:` argument, failing that from what
+its `weak link:` argument makes of that role, and failing that from the test's
+own `rf_defaults`. Captures, surveys, and tests that hold a live connection
+default to an ordinary link, so the planner keeps them off an attenuated
+board; a plan's `rf:` or `weak link:` overrides that per role.
+
+`weak link:` (`weaklink.py`) names one role and an attenuation in dB, and it
+speaks for every role of the test: that role at exactly that attenuation with
+its antenna attached, and every other hardware role an ordinary board. That is
+one number in the plan where `rf:` needs a record per role. It refuses a
+second role, so a figure from a run always belongs to one attenuation; a plan
+that wants two placements says so with `rf:`, and a test takes one argument or
+the other, never both. The attenuation a run used is not read back from the
+argument: `resource_placements` carries the placement of every board the
+planner bound, which is what a report quotes — for the boards that record a
+placement. A board with no `rf:` is absent from that record, so under
+`weak link:` the ordinary roles usually leave no trace of having been
+ordinary; what the record shows is the attenuated side and what every role
+was required to be (`placement_requirements`).
+
+`weaklink.unjudgeable` is what a run has to pass: a requirement may leave no
+attenuated link possible (an ordinary board) or pin exactly one attenuation,
+which must be in `weaklink.MEASURED_ATTENUATIONS_DB`. A requirement that
+leaves a band open above 0 dB, which `rf:` can write and `weak link:` cannot,
+is refused too, because which board it binds depends on what the bench
+happens to hold. `plan.check_runnable` applies that to a whole plan for
+`validate-plan`, honoring `runnable: false`; `plan.check_suite_runnable`
+applies it to the one suite a `run-suite` is about to run and does not
+consult the flag, since `runnable: false` says a plan may name those entries,
+not that a run may judge them. Both also refuse a test with no
+implementation. `weaklink.CHECKS` is the list of weak-link checks and what
+each one still needs; none is in a runnable plan, and
+`testplans/weak-link.yaml` is where they wait. The requirement
 narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
 is filtered by the role as well, so a unit that could never take the role is
 not offered as the one that satisfies the placement: `default` prefers the
@@ -693,9 +732,9 @@ and a self-reset is then only reported (README, "Firmware watchdog").
 
 Every test accepts `platforms:` (`linux`, `macos`, no duplicates), and a step
 that leaves it out runs on every platform. Every test that binds hardware also
-accepts `rf:`, one placement requirement per hardware role (see
-[RF placement](#rf-placement)); a role the test does not bind is refused at
-load. `hosts:` chooses the registered
+accepts `rf:`, one placement requirement per hardware role, and `weak link:`,
+its shorthand (see [RF placement](#rf-placement)); a role the test does not
+bind is refused at load, as is setting both. `hosts:` chooses the registered
 hosts a step may run on; `platforms:` narrows those to the ones that can run
 it, as a test-wide need (`hostneeds.Needs`), so the planner compiles the step
 only for hosts whose platform it lists and records the rest as not applicable.
