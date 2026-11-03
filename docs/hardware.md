@@ -260,16 +260,22 @@ holds the other.
   required: it names the lease, as `programmer-<serial>`, taken verbatim as
   registered (a `serial device`, where one is recorded, must be the stable
   `/dev/serial/by-id` path, not `/dev/ttyUSB<n>`, which is assignment order).
+  It has to leave room for that prefix and for the bench's own `bench-`
+  prefix, so 53 characters at most; a longer one is refused when the registry
+  loads, naming the field and the limit.
 - `programs:` is the one board it is wired to. A registry is refused when that
   board is not registered, is not a device the harness leases (a host, a hub:
   there would be no lock to take for it), is attached to another host (leases
   are local to a host, so a pair across two of them would hold nothing),
   already has another programmer, or is the programmer itself, and when the
-  pairing loops back on itself. Its serial has to be its own: a programmer
-  may not take a serial another device is registered with, nor one that
-  spells a file the lease directory keeps for itself (`host-power`,
-  `takeover`), because the bench lock name for a programmer is that serial
-  on its own and a lock of one would be read as a lock of the other.
+  pairing loops back on itself.
+- Its serial has to be its own, as every device's does, and the rule is not
+  this type's: see "One lock file is one device" under [Sharing the
+  bench](#sharing-the-bench). A programmer is the one device whose serial is
+  chosen by whoever labels the adapter rather than read from the hardware,
+  so it is the easiest one to give a name something else already has
+  (harness [#288](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/288),
+  [#290](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/290)).
 - A chain is allowed and is held as one set, for a bench that wires a
   programmer to another programmer's own header: holding any member holds all
   of them.
@@ -279,13 +285,65 @@ holds the other.
   or power-cycles the board, and `scripts/lab/hub-port` on either member's
   port. The three by-hand commands say on standard error which device the
   pairing brought in and why, and `ubertooth-harness boards` prints the
-  pairing under both. A run takes the pair without saying so in its record
-  yet ([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)).
+  pairing under both. A run says the same line before it takes the locks and
+  carries it in its own record: a `lease_pairing` record in `run.jsonl`, a
+  "Leases from a wired pair" row in `report.md`, and the same line in the
+  browser's live view (harness
+  [#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)).
 - The programmer appears in `ubertooth-harness boards` like any other leased
   device, so a holder a reader did not expect is explained where they see it.
 
 Nothing about a particular bench is in the harness: the type, the serial, and
 the pairing all come from the registry.
+
+#### Installing a bootloader through it
+
+A board's bootloader is the first 16 KiB of its flash. `ubertooth-dfu` runs
+from there, so an ordinary firmware write cannot replace it: a board keeps the
+bootloader it came with until somebody installs another one over the
+programmer. `ubertooth-util -B` reports which one a board has (see
+`Bootloader identity` in [`tests.md`](tests.md)), and a run may be asked to
+install the current one where a board is on an older or different bootloader:
+
+```sh
+ubertooth-harness run-suite ... --build --bootloader update
+```
+
+What that needs on the bench, beyond the pairing above:
+
+- **`lpc21isp` on the host**, which is the programmer command the Ubertooth
+  repository documents (`docs/source/programming.rst` there, and the `program`
+  target of `firmware/bootloader/Makefile`). The harness runs it exactly as
+  documented: `lpc21isp -control <image>.hex <port> 230400 4000`.
+- **`arm-none-eabi-gcc`**, because the bootloader to install is built from the
+  run's own Ubertooth source rather than taken from a file somewhere.
+- **A `serial device` on the programmer**, which is the port `lpc21isp`
+  drives. A programmer registered without one is still held with its board,
+  but a run cannot program through it and says so.
+- **The adapter wired so `lpc21isp` can reset the board into ISP**, which is
+  the CTS-to-RTS modification the Ubertooth documentation describes for an
+  FTDI breakout. Without it the board has to be put into ISP by hand, which no
+  run can do.
+
+The image is the whole 16 KiB region: the built bootloader padded with the
+0xff of erased flash, which is what makes the hash the board reports afterwards
+a property of the artifact alone rather than of whatever was in the top of the
+region before. A run records the region image, its CRC-32, and the commit it
+was built from, writes it once, and then requires `-B` to report exactly that
+version, build string, and hash; a failed write is a hard failure that is
+never retried, and recovery is another deliberate run with the same programmer.
+
+`--bootloader record`, the default, only reads `-B` and records it, which is
+what a bench run and the release suite do: a bootloader write is physical and
+cannot be undone over USB, so it is never implicit. `--bootloader check`
+compares without writing, and fails a run whose board is on an older or
+different bootloader.
+
+The Ubertooth fork has since gained `ubertooth-dfu --update-bootloader`, which
+installs a bootloader over USB. The harness deliberately does not use it: an
+automatic bootloader write goes through a programmer that is physically wired
+to the board, so a board that will not come back can be recovered at the bench
+(the maintainer's to decide: [#302](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/302)).
 
 ### Acroname USBHub3+
 
@@ -651,6 +709,17 @@ debug programmer and the board it programs](#a-debug-programmer-and-the-board-it
 Where the bench's own scripts lock devices with their own per-device files, a
 lease takes those too (`--external-board-lock`). See
 [Sharing boards: leases](../README.md#sharing-boards-leases).
+
+**One lock file is one device.** No two devices may be registered with one
+serial, whatever their types and whichever way each is written: the bench's
+own lock file for a device is named after its plain serial, so a lock of one
+would be read as a lock of the other. Nor may two resources take one lease
+file, which is a danger a duplicate identity does not cover, since a lease
+key is built from one identity field (a DK registered `000123456789` and one
+registered `123456789` are two identities and one key). A registry that does
+either is refused when it is loaded, naming both devices. `host-power` and
+`takeover` are names the lease directory keeps for itself, and no device may
+be registered with one.
 
 For a command you run by hand, [`scripts/lab/hold`](../scripts/lab/README.md)
 takes the leases and names devices the way a bench note does, by serial or by

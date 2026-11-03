@@ -330,6 +330,75 @@ name it.
 
 **Known limits.** Covered in practice by `Ubertooth identity`.
 
+## Bootloader identity
+
+**What it does.** Nothing as a plan entry: a catalog entry for the bootloader
+read, which mandatory preflight does on every board of every run instead.
+
+**Theory of operation.** A board's bootloader is the first 16 KiB of its
+flash, and `ubertooth-dfu` runs from there, so an ordinary firmware write
+cannot replace it: a board keeps the bootloader it came with until somebody
+installs another one over a programmer on its in-system programming header.
+`ubertooth-util -B` is what reports which one that is, in one line:
+
+```text
+Bootloader: 2.00 git-1a2b3c4, CRC32:0x9d2fe1b4
+Bootloader: no version block (factory or earlier, treated as 1.x), CRC32:0x5f0a73c1
+```
+
+The first form comes from a 48-byte version block the fork's bootloader
+carries at a fixed offset; the second is every board as shipped. The CRC-32 is
+of the whole region, worked out on the board, and is on the line either way.
+
+Preflight reads it for every board whose firmware the run requires, after the
+firmware checks, since firmware older than the read refuses it. What the run
+then requires is `--bootloader`:
+
+- `record`, the default, asks only that the board answered, and records what
+  it said. A bootloader write is physical and cannot be undone over USB, so
+  nothing about one is implicit in a bench or release run.
+- `check` compares the answer with a bootloader built from the run's own
+  Ubertooth source and fails the run when a board is on an older or different
+  one. All three of the version, the build string, and the region hash must
+  agree: two different 2.00 images are two different bootloaders, and the hash
+  is what tells them apart.
+- `update` installs that bootloader on a stale board whose registry pairs it
+  with a debug programmer, then reads `-B` again and requires exactly the
+  identity that was written, and the application still reporting the run's
+  revision. A stale board with no programmer fails and the reason names the
+  missing capability.
+
+"Current" is not the resolved commit's bootloader but the newest commit,
+reachable from it, that touched the sources the bootloader image is built
+from. The build string in the block is the whole repository's revision at
+build time, so an artifact pinned to the resolved commit would differ on every
+unrelated commit and ask for a physical write to every board on most days, for
+no change in behavior. The harness reads the bootloader's own makefile and
+refuses a pin whose paths no longer cover a source the image is built from.
+
+**Hardware and arguments.** One `Ubertooth` per check, selected by full
+serial. `update` also needs a `Debug programmer` paired with the board, with a
+`serial device`, plus `lpc21isp` and `arm-none-eabi-gcc` on the host; see
+"Installing a bootloader through it" in [`hardware.md`](hardware.md).
+
+**Expected outcome.** No implementation as a plan entry; only a
+`runnable: false` plan may name it. As a preflight check: one `-B` per
+selected board, recorded in `run.jsonl` as a `bootloader_identity` record and
+shown in the report's Bootloader section and in the GUI's board list.
+`record` passes on any answer, including a factory bootloader; `check` and
+`update` pass only on the identity the artifact names.
+
+**Known limits.** A run against a fork commit from before `-B` existed has no
+check at all, and records that it had none. The region hash is worked out from
+the artifact, which is the image padded with the 0xff of erased flash and the
+vector checksum filled in; a programmer that wrote the region any other way
+would be caught by the read-back rather than predicted, which is what the
+first hardware test of the update path confirms
+([#298](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/298)).
+There is no one factory hash to compare against: shipped boards each report a
+different one, so a board's own hash is worth recording and another board's
+says nothing about it.
+
 ## Part ID
 
 **What it does.** Nothing yet: a catalog entry for reading the
@@ -455,6 +524,12 @@ and must print none of the mode-start lines, so an accepted argument that
 started a mode is caught even where the exit status would not show it. The
 arguments and messages are taken from the fork's own sources, so the expected
 text is the tool's, not the harness's guess.
+
+Each command names the board it is for with `-U <serial>`, except the two
+`-U all` cases, which bring that selector themselves: no option may be given
+a value twice, so a second `-U` would be refused for the repeat and the case
+could never reach the behavior it is named for. Those two are refused before
+any board is opened, so leaving the selector out takes nothing away.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded, which is what catches the two `-U all` cases if a regression let them
@@ -749,6 +824,16 @@ directions rather than of one board talking to itself. `-m` on the sender then
 reports the lowest PA level and copy number that got through each way; the
 repeater keeps no result of its own, which the test also confirms.
 
+`-n` waits for the round trip and prints that same result block itself, on
+standard output, with its progress on standard error. So the test reads the
+result twice over: `-n`'s standard output must carry those four lines and
+nothing else, and the `-m` read after the test must give the same four
+values, which the case records from `-n` and holds the read to. Its step is
+given longer than the tool's own deadline, so a test the repeater never
+answers is reported by the tool, with its reason, rather than killed by the
+harness; a reply that differs from the request ends `-n` the same way, with
+the byte it differs at on standard error.
+
 Both boards are reset first, so neither can report a stale result, and both
 are set to 2410 MHz, which is neither the boot default nor the value the idle
 reset leaves. That way the channel reads after the test show the idle reset
@@ -763,13 +848,15 @@ rather than `each`. `allow RF transmission: true` is required: both boards
 transmit, the sender at every PA level up to 0 dBm. `maximum PA level:` (0-7,
 default 7) is the highest level the plan accepts for a pass. Guarded.
 
-**Expected outcome.** One case of 35 steps. It passes when the sender's `-m`
-reports four result lines with request and reply PA levels at or below
+**Expected outcome.** One case of 35 steps. It passes when the sender's `-n`
+completes the round trip and reports it, and its `-m` reports those same four
+values afterwards, with request and reply PA levels at or below
 `maximum PA level` and copy numbers 0-15; the repeater answers USB with its RX
 LED on both before and after the test and keeps no result; the sender is idle
 at 2441 MHz once the test ends by itself; `-S` returns the repeater to idle;
 and every setting of both boards is restored. A reply that differs from the
-request fails with the byte and the field it belongs to named.
+request ends `-n` with the tool's own `invalid range test: mismatch on byte N`
+and fails the case there.
 
 **Weak-link responder.** `range.yaml`'s second suite, `range-weak-link`,
 chooses both boards by RF placement instead of by alias: the responder behind
@@ -830,17 +917,19 @@ behavior
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.
 
-**The `range-weak-link` suite does not pass on fork main today.** Its one
-recorded run, at 20 dB and about a meter, failed at the step that asserts `-n`
-prints nothing on standard output: `-n` prints `waiting for the repeater...`
-there instead of on standard error
-([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)).
-That line appears only once the first progress interval has passed. A
-repeater at bench distance answers before then, so the ordinary suite never
-reaches it; one a meter away behind 20 dB does not. The run stops there,
-before `-m` is read, so this suite has never judged a result; the PA levels
-above come from driving `-e`, `-n`, and `-m` by hand. It is committed so the
-fork fix is verified by a suite rather than by a one-off script.
+**The `range-weak-link` suite has never judged a result.** Its one recorded
+run, at 20 dB and about a meter, failed at the `-n` step: `-n` printed
+`waiting for the repeater...` on standard output rather than standard error
+([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)),
+where the result block is. That line appears only once the first progress
+interval has passed, so a repeater at bench distance answers before it and
+the ordinary suite never saw it; one a meter away behind 20 dB did. The fork
+fixed the stream in `30c4103f`, and this step now requires standard output to
+carry the result block and nothing else, so that regression is still what the
+suite would catch. Nothing has run it since the fix, so it stopped before
+`-m` was read and the PA levels above come from driving `-e`, `-n`, and `-m`
+by hand. It is committed so the fork fix is verified by a suite rather than by
+a one-off script.
 
 ## Transmit power steps
 
@@ -1051,7 +1140,10 @@ value. The Ubertooth defaults to needing an ordinary link (antenna attached,
 no attenuation), so the planner keeps these cases off an attenuated board.
 
 **Expected outcome.** Smoke runs 3 cases: a survey (`-z -t`) that ends by
-itself and lists its results, a `-r` PCAPNG capture, and the AFH no-packets
+itself and lists its results, with the `Survey Results` heading on standard
+error and the addresses on standard output (the heading among the addresses
+is a failure: the fork splits the two streams so that standard output holds
+only what a script parses), a `-r` PCAPNG capture, and the AFH no-packets
 case. Comprehensive runs 14, adding the plain sweep, a fixed channel, the
 explicit `-s` sweep and `-s -c 39` where the channel wins, `-e 0` and `-e 4`,
 a `-q` PCAP capture, a `-d` packet dump, AFH with `-e 2`, AFH `-r` printing
@@ -1078,7 +1170,9 @@ records), so the file says which was used. The modulation options are checked
 at their source: the firmware programs the CC2400 MDMCTRL register with a
 known value for basic rate or LE when the stream starts, and the register
 keeps it after the mode stops, so `ubertooth-debug` can read back which
-modulation actually took effect, including which of `-c` and `-l` won.
+modulation actually took effect. A capture uses one demodulator, so `-c` and
+`-l` in one command line are refused rather than ranked; that refusal needs
+no board and is in `Refused command lines`.
 
 The stale-packet case uses the fact that `ubertooth-btle -n` and
 `ubertooth-dump` read the board over different paths, so the two meet only at
@@ -1091,8 +1185,8 @@ needing an ordinary link.
 
 **Expected outcome.** Smoke runs 3 cases: full records to a file, the `-b`
 bitstream to a file, and an E-GO receive run on 2440 MHz. Comprehensive runs
-11, adding `-l` LE modulation verified through MDMCTRL, `-l -c` and `-c -l`
-where the last option wins, E-GO capture lengths 1 and 48, an E-GO access
+10, adding `-l` LE and `-c` basic-rate modulation, each verified through
+MDMCTRL, E-GO capture lengths 1 and 48, an E-GO access
 code, the refusal of a bad access code, and the stale-packet case, which
 alternates BLE and BR/EDR five times and requires zero packets from the
 previous mode in every dump and every capture.
@@ -1237,7 +1331,9 @@ derive the UAP with `-l`, replay into PCAPNG and into PCAP (link type 255, the
 fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
 and `-s` decoding the same as without it, with `-h` listing `-s` as the
-default. Comprehensive runs 19, adding the survey listing of both piconets,
+default. Comprehensive runs 19, adding the survey listing of both piconets
+(the two addresses on standard output and the `Survey Results` heading on
+standard error),
 a LAP filter, a correct and a wrong `-u`, `-e 0` dropping the packet with an
 error, a `-d` dump compared byte for byte with the fixture, a filtered PCAP,
 an empty file, a file whose last record is cut short (exit 1 after the whole
@@ -1362,15 +1458,17 @@ and that note is forbidden in a refusal.
 they are left out on a host without it.
 
 **Expected outcome.** On a Linux host, smoke runs 45 cases and comprehensive
-65; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
+67; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
 applicable. Every file option of `btle`, `follow`, `rx`, `dump`, `specan`, and
 `dfu` is refused three ways: with a stray word, with `-h` (which exits 0 and
 must still create nothing), and with a bad option value later on the line.
 Beyond that: the extra-capture-file note goes to stderr, so it cannot land in
 a capture written to stdout; a repeated file option is refused with
 `error: option '-r' given more than once` before the stray word and before any
-board lookup; and `scan` and `follow` refuse a stray word with no usage text
-after the message.
+board lookup; `dump -d` with `-c` and `-l` in either order is refused with
+`a capture uses one modulation`, naming both options as they were written,
+before the dump file is opened; and `scan` and `follow` refuse a stray word
+with no usage text after the message.
 
 **Known limits.** Forks from before the no-devices switch ignore it, so the
 first step of every case reads the built library's bytes and the case skips

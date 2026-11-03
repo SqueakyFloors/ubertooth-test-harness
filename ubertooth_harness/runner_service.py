@@ -458,6 +458,11 @@ class RunnerService:
                 f"--libbtbb-ref={self.config.libbtbb_ref}",
             ]
         argv += [f"--test={name}" for name in message["tests"]]
+        # Always passed, so a run's record says which of the three it was
+        # asked for rather than leaving the default to be inferred. Before the
+        # build options, because nothing of the runner's own may follow
+        # --with-python, whose value is optional.
+        argv.append(f"--bootloader={message['bootloader']}")
         if message["build"]:
             argv.append("--build")
             if not message["flash_build"]:

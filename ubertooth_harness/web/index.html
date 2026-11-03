@@ -78,6 +78,15 @@
           <label for="with-python">Build the Python tools too</label>
         </div>
         <p id="with-python-note" class="hint">Costs extra build time; builds ubertooth-btbr and ubertooth-specan-ui with python3 on the target, where specan-ui also needs numpy, qtpy and a Qt binding.</p>
+        <div class="field">
+          <label for="bootloader">Bootloader</label>
+          <select id="bootloader" name="bootloader" aria-describedby="bootloader-note">
+            <option value="record" selected>Record what each board has</option>
+            <option value="check">Check it against the ref's bootloader</option>
+            <option value="update">Update a stale board through its programmer</option>
+          </select>
+        </div>
+        <p id="bootloader-note" class="hint">A board keeps its bootloader through every firmware update, so recording it is all a normal run does. Check and Update need Build and arm-none-eabi-gcc on the target. Update writes flash over a debug programmer the registry pairs with the board, and fails on a stale board that has none; it also needs Flash, because the write happens before preflight and the board has to be carrying this run's firmware first.</p>
         <p id="run-blocked" class="hint warn" role="status" hidden></p>
         <div class="form-actions">
           <button type="submit" id="run-button" class="primary" aria-describedby="run-blocked">Run</button>
@@ -107,6 +116,7 @@
           <div id="live-boards" class="live-boards" hidden>
             <h3 id="boards-heading">Boards</h3>
             <ul id="boards" class="boards" aria-labelledby="boards-heading"></ul>
+            <p id="bootloader-expected" class="hint" hidden></p>
           </div>
         </div>
         <div class="live-checklist">
@@ -118,6 +128,10 @@
           <div id="live-queued" class="live-queued" hidden>
             <h3 id="queued-heading">Queued behind another command</h3>
             <ul id="queued" class="queued" aria-labelledby="queued-heading"></ul>
+          </div>
+          <div id="live-pairings" class="live-pairings" hidden>
+            <h3 id="pairings-heading">Leases from a wired pair</h3>
+            <ul id="pairings" class="pairings" aria-labelledby="pairings-heading"></ul>
           </div>
           <h3 id="log-heading">Log tail</h3>
           <pre id="log" class="log" tabindex="0" aria-labelledby="log-heading"></pre>

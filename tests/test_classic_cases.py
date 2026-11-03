@@ -74,7 +74,10 @@ resources:
 # One packet line of each piconet, as ubertooth-rx prints them.
 PACKET = ("systime=1793317467 ch=28 LAP={lap} err=0 clkn=29234 clk_offset=2492 "
           "s=0 n=-88 snr=88")
-SURVEY = "Survey Results\n??:??:0D:E9:C5:BA\n"
+# A survey's standard output: the addresses alone. Its heading is on
+# standard error (ubertooth-rx.c), which these checks do not read; the
+# survey step asks for the heading in its patterns instead.
+SURVEY = "??:??:0D:E9:C5:BA\n"
 
 
 def arguments(test, coverage="smoke", duration="25s"):
@@ -128,8 +131,7 @@ class CheckTests(unittest.TestCase):
                          survey_lists(CENTRAL_LAP)("systime=1 nonsense\n"))
 
     def test_a_survey_line_with_no_uap_still_names_its_lap(self):
-        self.assertEqual("", survey_lists(CENTRAL_LAP)(
-            "Survey Results\n??:??:??:E9:C5:BA\n"))
+        self.assertEqual("", survey_lists(CENTRAL_LAP)("??:??:??:E9:C5:BA\n"))
 
     def test_the_swapped_case_requires_the_other_lap_and_not_the_centrals(self):
         self.assertEqual("the survey listed LAP e9c5ba, which is not the central's",
@@ -553,7 +555,9 @@ class RegistryTests(unittest.TestCase):
             load_plan(ROOT / "testplans" / "classic.yaml"), "classic")
         with tempfile.TemporaryDirectory() as directory:
             manifest, _ = run_contract(Path(directory), tuple(invocations))
-        checks = PreflightPolicy(registry).compile(invocations, manifest)
+            # Inside the directory: compiling reads the Ubertooth checkout the
+            # manifest names, for the libbtbb its tools must be linked against.
+            checks = PreflightPolicy(registry).compile(invocations, manifest)
         peers = [check for check in checks
                  if check.resource_alias in ("ESP32_Linux0", "ESP32_Linux1")]
         self.assertEqual(2, len(peers))

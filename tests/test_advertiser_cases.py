@@ -222,7 +222,9 @@ class RegistryTests(unittest.TestCase):
             load_plan(ROOT / "testplans" / "ble.yaml"), "ble")
         with tempfile.TemporaryDirectory() as directory:
             manifest, _ = run_contract(Path(directory), tuple(invocations))
-        checks = PreflightPolicy(registry).compile(invocations, manifest)
+            # Inside the directory: compiling reads the Ubertooth checkout the
+            # manifest names, for the libbtbb its tools must be linked against.
+            checks = PreflightPolicy(registry).compile(invocations, manifest)
         dk = [check for check in checks if check.resource_alias == "DK_Linux0"]
         self.assertEqual(1, len(dk))
         self.assertEqual(["identify", "--jlink", "1050000001"], list(dk[0].argv[2:]))
