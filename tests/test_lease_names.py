@@ -238,6 +238,28 @@ class OneBenchLockNameOneDevice(NamesTestCase):
         self.assertIn("DK_A (nRF52840 DK)", reason)
         self.assertIn("ESP_A (ESP32 Classic peer)", reason)
 
+    def test_a_device_the_harness_does_not_lease_takes_no_name(self):
+        """Only a leased device has a lease name, so only it claims one.
+
+        The key function answers for anything it is handed, falling back to
+        a board's serial, so a hub whose own serial happened to look like a
+        board's would otherwise be refused for sharing a file no command
+        ever locks for it.
+        """
+        registry = self.load(
+            ubertooth("UT_A", BOARD),
+            f"  Hub0:\n"
+            "    type: USB power controller\n"
+            "    attached to: Host_Linux\n"
+            "    identity:\n"
+            f'      serial: "{BOARD}"\n'
+            "    driver: acroname BrainStem USBHub3+\n"
+            "    capabilities:\n"
+            "      - per-port VBUS switching\n"
+            "      - power readback\n",
+        )
+        self.assertEqual(BOARD, leases.resource_key(registry.get("UT_A")))
+
     def test_a_serial_that_spells_another_device_s_lease_name_is_refused(self):
         """The bench's own files are named after either kind of name.
 
