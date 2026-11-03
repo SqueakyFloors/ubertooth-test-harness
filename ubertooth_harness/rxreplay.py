@@ -429,7 +429,7 @@ def survey_check(expected_lines: set[str]):
 
     The results are no longer introduced on this stream: the heading goes to
     standard error so that standard output holds only the packet lines and
-    the addresses a script parses (ubertooth-rx.c). So every line here that
+    the addresses a script parses (fork 1c1b41b7). So every line here that
     is not a packet line is an address the survey listed, which also makes a
     heading that arrived on this stream a listed "address" and a failure.
     The step's patterns are what read the heading on standard error.

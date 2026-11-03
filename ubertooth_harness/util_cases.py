@@ -460,6 +460,18 @@ RANGE_RESULT = (
     r"reply PA level   : (?P<reply_pa>\d+)\n"
     r"reply number     : (?P<reply_number>\d+)$"
 )
+# One line of that block on its own, so a check can say that standard output
+# holds the block and nothing besides it.
+RANGE_RESULT_LINE = re.compile(
+    r"^(?:request PA level|request number|reply PA level|reply number)\s+: \d+$")
+# The four values as one string, for the observation that carries `-n`'s
+# result to the `-m` read after it.
+RANGE_RESULT_FIELDS = ("request_pa", "request_number", "reply_pa", "reply_number")
+
+
+def range_result_value(match: re.Match) -> str:
+    """The four result values of a RANGE_RESULT match, in their own order."""
+    return " ".join(match[name] for name in RANGE_RESULT_FIELDS)
 RANGE_MISMATCH = r"invalid range test: mismatch on byte \d+"
 # The bytes cc2400_rangetest() compares (reply byte n against its request).
 RANGE_COMPARED_FIELDS = (
@@ -538,16 +550,35 @@ def range_poll_check(stdout) -> str:
     return f"{summary}; last read: {last_read or 'no read logged'}"
 
 
-def _all_checks(*checks):
-    """One Step.output_check running each of ``checks`` over the same output.
+def range_result_only_check(maximum_pa: int):
+    """`-n`: the result block on standard output, and nothing else there.
 
-    The line source can be iterated more than once (outputfiles.LineSource),
-    so each check reads the whole of it, and every reason is reported rather
-    than only the first.
+    `-n` runs the test and prints the same block `-m` does, so its standard
+    output is those four lines and no others: the `waiting for the
+    repeater...` line it prints while it waits goes to standard error (fork
+    `30c4103f`, fork #1029), and so does every other diagnostic. Any other
+    line fails, which is what `nothing_on_stdout` did for the silent starter
+    this replaced. A list of diagnostic prefixes would not: the progress line
+    begins with none of them, so a regression that put it back on standard
+    output would pass beside a valid result block.
     """
-    def check(output) -> str:
-        return "; ".join(
-            reason for reason in (one(output) for one in checks) if reason)
+    values = range_result_check(maximum_pa)
+
+    def check(stdout) -> str:
+        problems = []
+        reason = values(stdout)
+        if reason:
+            problems.append(reason)
+        other = [
+            line.strip() for line in text_lines(stdout)
+            if line.strip() and not RANGE_RESULT_LINE.match(line.strip())
+        ]
+        if other:
+            problems.append(
+                f"{other[0]!r} is on stdout, which carries the result block "
+                "alone; progress and diagnostics go to stderr")
+        return "; ".join(problems)
+
     return check
 
 
@@ -686,22 +717,29 @@ def range_test_cases(arguments, _resources, resource_identities):
                                  "Responder: the repeater keeps the test channel",
                                  "responder channel while repeating", RANGE_CHANNEL),
         # -n waits for the round trip and reports it here, so the result is
-        # this step's to check: its progress line is on standard error and
-        # standard output carries the four result lines and nothing else.
+        # this step's to check: standard output carries the four result lines
+        # and nothing else, and the result is recorded so the -m read after
+        # the test is held to the same values rather than to any valid block.
         Step("sender-run-range-test", "Sender: run the range test (-n)",
              _util(sender, "-n"), timeout_s=RANGE_TEST_TIMEOUT_S,
              output_patterns=(RANGE_TEST_START,),
-             forbidden_patterns=(RANGE_MISMATCH,),
-             output_check=_all_checks(no_diagnostics_on_stdout,
-                                      range_result_check(maximum_pa)),
+             output_check=range_result_only_check(maximum_pa),
+             observe=Observation("range result", RANGE_RESULT,
+                                 convert=range_result_value),
              mutates=True),
         Step("sender-wait-for-result",
              f"Sender: read -m until a result appears (up to {RANGE_RESULT_DEADLINE_S} s)",
              range_poll_argv(sender), timeout_s=RANGE_POLL_TIMEOUT_S,
              # The poll's own exit is not the verdict; its log is.
              expected_returncodes=(0, 1), output_check=range_poll_check),
+        # The board keeps the result -n reported, so this read must give the
+        # same four values and not merely another block in range.
         Step("sender-range-result", "Sender: range-test result",
              _util(sender, "-m"), output_check=range_result_check(maximum_pa),
+             observe=Observation("range result after the test", RANGE_RESULT,
+                                 expected=lambda context: require(
+                                     context, "range result"),
+                                 convert=range_result_value),
              forbidden_patterns=(RANGE_MISMATCH,)),
         repeating("responder-repeating-after-test",
                   "Responder: still repeating (RX LED on) and answering USB after the test"),

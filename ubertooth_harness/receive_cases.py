@@ -137,9 +137,10 @@ def _dump_check(step_id, name, file_name, fmt, *, min_records=0, types="br,keep-
 # "systime=<s> ch=<index> LAP=<hex6> err=<n> clkn=... s=.. n=.. snr=..";
 # libbtbb may add lines of its own (UAP and clock progress). -z then prints
 # "Survey Results" on standard error and one ??:??:[UAP:]LAP line per piconet
-# on standard output (fork ubertooth-rx.c:1486: the heading is for a person
-# reading along, so standard output holds only the addresses a script parses,
-# as ubertooth-scan prints "Scan results:"). Without -c it
+# on standard output (fork 1c1b41b7, SqueakyFloors/ubertooth#1082: the heading
+# is for a person reading along, so standard output holds only the addresses a
+# script parses, the split ubertooth-scan prints "Scan results:" with).
+# Without -c it
 # sweeps every channel; -c <index> fixes one. -e caps the access-code errors
 # reported. -r/-q create BR/EDR PCAPNG/PCAP files (link type 255) at start;
 # -d writes one full 68-byte record per packet found (possibly none).
@@ -408,7 +409,9 @@ def classic_receive_cases(arguments, _resources, resource_identities):
 #
 # Streams received symbols until signalled: full 68-byte records, or with -b
 # 401-byte ASCII bitstream records, to stdout or -d <file>. -c / -l set basic
-# rate or LE modulation (the last one wins); the firmware programs CC2400
+# rate or LE modulation, and one command line may name only one of them (fork
+# d3429234, SqueakyFloors/ubertooth#650: the pair used to mean whichever came
+# last, with the other dropped without a word); the firmware programs CC2400
 # MDMCTRL with 0x0029 (160 kHz deviation) or 0x0040 (250 kHz) when the stream
 # starts, and the register keeps that value after the mode stops, which the
 # modulation cases read with ubertooth-debug.

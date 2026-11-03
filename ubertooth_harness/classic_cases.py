@@ -262,7 +262,7 @@ def _survey_laps(output) -> set[str]:
     """The LAPs of the survey results, in the form -l takes.
 
     Standard output carries the addresses and nothing introducing them: the
-    heading is on standard error (ubertooth-rx.c), where the step's patterns
+    heading is on standard error (fork 1c1b41b7), where the step's patterns
     read it. So an address line counts wherever it is, and ``packet_check``
     beside this one is what refuses a heading that arrived here.
     """

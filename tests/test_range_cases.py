@@ -59,7 +59,8 @@ class RangeBoard(FakeUbertooth):
     """
 
     def __init__(self, serial, air, *, repeater_answers_usb=True,
-                 sender_answers_usb=True, idle_reset_keeps_channel=False, **kwargs):
+                 sender_answers_usb=True, idle_reset_keeps_channel=False,
+                 progress_on_stdout=False, keeps_another_result=False, **kwargs):
         super().__init__(serial=serial, **kwargs)
         self.air = air
         air.boards[serial] = self
@@ -67,6 +68,12 @@ class RangeBoard(FakeUbertooth):
         self.repeater_answers_usb = repeater_answers_usb
         self.sender_answers_usb = sender_answers_usb
         self.idle_reset_keeps_channel = idle_reset_keeps_channel
+        # fork #1026 before 30c4103f: the `waiting for the repeater...` lines
+        # went to standard output, where the result block is.
+        self.progress_on_stdout = progress_on_stdout
+        # A board whose -m answers with values that are not the ones -n
+        # reported, which only comparing the two can catch.
+        self.keeps_another_result = keeps_another_result
 
     def _stop_mode(self):
         channel = self.state["channel"]
@@ -145,6 +152,12 @@ class RangeBoard(FakeUbertooth):
             # The same result block -m prints, from the same function, so a
             # result reads the same whichever asked for it.
             code, stdout, stderr = self.range_report()
+            if self.progress_on_stdout:
+                stdout = "waiting for the repeater... (1 s)\n" + stdout
+            if self.keeps_another_result:
+                # What -n reported stands; the board answers -m with another
+                # block, in range but not this test's.
+                self.result = (0, 1, 0, 9)
             return self._result(command, code, stdout, start + stderr, on_output)
         return super()._util(command, options, on_output)
 
@@ -292,6 +305,28 @@ class RangeResultCheckTests(unittest.TestCase):
         self.assertEqual("", self.check((0, 0, 0, 0)))
         self.assertEqual("", self.check((7, 15, 7, 15)))
         self.assertEqual("", self.check((2, 3, 2, 0), maximum=2))
+
+    def test_only_the_result_block_may_be_on_stdout(self):
+        only = util_cases.range_result_only_check(7)
+        self.assertEqual("", only(self.RESULT.format(0, 0, 0, 8)))
+        for other in ("waiting for the repeater... (1 s)", "note: something",
+                      "Starting range test", "no range test result yet"):
+            with self.subTest(other):
+                reason = only(other + "\n" + self.RESULT.format(0, 0, 0, 8))
+                self.assertIn("carries the result block alone", reason)
+                self.assertIn(other, reason)
+        # Nothing at all on stdout is the absent result, named as such.
+        self.assertIn("no range test result", only(""))
+        # The bounds still apply, and both reasons are reported together.
+        reason = util_cases.range_result_only_check(2)(
+            "note: x\n" + self.RESULT.format(0, 0, 4, 0))
+        self.assertIn("reply got through only at PA level 4", reason)
+        self.assertIn("carries the result block alone", reason)
+
+    def test_the_result_value_carries_the_four_numbers(self):
+        import re
+        match = re.search(util_cases.RANGE_RESULT, self.RESULT.format(1, 2, 3, 4))
+        self.assertEqual("1 2 3 4", util_cases.range_result_value(match))
 
     def test_level_above_the_maximum_fails_naming_the_direction(self):
         self.assertIn("reply got through only at PA level 3, above the plan's maximum 2",
@@ -480,16 +515,19 @@ class RangeExecutionTests(unittest.TestCase):
         self.assertIsNone(responder.mode)
         self.assertIsNone(sender.mode)
 
-    def test_a_mismatch_fails_naming_the_field(self):
+    def test_a_mismatch_fails_at_the_range_test(self):
         # -n reports the corrupted reply itself and exits 1, so the test
-        # fails there; the poll's own reading of a mismatch is covered by
-        # range_poll_check's own tests.
+        # fails there, with the tool's own line in the step's output. The
+        # poll's reading of a mismatch, which names the field the byte
+        # belongs to, is covered by range_poll_check's own tests; a mismatch
+        # no longer reaches it.
         _air, sender, responder = pair(Air(mismatch=17))
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
         self.assertEqual(["sender-run-range-test"], failed_steps(events))
         (test,) = steps(events, step_id="sender-run-range-test")
         self.assertIn("command exited 1", test.details["reason"])
+        self.assertEqual([], steps(events, step_id="sender-wait-for-result"))
 
     def test_level_above_the_plan_maximum_fails(self):
         # -n prints the result block, so the plan's maximum is checked there.
@@ -507,6 +545,32 @@ class RangeExecutionTests(unittest.TestCase):
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
         self.assertEqual(["sender-run-range-test"], failed_steps(events))
+
+    def test_progress_on_stdout_fails_the_range_test(self):
+        # fork #1026: the wait's progress belongs on standard error, where
+        # the result block is not. A prefix list does not catch this line,
+        # so the step requires stdout to hold the result block alone.
+        _air, sender, responder = pair()
+        sender.progress_on_stdout = True
+        summary, events, _report = self.run_pair(sender, responder)
+        self.assertFalse(summary.passed)
+        self.assertEqual(["sender-run-range-test"], failed_steps(events))
+        (test,) = steps(events, step_id="sender-run-range-test")
+        self.assertIn("waiting for the repeater", test.details["reason"])
+        self.assertIn("carries the result block alone", test.details["reason"])
+
+    def test_a_different_result_from_m_after_the_test_fails(self):
+        # -n and -m print the same block from the same function, so the read
+        # after the test must give the values -n reported, not merely some
+        # valid block.
+        _air, sender, responder = pair()
+        sender.keeps_another_result = True
+        summary, events, _report = self.run_pair(sender, responder)
+        self.assertFalse(summary.passed)
+        self.assertEqual(["sender-range-result"], failed_steps(events))
+        (result,) = steps(events, step_id="sender-range-result")
+        self.assertIn("expected range result after the test=0 0 0 0, observed 0 1 0 9",
+                      result.details["reason"])
 
     def test_other_boards_are_guarded(self):
         air, sender, responder = pair()

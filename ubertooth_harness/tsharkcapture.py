@@ -578,8 +578,8 @@ def _report(status, stdout, stderr, children, address, pdu_type, min_packets,
     if capture_filter is not None:
         if NO_CAPTURE_FILTER not in stderr:
             failures.append(
-                "the plugin's warning that it applies no capture filter did not "
-                "reach tshark")
+                f"the plugin's warning that it does not apply capture filters "
+                f"({NO_CAPTURE_FILTER!r}) did not reach tshark")
         if f"(got {capture_filter})" not in stderr:
             failures.append(
                 f"the warning does not name the filter tshark passed on "

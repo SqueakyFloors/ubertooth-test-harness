@@ -142,11 +142,13 @@ class ReceiveUbertooth(ToolUbertooth):
         # heading among the addresses, as the tool did before the split.
         survey = []
         if "-z" in options and "rx-no-survey" not in self.bugs:
-            survey = ["Survey Results"]
             addresses = ["??:??:??:9E:8B:33", "??:??:47:9E:8B:33"]
             if "rx-survey-heading-on-stdout" in self.bugs:
+                # The tool before the split: the heading on standard output,
+                # among the addresses, and not on standard error at all.
                 lines += ["Survey Results"] + addresses
             else:
+                survey = ["Survey Results"]
                 lines += addresses
         for index, option in enumerate(options):
             if option in ("-r", "-q", "-d"):

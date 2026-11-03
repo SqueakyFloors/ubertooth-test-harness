@@ -757,11 +757,14 @@ reports the lowest PA level and copy number that got through each way; the
 repeater keeps no result of its own, which the test also confirms.
 
 `-n` waits for the round trip and prints that same result block itself, on
-standard output, with its progress on standard error, so the test reads the
-result twice over: once from the run and once from the board afterwards. Its
-step is given longer than the tool's own deadline, so a test the repeater
-never answers is reported by the tool, with its reason, rather than killed by
-the harness.
+standard output, with its progress on standard error. So the test reads the
+result twice over: `-n`'s standard output must carry those four lines and
+nothing else, and the `-m` read after the test must give the same four
+values, which the case records from `-n` and holds the read to. Its step is
+given longer than the tool's own deadline, so a test the repeater never
+answers is reported by the tool, with its reason, rather than killed by the
+harness; a reply that differs from the request ends `-n` the same way, with
+the byte it differs at on standard error.
 
 Both boards are reset first, so neither can report a stale result, and both
 are set to 2410 MHz, which is neither the boot default nor the value the idle
@@ -778,13 +781,14 @@ transmit, the sender at every PA level up to 0 dBm. `maximum PA level:` (0-7,
 default 7) is the highest level the plan accepts for a pass. Guarded.
 
 **Expected outcome.** One case of 35 steps. It passes when the sender's `-n`
-completes the round trip and reports it, and its `-m` reports the same result
-afterwards: four result lines with request and reply PA levels at or below
+completes the round trip and reports it, and its `-m` reports those same four
+values afterwards, with request and reply PA levels at or below
 `maximum PA level` and copy numbers 0-15; the repeater answers USB with its RX
 LED on both before and after the test and keeps no result; the sender is idle
 at 2441 MHz once the test ends by itself; `-S` returns the repeater to idle;
 and every setting of both boards is restored. A reply that differs from the
-request fails with the byte and the field it belongs to named.
+request ends `-n` with the tool's own `invalid range test: mismatch on byte N`
+and fails the case there.
 
 **Weak-link responder.** `range.yaml`'s second suite, `range-weak-link`,
 chooses both boards by RF placement instead of by alias: the responder behind
@@ -845,17 +849,19 @@ behavior
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.
 
-**The `range-weak-link` suite does not pass on fork main today.** Its one
-recorded run, at 20 dB and about a meter, failed at the step that asserts `-n`
-prints nothing on standard output: `-n` prints `waiting for the repeater...`
-there instead of on standard error
-([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)).
-That line appears only once the first progress interval has passed. A
-repeater at bench distance answers before then, so the ordinary suite never
-reaches it; one a meter away behind 20 dB does not. The run stops there,
-before `-m` is read, so this suite has never judged a result; the PA levels
-above come from driving `-e`, `-n`, and `-m` by hand. It is committed so the
-fork fix is verified by a suite rather than by a one-off script.
+**The `range-weak-link` suite has never judged a result.** Its one recorded
+run, at 20 dB and about a meter, failed at the `-n` step: `-n` printed
+`waiting for the repeater...` on standard output rather than standard error
+([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)),
+where the result block is. That line appears only once the first progress
+interval has passed, so a repeater at bench distance answers before it and
+the ordinary suite never saw it; one a meter away behind 20 dB did. The fork
+fixed the stream in `30c4103f`, and this step now requires standard output to
+carry the result block and nothing else, so that regression is still what the
+suite would catch. Nothing has run it since the fix, so it stopped before
+`-m` was read and the PA levels above come from driving `-e`, `-n`, and `-m`
+by hand. It is committed so the fork fix is verified by a suite rather than by
+a one-off script.
 
 ## Transmit power steps
 
