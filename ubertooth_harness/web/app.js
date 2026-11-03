@@ -499,7 +499,7 @@
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
-      invocations: null, boards: new Map(), queued: [],
+      invocations: null, boards: new Map(), queued: [], pairings: [],
     };
   }
 
@@ -568,6 +568,7 @@
     live.byInvocation = new Map();
     live.boards = new Map();
     live.queued = [];
+    live.pairings = [];
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
     live.events = [];
@@ -665,6 +666,17 @@
       const text = String(details.message ?? "");
       if (text) {
         if (!live.queued.includes(text)) live.queued.push(text);
+        pushLog(`note: ${text}`);
+      }
+    }
+    if (kind === "lease_pairing") {
+      // A device this run never named, held because the registry says it is
+      // permanently wired to one the run did: why a programmer appears
+      // among the leases of a run that asked for a board. The harness sends
+      // the line the report shows.
+      const text = String(details.message ?? "");
+      if (text) {
+        if (!live.pairings.includes(text)) live.pairings.push(text);
         pushLog(`note: ${text}`);
       }
     }
@@ -972,6 +984,12 @@
     $("live-queued").hidden = live.queued.length === 0;
     $("queued").replaceChildren(
       ...live.queued.map((text) => el("li", { text })));
+
+    // Devices the run never named and holds because they are wired to ones
+    // it did. Hidden on every bench that registers no such pairing.
+    $("live-pairings").hidden = live.pairings.length === 0;
+    $("pairings").replaceChildren(
+      ...live.pairings.map((text) => el("li", { text })));
 
     $("checklist").replaceChildren(...live.items.map((item) => {
       const shown = itemStatus(item, run);

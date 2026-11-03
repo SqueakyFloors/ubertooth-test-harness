@@ -13,6 +13,7 @@ locks are files in a temporary directory.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -24,9 +25,11 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from unittest import mock
 
-from ubertooth_harness import leases
+from ubertooth_harness import cli, leases
 from ubertooth_harness.cli import main
+from ubertooth_harness.report import _Run, _setup_rows, render_run
 from ubertooth_harness.resources import (
     DEBUG_PROGRAMMER,
     FileResourceRegistry,
@@ -129,6 +132,16 @@ class PairTestCase(unittest.TestCase):
         self.assertIn(fragment, str(caught.exception))
         return str(caught.exception)
 
+    def invocation(self, **fields):
+        """One test of a run, as the planner hands it to the leases."""
+        values = dict(
+            test_name="Radio setting transitions", host="Host_Linux",
+            resources={"Ubertooth": "UT_Free"}, power_isolation=(),
+            exclusive_ubertooth=False,
+        )
+        values.update(fields)
+        return SimpleNamespace(**values)
+
 
 class PairRegistry(PairTestCase):
     """What a registry may and may not say about a wired pair."""
@@ -218,8 +231,9 @@ class PairRegistry(PairTestCase):
                 self.assertIn("Prog0", registry.pair_members(target))
 
     def test_a_programmer_may_not_take_a_name_that_is_already_something_s(self):
-        """Its bench lock name is that serial on its own, in one space with
-        every other device's serial and the lease directory's own files."""
+        """The bench's own lock file is named after a device's plain serial,
+        so that name is in one space with every other device's serial and
+        with the files the lease directory keeps for itself."""
         others = (
             "  DK_Pair:\n"
             "    type: nRF52840 DK\n"
@@ -237,12 +251,12 @@ class PairRegistry(PairTestCase):
             '      BD_ADDR: "C8:00:00:00:00:01"\n'
         )
         for serial, fragment in (
-            (TARGET, "the serial of UT_Debug (Ubertooth)"),
-            ("000123456789", "the serial of DK_Pair (nRF52840 DK)"),
+            (TARGET, "UT_Debug (Ubertooth)"),
+            ("000123456789", "DK_Pair (nRF52840 DK)"),
             # nrfutil prints a J-Link serial without its leading zeros, and
             # a bench script may name the lock either way.
-            ("123456789", "the serial of DK_Pair (nRF52840 DK)"),
-            ("a1b2c3d400000000a1b2c3d400000000", "the serial of ESP_Pair"),
+            ("123456789", "DK_Pair (nRF52840 DK)"),
+            ("a1b2c3d400000000a1b2c3d400000000", "ESP_Pair (ESP32 Classic peer)"),
             ("host-power", "this host's power/firmware lock"),
             ("takeover", "the lease directory's own takeover lock"),
         ):
@@ -646,15 +660,6 @@ class PairLocks(PairTestCase):
 class PairRuns(PairTestCase):
     """A run holds the programmer of every device it uses or power-cycles."""
 
-    def invocation(self, **fields):
-        values = dict(
-            test_name="Radio setting transitions", host="Host_Linux",
-            resources={"Ubertooth": "UT_Free"}, power_isolation=(),
-            exclusive_ubertooth=False,
-        )
-        values.update(fields)
-        return SimpleNamespace(**values)
-
     def test_a_run_that_uses_the_target_holds_the_programmer(self):
         registry = self.load(PROGRAMMER)
         boards = leases.boards_for_invocations(
@@ -680,6 +685,227 @@ class PairRuns(PairTestCase):
         registry = self.load(PROGRAMMER)
         boards = leases.boards_for_invocations([self.invocation()], registry)
         self.assertEqual([FREE], [board.key for board in boards])
+
+
+class PairRunRecords(PairTestCase):
+    """A run says why it held a device it never named (#289).
+
+    The leases list a debug programmer like any other device, so without
+    this a reader of the report sees a programmer leased by a run that
+    asked for a board. The by-hand commands say it on standard error; a run
+    carries it in its record, its report, its transcript and the live view.
+    """
+
+    def using_the_target(self):
+        return [self.invocation(resources={"Ubertooth": "UT_Debug"})]
+
+    def test_the_record_names_the_device_the_run_asked_for_and_why(self):
+        registry = self.load(PROGRAMMER)
+        pairings = leases.pairings_for_invocations(self.using_the_target(), registry)
+        self.assertEqual(
+            [{"resource": "Prog0", "named": "UT_Debug",
+              "reason": "Prog0 is the programmer wired to UT_Debug"}],
+            [dict(record) for record in pairings],
+        )
+        # The registry's own wording, so a run says what `hold` and `boards`
+        # say about the same pair.
+        self.assertEqual(
+            pairings[0]["reason"], registry.describe_pairing("Prog0", "UT_Debug")
+        )
+
+    def test_a_run_that_named_both_members_added_nothing(self):
+        """Both are the run's own devices, so neither needs explaining."""
+        registry = self.load(PROGRAMMER)
+        invocations = [
+            self.invocation(resources={"Ubertooth": "UT_Debug"}),
+            self.invocation(
+                resources={"Ubertooth": "UT_Free"},
+                power_isolation=(PowerIsolationAction("Prog0", "Hub0", 2),),
+            ),
+        ]
+        self.assertIn(
+            PROGRAMMER_KEY,
+            [board.key for board in leases.boards_for_invocations(invocations, registry)],
+        )
+        self.assertEqual((), leases.pairings_for_invocations(invocations, registry))
+
+    def test_a_run_that_touches_neither_member_records_nothing(self):
+        registry = self.load(PROGRAMMER)
+        self.assertEqual(
+            (), leases.pairings_for_invocations([self.invocation()], registry)
+        )
+
+    def test_a_registry_with_no_pairing_records_nothing(self):
+        registry = self.load()
+        self.assertEqual(
+            (), leases.pairings_for_invocations(self.using_the_target(), registry)
+        )
+
+    def test_the_run_record_the_report_and_the_live_view_carry_it(self):
+        registry = self.load(PROGRAMMER)
+        pairings = leases.pairings_for_invocations(self.using_the_target(), registry)
+        events = []
+
+        class Publisher:
+            def emit(self, kind, status, details, **_kwargs):
+                events.append((kind, status, details))
+
+        cli._record_lease_pairings(Publisher(), pairings)
+        self.assertEqual(1, len(events))
+        kind, status, details = events[0]
+        self.assertEqual(("lease_pairing", "passed"), (kind, status))
+        self.assertEqual("Prog0", details["resource"])
+        self.assertEqual(
+            "Prog0 is the programmer wired to UT_Debug, so the run held it too",
+            details["message"],
+        )
+        # The report's setup table, beside the leases themselves.
+        rows = dict(_setup_rows(_Run([{
+            "run_id": "r", "event_type": "manifest",
+            "timestamp": "2026-01-01T00:00:00.000",
+            "details": {"manifest": {"lease_pairings": [dict(pairings[0])]}},
+        }])))
+        self.assertEqual(
+            "Prog0 is the programmer wired to UT_Debug, so the run held it too",
+            rows["Leases from a wired pair"],
+        )
+        # A run on a bench with no pairing says nothing, and so does a
+        # record written before any of this existed.
+        self.assertNotIn("Leases from a wired pair", dict(_setup_rows(_Run([{
+            "run_id": "r", "event_type": "manifest",
+            "timestamp": "2026-01-01T00:00:00.000", "details": {"manifest": {}},
+        }]))))
+        transcript = render_run([{
+            "schema_version": 1, "run_id": "r", "sequence": 1,
+            "timestamp": "2026-01-01T00:00:00.000", "event_type": "lease_pairing",
+            "status": "passed", "details": details,
+        }])
+        self.assertIn(
+            "[M] Prog0 is the programmer wired to UT_Debug, so the run held it too",
+            transcript,
+        )
+        # And the browser's live view shows the same line, in a row of its own.
+        web = Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
+        js = (web / "app.js").read_text(encoding="utf-8")
+        self.assertIn('kind === "lease_pairing"', js)
+        self.assertIn('$("live-pairings").hidden = live.pairings.length === 0;', js)
+        self.assertIn(
+            "Leases from a wired pair",
+            (web / "index.html").read_text(encoding="utf-8"),
+        )
+
+    def test_a_manifest_carries_the_pairing_the_report_reads(self):
+        """The run record's own key, and the path a run without --build takes.
+
+        Such a run has no publisher until the sequencer starts, which emits
+        the records from the manifest; a report then reads them back out of
+        it. So the field has to survive being frozen into a manifest and
+        read as the report's row names it.
+        """
+        from ubertooth_harness.manifest import (
+            SourceRevision,
+            build_run_manifest,
+            json_value,
+        )
+        from ubertooth_harness.planner import TestInvocation
+        from ubertooth_harness.report import _pairing_rows
+
+        registry = self.load(PROGRAMMER)
+        record = leases.pairings_for_invocations(self.using_the_target(), registry)[0]
+        plan = self.root / "plan.yaml"
+        plan.write_text("plan\n", encoding="utf-8")
+        manifest = build_run_manifest(
+            run_id="paired-run", plan_name="named", suite="fast", host="Host_Linux",
+            plan_path=plan, hardware_path=self.write(PROGRAMMER),
+            sources=(SourceRevision("Ubertooth", "/source", "https://host.invalid/u.git",
+                                    "ref", "a" * 40, "test"),),
+            invocations=(TestInvocation(
+                "invocation-001", "Host CLI surface", "Host_Linux", {}, {}, {}),),
+            lease_pairings=(record,),
+        )
+        carried = manifest.to_dict()["lease_pairings"]
+        self.assertEqual(["Prog0"], [item["resource"] for item in carried])
+        # What the sequencer emits for such a run, from the frozen record.
+        self.assertEqual(
+            "Prog0 is the programmer wired to UT_Debug, so the run held it too",
+            leases.describe_pairing_lease(json_value(record)),
+        )
+        rows = dict(_pairing_rows(manifest.to_dict()))
+        self.assertIn("Prog0 is the programmer wired to UT_Debug",
+                      rows["Leases from a wired pair"])
+
+    def test_a_real_run_says_it_on_standard_error_and_records_it(self):
+        """The whole path, from the registry to run.jsonl.
+
+        `Flash reliability` binds the host's default Ubertooth, which this
+        registry wires a programmer to, so the run holds the programmer. The
+        note is printed before the locks are taken, as `hold` prints it, and
+        the record is written before the build, which is where a run of this
+        kind may fail.
+        """
+        from tests.test_cli import make_source
+        from ubertooth_harness.manifest import ManifestError
+
+        source, _short = make_source(self.root)
+        kgv = self.root / "kgv.dfu"
+        kgv.write_bytes(b"kgv")
+        image = self.root / "test.dfu"
+        image.write_bytes(b"test")
+        plan = self.root / "paired.yaml"
+        plan.write_text(textwrap.dedent(f"""\
+            plan: paired run
+            suites:
+              slow:
+                - Flash reliability:
+                    hosts: each
+                    platforms: [{PLATFORM}]
+                    Ubertooth: default
+                    flashes: 2
+                    image sequence: [test build, KGV]
+                    KGV sha256: {hashlib.sha256(b"kgv").hexdigest()}
+                    KGV revision: 2020-12-R1
+            """), encoding="utf-8")
+        output = self.root / "runs"
+        hardware = self.write(PROGRAMMER.replace("programs: UT_Debug", "programs: UT_Free"))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(cli, "_prepare_run",
+                               side_effect=ManifestError("artifact vanished")), \
+                redirect_stdout(out), redirect_stderr(err):
+            code = main([
+                "run-suite", "--plan", str(plan), "--suite", "slow",
+                "--hardware", str(hardware), "--host", "Host_Linux",
+                "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+                "--libbtbb-source", str(source), "--libbtbb-ref", "HEAD",
+                "--artifact", f"test build={image}", "--artifact", f"KGV={kgv}",
+                "--run-id", "paired", "--output", str(output),
+                "--lease-dir", str(self.leases),
+            ])
+        self.assertEqual(2, code)
+        self.assertIn(
+            "note: Prog0 is the programmer wired to UT_Free, so it is held too",
+            err.getvalue(),
+        )
+        events = [
+            json.loads(line) for line
+            in (output / "paired" / "run.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        kinds = [event["event_type"] for event in events]
+        self.assertNotIn("manifest", kinds)  # the run never got that far
+        self.assertEqual(1, kinds.count("lease_pairing"), kinds)
+        details = events[kinds.index("lease_pairing")]["details"]
+        self.assertEqual("Prog0", details["resource"])
+        self.assertEqual("UT_Free", details["named"])
+        self.assertEqual(
+            "Prog0 is the programmer wired to UT_Free, so the run held it too",
+            details["message"],
+        )
+
+    def test_a_record_with_no_clause_in_it_still_reads_as_a_sentence(self):
+        """A record from elsewhere, or an older one, is only being shown."""
+        self.assertEqual(
+            "Prog0 is wired to UT_Debug, so the run held it too",
+            leases.describe_pairing_lease({"resource": "Prog0", "named": "UT_Debug"}),
+        )
 
 
 class PairCommands(PairTestCase):

@@ -265,11 +265,15 @@ holds the other.
   there would be no lock to take for it), is attached to another host (leases
   are local to a host, so a pair across two of them would hold nothing),
   already has another programmer, or is the programmer itself, and when the
-  pairing loops back on itself. Its serial has to be its own: a programmer
-  may not take a serial another device is registered with, nor one that
-  spells a file the lease directory keeps for itself (`host-power`,
-  `takeover`), because the bench lock name for a programmer is that serial
-  on its own and a lock of one would be read as a lock of the other.
+  pairing loops back on itself.
+- Its serial has to be its own, as every device's does: two devices may not
+  be registered with one serial, whatever their types and whichever way each
+  is written, because `scripts/lab/hold` names the bench's own lock file
+  after a device's plain serial and a lock of one would be read as a lock of
+  the other. Nor may a serial spell a file the lease directory keeps for
+  itself (`host-power`, `takeover`). The same rule covers the lease files:
+  no two devices may take one (harness
+  [#288](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/288)).
 - A chain is allowed and is held as one set, for a bench that wires a
   programmer to another programmer's own header: holding any member holds all
   of them.
@@ -279,8 +283,11 @@ holds the other.
   or power-cycles the board, and `scripts/lab/hub-port` on either member's
   port. The three by-hand commands say on standard error which device the
   pairing brought in and why, and `ubertooth-harness boards` prints the
-  pairing under both. A run takes the pair without saying so in its record
-  yet ([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)).
+  pairing under both. A run says the same line before it takes the locks and
+  carries it in its own record: a `lease_pairing` record in `run.jsonl`, a
+  "Leases from a wired pair" row in `report.md`, and the same line in the
+  browser's live view (harness
+  [#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)).
 - The programmer appears in `ubertooth-harness boards` like any other leased
   device, so a holder a reader did not expect is explained where they see it.
 

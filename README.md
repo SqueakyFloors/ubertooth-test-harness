@@ -1648,6 +1648,20 @@ deadlock. A leased board needs its full 32-hex-digit serial in the hardware
 registry: libubertooth matches `-U` against the start of a serial, so a short
 serial would select the same board under a different lock.
 
+One lease file is one device, so the registry is refused when two resources
+would take the same one
+([#288](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/288)).
+A lease key comes from one identity field — a board's serial, a DK's J-Link
+serial without its leading zeros, a peer's bridge serial, a programmer's
+serial — and the duplicate-identity check compares whole identity mappings,
+so two resources whose other fields differ could otherwise take one file
+while everything that read the registry treated them as two devices (a run
+binding both ends of a connection to one DK, with the lease saying nothing).
+The serials themselves are compared the same way, because
+[`scripts/lab/hold`](scripts/lab/README.md) also names a lock after a
+device's plain serial: one serial is one device, whichever way it is written,
+and on whatever type it is registered.
+
 If a board is held, the run fails before any build or device command and names
 the holder. `--wait-for-boards MINUTES` waits instead; `--owner LABEL` (or
 `UBERTOOTH_HARNESS_OWNER`) names you in other agents' errors. The run report
@@ -1944,7 +1958,10 @@ ubertooth-harness lease --external-board-lock '/var/lock/board-{serial}.lock' \
 The template is an absolute path (or starts with `~/`) with exactly one
 `{serial}`, replaced by the board's lock key, the same key its lease file
 uses: an Ubertooth's full 32-hex-digit serial in lowercase, or
-`nrf52840dk-<J-Link serial without leading zeros>` for a DK. No other brace;
+`nrf52840dk-<J-Link serial without leading zeros>` for a DK.
+([`scripts/lab/hold`](scripts/lab/README.md) takes one more file per DK, peer
+and programmer, the bench's own older name for it: that one is the plain
+serial.) No other brace;
 `--external-board-lock` overrides the variable and
 `--external-board-lock ''` turns it off for one command. Unset, nothing
 changes. Each external lock is an exclusive `flock` on that file, taken in
@@ -2011,9 +2028,13 @@ attempt, in the usual lock order, and naming both is harmless. That holds for
 runs by hand say on standard error which device the pairing brought in and why
 (`note: Prog_Linux0 is the programmer wired to UT_Linux1, so it is held
 too`), so a holder nobody asked for is never a mystery, and `boards` prints
-the pairing under both devices. A run holds the pair the same way, and its
-record does not yet say why it took the programmer
-([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)):
+the pairing under both devices. A run says the same line on standard error
+before it takes the locks, and carries it in its record: a `lease_pairing`
+record in run.jsonl (the device, the one the run named, and why the two come
+together), a line in the transcript, a "Leases from a wired pair" row in
+report.md, and the same line in the browser's live view, so a reader of a
+report never finds a programmer among the leases of a run that asked for a
+board ([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)):
 
 ```
 Prog_Linux0  free
@@ -2024,12 +2045,10 @@ UT_Linux1    free
 
 The registry is refused when a pairing cannot be real: a target that is not
 registered, is not a device the harness leases, sits on another host (leases
-are local to one host), or already has a programmer, a programmer whose
-serial another device is registered with or which spells a file the lease
-directory keeps for itself, a programmer that names itself or more than one
-target, a `programs:` on anything that is not a `Debug programmer`, and a
-pairing that loops back on itself. A chain of pairs is allowed and is held as
-one set. No test binds a programmer and the harness
+are local to one host), or already has a programmer, a programmer that names
+itself or more than one target, a `programs:` on anything that is not a
+`Debug programmer`, and a pairing that loops back on itself. A chain of pairs
+is allowed and is held as one set. No test binds a programmer and the harness
 never drives one; see
 [`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs).
 

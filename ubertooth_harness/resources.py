@@ -172,14 +172,17 @@ _RESERVED_LEASE_NAMES = MappingProxyType({
 })
 
 
-def _bench_lock_names(resource) -> tuple[str, ...]:
-    """The unprefixed lock names a bench script may use for this device.
+def _bench_lock_names(resource) -> tuple[tuple[str, str], ...]:
+    """The plain lock names a bench script may use for this device.
 
-    One space, shared by every device: a serial written here is the file
-    `scripts/lab/hold` locks beside the harness's own prefixed key, so a
-    second device with the same serial would be held as the first. An
-    Ubertooth's is its serial (its lease key too), a DK's its J-Link serial
-    as nrfutil and sysfs each print it, a peer's its bridge serial.
+    (compared, as registered) for each, lowercased for the comparison
+    because one serial written two ways is still one device. One flat space,
+    shared by every device: such a name is the bench's own lock file that
+    `scripts/lab/hold` takes beside the harness's own lease key, so a second
+    device with the same serial would be held through the first one's file.
+    An Ubertooth's is its serial (its lease key too), a DK's its J-Link
+    serial as nrfutil and sysfs each print it, a peer's its bridge serial,
+    and a programmer's the serial its USB descriptor reports.
     """
     identity = resource.identity
     values = {
@@ -190,13 +193,30 @@ def _bench_lock_names(resource) -> tuple[str, ...]:
     }.get(resource.type, ())
     names = []
     for key in values:
-        serial = str(identity.get(key, "") or "").strip().lower()
+        written = str(identity.get(key, "") or "").strip()
+        serial = written.lower()
         if not serial:
             continue
-        names.append(serial)
+        names.append((serial, written))
         if serial.isdigit():
-            names.append(serial.lstrip("0"))  # nrfutil's form of a J-Link serial
-    return tuple(name for name in names if name)
+            # nrfutil's form of a J-Link serial, which sysfs zero-pads.
+            names.append((serial.lstrip("0"), written))
+    return tuple(item for item in names if item[0])
+
+
+def _lease_key_of(resource) -> str | None:
+    """The file this device's lease takes, or None when it has no key yet.
+
+    A registry may record a device before the field its lease key comes
+    from: leasing it is refused where it is asked for, naming the field to
+    fill in, and there is no key to compare here.
+    """
+    from ubertooth_harness.leases import LeaseError, resource_key
+
+    try:
+        return resource_key(resource)
+    except LeaseError:
+        return None
 
 
 def _leased_types() -> tuple[str, ...]:
@@ -480,7 +500,7 @@ class FileResourceRegistry:
                 _validate_peer(resource)
             if resource.type == DEBUG_PROGRAMMER:
                 _validate_programmer(resource)
-        self._validate_programmer_serials()
+        self._validate_lock_names()
         self._validate_pairs()
         used_power_ports = {}
         for resource in self.resources.values():
@@ -556,61 +576,97 @@ class FileResourceRegistry:
                     )
                 used_power_ports[key] = resource.alias
 
-    def _validate_programmer_serials(self) -> None:
-        """One serial is one programmer, and is nobody else's.
+    def _validate_lock_names(self) -> None:
+        """One file, one device: the bench's lock names, then the lease keys.
 
-        The identity check above compares whole identity mappings, so two
-        programmers differing only in an optional ``serial device`` would
-        both pass it while naming one device -- and the lease key is the
-        serial alone, so each would think it had held that device for a
-        target of its own. Compared without regard to case, because a serial
-        written two ways is still one adapter, while the two spellings would
-        name two lock files.
+        Two flat spaces, and a device has to be held through its own file in
+        each of them.
 
-        A programmer's serial is chosen by whoever labels the adapter, where
-        every other serial is the device's own, and the bench's older lock
-        name for a programmer is that serial on its own
-        (``scripts/lab/_bench.plain_serial``). That name is unprefixed, so it
-        shares one space with every other device's serial and with the lease
-        directory's own files: the serial of a registered Ubertooth is that
-        board's lease file, a DK's or a peer's is that device's bench name,
-        and ``host-power`` or ``takeover`` are the host lock and the takeover
-        lock. A programmer may take none of them, because holding one would
-        hold something else and report it as the programmer's.
+        The bench's own lock files are named after a device's plain serial
+        (``scripts/lab/_bench.plain_serial``), so that space holds every
+        device's serial whatever type it is, and the serial of a registered
+        Ubertooth is that board's lease name too. Two devices registered
+        with one serial would be held through one file while everything that
+        reads the registry treated them as two devices. A serial is also the
+        one identity field a person copies by hand, so a collision there is
+        reported as the serial it is.
 
-        Taken without regard to case throughout. Two spellings of one serial
-        would name two lock files rather than collide, so this refuses a
-        pair of them that could not have collided; a registry edit is the
-        cheaper of the two mistakes.
+        ``host-power`` and ``takeover`` are names the lease directory keeps
+        for itself. The lease file that goes with a bench lock name is
+        prefixed (``leases.bench_lock_key``), so a serial can no longer
+        reach either file; refusing one is a guard on the registry, because
+        a device registered under a name of the harness's own is a mistake
+        whoever reads that registry next should not have to know about.
+
+        The lease files are the second space: a lease key is a file name in
+        the lease directory (``leases.resource_key``), and the identity
+        check above compares whole identity mappings while a key comes from
+        one field. So two resources whose other fields differ would pass it
+        and still take one lease file, each read as a device of its own: a
+        run could bind both boards of a connection to one DK and the lease
+        would not notice (#288). A DK makes it plainer, since
+        ``000123456789`` and ``123456789`` are two identities and one key.
+        Every key the harness leases is checked against the function that
+        builds it, so a type whose key stops coming from the serials above
+        is still covered.
+
+        Compared without regard to case throughout: one serial written two
+        ways is still one device, while the two spellings would name two
+        files. That refuses a pair of spellings that could not have
+        collided; a registry edit is the cheaper of the two mistakes.
         """
-        taken = dict(_RESERVED_LEASE_NAMES)
-        for resource in sorted(self.resources.values(), key=lambda r: r.alias):
-            if resource.type == DEBUG_PROGRAMMER:
-                continue  # two of those are the `seen` check below
-            for name in _bench_lock_names(resource):
-                taken.setdefault(
-                    name, f"the serial of {resource.alias} ({resource.type})"
+        ordered = sorted(self.resources.values(), key=lambda r: r.alias)
+        # name -> (the alias that has it, or None for a reserved file; what
+        # it is in a refusal).
+        taken: dict[str, tuple[str | None, str]] = {
+            name: (None, what) for name, what in _RESERVED_LEASE_NAMES.items()
+        }
+        for resource in ordered:
+            this = f"{resource.alias} ({resource.type})"
+            for name, written in _bench_lock_names(resource):
+                held_by, what = taken.get(name, (resource.alias, ""))
+                if held_by == resource.alias:
+                    # Unclaimed, or this device's other spelling of its own
+                    # serial (a J-Link serial with and without its zeros).
+                    taken.setdefault(name, (resource.alias, this))
+                    continue
+                if held_by is None:
+                    raise RegistryError(
+                        f"{this} is registered with the serial '{written}', which "
+                        f"is {what}; the lease directory keeps that name for "
+                        "itself, so give the device the serial its own USB "
+                        "descriptor reports"
+                    )
+                if self.resources[held_by].type == resource.type:
+                    raise RegistryError(
+                        f"{resource.type}s {held_by} and {resource.alias} are "
+                        f"registered with the same serial '{written}'; one serial "
+                        "is one device, whichever way it is written, and the two "
+                        "would be held through one lock file"
+                    )
+                # Neither of them is the mistake on its own, so both are
+                # named: which one is wrong is for whoever wired the bench.
+                raise RegistryError(
+                    f"'{written}' is the serial of both {what} and {this}; a "
+                    "device's lease file and the bench's own lock file are named "
+                    "after that serial, so a lock of one would be read as a lock "
+                    "of the other"
                 )
-        seen: dict[str, str] = {}
-        for resource in sorted(self.resources.values(), key=lambda r: r.alias):
-            if resource.type != DEBUG_PROGRAMMER:
+        keys: dict[str, str] = {}
+        for resource in ordered:
+            if resource.type not in _leased_types():
                 continue
-            written = resource.identity.get("serial")
-            serial = str(written or "").strip().lower()
-            if serial in seen:
+            key = _lease_key_of(resource)
+            if key is None:
+                continue
+            if key.lower() in keys:
                 raise RegistryError(
-                    f"{DEBUG_PROGRAMMER}s {seen[serial]} and {resource.alias} are "
-                    f"registered with the same serial '{written}'; one serial is "
-                    "one programmer, whichever way it is written"
+                    f"{keys[key.lower()]} and {resource.alias} would both be "
+                    f"leased as '{key}'; one lease file is one device, so the two "
+                    "would be held in turn through it while everything that reads "
+                    "the registry treated them as two devices"
                 )
-            if serial in taken:
-                raise RegistryError(
-                    f"{DEBUG_PROGRAMMER} {resource.alias} is registered with the "
-                    f"serial '{written}', which is already {taken[serial]}; a lock "
-                    "of one would be read as a lock of the other, so give the "
-                    "programmer the serial its own USB descriptor reports"
-                )
-            seen[serial] = resource.alias
+            keys[key.lower()] = resource.alias
 
     def _validate_pairs(self) -> None:
         """Permanently wired pairs: one target each, on one host, no loop.

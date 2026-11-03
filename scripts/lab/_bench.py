@@ -123,8 +123,18 @@ def board(resource) -> leases.Board:
 
 
 def bench_lock_board(resource) -> leases.Board | None:
-    """The bench's older lock name for this device, when it has a second one."""
+    """The bench's older lock name for this device, when it has a second one.
+
+    The bench's own file keeps the plain serial, which is the whole point of
+    the second name; the lease file taken beside it is prefixed, because an
+    unprefixed name of 32 hex digits is the lease file of an Ubertooth with
+    that serial and a peer's bridge serial is 32 hex digits (harness #290).
+    """
     serial = plain_serial(resource)
     if not serial or serial == lock_key(resource):
         return None
-    return leases.Board(f"{resource.alias} (bench lock)", serial)
+    return leases.Board(
+        f"{resource.alias} (bench lock)",
+        leases.bench_lock_key(serial),
+        external_key=serial,
+    )

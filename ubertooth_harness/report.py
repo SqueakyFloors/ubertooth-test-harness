@@ -20,6 +20,7 @@ from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.leases import (
     describe_holder,
+    describe_pairing_lease,
     describe_queued_resource,
     describe_takeover,
 )
@@ -492,6 +493,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         ))
     rows.extend(_takeover_rows(manifest))
     rows.extend(_queued_rows(manifest))
+    rows.extend(_pairing_rows(manifest))
     rows.extend(_placement_rows(run))
     if artifacts:
         rows.append((
@@ -543,6 +545,22 @@ def _queued_rows(manifest: Mapping) -> list[tuple[str, str]]:
         # The wait is over by the time a report is read, so the line reads
         # as what happened, not as what is happening.
         "; ".join(describe_queued_resource(item, past=True) for item in queued),
+    )]
+
+
+def _pairing_rows(manifest: Mapping) -> list[tuple[str, str]]:
+    """Devices this run held because they are wired to ones it named (#289).
+
+    The leases above list them like any other, so without this row a reader
+    sees a debug programmer leased by a run that asked for a board. The
+    by-hand commands say it on standard error; a run says it here.
+    """
+    pairings = manifest.get("lease_pairings") or []
+    if not pairings:
+        return []
+    return [(
+        "Leases from a wired pair",
+        "; ".join(describe_pairing_lease(item) for item in pairings),
     )]
 
 
@@ -1281,6 +1299,8 @@ def _transcript(run: _Run) -> list[str]:
             line(event, f"[M] {describe_takeover(details)}")
         elif kind == "lease_queued":
             line(event, f"[M] {describe_queued_resource(details, past=True)}")
+        elif kind == "lease_pairing":
+            line(event, f"[M] {describe_pairing_lease(details)}")
         elif kind == "test_finished":
             line(
                 event,

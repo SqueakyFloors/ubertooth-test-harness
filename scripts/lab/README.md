@@ -68,12 +68,18 @@ second while already holding the first.
 devices with per-device `flock` files keeps both sides honest: every hold
 takes that file too. Point it at the bench's existing lock files.
 
-An Ubertooth's lock file is named after its serial. A DK's and a peer's are
-named after the harness's lease key for them (`nrf52840dk-<serial without
-leading zeros>`, `esp32-<serial>`), because that is what a harness run takes.
-A bench script that names such a lock after the plain serial instead would not
-meet a harness run on the same file, so `hold` takes **both** names for those
-two types.
+An Ubertooth's lock file is named after its serial. A DK's, a peer's and a
+programmer's are named after the harness's lease key for them
+(`nrf52840dk-<serial without leading zeros>`, `esp32-<serial>`,
+`programmer-<serial>`), because that is what a harness run takes. A bench
+script that names such a lock after the plain serial instead would not meet a
+harness run on the same file, so `hold` takes **both** names for those three
+types: the bench's own `board-<plain serial>.lock`, which is the file such a
+script locks, and, beside it, a lease file of its own named
+`bench-<plain serial>` — prefixed, because an unprefixed name of 32 hex
+digits is the lease file of an Ubertooth with that serial, and a peer's
+bridge serial is 32 hex digits
+([#290](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/290)).
 
 That makes every `hold` exclude every other `hold`, whichever name a bench
 script was written against. It does not reach further than that: a
