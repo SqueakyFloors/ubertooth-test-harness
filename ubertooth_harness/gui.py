@@ -47,13 +47,7 @@ from ubertooth_harness.hostneeds import (
     platform_capabilities,
     unmet,
 )
-from ubertooth_harness.plan import (
-    Plan,
-    PlanError,
-    TestStep,
-    image_label,
-    load_plan,
-)
+from ubertooth_harness.plan import PlanError, TestStep, image_label, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
 
 
@@ -754,28 +748,6 @@ def list_plans(
     return plans
 
 
-# One plan file as it was last read, by path and by what the file system
-# says about it, so an edited plan is read again. Every run start reads one,
-# and a plan is a few hundred lines of YAML put through the catalog's own
-# argument validation: tens of milliseconds, which a start should not spend
-# again for every request. Bounded, and cleared whole when it is full, so a
-# long-lived controller cannot grow by it.
-_PLANS: dict[tuple, Plan] = {}
-_PLANS_MAX = 32
-
-
-def _loaded_plan(path: Path, catalog: TestCatalog) -> Plan:
-    stat = path.stat()
-    key = (str(path), stat.st_mtime_ns, stat.st_size)
-    plan = _PLANS.get(key)
-    if plan is None:
-        plan = load_plan(path, catalog)
-        if len(_PLANS) >= _PLANS_MAX:
-            _PLANS.clear()
-        _PLANS[key] = plan
-    return plan
-
-
 def suite_refusal(
     plans_dir: Path,
     plan: str,
@@ -794,9 +766,10 @@ def suite_refusal(
     in its own words, and a plan the controller cannot read is not a reason
     to refuse a run the target could carry out with its own copy.
 
-    Every run start calls this, so the caller passes the catalog it already
-    has (building one is about 90 ms) and the plan is kept as it was last
-    read (``_loaded_plan``).
+    Every run start calls this, and the plan is read each time, which is a
+    few milliseconds and always the file as it now stands. The catalog is
+    the caller's, because building one allocates enough to be worth holding
+    (see ``Controller.catalog``).
     """
     if not _name(plan) or not isinstance(suite, str):
         return ""  # the protocol refuses the request in its own words
@@ -805,7 +778,7 @@ def suite_refusal(
         if not path.is_file():
             return ""
         catalog = catalog or builtin_catalog()
-        steps = _loaded_plan(path, catalog).steps(suite)
+        steps = load_plan(path, catalog).steps(suite)
     except (CatalogError, PlanError, OSError):
         return ""
     return run_plan_check(

@@ -121,7 +121,7 @@ code { overflow-wrap: anywhere; }
 
 .hint { color: var(--muted); margin: 0.3rem 0 0; font-size: 0.9rem; }
 /* A hint the operator must read, because it says why Run is held: the same
-   colours as a failed status pill, which meet WCAG AA in both schemes. */
+   colors as a failed status pill, which meet WCAG AA in both schemes. */
 .hint.warn {
   color: var(--bad-fg); background: var(--bad-bg);
   border: 1px solid var(--bad-line); border-radius: 6px;

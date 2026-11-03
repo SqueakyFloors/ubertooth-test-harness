@@ -446,9 +446,13 @@ class Controller:
         # Lists the refs a run may name; None refuses every run.
         self.ref_source = ref_source
         self.plans_dir = Path(plans_dir).expanduser()
-        # The test catalog, built once: every run start reads a plan against
-        # it to see whether that run could measure what its suite requires,
-        # and building one costs about 90 ms. Its definitions are frozen.
+        # The test catalog, built once and shared: every run start reads a
+        # plan against it to see whether that run could measure what its
+        # suite requires. Building one is about 2 ms, but it allocates some
+        # thousands of frozen dataclasses, and the collection that follows
+        # cost up to 130 ms in measurement; a start should not pay that at
+        # all when the catalog can be held. Its definitions are frozen, so
+        # one instance serves every request.
         self.catalog = builtin_catalog()
         # Durations learned from the runs stored here, kept beside them.
         self.estimates = EstimateStore.load(self.results_dir / STORE_FILE, log=log)

@@ -1178,7 +1178,9 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("suite.runnable_on_target === false", body)
         self.assertIn("suite.not_runnable_reason", body)
         self.assertIn('$("run-button").disabled = Boolean(reason);', body)
-        self.assertIn("note.hidden = !reason;", body)
+        # Shown first, then filled, so the status region announces it.
+        self.assertRegex(
+            body, r"note\.hidden = !reason;\s*\n\s*note\.textContent = reason;")
         # Called wherever the suite, the plan, or the target changes
         # (renderSuiteTests), and again after a start attempt, so a refusal
         # does not leave Run enabled for a suite that is still held.

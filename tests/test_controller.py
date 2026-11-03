@@ -825,7 +825,7 @@ class RequiredHardwareTests(ControllerTestCase):
             self.assertIn("no test of this suite runs on Host_Mac",
                           payload["detail"])
 
-    async def test_the_host_it_names_and_a_selection_without_it_still_run(self):
+    async def test_the_host_the_step_names_still_runs(self):
         async with FakeRunner(self.port) as runner:
             await self.registered(runner, host="Host_Linux")
             # The host the step names measures the gate.

@@ -351,8 +351,11 @@
       ? String(suite.not_runnable_reason || "This target cannot run this suite.")
       : "";
     const note = $("run-blocked");
-    note.textContent = reason;
+    // Shown before it is filled: a status region that changes while it is
+    // hidden announces nothing, and a disabled button cannot be focused to
+    // reach its description.
     note.hidden = !reason;
+    note.textContent = reason;
     $("run-button").disabled = Boolean(reason);
   }
 
