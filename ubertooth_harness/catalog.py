@@ -24,6 +24,7 @@ from ubertooth_harness.patterns import (
     VERSION_ANSWER,
     serial_pattern,
 )
+from ubertooth_harness.outputfiles import output_of
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
