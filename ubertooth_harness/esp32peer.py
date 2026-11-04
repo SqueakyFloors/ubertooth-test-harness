@@ -839,21 +839,47 @@ class Shell:
     def ask_for_framing(self, version: str) -> bool:
         """Have the board check-sum every line it writes, if its image can.
 
-        Older images have no such command, so nothing here depends on it:
-        the loss is then caught where it always was, by a line that stopped
-        being readable, and the retry is what saves the run. A board that
-        refuses the command, or whose version did not arrive readably, is
-        driven that older way too rather than failing the session over a
-        check it does not have. Returns whether the board is framing.
+        An image older than FRAME_MINIMUM_FIRMWARE has no such command, and
+        nothing here depends on one: the loss is then caught where it always
+        was, by a line that stopped being readable, and the retry is what
+        saves the run. A version that did not arrive readably is treated the
+        same way, and :meth:`confirm_framing` is what catches that.
+
+        An image new enough must frame. A board that will not do what its
+        version says it can is a board whose lines cannot be checked, and
+        carrying on unchecked would quietly give up the whole point of this,
+        so that failure is the session's. Returns whether the board is
+        framing.
         """
         try:
             check_firmware(version, self.label, FRAME_MINIMUM_FIRMWARE)
-            self.command(FRAME_ON)
         except PeerError:
             self.framed = False
             return False
+        self.command(FRAME_ON)
         self.framed = True
         return True
+
+    def confirm_framing(self, firmware: str) -> None:
+        """The version in the board's status must agree about the framing.
+
+        :meth:`ask_for_framing` goes on the version in the boot notice,
+        which is read before anything is checking the lines, so a notice
+        that lost bytes could name an older image than the board is really
+        running and the session would run unchecked without saying so. The
+        status line is the version check proper, so the two are compared
+        once it has been read.
+        """
+        if self.framed:
+            return
+        try:
+            check_firmware(firmware, self.label, FRAME_MINIMUM_FIRMWARE)
+        except PeerError:
+            return  # an older image, which frames nothing
+        raise PeerError(
+            f"{self.label} runs {firmware}, which check-sums the lines it "
+            "sends, but this session is not reading framed lines: its boot "
+            f"notice named {self.version or 'no version'}")
 
     def wait_ready(self, timeout: float = BOOT_TIMEOUT_S) -> None:
         """Wait for the boot notice the firmware sends once Bluetooth is up.
@@ -1083,6 +1109,7 @@ def identify(peer: Peer, out=None) -> dict:
         # case reads.
         shell.ask_for_framing(shell.version)
         status = check_status(shell.status(), peer.label, peer.address)
+        shell.confirm_framing(status["fw"])
     finally:
         shell.close()
     print(f"{peer.label} device: {peer.device}", file=out)
@@ -1097,6 +1124,7 @@ def status_command(peer: Peer, out=None) -> dict:
         shell.wait_ready()
         shell.ask_for_framing(shell.version)
         status = check_status(shell.status(), peer.label, peer.address)
+        shell.confirm_framing(status["fw"])
     finally:
         shell.close()
     print(json.dumps(status, sort_keys=True), file=out)
@@ -1118,6 +1146,7 @@ def reset(peer: Peer, out=None) -> dict:
         shell.reset()
         shell.ask_for_framing(shell.version)
         status = check_status(shell.status(), peer.label, peer.address)
+        shell.confirm_framing(status["fw"])
     finally:
         shell.close()
     wrong = [f"{key} {status[key]!r}, not {value!r}"
@@ -1388,6 +1417,7 @@ def _release(shell: Shell, peer: Peer, expected: dict) -> str:
         # anything, so the release's own status read asks again (#310).
         shell.ask_for_framing(shell.version)
         status = shell.status()
+        shell.confirm_framing(status.get("fw", ""))
     except Exception as error:
         # Any failure, not only a PeerError: a bridge that went away raises
         # from pyserial, and letting that out of here would skip the other
@@ -1533,6 +1563,8 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                                    acceptor.address)
     initiator_status = check_status(initiator_shell.status(), initiator.label,
                                     initiator.address)
+    initiator_shell.confirm_framing(initiator_status["fw"])
+    acceptor_shell.confirm_framing(acceptor_status["fw"])
     if acceptor_status["address"] == initiator_status["address"]:
         raise PeerError("both bridges lead to one board: they report the same "
                         f"BD_ADDR {acceptor_status['address']}")
@@ -1974,6 +2006,8 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                                   acceptor.address)
     initiator_status = check_status(initiator_shell.status(), initiator.label,
                                     initiator.address)
+    initiator_shell.confirm_framing(initiator_status["fw"])
+    acceptor_shell.confirm_framing(acceptor_status["fw"])
     if acceptor_status["address"] == initiator_status["address"]:
         raise PeerError("both bridges lead to one board: they report the same "
                         f"BD_ADDR {acceptor_status['address']}")

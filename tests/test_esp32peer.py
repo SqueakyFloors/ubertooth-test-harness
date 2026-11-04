@@ -1677,15 +1677,56 @@ class FramingTests(unittest.TestCase):
         self.assertFalse(board.framed)
         self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
 
-    def test_a_board_that_refuses_the_command_is_driven_without_it_too(self):
+    def test_an_image_that_should_frame_and_will_not_fails_the_session(self):
+        """Carrying on unframed there would give up the check silently.
+
+        An older image has no such command and is driven as it always was.
+        One whose version says it has the command and refuses it is a board
+        whose lines cannot be checked, so that is the session's failure
+        rather than a quiet fallback.
+        """
         firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
                                     version=esp32peer.FRAME_MINIMUM_FIRMWARE)
         firmware.refuse[esp32peer.FRAME_ON] = "unknown command, try \"help\""
         board = shell(firmware, "acceptor")
         board.wait_ready()
 
-        self.assertFalse(board.ask_for_framing(board.version))
-        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "'frame on' refused"):
+            board.ask_for_framing(board.version)
+
+    def test_a_boot_notice_that_named_an_older_image_than_the_status_fails(self):
+        """The hole a corrupted boot notice would otherwise leave.
+
+        The framing is asked for on the version in the boot notice, which is
+        read before anything is checking the lines. A notice that lost bytes
+        could name an image too old to frame, and the session would then run
+        unchecked against a board that does. The status line is the version
+        check proper, so the two have to agree.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+
+        self.assertFalse(board.ask_for_framing("utesp-1.5.0"))
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            f"acceptor runs {esp32peer.FRAME_MINIMUM_FIRMWARE}, which "
+            "check-sums the lines it sends, but this session is not reading "
+            "framed lines: its boot notice named "
+            f"{esp32peer.FRAME_MINIMUM_FIRMWARE}"
+        ):
+            board.confirm_framing(esp32peer.FRAME_MINIMUM_FIRMWARE)
+
+    def test_an_older_image_passes_the_same_check(self):
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS, version="utesp-1.5.0")
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+
+        board.confirm_framing("utesp-1.5.0")  # no complaint
+        self.assertFalse(board.framed)
 
     def test_a_session_says_whether_each_bridge_is_framed(self):
         acceptor, initiator = _pair(version=esp32peer.FRAME_MINIMUM_FIRMWARE)
