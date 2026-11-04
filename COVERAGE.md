@@ -64,8 +64,7 @@ Harness-wide checks that use the CLIs:
   is not tolerant: `-d` asks for all three LEDs at once and every image that
   answers these requests answers those, so a stall there fails the read. No
   read is skipped for the image a board carries, and every command sent is a
-  query (libubertooth's own stop for a board it cannot claim is the one write
-  the harness cannot prevent). A guard
+  query. A guard
   on `bluetooth_rxtx`, or on the receive-only `bluetooth_rx` build, must answer
   the radio settings that build implements, and any guarded test is refused
   when a guard answered none of `-v`, `-V`, `-s`, or `-B`.

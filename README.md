@@ -1175,10 +1175,12 @@ afterwards. [docs/tests.md, "Guard Ubertooths"](docs/tests.md) has the whole
 rule.
 
 The harness
-never sets, stops, or resets a guard. One stop it cannot prevent: the fork's
-`ubertooth_connect_serial` sends a stop when it cannot claim the board's USB
-interface, so a guard held open by another process may receive one from any
-read.
+never sets, stops, or resets a guard: every command a guard is sent is a
+query, and the one that could write to it — `ubertooth-btle`, whose API check
+may stop a board — is refused rather than sent whenever that board's API is
+not the one this check read. A board another process holds open is not
+disturbed either: libubertooth reports the claim failure and closes the board
+without a stop, so that it does not interrupt whatever has it.
 
 The same reads run after every state-changing case (`Guard Ubertooths
 unchanged after <case>`) and, if read-only cases ran since the last check,

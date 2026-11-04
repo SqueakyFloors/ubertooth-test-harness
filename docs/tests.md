@@ -169,8 +169,8 @@ is refused, which fails the check, unless that board's firmware API is the
 host tools' own: `ubertooth-btle`'s own API check may refuse any other, newer
 as well as older, and stop the board as it goes — whether it does is how the
 host tools were built and whether `UBERTOOTH_ALLOW_API_MISMATCH` is set,
-neither of which the run tells the tools, so it cannot know which it would
-get and does not send the read. Preflight refuses
+which the run does not set and cannot predict, so it does not send the
+read. Preflight refuses
 a guard-only board whose API differs, so that is caught before any test runs.
 
 Every guard gets every read, whatever firmware image it carries, and the CRC
@@ -200,11 +200,10 @@ answered none of `-v`, `-V`, `-s`, or `-B`, because nothing about that board
 could be compared afterwards — a wedged board would read that way too, though
 the strict LED read fails it first.
 
-Every command a guard is sent is a query, and no guard is ever reflashed to
-make it readable. One write the harness cannot prevent: libubertooth sends a
-stop of its own when it cannot claim a board's USB interface, so a guard
-another process holds open may be stopped by any read (README, "Guard
-Ubertooths").
+A guard is only ever read: every command it is sent is a query, it is never
+reflashed to make it readable, and the one command that could write to it —
+`ubertooth-btle`, which may stop a board whose firmware API is not the host
+tools' own — is refused rather than sent.
 
 **Files.** Files a case writes (captures, dumps, images, FIFOs) go in a
 per-case directory under the run's `captures/`. Checker scripts read them and
