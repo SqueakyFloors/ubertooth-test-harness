@@ -14,14 +14,14 @@ programmer and the board it programs -- is held together with it, whichever of
 the two is named, in the same all-or-nothing attempt. Naming both is harmless.
 The note on standard error says which device a pair brought in and why.
 
-Everything else is the harness's own lease machinery. For the device types the
-harness leases this script resolves the names and runs
-``ubertooth-harness lease``, so the locks, their order, the all-or-nothing
-attempt, the wait, the holder reporting, and the automatic host lock for a
-command line that names ``ubertooth-dfu`` are the harness's, not a second
-implementation. When a device needs a lock the harness does
-not take -- the bench's older lock name -- every lock is taken here instead,
-in one attempt in the harness's own order.
+Everything else is the harness's own lease machinery: this script resolves the
+names and runs ``ubertooth-harness lease``, so the locks, their order, the
+all-or-nothing attempt, the wait, the holder reporting, and the automatic host
+lock for a command line that names ``ubertooth-dfu`` are the harness's, not a
+second implementation. It used to take some locks itself, because a run did
+not take the lab's own file for a DK, a peer or a programmer; a run takes it
+now (harness #317), so a session held here and a run exclude each other on
+the same files with nothing extra to do.
 
 Nothing about a bench is built in: the registry, the lab's own per-device lock
 files, the lease directory, the owner label, and the wait all come from
@@ -31,6 +31,15 @@ is as short as the bench's own wrapper was:
     export UBERTOOTH_HARNESS_HARDWARE=~/bench/hardware.yaml
     export UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK=~/bench/board-{serial}.lock
     scripts/lab/hold UT_Linux0 -- ubertooth-util -U <serial> -v
+
+The harness this uses is its own checkout's, start to finish: it re-runs
+itself under that checkout's bootstrapped interpreter, and the delegate it
+hands the locks to is given that same checkout first on its import path with
+the working directory left off it. With no environment in its own checkout it
+carries on in any the harness bootstrapped, since the code still comes from
+beside this file; an interpreter nobody bootstrapped is refused. So any
+interpreter may start it, the working directory does not matter, and a
+wrapper on a bench is one ``exec`` of this path. See ``_checkout.py``.
 
 Exit status is the command's, or 2 if a device could not be held, which is
 what the harness CLI exits on an error of its own.
@@ -51,20 +60,22 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
 
+import _checkout  # noqa: E402  (nothing but the standard library)
+
+# Before the harness is imported, and only when this file is the program:
+# loaded as a module, by this project's own tests, it must not re-run
+# anything. Whichever interpreter started it, what runs from here on is the
+# environment this checkout bootstrapped.
+if __name__ == "__main__":
+    _checkout.run_in_checkout_environment(__file__, "hold")
+
 try:
     from ubertooth_harness import leases
-    # The rule for "this command line writes firmware", so the host lock is
-    # asked for on exactly the command lines `ubertooth-harness lease` asks
-    # for it on, rather than by a second copy of the rule here.
-    from ubertooth_harness.cli import _writes_firmware as writes_firmware
-    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+    from ubertooth_harness.resources import RegistryError
 
-    from _bench import bench_lock_board, lock_key, resolve
-except ImportError:  # run from outside the harness environment
-    sys.exit(
-        "hold: run this from the harness environment "
-        "(python3 bootstrap.py, then .venv/bin/python scripts/lab/hold ...)"
-    )
+    from _bench import load_registry, lock_key, resolve
+except ImportError as error:  # no environment of its own, or a broken import
+    sys.exit(_checkout.bootstrap_advice("hold", error))
 
 HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 
@@ -146,7 +157,8 @@ def child_environment(environ=None) -> dict:
 
     This process put the checkout on its own `sys.path`; a child does not
     inherit that, so `python -m ubertooth_harness` in the delegate would not
-    find the package unless the checkout happens to be the working directory.
+    find the package. This names it, and `-P` in the command line below is
+    what makes it the only candidate: see `_checkout.CHILD_PYTHON_OPTIONS`.
     """
     environment = dict(os.environ if environ is None else environ)
     root = str(_HERE.parents[1])
@@ -158,9 +170,17 @@ def child_environment(environ=None) -> dict:
 
 
 def harness_lease_argv(args, aliases, command) -> list[str]:
-    """The `ubertooth-harness lease` command line this delegates to."""
+    """The `ubertooth-harness lease` command line this delegates to.
+
+    The interpreter's own options come first, and they matter: without `-P`
+    the delegate would take `ubertooth_harness` from the working directory
+    ahead of the checkout this script belongs to, so a hold run from inside
+    another checkout would validate the registry with one harness and lease
+    with the other (#312).
+    """
     argv = [
-        sys.executable, "-m", "ubertooth_harness", "lease",
+        sys.executable, *_checkout.CHILD_PYTHON_OPTIONS,
+        "-m", "ubertooth_harness", "lease",
         "--hardware", str(args.hardware),
         "--wait-for-boards", str(args.wait_for_boards),
     ]
@@ -175,24 +195,10 @@ def harness_lease_argv(args, aliases, command) -> list[str]:
     return argv + list(aliases) + ["--"] + list(command)
 
 
-def extra_boards(resources) -> list[leases.Board]:
-    """Locks `ubertooth-harness lease` does not take for these devices.
-
-    The bench's older lock name, for a device whose lease key is not its
-    serial. The harness leases every type these helpers hold, so that is the
-    only one left.
-    """
-    return [
-        second for r in resources
-        for second in (bench_lock_board(r),)
-        if second is not None
-    ]
-
-
 def main(argv: list[str] | None = None) -> int:
     args, command = parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
-        registry = FileResourceRegistry.load(args.hardware)
+        registry = load_registry(args.hardware)
         named = [resolve(registry, name) for name in args.devices.split(",")]
         # A device permanently wired to a debug programmer is held with it,
         # whichever of the two was named, and naming both is harmless: the
@@ -203,65 +209,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         resources = [registry.get(alias) for alias in aliases]
         # LeaseError too: a registry can load and still hold a serial no lock
-        # file can be named after.
-        keys = {resource.alias: lock_key(resource) for resource in resources}
-        extra = extra_boards(resources)
+        # file can be named after. Said here, before the delegate runs, so a
+        # device the lease could not name is reported in this script's words.
+        for resource in resources:
+            lock_key(resource)
     except (RegistryError, leases.LeaseError) as error:
         return _fail(error)
 
-    # Said here, whichever way the locks are taken below, and before the
-    # attempt, which is also when a wait for any of them starts. The
+    # Before the attempt, which is also when a wait for any device starts. The
     # delegate is handed the expanded devices, so its own expansion adds
     # nothing and it says nothing either: one note, in one place.
     for clause in pairing:
         print(f"note: {clause}, so it is held too", file=sys.stderr)
 
-    # With nothing extra to take, this is purely a wrapper: the harness holds
-    # every lock, decides the host lock, and runs the command.
-    if not extra:
-        return leases.exit_status(
-            subprocess.call(
-                harness_lease_argv(args, [r.alias for r in resources], command),
-                env=child_environment(),
-            )
+    # Purely a wrapper: the harness holds every lock of every device, decides
+    # the host lock, and runs the command.
+    return leases.exit_status(
+        subprocess.call(
+            harness_lease_argv(args, [r.alias for r in resources], command),
+            env=child_environment(),
         )
-
-    # Otherwise every lock is taken here, in one all-or-nothing attempt in the
-    # harness's own order, rather than nesting a second attempt inside this
-    # one: a wait must never happen while some of the locks are already held.
-    boards = extra + [
-        leases.Board(r.alias, keys[r.alias])
-        for r in resources if r.type in leases.LEASED_TYPES
-    ]
-    host_lock = args.host_lock or writes_firmware(command)
-    if host_lock and not args.host_lock:
-        print(
-            "note: this command line names ubertooth-dfu, so it asks for this "
-            "host's power/firmware lock as well as its devices, and holds it "
-            "until the command exits",
-            file=sys.stderr,
-        )
-    try:
-        template = leases.external_lock_template(args.external_board_lock)
-        with leases.acquire(
-            boards,
-            leases.holder_info(
-                run_id=None, owner=args.owner,
-                purpose="hold: " + " ".join(command),
-            ),
-            directory=args.lease_dir,
-            wait_s=args.wait_for_boards * 60,
-            host_lock=host_lock,
-            external_template=template,
-        ) as held:
-            # The command inherits the locks, so they are held for as long as
-            # it runs even if this process is killed first.
-            fds = [lease.fd for lease in held.leases]
-            for fd in fds:
-                os.set_inheritable(fd, True)
-            return leases.exit_status(subprocess.call(command, pass_fds=fds))
-    except leases.LeaseError as error:
-        return _fail(error)
+    )
 
 
 def _fail(error) -> int:

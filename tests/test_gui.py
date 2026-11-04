@@ -472,6 +472,69 @@ class PlanTests(ControllerTestCase):
             self.assertEqual(
                 [], [t["name"] for t in suite["tests"] if not t["runs_on_target"]])
 
+    async def test_the_response_says_what_each_listed_test_is_for(self):
+        # The information the GUI shows beside a test name comes down the
+        # same response as the plans, once per test rather than per row
+        # (#315). The file's own schema and the unavailable cases are
+        # tests.test_test_info; here the endpoint is asked for it, so the
+        # JSON a browser gets is what is checked.
+        status, payload, _ = await self.http("GET", "/api/plans")
+        self.assertEqual(200, status)
+        plans = {plan["name"]: plan for plan in payload["plans"]}
+        information = payload["test_information"]
+        (suite,) = plans["fast"]["suites"]
+        for test in suite["tests"]:
+            with self.subTest(test=test["name"]):
+                info = information[test["name"]]
+                self.assertIs(True, info["available"], info["unavailable_reason"])
+                for field in ("purpose", "theory", "hardware", "expected",
+                              "limitations"):
+                    self.assertIsInstance(info[field], str)
+                    self.assertTrue(info[field].strip())
+                self.assertIsInstance(info["related"], list)
+                self.assertEqual("docs/tests.md", info["documentation"]["path"])
+                # Catalog-derived, on the row, because it belongs to the step.
+                definition = builtin_catalog().get(test["name"])
+                self.assertEqual(
+                    [{"role": role, "device": device} for role, device
+                     in (definition.hardware_roles or {}).items()],
+                    test["hardware_roles"],
+                )
+                self.assertEqual(
+                    [{"name": name, "required": rule.required} for name, rule
+                     in definition.arguments.items()],
+                    test["arguments"],
+                )
+        # Every row of every plan can be looked up, and no row carries prose.
+        rows = [test for plan in payload["plans"] for suite in plan["suites"]
+                for test in suite["tests"]]
+        self.assertGreater(len(rows), len(information))
+        for test in rows:
+            self.assertIn(test["name"], information)
+            self.assertNotIn("info", test)
+        identity = next(
+            test for test in suite["tests"] if test["name"] == "Ubertooth identity"
+        )
+        self.assertIn("serial", information["Ubertooth identity"]["theory"])
+        self.assertEqual("default", identity["estimate_profile"])
+
+    async def test_the_plans_endpoint_takes_nothing_but_a_target(self):
+        # Nothing routes a filesystem path into the information the listing
+        # reads: the only query parameter the endpoint has is the target,
+        # and an unexpected one is ignored rather than acted on.
+        for query in ("?path=/etc/passwd", "?test_info=/etc/passwd",
+                      "?information=/etc/passwd"):
+            status, payload, _ = await self.http("GET", f"/api/plans{query}")
+            with self.subTest(query=query):
+                self.assertEqual(200, status)
+                self.assertIsNone(payload["target"])
+                self.assertIn("Host CLI surface", payload["test_information"])
+        # And the one parameter it does have is still judged: an identifier
+        # that is not a registry host name is refused rather than read.
+        status, payload, _ = await self.http("GET", "/api/plans?target=../../etc")
+        self.assertEqual(422, status)
+        self.assertIn("registry host name", payload["detail"])
+
     def test_a_step_for_another_host_ticks_no_build_option_here(self):
         # The build options and the images only --artifact can pass are the
         # suite's as the chosen target would run it: a step the target does

@@ -76,6 +76,7 @@ from ubertooth_harness.gui import (
     run_stage_estimates,
     security_headers,
     suite_refusal,
+    test_information_view,
 )
 from ubertooth_harness.learned import STORE_FILE, EstimateStore
 from ubertooth_harness.report import write_report
@@ -2301,7 +2302,9 @@ ENDPOINTS = {
     "GET /ui/": "web GUI",
     "GET /api/refs": "branches and tags of the Ubertooth repository (git ls-remote)",
     "GET /api/plans": (
-        "test plans with suites, tests and duration estimates "
+        "test plans with suites, tests and duration estimates, each test "
+        "with the hardware roles and arguments the catalog gives it and the "
+        "information in ubertooth_harness/test_info.yaml "
         "(?target=HOST uses the durations learned on that target)"
     ),
     "GET /api/targets": "registered targets",
@@ -2455,6 +2458,11 @@ def create_app(controller: Controller):
         return {
             "plans": plans, "target": target, "platform": platform,
             "stages": learned_stages(estimates, target),
+            # What each listed test is for, once per response and keyed by
+            # the catalog name the rows carry (#315).
+            "test_information": await asyncio.to_thread(
+                test_information_view, plans
+            ),
         }
 
     @app.get("/api/targets")
