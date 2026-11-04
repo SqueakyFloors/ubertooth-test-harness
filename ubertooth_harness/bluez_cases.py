@@ -72,6 +72,8 @@ from ubertooth_harness.classic_cases import (
     _capture_path,
     _pair,
     _pair_patterns,
+    _record_checks,
+    _record_step,
     _reset_step,
     piconet_packets,
 )
@@ -122,8 +124,17 @@ INQUIRY_MIN_S = 8 * 1.28
 # (`REMOTE_NAME_TIMEOUT_MS` in ubertooth-scan.c, fork #1091): until that
 # landed, the survey's read passed a zero timeout, which BlueZ takes as no
 # deadline at all, and one silent device could hold the tool forever. This
-# allows two such devices with margin; a bench with more falls back on the
-# driver's own deadline, which fails with its message.
+# allows two such devices with margin.
+#
+# It is the one number here that is not derived, and the bench shows why it
+# needs watching: the `-s` command took 78 s against its 111 s window in one
+# run and 55 s in another, the difference being how many of other people's
+# devices answered the inquiry and had to be paged. Two silent neighbors
+# would cost 50 s of this on their own. A busier room falls back on the
+# driver's deadline, which reads like a hung tool; what tells the two apart
+# is the tool's own `note: reading the name of <address> failed` lines, which
+# are in the run record on standard error. docs/tests.md records that under
+# this test's known limits.
 NAME_READS_S = 60.0
 # What `ubertooth-follow` spends before its capture starts, all of it inside
 # the window the driver interrupts at, so the window has to be the capture
@@ -184,7 +195,10 @@ SCAN_RESULT_LINE = re.compile(
 # from a survey result, and all of them were gone shortly after. So only an
 # established link is held against a run -- that is a peer this host is
 # keeping, which is what this check is for.
-ESTABLISHED_LINK = r"(?m)^\s*[<>]\s+(?:ACL|SCO|eSCO|LE)\s.*\sstate 1\s"
+# `\b` rather than `\s` after the number, so the pattern does not depend on
+# a link mode following it: `state 11` still fails to match, and a line that
+# ends at the state matches as it should.
+ESTABLISHED_LINK = r"(?m)^\s*[<>]\s+(?:ACL|SCO|eSCO|LE)\s.*\sstate 1\b"
 
 
 # ---------------------------------------------------------------------------
@@ -297,23 +311,37 @@ def inquiry_found(names: Mapping[str, str]) -> Check:
 
     Every address must be listed. The two peers are discoverable from boot,
     so an inquiry through the adapter that missed one did not do its work,
-    and that part held in every run.
+    and that part held in all 19 runs of this case on the bench.
 
-    The names are asked of the set rather than of each device, because a
-    name is read over a page of that device and the bench showed one of them
-    land on the wrong line: an inquiry that found two televisions besides the
-    peers printed the acceptor's address against a television's name, while
-    the television whose name it was printed as ``[unknown]`` after its own
-    read failed with EIO. The run before and five runs after had every name
-    right. The tool reads each name into a buffer of its own, one device at a
-    time (``print_name_and_class()`` in ubertooth-scan.c), so the swap is
-    below it, in the reply the library matched to the read -- see fork
+    The names did not. A name is read over a page of that device, and two
+    things happened across those 19 runs:
+
+    - a peer's own read failed and it was printed as ``[unknown]``, in two
+      runs, once for each board;
+    - a neighbor's name landed on a peer's line, in one run: an inquiry that
+      found two televisions besides the peers printed the acceptor's address
+      against a television's name, while the television, whose own read had
+      just failed with EIO, was printed as ``[unknown]``.
+
+    The tool reads each name into a buffer of its own, one device at a time
+    (``print_name_and_class()`` in ubertooth-scan.c), so the swap is below
+    it, in the reply the library matched to the read -- fork
     [#1172](https://github.com/SqueakyFloors/ubertooth/issues/1172). Nothing
     the harness can check tells a swapped name from a wrongly reported one,
-    and the devices whose failing reads set it off are not the bench's. So
-    the check is that the name read worked: one peer under its own name
-    proves the adapter paged a device the harness owns and got its name
-    back, and both peers wrong fails.
+    and the devices whose failing reads set it off are not the bench's.
+
+    So the check is that a name read worked, of either peer: 16 of the 19
+    runs had both peers under their own names and all 19 had at least one,
+    where naming a particular board would have failed three of them. One
+    peer under its own name proves the adapter paged a device the harness
+    owns and got its name back; both peers wrong fails.
+
+    Retrying the case to hold on to the stronger check (``attempts``, as
+    `Recover AFH map` uses for what the air gives it) was considered and
+    rejected: a retry costs another whole inquiry and name sweep -- 78 s of
+    command measured -- and what it would catch is a regression that
+    misattributes exactly one of two names, where every mechanism found so
+    far misattributes by device rather than by peer.
     """
     def check(output) -> str:
         found = {}
@@ -487,14 +515,10 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
     )
 
 
-def _pair_report(acceptor, initiator, *, exit_status=r"0") -> tuple[str, ...]:
-    """The driver's report of the session, with the status the case accepts.
-
-    Every case pins a zero exit but ``-x``, whose status also reflects reads
-    of devices the bench does not own (see the case).
-    """
+def _pair_report(acceptor, initiator) -> tuple[str, ...]:
+    """The driver's report of the session, with the zero exit every case pins."""
     return tuple(
-        rf"(?m)^command exit: {exit_status} after \d+\.\d s$"
+        r"(?m)^command exit: 0 after \d+\.\d s$"
         if pattern.startswith(r"(?m)^command exit:") else pattern
         for pattern in _pair_patterns(acceptor, initiator)
     )
@@ -505,7 +529,23 @@ def _pair_report(acceptor, initiator, *, exit_status=r"0") -> tuple[str, ...]:
 
 
 def inquiry_scan_cases(arguments, resources, resource_identities):
-    """Bluetooth inquiry scan: ubertooth-scan's two halves, and -x."""
+    """Bluetooth inquiry scan: ubertooth-scan's two halves.
+
+    Both profiles run the same two cases. `-s -x` is deliberately not
+    exercised, and the bench settled why: `-x` fetches its report over a
+    connection it makes to each device, and the acceptor is in the pair's
+    link throughout, so the connection does not happen -- a run had the
+    inquiry list the acceptor and its extended report carry no address at
+    all. An idle acceptor would answer, but then the sweep has no piconet to
+    report, and with two Classic boards the two cannot both hold. What the
+    case wants is a third Classic device, idle and connectable, which this
+    bench has not got (#88).
+
+    Measured in the same run, and the reason a case here could not have
+    pinned the exit status either: `-x` also asks every piconet the sweep
+    heard, and twenty of those reads failed against devices the bench does
+    not own. docs/tests.md records both measurements.
+    """
     serial = _serial(resource_identities, INQUIRY_TEST_NAME)
     acceptor, initiator = _pair(resource_identities, INQUIRY_TEST_NAME, resources)
     hci = adapter(resource_identities, INQUIRY_TEST_NAME, resources)
@@ -559,22 +599,6 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
              expected_state=f"the scan results listed LAP {central} with the "
                             "'AFH map:' line the scan built for it"),
     ]
-    if arguments["coverage"] == "comprehensive":
-        # `-s -x` is deliberately not exercised. The bench settled why: `-x`
-        # fetches its report over a connection it makes to each device, and
-        # the acceptor is in the pair's link throughout, so the connection
-        # does not happen -- a run had the inquiry list the acceptor and its
-        # extended report carry no address at all. An idle acceptor would
-        # answer, but then the sweep has no piconet to report, and with two
-        # Classic boards the two cannot both hold. What it wants is a third
-        # Classic device, idle and connectable, which this bench has not got
-        # (#88); docs/tests.md records the measurement.
-        #
-        # Measured in the same run, and the reason a case here could not pin
-        # the exit status either: `-x` also asks every piconet the sweep
-        # heard, and twenty of those reads failed against devices the bench
-        # does not own.
-        pass
     return tuple(cases)
 
 
@@ -654,7 +678,8 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
         # The file is decoded as well as counted: a BR/EDR capture holding
         # the right number of records says nothing about whose packets they
         # are, and a followed capture's records all belong to the piconet it
-        # was given.
+        # was given. Two of the decoder's checks are lowered for what the
+        # bench measured, and only those two: see the step below.
         cases.append(follow(
             case_id="follow-target-pcap",
             name=f"ubertooth-follow -t {target} -q writes the piconet's packets "
@@ -671,24 +696,33 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
                     "verify-capture",
                     "The -q file is a BR/EDR pcap and holds the packets",
                     "follow.pcap", "pcap", MIN_PACKETS),
-                # No record decode. The bench settled why: a -q run wrote
-                # 258 records, every one carrying LAP e9c5ba and that LAP and
-                # UAP as its reference address, and then
+                # Every record must carry this piconet's LAP, and that LAP
+                # and UAP as its reference address, which is what the bench
+                # measured: a -q run wrote 258 records and every one of them
+                # did. Two of the decoder's checks are lowered, and only
+                # those two, because the same run showed
                 #
-                #   none of them passed a header HEC, where
+                #   none of the 258 passing a header HEC, where
                 #   `ubertooth-rx -l -u` on this same pair passes a fifth to
                 #   a third of them, and
                 #
-                #   35 of them carried `transport 3`, which a receive-only
-                #   basic-rate capture records as 0.
+                #   35 of them carrying `transport 3`, which a receive-only
+                #   capture records as 0.
                 #
-                # Both are header-derived fields, and both say the same
-                # thing: the access code is found and the header does not
-                # decode, which is about the clock `ubertooth-follow` hops
-                # on. That is what fork #518 is open about, so this case
-                # checks the file is a BR/EDR pcap with the piconet's packets
-                # in it and leaves the records to `Classic capture record
-                # fields`, which reads a capture taken by a tool whose
-                # headers do decode. docs/tests.md carries the figures.
+                # Both fields come from the header, so they are one
+                # observation: the access code is found and the header does
+                # not decode, which is about the clock `ubertooth-follow`
+                # hops on. That is what fork #518 is open about, and it is a
+                # fault of the capture rather than of a record, so the HEC
+                # floor is 0 here and the transport nibble is let be. The
+                # header fields of a capture whose headers do decode are
+                # `Classic capture record fields`' business. docs/tests.md
+                # carries the figures.
+                _record_step(
+                    "verify-records",
+                    "Every record of the -q file belongs to this piconet",
+                    "follow.pcap",
+                    _record_checks(initiator, hec_valid=0,
+                                   extra=("--any-transport",))),
             )))
     return tuple(cases)

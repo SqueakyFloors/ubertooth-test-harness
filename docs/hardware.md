@@ -227,11 +227,10 @@ link and `peer audio` for the voice link.
 
 ### A host Bluetooth adapter (BlueZ)
 
-**No bench has one yet**
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
-This section says what one has to be and how it is registered, so a bench can
-be set up and the two tests that bind it run for the first time; nothing here
-has been measured.
+One bench has one, a USB adapter on the Linux host that also holds the two
+ESP32 Classic peers, and both tests that bind it have run against it. This
+section says what such an adapter has to be and how it is registered; the
+measurements below come from those runs.
 
 Two of the fork's host tools are built only when libbluetooth is found, and
 both drive a Bluetooth controller of the host's as well as an Ubertooth:
@@ -317,6 +316,7 @@ One caution belongs here too:
 `-x` fetches a report from every device the inquiry answered. On a site with
 other people's Bluetooth devices in range, that transmits to them. Run it
 where that is acceptable.
+
 ### A debug programmer and the board it programs
 
 A bench may have a programmer left permanently wired to one board: a USB

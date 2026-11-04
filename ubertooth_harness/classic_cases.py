@@ -634,6 +634,7 @@ def _record_step(step_id, name, file_name, checks) -> Step:
 
 
 def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
+                   hec_valid=MIN_HEC_VALID_RECORDS,
                    extra=()) -> tuple[str, ...]:  # noqa: C901
     """What the records of a capture must hold.
 
@@ -641,6 +642,11 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
     follow, so every record belongs to it and carries it as the reference
     address. Without one, the capture is a survey: it records whatever is in
     range, and the caller says what to look for instead.
+
+    ``hec_valid`` is the floor on records whose header passed its HEC. A
+    caller lowers it for a capture taken by a tool whose headers are known
+    not to decode, which is a fault of that tool rather than of these
+    records; `bluez_cases` does, and says which tool and why.
     """
     if following and central is None:
         raise StateCaseError("the address a capture was following is the "
@@ -656,7 +662,7 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
         # header when it is working on one piconet's clock, and a survey,
         # which is working on every piconet it hears, decoded one header in
         # 235 records on the bench.
-        checks += ("--min-hec-valid", str(MIN_HEC_VALID_RECORDS),
+        checks += ("--min-hec-valid", str(hec_valid),
                    "--lap", central["lap"],
                    "--reference-lap", central["lap"],
                    # Every record that carries a reference UAP must carry

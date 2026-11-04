@@ -969,9 +969,11 @@ modulation (the firmware stop returns it to basic rate), the BR/EDR target
 address and LE advertising channel (cleared by a mode stop), the BLE
 follow target, the E-GO capture length and access code (`Raw receive`
 sets `ubertooth-ego -l1`/`-l48`/`-a`; a later `-l`/`-a` or `-r` replaces them),
-and the board's AFH channel map, which `Follow Classic piconet over HCI`
-leaves set in its `-a` case (`ubertooth-follow` without `-a` clears it, and
-no `ubertooth-util` option reads or writes it).
+and the board's AFH channel map, which no `ubertooth-util` option reads or
+writes. No case leaves one set: `ubertooth-follow` clears the map without
+`-a`, and the bench measured that it clears it with `-a` too against this
+peer, because the peer reports AFH off and the tool takes its disabled
+branch.
 The BLE access address (reset to 8e89bed6 by `-r`) is read with
 `ubertooth-btle -a`: `BLE settings` records and restores it; other cases leave
 it alone.

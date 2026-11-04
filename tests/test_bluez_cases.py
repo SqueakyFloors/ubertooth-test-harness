@@ -1,9 +1,10 @@
 """The BlueZ-tool cases: the adapter resource, the commands, and the checks.
 
-No bench has a Bluetooth adapter yet (issue #88), so everything here runs
-against the output samples in tests/fake_bluez.py and against the real
-esp32peer.py driver talking to the ESP32 firmware fake. What a run on real
-hardware has still to settle is recorded in docs/tests.md, per case.
+Everything here runs against the output samples in tests/fake_bluez.py and
+against the real esp32peer.py driver talking to the ESP32 firmware fake. The
+cases themselves have run on a bench with a USB adapter, and several of the
+checks below carry the figures those runs gave; docs/tests.md records per
+case what they settled and what they left open.
 """
 
 import io
@@ -454,18 +455,25 @@ class FollowCaseTests(unittest.TestCase):
              "-t", INITIATOR_ADDRESS, "-q",
              "/run/captures/hci/follow.pcap"],
             tool_argv(case))
-        self.assertEqual("verify-capture",
-                         [step.step_id for step in case.steps][-1])
+        self.assertEqual(["verify-capture", "verify-records"],
+                         [step.step_id for step in case.steps][-2:])
 
-    def test_the_pcap_case_does_not_decode_the_records(self):
-        """Measured: all 258 records carried the piconet's LAP and reference
-        address, none passed a header HEC, and 35 carried `transport 3`. The
-        access code is found and the header does not decode (fork #518), so
-        the records are left to the test that reads a capture whose headers
-        do."""
+    def test_the_pcap_records_must_belong_to_the_piconet(self):
+        """Measured: all 258 records carried the piconet's LAP and that LAP
+        and UAP as the reference address, so those are required. None passed
+        a header HEC and 35 carried `transport 3` -- the access code is found
+        and the header does not decode (fork #518) -- so the HEC floor is 0
+        and the transport nibble is let be, and nothing else is."""
         case = follow_cases("comprehensive")["follow-target-pcap"]
-        self.assertNotIn("verify-records",
-                         [step.step_id for step in case.steps])
+        step = next(s for s in case.steps if s.step_id == "verify-records")
+        argv = list(step.argv({CAPTURE_DIR_KEY: "/run/captures/hci"}))
+        self.assertIn("--lap", argv)
+        self.assertEqual(CENTRAL_LAP, argv[argv.index("--lap") + 1])
+        self.assertEqual(CENTRAL_LAP, argv[argv.index("--reference-lap") + 1])
+        self.assertEqual(CENTRAL_UAP, argv[argv.index("--reference-uap") + 1])
+        self.assertEqual("0", argv[argv.index("--min-hec-valid") + 1])
+        self.assertIn("--any-transport", argv)
+        self.assertEqual(str(MIN_PACKETS), argv[argv.index("--min-packets") + 1])
 
     def test_no_case_runs_l_and_u_without_t(self):
         """The page then goes to a guessed 00:00: address, and whether it
@@ -499,9 +507,14 @@ class AdapterStepTests(unittest.TestCase):
         self.patterns(step, fake_bluez.hciconfig(up=True))
 
     def test_an_adapter_that_is_down_fails_the_read(self):
+        """Against the step's own patterns, not the fixture alone: a step
+        whose patterns changed would otherwise keep passing."""
+        step = steps(scan_cases()["inquiry"])["adapter-up"]
         text = fake_bluez.hciconfig(up=False)
-        self.assertNotRegex(text, re.compile(r"(?m)^\s+UP RUNNING\b"))
         self.assertRegex(text, re.compile(r"(?m)^\s+DOWN\b"))
+        self.assertFalse(
+            all(re.search(pattern, text) for pattern in step.output_patterns),
+            "an adapter that is down satisfied every pattern of the read")
 
     def test_an_adapter_at_another_address_fails_the_read(self):
         """The hciN number is attach order; the address is the adapter."""
@@ -717,11 +730,9 @@ class ToolPatternTests(unittest.TestCase):
                     with self.subTest(pattern=pattern):
                         self.assertRegex(text, re.compile(pattern))
 
-    def test_every_other_case_pins_a_zero_exit(self):
+    def test_every_case_pins_a_zero_exit(self):
         for cases in (scan_cases("comprehensive"), follow_cases("comprehensive")):
             for case_id, case in cases.items():
-                if case_id == "extended-report":
-                    continue
                 with self.subTest(case_id):
                     step = steps(case)["pair-and-run"]
                     self.assertEqual((0,), step.expected_returncodes)

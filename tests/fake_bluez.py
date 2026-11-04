@@ -1,11 +1,10 @@
 """Output samples of the BlueZ tools and the two tools that drive them.
 
 The cases in ``ubertooth_harness/bluez_cases.py`` read what ``hciconfig``,
-``hcitool``, ``ubertooth-scan`` and ``ubertooth-follow`` print. No bench has
-a Bluetooth adapter yet (issue #88), so these samples stand in for the real
-thing: they are built line by line from the format strings the code prints,
-so a pattern or a check that does not match them would not match a real run
-either.
+``hcitool``, ``ubertooth-scan`` and ``ubertooth-follow`` print. These samples
+stand in for a bench: they are built line by line from the format strings the
+code prints, so a pattern or a check that does not match them would not match
+a real run either. Bench runs have since confirmed every pattern they feed.
 
 Where each sample comes from:
 
@@ -93,22 +92,6 @@ def scan_survey(lap: str = CENTRAL_LAP, uap: str = CENTRAL_UAP,
     head = f"??:??:{uap.upper() if uap else '??'}:{printable}"
     return f"{head}\t{name}\n{WHOLE_BAND_MAP}\n" if name else \
         f"{head}\n{WHOLE_BAND_MAP}\n"
-
-
-def scan_extended(address: str = ACCEPTOR_ADDRESS,
-                  name: str = ACCEPTOR_NAME) -> str:
-    """The standard output ``-x`` adds for one device it reached."""
-    return "\n".join((
-        f"\tBD Address:  {address}",
-        f"\tDevice Name: {name}",
-        "\tLMP Version: 4.2 (0x8) LMP Subversion: 0x2043",
-        "\tManufacturer: Espressif Incorporated (741)",
-        "\tFeatures page 0: 0xbf 0xfe 0xcf 0xfe 0xdb 0xff 0x7b 0x87",
-        "\t\t<3-slot packets> <5-slot packets> <encryption>",
-        "\tClock offset: 0x4d2e",
-        "\tAFH Map: 0x" + "ff" * 9 + "7f",
-        "",
-    ))
 
 
 def packet_lines(lap: str = CENTRAL_LAP, count: int = 12) -> str:

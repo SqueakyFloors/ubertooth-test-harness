@@ -2574,28 +2574,30 @@ measure.
 
 **What it does.** Runs `ubertooth-scan`, which drives a host Bluetooth
 adapter and an Ubertooth at once, against the piconet two registered ESP32
-Classic peers hold. With `-s` the adapter's inquiry must report the acceptor
-by address and by the name the peer firmware gives it; with no `-s` the
-Ubertooth's sweep must report that piconet by the central's LAP, with the
-channel map the scan built for it; and `-x` must fetch the acceptor's name
-and LMP version over a connection the scan makes itself.
+Classic peers hold. With `-s` the adapter's inquiry must report both peers
+by address and one of them by the name the peer firmware gives it; with no
+`-s` the Ubertooth's sweep must report that piconet by the central's LAP,
+with the channel map the scan built for it. `-x` has no case, for the reason
+below.
 
 **Theory of operation.** The tool has two halves. The Ubertooth's sweep runs
 always; `-s` adds the adapter's inquiry before it. So the cases differ by what
-they require, not only by what they run: the smoke `-s` case requires the
+they require, not only by what they run: the `-s` case requires the
 inquiry's result alone, so a bench whose sweep happened to hear no piconet
-still tests the adapter, and the comprehensive case requires both of the same
-run.
+still tests the adapter, and the other requires the sweep's. Both profiles
+run those same two cases.
 
 `-s` is the adapter's half: a BlueZ inquiry, and the name read back from each
 device that answers. Both ESP32 peers are discoverable and connectable from
 boot and stay so for a whole session, because switching a board's role does
-not touch its scan mode (`firmware/esp32-classic-peer`, `disc`). So the
-acceptor must be in the results. Its name is knowable in advance without
-reading the board: the firmware builds it from the LAP as
-`UT-ESP32-<LAP>` (`bt_peer.c`), which `esp32peer.device_name()` repeats and
-a unit test keeps in step with that source. Other discoverable devices in
-range are reported too and are not held against the run.
+not touch its scan mode (`firmware/esp32-classic-peer`, `disc`). So both must
+be in the results. Their names are knowable in advance without reading the
+boards: the firmware builds a name from the LAP as `UT-ESP32-<LAP>`
+(`bt_peer.c`), which `esp32peer.device_name()` repeats and a unit test keeps
+in step with that source. One of the two must come back under its own name,
+rather than a named board, for the reason under the known limits below.
+Other discoverable devices in range are reported too and are not held
+against the run.
 
 The other half is the Ubertooth's: the board sweeps the whole band and
 libbtbb keeps a piconet per access code it hears. The initiator pages, so it
@@ -2625,13 +2627,19 @@ number is the order the kernel attached controllers in rather than a property
 of the adapter, so the address is what identifies it, and an adapter that came
 back as another `hciN` fails here, naming what was found, instead of the test
 driving whatever took the name. `hcitool -i <device> con` then says it holds
-no link at all, so a case does not start with a link an earlier run left up.
-The same check runs again, first thing in the cleanup.
+no **established** link, so a case does not start with a link an earlier run
+left up. The same check runs again, first thing in the cleanup.
 
-Any link, not the peers' addresses alone, and the distinction matters: `-x`
-pages the address the scan assembles from a survey result, `00:00:<UAP>:<LAP>`,
-which is not a registered address, and that is the link most likely to be
-left behind. A link to either peer cannot survive the step in any case, since
+A pending page, which `hcitool` reports as `state 2`, is not held against a
+run: the scan's own name reads leave them behind and the kernel times them
+out, and the bench saw three to five at a time, all gone shortly after. An
+established link is still refused.
+
+Any device's link, not the peers' addresses alone, and the distinction
+matters: the survey half pages the address the scan assembles from a result,
+`00:00:<UAP>:<LAP>`, which is not a registered address, and that is the link
+most likely to be left behind — the bench confirmed it, among those pending
+pages. A link to either peer cannot survive the step in any case, since
 `esp32peer.py stream` resets both boards on its way out whatever happened. So
 the check before the tool is the stronger of the two: it is what makes the
 state afterwards mean anything.
@@ -2679,7 +2687,16 @@ peers, alongside one to three of other people's devices in range. A
 25-second window left the sweep the pair's piconet to report, with the
 channel map the scan builds for it, in each run.
 
-**Known limits.** A device's name is read over a page of it, and on a bench
+**Known limits.** The allowance for the name reads is the one number in
+either test that is not derived from a tool's own deadline, and a crowded
+room is what it is spent on. Each read is bounded at 25 s, and the allowance
+is 60: the measured commands took 78 s and 55 s against a 111 s window, so
+two silent neighbors would use it up on their own. A busier room fails on the
+driver's deadline, which reads like a hung tool; what distinguishes the two is
+the tool's own `note: reading the name of <address> failed` lines, which are
+in the run record on standard error.
+
+A device's name is read over a page of it, and on a bench
 with strangers' devices in range the name can land on the wrong line: one run
 printed the acceptor's address against a television's name, while the
 television, whose own name read had just failed, was printed as `[unknown]`.
@@ -2866,7 +2883,9 @@ prints it and hands it to the board is **not** exercised: it wants a peer
 that offers one ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
 That is also narrower than it sounds even when it runs: nothing reads the
 board back, so what such a case could check is that the request was made and
-accepted. The map the tool reads is of the adapter's link to the peer, not of
+accepted. And because the tool takes its disabled branch here, it clears the
+board's map rather than leaving one set, exactly as a follow without `-a`
+does — so neither case leaves a map behind for the next one. The map the tool reads is of the adapter's link to the peer, not of
 the piconet the Ubertooth follows, and the two need not agree, so comparing a
 map with a known one stays `Recover AFH map`'s job, from the air.
 

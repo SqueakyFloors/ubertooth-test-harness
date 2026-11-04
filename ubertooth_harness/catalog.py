@@ -1742,10 +1742,10 @@ def builtin_catalog() -> TestCatalog:
         TestDefinition(
             "Bluetooth inquiry scan",
             "ubertooth-scan drives a host Bluetooth adapter and an Ubertooth "
-            "at once: the adapter's inquiry reports a registered ESP32 Classic "
-            "peer by address and name, the Ubertooth's sweep reports the "
-            "piconet the pair holds with the channel map it built for it, and "
-            "-x reads the peer's name and version over a connection",
+            "at once: the adapter's inquiry reports both registered ESP32 "
+            "Classic peers by address and one of them by name, and the "
+            "Ubertooth's sweep reports the piconet the pair holds with the "
+            "channel map it built for it",
             MappingProxyType({
                 "hosts": HOSTS, "Ubertooth": UBERTOOTH,
                 BLUETOOTH_ADAPTER: ArgumentRule(_selector, default="default"),
@@ -1765,9 +1765,10 @@ def builtin_catalog() -> TestCatalog:
         TestDefinition(
             "Follow Classic piconet over HCI",
             "ubertooth-follow pages the piconet's central from a host "
-            "Bluetooth adapter, follows it on the clock it read over HCI, and "
-            "with -a reads the link's channel map and follows with Adaptive "
-            "Frequency Hopping on",
+            "Bluetooth adapter and follows it on the clock it read over HCI; "
+            "with -a it asks that link for its channel map, which this peer "
+            "runs with Adaptive Frequency Hopping off, so the tool says so "
+            "and follows without it",
             MappingProxyType({
                 "hosts": HOSTS, "Ubertooth": UBERTOOTH,
                 BLUETOOTH_ADAPTER: ArgumentRule(_selector, default="default"),
