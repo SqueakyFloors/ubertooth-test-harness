@@ -2630,6 +2630,16 @@ driving whatever took the name. `hcitool -i <device> con` then says it holds
 no **established** link, so a case does not start with a link an earlier run
 left up. The same check runs again, first thing in the cleanup.
 
+Reading the right adapter and *driving* it are two things, and on a host with
+one adapter they look the same. `hciconfig`, `hcitool` and both fork tools
+fall back to the first controller they find when none is named, so a command
+that stopped naming the bound device would keep passing every check above
+while the test drove whatever the kernel attached first. Every command these
+cases run against a controller therefore names it — `hciconfig <device>`,
+`hcitool -i <device> con`, and `-b <device>` for the fork tool — and a unit
+test builds every case in both tests against a second adapter and fails if
+any command, pattern, or expected state would reach the first.
+
 A pending page, which `hcitool` reports as `state 2`, is not held against a
 run: the scan's own name reads leave them behind and the kernel times them
 out, and the bench saw three to five at a time, all gone shortly after. An
@@ -2815,6 +2825,9 @@ capture files, setting the target address and zeroing the clock, and starting
 the transfer thread. A margin covers those. The adapter is read before each case and checked for a
 leftover link afterwards: the tool drops the link to the target before the
 capture starts, so a link still up at the end is one this host is holding.
+The adapter reads, and the rule that every command names the bound device
+rather than letting a tool fall back to the first controller on the host,
+are as described under `Bluetooth inquiry scan`.
 
 **Hardware and arguments.** The same four roles, arguments, platform, and
 host tools as `Bluetooth inquiry scan`, and the same `hci` plan. The

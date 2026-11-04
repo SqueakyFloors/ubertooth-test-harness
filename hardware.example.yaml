@@ -166,7 +166,8 @@ resources:
   # property of the adapter, so the address is what identifies it: a case
   # reads the device first and fails, naming what it found, if the address
   # is not this one. `description` is a free note for a person reading the
-  # registry. No roles: one host has one controller for these tools.
+  # registry. No roles: a test binds one controller, named as the host's
+  # default above.
   BT_Linux0:
     type: Bluetooth adapter
     attached to: Host_Linux
@@ -174,6 +175,21 @@ resources:
       hci device: hci0
       BD_ADDR: "00:1A:7D:00:00:01"
       description: USB Bluetooth controller
+
+  # A host may have a second one, for multi-adapter testing or for another
+  # runner on the same host; no plan here needs two at once. Two adapters on
+  # one host may share neither their `hci device` nor their `BD_ADDR`: the
+  # first would have them drive one controller under two leases, and the
+  # second is one radio registered twice, which would share one lease, since
+  # the lease name is built from the address. Either is refused when the
+  # registry loads. Uncomment to register one.
+  # BT_Linux1:
+  #   type: Bluetooth adapter
+  #   attached to: Host_Linux
+  #   identity:
+  #     hci device: hci1
+  #     BD_ADDR: "00:1A:7D:00:00:02"
+  #     description: second USB Bluetooth controller
 
   # A debug programmer: a USB serial adapter, an SWD probe, or anything else
   # wired to one board's debug or in-system programming header and left there.

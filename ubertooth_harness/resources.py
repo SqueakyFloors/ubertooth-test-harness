@@ -621,6 +621,7 @@ class FileResourceRegistry:
                         f"default {alias} is not attached to {host.alias}"
                     )
         adapter_devices: dict[tuple, str] = {}
+        adapter_addresses: dict[tuple, str] = {}
         for resource in self.resources.values():
             if resource.type == NRF52840_DK:
                 _validate_dk(resource)
@@ -642,6 +643,23 @@ class FileResourceRegistry:
                         f"{resource.attached_to}"
                     )
                 adapter_devices[key] = resource.alias
+                # And one address names one radio. The reverse of the check
+                # above: a bench that registered the same adapter again
+                # after it came back under another hciN has two aliases for
+                # one controller, whose identities differ in the name, so
+                # the duplicate-identity check does not catch it either.
+                # Both would then share a lease, since the lease key is
+                # built from the address, while the cases drove two devices.
+                address = (resource.attached_to,
+                           str(resource.identity["BD_ADDR"]).upper())
+                if address in adapter_addresses:
+                    raise RegistryError(
+                        f"{BLUETOOTH_ADAPTER} {adapter_addresses[address]} "
+                        f"and {resource.alias} are both registered at "
+                        f"{resource.identity['BD_ADDR']} on "
+                        f"{resource.attached_to}"
+                    )
+                adapter_addresses[address] = resource.alias
             if resource.type == DEBUG_PROGRAMMER:
                 _validate_programmer(resource)
         self._validate_lock_names()

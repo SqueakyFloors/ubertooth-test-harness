@@ -55,6 +55,17 @@ CENTRAL_LAP, CENTRAL_UAP = fake_bluez.CENTRAL_LAP, fake_bluez.CENTRAL_UAP
 ACCEPTOR_NAME = fake_bluez.ACCEPTOR_NAME
 INITIATOR_NAME = fake_bluez.INITIATOR_NAME
 CONTEXT = {CAPTURE_DIR_KEY: "/run/captures/hci"}
+# The same plus a recorded value for every board setting a cleanup restores,
+# so that a restore step's command line resolves and can be read.
+RESTORE_CONTEXT = {
+    **CONTEXT,
+    "original channel": "2441",
+    "original channel-index": "2441",
+    "original squelch": "-90",
+    "original leds": "0/0/0",
+    "original crc": "1",
+    "original pa-level": "7",
+}
 
 RESOURCES = {"Ubertooth": "UT_Linux0", ADAPTER_ROLE: ADAPTER_ALIAS,
              "acceptor": "ESP32_Linux0", "initiator": "ESP32_Linux1"}
@@ -757,6 +768,169 @@ class AdapterHelperTests(unittest.TestCase):
                                     "BD_ADDR": fake_bluez.ADAPTER_ADDRESS.lower()}
         self.assertEqual(fake_bluez.ADAPTER_ADDRESS,
                          adapter(identities, INQUIRY_TEST_NAME)["address"])
+
+
+class AdapterSelectionTests(unittest.TestCase):
+    """Two adapters on one host are not interchangeable.
+
+    A bench with two of them is the case this guards. `hciconfig`, `hcitool`
+    and both fork tools all default to the first controller they find when no
+    device is named, so a command that forgot to name one would drive `hci0`
+    whatever the registry says, and on a one-adapter bench every check would
+    still pass. The bench would then be measuring a controller no case chose.
+
+    So each case is built here against a *second* adapter, and nothing it
+    runs may name the first one or leave the choice out. The `hciN` name is
+    also only attach order, so the address is checked with it: naming `hci1`
+    while reading `hci0`'s address would be the same mistake one level down.
+    """
+
+    SECOND_DEVICE = "hci1"
+    SECOND_ADDRESS = "AC:A7:F1:5B:C3:C9"
+    # Every command either tool or BlueZ tool runs against a controller, and
+    # the option each one takes to name it. `hciconfig` takes the device as
+    # its first argument, with no option at all.
+    SELECTORS = {"hciconfig": None, "hcitool": "-i",
+                 "ubertooth-scan": "-b", "ubertooth-follow": "-b"}
+
+    def identities(self):
+        identities = dict(IDENTITIES)
+        identities[ADAPTER_ROLE] = {"hci device": self.SECOND_DEVICE,
+                                    "BD_ADDR": self.SECOND_ADDRESS}
+        return identities
+
+    def cases(self):
+        identities = self.identities()
+        for coverage in ("smoke", "comprehensive"):
+            for build in (scan_cases, follow_cases):
+                for case in build(coverage, identities).values():
+                    yield coverage, case
+
+    def commands(self, case):
+        """Every step's argv, cleanup included, with the tool's own line.
+
+        A restore step builds its command from what an earlier step read, so
+        the context carries recorded values for all of them: the point here
+        is which device each command names, and a step left out for want of
+        a recorded value is a step not checked.
+        """
+        for step in case.steps + case.cleanup:
+            argv = list(step.resolve_argv(RESTORE_CONTEXT))
+            yield step, argv
+            if "--" in argv:
+                yield step, argv[argv.index("--") + 1:]
+
+    def test_every_controller_command_names_the_adapter_it_was_given(self):
+        for coverage, case in self.cases():
+            for step, argv in self.commands(case):
+                if not argv:
+                    continue
+                program = Path(argv[0]).name
+                if program not in self.SELECTORS:
+                    continue
+                option = self.SELECTORS[program]
+                with self.subTest(coverage=coverage, case=case.case_id,
+                                  step=step.step_id, program=program):
+                    if option is None:
+                        self.assertEqual(self.SECOND_DEVICE, argv[1])
+                        continue
+                    self.assertIn(option, argv)
+                    self.assertEqual(self.SECOND_DEVICE,
+                                     argv[argv.index(option) + 1])
+
+    def test_no_case_mentions_the_adapter_it_was_not_given(self):
+        """Not in a command, a pattern, a step name, or the expected state.
+
+        The default device is what a dropped selector would reach, and
+        `fake_bluez.ADAPTER` is it. A check written against that name rather
+        than the bound one would pass on the bench that has only the first
+        adapter and fail on the one that has both.
+        """
+        default = fake_bluez.ADAPTER
+        self.assertNotEqual(default, self.SECOND_DEVICE)
+        for coverage, case in self.cases():
+            text = [case.name, case.expected_state]
+            for step, argv in self.commands(case):
+                text.extend(argv)
+            for step in case.steps + case.cleanup:
+                text.append(step.name)
+                text.extend(step.output_patterns)
+                text.extend(step.forbidden_patterns)
+            for piece in text:
+                with self.subTest(coverage=coverage, case=case.case_id,
+                                  piece=piece):
+                    self.assertNotRegex(str(piece), rf"\b{default}\b")
+
+    def test_the_adapter_reads_check_the_address_of_the_one_it_was_given(self):
+        """The identity half: the right name, and the right radio under it."""
+        wanted = re.escape(self.SECOND_ADDRESS)
+        for coverage, case in self.cases():
+            reads = [step for step in case.steps + case.cleanup
+                     if step.step_id in ("adapter-up", "adapter-still-up")]
+            self.assertEqual(2, len(reads), case.case_id)
+            for step in reads:
+                with self.subTest(coverage=coverage, case=case.case_id,
+                                  step=step.step_id):
+                    self.assertTrue(
+                        any(wanted in pattern
+                            for pattern in step.output_patterns),
+                        f"{step.step_id} does not require "
+                        f"{self.SECOND_ADDRESS}: {step.output_patterns}")
+                    self.assertNotIn(
+                        fake_bluez.ADAPTER_ADDRESS,
+                        "".join(step.output_patterns))
+
+    def test_one_radio_registered_under_two_names_is_refused(self):
+        """Two aliases, two `hciN` names, one address: one radio twice.
+
+        The reverse case -- two adapters sharing an `hci device` -- is
+        refused above. This one is what a bench produces by registering the
+        same adapter again after it came back under another name: the lease
+        keys are built from the address, so the two aliases would share one
+        lease while the cases drove two devices.
+        """
+        second = f"""
+  BT_Linux1:
+    type: {ADAPTER_ROLE}
+    attached to: Host_Linux
+    identity:
+      hci device: {self.SECOND_DEVICE}
+      BD_ADDR: "{fake_bluez.ADAPTER_ADDRESS}"
+"""
+        with self.assertRaisesRegex(RegistryError, "both registered at"):
+            registry_with(ADAPTER_ONLY + second)
+
+    def test_two_adapters_with_their_own_addresses_are_accepted(self):
+        second = f"""
+  BT_Linux1:
+    type: {ADAPTER_ROLE}
+    attached to: Host_Linux
+    identity:
+      hci device: {self.SECOND_DEVICE}
+      BD_ADDR: "{self.SECOND_ADDRESS}"
+"""
+        registry = registry_with(ADAPTER_ONLY + second)
+        self.assertEqual(
+            self.SECOND_ADDRESS,
+            registry.resources["BT_Linux1"].identity["BD_ADDR"])
+
+    def test_no_plan_binds_more_than_one_adapter_to_a_test(self):
+        """The bench keeps one adapter; a second is for a second runner.
+
+        A plan row binds one resource per role, so this is a property of the
+        role rather than of the row -- which is the point: there is no
+        `Bluetooth adapter 2` role to bind, so nothing can come to require
+        two at once.
+        """
+        for path in sorted((ROOT / "testplans").glob("*.yaml")):
+            plan = load_plan(path)
+            for suite, entries in plan.suites.items():
+                for entry in entries:
+                    bound = [key for key in entry.arguments
+                             if str(key).startswith(ADAPTER_ROLE)]
+                    with self.subTest(plan=path.name, suite=suite,
+                                      test=entry.test_name):
+                        self.assertLessEqual(len(bound), 1, bound)
 
 
 if __name__ == "__main__":
