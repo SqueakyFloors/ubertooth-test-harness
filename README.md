@@ -1143,7 +1143,8 @@ line carries a build timestamp that also catches a reflash of the same
 revision), `-s` (the serial the board itself reports), `-B` (the bootloader
 under that firmware), `-C` (channel), `-a` (PA level), `-z`
 (squelch), and `-d` (LEDs), then `ubertooth-btle -U <serial> -k` (CRC).
-`ubertooth-util` never checks the firmware API, but `ubertooth-btle` does, and
+None of the `ubertooth-util` options these reads use checks the firmware API,
+but `ubertooth-btle` does, and
 it may refuse any API that is not the one the tools were built for — newer as
 well as older — stopping that board as it goes; whether it refuses or warns
 and reads on is how those tools were built and whether

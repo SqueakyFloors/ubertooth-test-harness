@@ -33,7 +33,10 @@ from tests.test_transitions import (
 
 A, B, C = "a" * 32, "b" * 32, "c" * 32
 KGV = "e" * 64
-GUARD_QUERIES = {option for _key, option, _pattern, _convert in transitions.GUARD_READBACK}
+# The query options a guard read may use, written out rather than taken from
+# GUARD_READBACK: a write option added to the read set would satisfy a check
+# derived from that set.
+GUARD_QUERIES = {"-v", "-V", "-s", "-B", "-C", "-a", "-z", "-d"}
 GUARD_KEYS = tuple(key for key, *_rest in transitions.GUARD_READBACK) + (
     transitions.GUARD_CRC_KEY,
 )
@@ -646,7 +649,7 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
             f"firmware API {transitions.format_api(api)} is not the host tools API",
             reason,
         )
-        self.assertIn("its API check would stop the guard", reason)
+        self.assertIn("its API check may stop the guard", reason)
         self.assertEqual([f"guard Ubertooth 1 {transitions.GUARD_CRC_KEY}"],
                          failed_guard_reads(events))
         (refused,) = [e for e in events if e.event_type == "step_finished"
@@ -1063,7 +1066,7 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertIn("wedged rather than short of one", reason)
         self.assertIn("no case ran", reason)
         # The CRC read is the one that does not reach a board whose firmware
-        # this check could not confirm: ubertooth-btle would stop a board
+        # this check could not confirm: ubertooth-btle may stop a board
         # whose API is not the host tools' own, so it is refused and fails
         # the check.
         self.assertEqual([], [c for c in bench.commands_for(B)
@@ -1136,14 +1139,28 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
         the tool printed for some other reason must not become a value that
         then compares equal for the rest of the run.
         """
-        read = transitions.guard_steps(
-            (transitions.GuardBoard("guard Ubertooth 1", B, host_api=HOST_API),)
-        )[0]
-        pattern = read.observe.pattern
+        board = transitions.GuardBoard("guard Ubertooth 1", B, host_api=HOST_API)
+        # Every read that tolerates an unanswered request, each read the way
+        # the run reads it: the lines on stderr, through the step's own
+        # observation, which searches stdout first and stderr after.
+        reads = [
+            step for step in transitions.guard_steps((board,))
+            if step.expected_returncodes == (0, 1)
+        ]
+        self.assertEqual(
+            len([key for key, *_rest in transitions.GUARD_READBACK
+                 if key not in transitions.GUARD_STRICT_KEYS]) + 1,
+            len(reads),
+        )
 
-        def reading(text):
-            match = re.search(pattern, text)
-            return None if match is None else read.observe.value(match)
+        def readings(text):
+            """What each tolerant read makes of ``text`` on stderr."""
+            return {
+                step.name: step.observe.extract(
+                    CommandResult(step.argv, 1, "", text, 0.01, False)
+                )
+                for step in reads
+            }
 
         unsupported = (
             # libubertooth's stall wording, with and without the libusb code.
@@ -1157,7 +1174,23 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
         )
         for text in unsupported:
             with self.subTest(text.split("\n")[0]):
-                self.assertEqual(transitions.GUARD_UNSUPPORTED, reading(text))
+                self.assertEqual(
+                    {step.name: transitions.GUARD_UNSUPPORTED for step in reads},
+                    readings(text),
+                )
+
+        # A value the board did print wins over a stall beside it, whichever
+        # request stalled: that is the `-V` case, where firmware older than
+        # the build string answers the version and not the build.
+        firmware = f"{APPLICATION_IMAGE} git-test (API:{transitions.format_api(HOST_API)})"
+        (version_read,) = [
+            step for step in reads
+            if step.name.endswith(transitions.GUARD_FIRMWARE_KEY)
+        ]
+        self.assertEqual(firmware, version_read.observe.extract(CommandResult(
+            version_read.argv, 1, f"Firmware version: {firmware}\n",
+            unsupported[0], 0.01, False,
+        )))
 
         fails = (
             # A board that has left the bus stalls requests too, and says so.
@@ -1177,7 +1210,9 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
         )
         for text in fails:
             with self.subTest(text.split("\n")[0] or "no output"):
-                self.assertIsNone(reading(text))
+                self.assertEqual(
+                    {step.name: None for step in reads}, readings(text)
+                )
 
     def test_the_image_name_comes_off_the_firmware_reading(self):
         self.assertEqual(APPLICATION_IMAGE, transitions.guard_image(
