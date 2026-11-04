@@ -1638,10 +1638,12 @@ lease directory). A lab that also guards boards with its own per-board lock
 files can hand the harness their path with `--external-board-lock`, and every
 lease then takes the DK's file too (see [External board
 locks](#external-board-locks)); the DK's file is the one named after its
-plain J-Link serial, `board-<J-Link serial without leading zeros>.lock` for
-the template `<lab lock dir>/board-{serial}.lock`, which is the file a lab's
-own scripts already lock. Hold such a lock only for the run, so other users
-of the DK get their turn.
+J-Link serial exactly as the registry carries it,
+`board-<J-Link serial>.lock` for the template
+`<lab lock dir>/board-{serial}.lock`, which is the file a lab's own scripts
+already lock. The lease key strips the leading zeros and the lock file does
+not, so a registry carrying the padded form means a padded file name. Hold
+such a lock only for the run, so other users of the DK get their turn.
 
 ## Classic test devices (ESP32 Classic peers)
 

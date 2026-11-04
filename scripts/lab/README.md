@@ -41,9 +41,13 @@ out rather than reached through `$HOME`, for the same reason: a caller with a
 different home would silently repoint both paths. Everything else a helper
 needs it works out for itself.
 
-Give the lock template only to a wrapper that is the outermost hold. A
-command run *by* such a wrapper is already inside those locks, and asking for
-them again would wait for a lock its own parent holds.
+An `export` reaches every command the wrapper runs, which is what you want
+until one of them takes devices of its own: it is already inside the
+wrapper's locks, so asking for the same files again finds them busy. `hold`
+waits for them, up to its deadline; `ubertooth-harness lease` and a
+`run-suite` run refuse at once. Either way, turn the template off for that
+command with `--external-board-lock ''`, or, for `peer` inside a `hold` that
+already has its devices, pass `--no-hold`.
 
 Naming the environment's interpreter yourself still works and is what the
 harness's own commands take:
