@@ -287,22 +287,53 @@ def _adapter_free_step(step_id: str, name: str, hci: dict) -> Step:
 # Output checks
 
 
-def inquiry_found(address: str, name: str) -> Check:
-    """The BlueZ inquiry reported this device, under this name."""
+def inquiry_found(names: Mapping[str, str]) -> Check:
+    """The BlueZ inquiry reported every one of these devices, and read back
+    the name of at least one of them.
+
+    Both halves matter, and they are asked for differently because the bench
+    showed they are worth different confidence.
+
+    Every address must be listed. The two peers are discoverable from boot,
+    so an inquiry through the adapter that missed one did not do its work,
+    and that part held in every run.
+
+    The names are asked of the set rather than of each device, because a
+    name is read over a page of that device and the bench showed one of them
+    land on the wrong line: an inquiry that found two televisions besides the
+    peers printed the acceptor's address against a television's name, while
+    the television whose name it was printed as ``[unknown]`` after its own
+    read failed with EIO. The run before and five runs after had every name
+    right. The tool reads each name into a buffer of its own, one device at a
+    time (``print_name_and_class()`` in ubertooth-scan.c), so the swap is
+    below it, in the reply the library matched to the read -- see fork
+    [#1172](https://github.com/SqueakyFloors/ubertooth/issues/1172). Nothing
+    the harness can check tells a swapped name from a wrongly reported one,
+    and the devices whose failing reads set it off are not the bench's. So
+    the check is that the name read worked: one peer under its own name
+    proves the adapter paged a device the harness owns and got its name
+    back, and both peers wrong fails.
+    """
     def check(output) -> str:
         found = {}
         for line in text_lines(output):
             match = INQUIRY_LINE.match(line)
             if match:
                 found[match["address"]] = match["name"]
-        if address not in found:
+        missing = [address for address in names if address not in found]
+        if missing:
             listed = ", ".join(sorted(found)) if found else "nothing"
-            return (f"the inquiry reported {listed}, not {address}: the peer "
-                    "is discoverable from boot, so an inquiry that missed it "
-                    "did not work")
-        if found[address] != name:
-            return (f"the inquiry reported {address} as {found[address]!r}, "
-                    f"and the peer firmware names it {name!r}")
+            return (f"the inquiry reported {listed}, and not "
+                    f"{', '.join(missing)}: the peers are discoverable from "
+                    "boot, so an inquiry that missed one did not work")
+        if not any(found[address] == name for address, name in names.items()):
+            reported = ", ".join(f"{address} as {found[address]!r}"
+                                 for address in names)
+            wanted = ", ".join(f"{address} is {name!r}"
+                               for address, name in names.items())
+            return (f"the inquiry reported {reported}, and the peer firmware "
+                    f"names them {wanted}: no peer came back under its own "
+                    "name, so no name read worked")
         return ""
     return check
 
@@ -481,7 +512,12 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
     seconds = seconds_arg(arguments)
     device = hci["device"]
     central = initiator["lap"]
-    acceptor_name = esp32peer.device_name(acceptor["address"])
+    # The firmware names a board after its own address, so the names the
+    # inquiry must read back follow from the registry.
+    peer_names = {
+        acceptor["address"]: esp32peer.device_name(acceptor["address"]),
+        initiator["address"]: esp32peer.device_name(initiator["address"]),
+    }
     report = _pair_report(acceptor, initiator)
 
     def scan(*options, **case):
@@ -500,17 +536,18 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
 
     cases = [
         # -s adds the adapter's own half: an inquiry, and the name of each
-        # device it answers. The acceptor is discoverable from boot, so it is
-        # what the inquiry must report. Only that is checked here, so a bench
-        # whose sweep happened to hear no piconet still tests the adapter.
-        # Other discoverable devices in range are reported too and are not
-        # held against the run.
+        # device it answers. Both peers are discoverable from boot, so both
+        # are what the inquiry must report, and one of them must come back
+        # under its own name -- see inquiry_found() for why the names are
+        # asked of the pair rather than of each board. Only the inquiry is
+        # checked here, so a bench whose sweep happened to hear no piconet
+        # still tests the adapter. Other discoverable devices in range are
+        # reported too and are not held against the run.
         scan("-s", case_id="inquiry",
-             name=f"ubertooth-scan -s reports the acceptor {acceptor['address']} "
-                  f"as {acceptor_name}",
-             check=inquiry_found(acceptor["address"], acceptor_name),
-             expected_state=f"the inquiry reported {acceptor['address']} as "
-                            f"{acceptor_name}"),
+             name="ubertooth-scan -s reports both peers and names one of them",
+             check=inquiry_found(peer_names),
+             expected_state=f"the inquiry reported {acceptor['address']} and "
+                            f"{initiator['address']}, and named one of them"),
         # Without -s only the Ubertooth half runs: the board sweeps the band
         # and the survey reports the piconet the pair is holding, by the
         # central's LAP, with the channel map the scan built for it.

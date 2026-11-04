@@ -34,6 +34,7 @@ ADAPTER_ADDRESS = "00:1A:7D:DA:71:13"
 ACCEPTOR_ADDRESS = "C8:85:41:2A:1B:2A"
 INITIATOR_ADDRESS = "20:50:0D:E9:C5:BA"
 ACCEPTOR_NAME = "UT-ESP32-2A1B2A"
+INITIATOR_NAME = "UT-ESP32-E9C5BA"
 CENTRAL_LAP, CENTRAL_UAP = "e9c5ba", "0d"
 # A device of someone else's that an inquiry in a shared room may report as
 # well. The checks must not mind it.

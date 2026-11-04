@@ -52,6 +52,7 @@ ADAPTER_ROLE = "Bluetooth adapter"
 ADAPTER_ALIAS = "BT_Linux0"
 CENTRAL_LAP, CENTRAL_UAP = fake_bluez.CENTRAL_LAP, fake_bluez.CENTRAL_UAP
 ACCEPTOR_NAME = fake_bluez.ACCEPTOR_NAME
+INITIATOR_NAME = fake_bluez.INITIATOR_NAME
 CONTEXT = {CAPTURE_DIR_KEY: "/run/captures/hci"}
 
 RESOURCES = {"Ubertooth": "UT_Linux0", ADAPTER_ROLE: ADAPTER_ALIAS,
@@ -557,16 +558,34 @@ class AdapterStepTests(unittest.TestCase):
 class OutputCheckTests(unittest.TestCase):
     """The checks over each tool's own standard output."""
 
-    def test_the_inquiry_check_wants_the_peer_by_address_and_name(self):
-        check = inquiry_found(ACCEPTOR_ADDRESS, ACCEPTOR_NAME)
+    def test_the_inquiry_check_wants_both_peers_and_one_name(self):
+        check = inquiry_found({ACCEPTOR_ADDRESS: ACCEPTOR_NAME,
+                               INITIATOR_ADDRESS: INITIATOR_NAME})
         found = fake_bluez.scan_inquiry(
             (fake_bluez.OTHER_ADDRESS, "Someone's speaker"),
-            (ACCEPTOR_ADDRESS, ACCEPTOR_NAME))
+            (ACCEPTOR_ADDRESS, ACCEPTOR_NAME),
+            (INITIATOR_ADDRESS, INITIATOR_NAME))
         self.assertEqual("", check(found))
-        self.assertIn("not " + ACCEPTOR_ADDRESS, check(fake_bluez.scan_inquiry()))
-        self.assertIn(
-            "names it",
-            check(fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, "[unknown]"))))
+        self.assertIn("and not " + ACCEPTOR_ADDRESS + ", " + INITIATOR_ADDRESS,
+                      check(fake_bluez.scan_inquiry()))
+        # One peer listed and the other not is the same failure.
+        self.assertIn("and not " + INITIATOR_ADDRESS, check(
+            fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))))
+
+    def test_one_peer_name_is_enough_and_none_is_not(self):
+        """A name can land on the wrong line when another device's read
+        fails, which the bench showed once: see inquiry_found()."""
+        check = inquiry_found({ACCEPTOR_ADDRESS: ACCEPTOR_NAME,
+                               INITIATOR_ADDRESS: INITIATOR_NAME})
+        # What the bench printed: the acceptor under a television's name,
+        # the initiator under its own.
+        self.assertEqual("", check(fake_bluez.scan_inquiry(
+            (fake_bluez.OTHER_ADDRESS, "[unknown]"),
+            (ACCEPTOR_ADDRESS, "[TV] Someone's television"),
+            (INITIATOR_ADDRESS, INITIATOR_NAME))))
+        self.assertIn("no peer came back under its own name", check(
+            fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, "[unknown]"),
+                                    (INITIATOR_ADDRESS, "[unknown]"))))
 
     def test_the_peer_name_is_derived_from_its_address(self):
         self.assertEqual(ACCEPTOR_NAME, esp32peer.device_name(ACCEPTOR_ADDRESS))
