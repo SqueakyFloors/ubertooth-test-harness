@@ -22,13 +22,38 @@ scripts/lab/hold --help                   # or python3 scripts/lab/hold --help
 ~/checkout/scripts/lab/hub-port --help
 ```
 
-A wrapper on a bench is therefore one line, and there is nothing in it to get
-wrong:
+A wrapper on a bench is therefore what that bench knows and an `exec`, with
+no interpreter to name and no working directory to be in:
 
 ```sh
 #!/bin/sh
-exec ~/checkout/scripts/lab/hold "$@"
+export UBERTOOTH_HARNESS_HARDWARE=/path/to/bench/hardware.yaml
+# Only a bench whose own scripts lock devices with per-device files:
+export UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK=/path/to/bench/board-{serial}.lock
+exec /path/to/checkout/scripts/lab/hold "$@"
 ```
+
+The registry belongs in the wrapper, not in whoever calls it: a helper with
+no registry refuses rather than guessing, and a bench whose wrapper leaves
+that to the caller's environment works from a shell that happens to have
+exported it and not from cron, a script, or another agent's session. Written
+out rather than reached through `$HOME`, for the same reason: a caller with a
+different home would silently repoint both paths. Everything else a helper
+needs it works out for itself.
+
+An `export` reaches every command the wrapper runs, which is what you want
+until one of them takes devices of its own. A command run inside the wrapper
+above is inside a whole `hold`: the harness lease as well as the bench's
+file, and nothing recognizes itself, so asking for the same devices again
+finds them held however the template is set. Do not re-hold them. `peer`
+has `--no-hold` for exactly this, for the common case of driving the peers
+inside an outer `hold` that already has them.
+
+`--external-board-lock ''` is the lever for the other arrangement: a bench's
+*own* script holding the plain-serial files itself and then running a harness
+command, which would otherwise wait for the files its caller holds. There the
+template is the only thing in the way, and turning it off for that one
+command is right.
 
 Naming the environment's interpreter yourself still works and is what the
 harness's own commands take:
@@ -49,7 +74,10 @@ A helper now pins both halves to its own checkout, and
 tracks `main`, the same one the harness is deployed from, so a registry
 change and the code that reads it move together.
 
-Set the two paths once and the commands stay short:
+Running them by hand instead of through a wrapper, set them once and the
+commands stay short. `UBERTOOTH_HARNESS_OWNER` is how another holder's error
+names you, which is worth setting in a shell a person types in and has no
+place in a wrapper:
 
 ```sh
 export UBERTOOTH_HARNESS_HARDWARE=~/bench/hardware.yaml

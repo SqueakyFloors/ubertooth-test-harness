@@ -169,8 +169,9 @@ stopped answering. Each runs the harness of the checkout it lives in,
 whichever interpreter starts it and from whatever directory: it re-runs
 itself under that checkout's own bootstrapped environment, carries on in any
 other the harness bootstrapped if its own checkout has none, and refuses an
-interpreter nobody bootstrapped. So a wrapper on a bench is one `exec` of a
-path.
+interpreter nobody bootstrapped. So a wrapper on a bench names its registry
+and `exec`s the helper by path, with nothing in it about which harness runs
+([`scripts/lab/README.md`](scripts/lab/README.md)).
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
@@ -1636,10 +1637,13 @@ list it), keyed by its J-Link serial (`nrf52840dk-<serial>.lock` in the
 lease directory). A lab that also guards boards with its own per-board lock
 files can hand the harness their path with `--external-board-lock`, and every
 lease then takes the DK's file too (see [External board
-locks](#external-board-locks)); the DK's file is the one named after its lock
-key, `board-nrf52840dk-<J-Link serial without leading zeros>.lock` for the
-template `<lab lock dir>/board-{serial}.lock`. Hold such a lock only for the
-run, so other users of the DK get their turn.
+locks](#external-board-locks)); the DK's file is the one named after its
+J-Link serial exactly as the registry carries it,
+`board-<J-Link serial>.lock` for the template
+`<lab lock dir>/board-{serial}.lock`, which is the file a lab's own scripts
+already lock. The lease key strips the leading zeros and the lock file does
+not, so a registry carrying the padded form means a padded file name. Hold
+such a lock only for the run, so other users of the DK get their turn.
 
 ## Classic test devices (ESP32 Classic peers)
 

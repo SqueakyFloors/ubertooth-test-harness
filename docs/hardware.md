@@ -775,8 +775,10 @@ the harness of the checkout it lives in: it re-runs itself under that
 checkout's bootstrapped interpreter, and the `ubertooth-harness lease` it
 delegates to is given that checkout first on its import path with the working
 directory left off it. So a wrapper on the
-bench names a path and nothing more, and the registry and the code that reads
-it cannot come from two different versions. They did once: a wrapper naming a
+bench names its registry, its own lock files if it has them, and a path to
+the helper -- nothing about which harness runs -- and the registry and the
+code that reads it cannot come from two different versions
+([`scripts/lab/README.md`](../scripts/lab/README.md) has the wrapper). They did once: a wrapper naming a
 deployed checkout's interpreter left every device command on the host
 refusing a registry that had just gained a role-named default, because the
 deployed half predated them
