@@ -2631,14 +2631,19 @@ no **established** link, so a case does not start with a link an earlier run
 left up. The same check runs again, first thing in the cleanup.
 
 Reading the right adapter and *driving* it are two things, and on a host with
-one adapter they look the same. `hciconfig`, `hcitool` and both fork tools
-fall back to the first controller they find when none is named, so a command
-that stopped naming the bound device would keep passing every check above
-while the test drove whatever the kernel attached first. Every command these
-cases run against a controller therefore names it — `hciconfig <device>`,
-`hcitool -i <device> con`, and `-b <device>` for the fork tool — and a unit
-test builds every case in both tests against a second adapter and fails if
-any command, pattern, or expected state would reach the first.
+one adapter they look the same. Dropping the device from either read would
+not fail it: `hciconfig` with no device lists every controller and
+`hcitool con` with no `-i` reports every up controller's links, so the output
+still holds the bound adapter's block and the patterns above still match,
+while the links being refused are any controller's. The fork tools do not
+fall back so quietly — without `-b` they take the host's first available
+controller — but nothing in the output would say which one that was. Every
+command these cases run against a controller therefore names it —
+`hciconfig <device>`, `hcitool -i <device> con`, and `-b <device>` for the
+fork tool — and because output cannot settle it, a unit test checks the
+commands themselves: it builds every case in both tests against a second
+adapter and fails if any command, pattern, or expected state would reach the
+first.
 
 A pending page, which `hcitool` reports as `state 2`, is not held against a
 run: the scan's own name reads leave them behind and the kernel times them

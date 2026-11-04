@@ -276,14 +276,24 @@ built from the address, while the cases drove two devices. Both are refused
 when the registry loads.
 
 Naming the device is not optional anywhere, and that is worth stating because
-nothing would complain if it were dropped: `hciconfig`, `hcitool` and both
-fork tools all fall back to the first controller they find. So every command
-a case runs against a controller names the bound one — `hciconfig <device>`,
-`hcitool -i <device>`, `-b <device>` for the two fork tools — and a unit test
-builds every case against a second adapter and fails if any command would
-reach the first. On a bench with one adapter the fallback and the choice are
-the same controller, so only a bench with two would ever have shown the
-mistake.
+nothing in a run would complain if it were dropped. What each program does
+without one differs, and neither answer is the bound adapter:
+
+- the two fork tools take the host's first available controller, so they would
+  drive the wrong radio;
+- `hciconfig` with no device lists every controller, and `hcitool con` with no
+  `-i` reports the links of every controller that is up. The output then still
+  contains the bound adapter's own block, so the patterns these steps match
+  would **pass** — while the links reported, and refused, belonged to any
+  controller on the host.
+
+So every command a case runs against a controller names the bound one —
+`hciconfig <device>`, `hcitool -i <device>`, `-b <device>` for the two fork
+tools — and that is checked by its shape rather than by its output, which is
+the only way to catch the two reads: a unit test builds every case against a
+second adapter and fails if any command would reach the first. On a bench
+with one adapter none of this is visible, since the fallback and the choice
+are the same radio, which is why a second adapter is what showed it.
 
 The cases also run `hcitool -i <device> con`, before the tool and again at
 the start of the cleanup, to catch a link to a peer that a run left up.
@@ -343,12 +353,19 @@ needs all three. They are complementary, not interchangeable: each one gives
 the harness a kind of control or a counter the other two cannot.
 
 - **The nRF52840 DKs are the deterministic LE endpoints.** Their firmware is
-  the harness's own, so a test sets the advertising address, payload, channel
-  and interval; the central and peripheral connection parameters, data length
-  extension, the channel map, channel selection algorithm 1 or 2, and
-  connection cycling. The DK also reports endpoint-side counters — packets,
-  errors, retransmissions, timeouts — so a check can compare what the
-  Ubertooth saw against what the far end says it sent.
+  the harness's own, so a test sets the advertising payload, channel and
+  type, and the interval; the connection peer, interval, data length
+  extension, write size and period, the data channel map, a parameter update,
+  and connection cycling. Its address is **known rather than settable**: a
+  static random identity address derived from the board's FICR, fixed across
+  boots, which is what it advertises from — knowing it in advance is what a
+  test needs, and the shell cannot change it. Channel selection algorithm 1
+  or 2 is likewise chosen by **which of the two images is flashed**
+  (`chan-sel-1.conf` turns algorithm 2 off in the controller) rather than by
+  a command. The DK then reports endpoint-side counters — writes, write
+  errors, bytes received, parameter updates, connects and disconnects — and
+  the parameters in force, including the supervision timeout, so a check can
+  compare what the Ubertooth saw against what the far end says it did.
 - **The ESP32 peers are the deterministic Classic endpoints.** Their firmware
   is likewise the harness's own, and it supplies a known LAP and UAP and a
   known role for each board, Serial Port Profile traffic, EV3 and 2-EV3

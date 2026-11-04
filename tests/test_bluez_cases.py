@@ -773,16 +773,21 @@ class AdapterHelperTests(unittest.TestCase):
 class AdapterSelectionTests(unittest.TestCase):
     """Two adapters on one host are not interchangeable.
 
-    A bench with two of them is the case this guards. `hciconfig`, `hcitool`
-    and both fork tools all default to the first controller they find when no
-    device is named, so a command that forgot to name one would drive `hci0`
-    whatever the registry says, and on a one-adapter bench every check would
-    still pass. The bench would then be measuring a controller no case chose.
+    A bench with two of them is the case this guards, and what each program
+    does with no device named differs, so no single output check catches it:
 
-    So each case is built here against a *second* adapter, and nothing it
-    runs may name the first one or leave the choice out. The `hciN` name is
-    also only attach order, so the address is checked with it: naming `hci1`
-    while reading `hci0`'s address would be the same mistake one level down.
+    - the two fork tools take the host's first available controller, and
+      would drive the wrong radio with nothing in their output saying which;
+    - ``hciconfig`` with no device lists every controller and ``hcitool con``
+      with no ``-i`` reports every up controller's links, so the adapter
+      steps' own patterns would still match -- the bound adapter's block is
+      in that output -- while the links refused belonged to any controller.
+
+    That is why this checks the commands rather than their output. Each case
+    is built against a *second* adapter, and nothing it runs may name the
+    first one or leave the choice out. The ``hciN`` name is only attach
+    order, so the address is checked with it: naming ``hci1`` while reading
+    ``hci0``'s address would be the same mistake one level down.
     """
 
     SECOND_DEVICE = "hci1"
@@ -841,10 +846,9 @@ class AdapterSelectionTests(unittest.TestCase):
     def test_no_case_mentions_the_adapter_it_was_not_given(self):
         """Not in a command, a pattern, a step name, or the expected state.
 
-        The default device is what a dropped selector would reach, and
-        `fake_bluez.ADAPTER` is it. A check written against that name rather
-        than the bound one would pass on the bench that has only the first
-        adapter and fail on the one that has both.
+        `fake_bluez.ADAPTER` is the first adapter's name, and a check written
+        against it rather than against the bound one would pass on the bench
+        that has only that adapter and fail on the one that has both.
         """
         default = fake_bluez.ADAPTER
         self.assertNotEqual(default, self.SECOND_DEVICE)
