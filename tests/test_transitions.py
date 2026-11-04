@@ -163,6 +163,7 @@ class FakeUbertooth:
         reported_serial=None,
         bootloader="2.00 git-test, CRC32:0x11112222",
         unsupported=(),
+        stalled_leds=(),
         next_word=True,
         reject_strays=True,
         pa_zero_sets=True,
@@ -200,6 +201,10 @@ class FakeUbertooth:
         # follows with its own read-failed line, exit 1. Modeled for the
         # one-read commands the guard check sends.
         self.unsupported = frozenset(unsupported)
+        # Which of the three LED reads `-d` asks for stall, for a board that
+        # answers some of them and not others. `-d` is the one guard read that
+        # makes more than one request of the same kind.
+        self.stalled_leds = frozenset(stalled_leds)
         # Commands that reached the firmware as cmd_stop (ubertooth_stop()).
         self.stops = 0
         self.state = {
@@ -461,6 +466,22 @@ class FakeUbertooth:
             on_output,
         )
 
+    def _stall_lines(self, request, query):
+        """What a stalled request prints: libubertooth's line, then the tool's."""
+        lines = [
+            f"error: could not {request}: the board's firmware does not "
+            "support it (stalled, libusb -9)",
+            "note: the board reports firmware API version "
+            f"{transitions.format_api(self.api)}, libubertooth 1.1 "
+            f"requires {transitions.format_api(self.api)}",
+            "note: a board that stalls every request is wedged rather "
+            "than short of this one; reset it with ubertooth-util -r on "
+            "the same board",
+        ]
+        if query is not None:
+            lines.append(f"error: {query} read failed")
+        return lines
+
     def _stalled_read(self, command, pairs, on_output, read_options=None):
         """The answer to a read this image has not got, or None.
 
@@ -476,20 +497,10 @@ class FakeUbertooth:
             if option not in self.unsupported:
                 continue
             request, query = self.STALLED_READS[option]
-            lines = [
-                f"error: could not {request}: the board's firmware does not "
-                "support it (stalled, libusb -9)",
-                "note: the board reports firmware API version "
-                f"{transitions.format_api(self.api)}, libubertooth 1.1 "
-                f"requires {transitions.format_api(self.api)}",
-                "note: a board that stalls every request is wedged rather "
-                "than short of this one; reset it with ubertooth-util -r on "
-                "the same board",
-            ]
-            if query is not None:
-                lines.append(f"error: {query} read failed")
             return self._result(
-                command, 1, "", "".join(line + "\n" for line in lines), on_output
+                command, 1, "",
+                "".join(line + "\n" for line in self._stall_lines(request, query)),
+                on_output,
             )
         return None
 
@@ -611,10 +622,24 @@ class FakeUbertooth:
         if pa not in (None, "q"):
             self.state["pa"] = pa
         # Reports in ubertooth-util's order.
+        failed_read = False
         if all_leds == "q" or "d" in gets:
-            lines += [f"USR LED status: {self.state['usr']}",
-                      f"RX LED status : {self.state['rx']}",
-                      f"TX LED status : {self.state['tx']}"]
+            # Three requests in one command: each answers or stalls on its
+            # own, the lines that answered are printed, and the status merges
+            # (ubertooth-util.c, the do_get_all_leds block). ``stalled_leds``
+            # models a board that answers some of them.
+            for led, label, request in (
+                ("usr", "USR LED status: ", "read the user LED"),
+                ("rx", "RX LED status : ", "read the receive LED"),
+                ("tx", "TX LED status : ", "read the transmit LED"),
+            ):
+                if led in self.stalled_leds:
+                    failed_read = True
+                    progress += self._stall_lines(request, {
+                        "usr": "USR LED", "rx": "RX LED", "tx": "TX LED",
+                    }[led])
+                else:
+                    lines.append(f"{label}{self.state[led]}")
         if "b" in flags:
             lines.append("Board ID Number: 1 (Ubertooth One)")
         if "B" in flags:
@@ -644,7 +669,9 @@ class FakeUbertooth:
             self.mode = "xmas"
         stdout = "".join(line + "\n" for line in lines)
         stderr = "".join(line + "\n" for line in progress)
-        return self._result(command, 0, stdout, stderr, on_output)
+        return self._result(
+            command, 1 if failed_read else 0, stdout, stderr, on_output
+        )
 
 
 def cases_for(test_name, coverage="smoke"):

@@ -917,9 +917,10 @@ guard on `bluetooth_rxtx`, or on the receive-only `bluetooth_rx` build, must
 answer the radio settings that build implements
 (`GUARD_REQUIRED_OF_IMAGE`), and any guarded test is refused when a guard
 answered none of the reads that pin it (`-v`, `-V`, `-s`, `-B`) — a wedged
-board stalls every request and reads the same way. The LED read is taken
+board stalls every request and would read that way too. The LED read is taken
 strictly (`GUARD_STRICT_KEYS`), because `-d` makes all three LED requests in
-one command and every image in this tree answers them.
+one command and every image that answers these requests answers those three,
+so tolerating a stall there would accept a board that answered two of them.
 Differences are counted as `failed_guard_checks`,
 apart from `failed_cases`, and the reason names the guard to check and
 restore by hand; guards are never restored automatically. The CRC read uses

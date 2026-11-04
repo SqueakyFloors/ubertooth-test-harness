@@ -448,7 +448,8 @@ def test_finished(events):
     return finished
 
 
-class GuardExecutionTests(unittest.TestCase):
+class ReadOnlyGuardCommands:
+    """Every command a guard was sent is one of the reads, and nothing else."""
 
     def assert_guard_commands_read_only(self, bench, serial):
         commands = bench.commands_for(serial)
@@ -461,6 +462,9 @@ class GuardExecutionTests(unittest.TestCase):
                 self.assertEqual("ubertooth-util", command[0])
                 self.assertEqual(1, len(command[3:]), command)
                 self.assertIn(command[3], GUARD_QUERIES, command)
+
+
+class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
 
     def test_untouched_guard_passes_with_baseline_and_a_check_after_every_case(self):
         guard = FakeUbertooth(serial=B, crc="1")
@@ -807,7 +811,7 @@ def guard_readings(events, board="guard Ubertooth 1"):
     }
 
 
-class ImageAwareGuardTests(unittest.TestCase):
+class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
     """A guard is read and compared whatever image it carries (#275).
 
     None of these skips a read or writes to a guard: the reads are the same
@@ -826,6 +830,7 @@ class ImageAwareGuardTests(unittest.TestCase):
 
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertEqual(before, guard.state)
+        self.assert_guard_commands_read_only(bench, B)
         readings = guard_readings(events)
         self.assertEqual(
             {key: transitions.GUARD_UNSUPPORTED for key in BTBR_UNANSWERED},
@@ -929,19 +934,31 @@ class ImageAwareGuardTests(unittest.TestCase):
         # The refusal is the reading, so the read itself did not fail.
         self.assertEqual([], failed_guard_reads(events))
 
-    def test_a_stalled_led_read_fails_instead_of_being_recorded(self):
+    def test_a_partly_answered_led_read_fails_instead_of_being_recorded(self):
         """`-d` asks for three LEDs at once, so a stall there is not an answer.
 
-        Were it recorded, a board that answered two of the three would leave
-        all three unguarded for the rest of the run.
+        Were it recorded, this board -- which answered two of the three --
+        would leave all three unguarded for the rest of the run.
         """
         self.assertEqual(("leds",), transitions.GUARD_STRICT_KEYS)
-        guard = image_guard(BTBR_IMAGE, stalls=BTBR_STALLS + ("d",))
+        guard = FakeUbertooth(
+            serial=B, firmware=f"{BTBR_IMAGE} git-test",
+            unsupported=BTBR_STALLS, stalled_leds=("tx",),
+        )
         bench = Bench(FakeUbertooth(serial=A), guard)
 
         summary, events, _ = run_guarded(
             guarded_invocation("Radio setting transitions"), bench
         )
+
+        # The board did print the two LED lines it could.
+        partial = [c for c in bench.commands_for(B) if c[3:] == ("-d",)]
+        self.assertTrue(partial)
+        answer = guard.run(list(partial[0]), timeout_s=5)
+        self.assertIn("USR LED status: ", answer.stdout)
+        self.assertIn("RX LED status : ", answer.stdout)
+        self.assertNotIn("TX LED status", answer.stdout)
+        self.assertEqual(1, answer.returncode)
 
         self.assertFalse(summary.passed)
         self.assertEqual([], state_cases(events))
@@ -951,6 +968,31 @@ class ImageAwareGuardTests(unittest.TestCase):
         self.assertIn("guard Ubertooth 1 leds: command exited 1",
                       check.details["reason"])
         self.assertIn("no case ran", check.details["reason"])
+
+    def test_a_board_that_stalls_every_read_fails_the_strict_one_too(self):
+        """What a wedged board looks like: every request stalls."""
+        guard = FakeUbertooth(
+            serial=B, unsupported=("v", "V", "s", "B", "C", "c", "z", "a", "d"),
+        )
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertFalse(summary.passed)
+        self.assertEqual([], state_cases(events))
+        # The LED read fails outright, and the CRC read is refused because
+        # this check could confirm no firmware API.
+        self.assertEqual(
+            ["guard Ubertooth 1 leds", f"guard Ubertooth 1 {transitions.GUARD_CRC_KEY}"],
+            failed_guard_reads(events),
+        )
+        (check,) = guard_checks(events)
+        reason = check.details["reason"]
+        self.assertIn("guard Ubertooth 1 leds", reason)
+        self.assertIn("answered none of", reason)
+        self.assertIn("wedged rather than short of one", reason)
 
     def test_the_receive_only_build_is_held_to_the_settings_it_has(self):
         """It answers the same settings bar the transmit power level."""
@@ -978,8 +1020,9 @@ class ImageAwareGuardTests(unittest.TestCase):
     def test_a_guard_the_run_cannot_observe_is_refused_by_name(self):
         """A guard that answers none of the stable reads is not a guard.
 
-        A wedged board stalls every request, so it reads exactly like an
-        image this host knows nothing of; neither can be guarded.
+        Firmware this host can read nothing of, which is what the rule is
+        about; a wedged board reads that way too, and fails the strict LED
+        read as well (above).
         """
         guard = image_guard(
             BTBR_IMAGE, stalls=("v", "V", "s", "B") + BTBR_STALLS
@@ -1043,7 +1086,10 @@ class ImageAwareGuardTests(unittest.TestCase):
         )
         (problem,) = transitions.guard_baseline_problems((board,), readings)
         self.assertIn(f"runs {APPLICATION_IMAGE}", problem)
-        self.assertIn("channel, pa-level, squelch, leds", problem)
+        # The LEDs are not on that list: their read is the strict one, which
+        # every guard is held to whatever it runs.
+        self.assertIn("channel, pa-level, squelch", problem)
+        self.assertNotIn("leds", problem)
 
     def test_the_bootloader_pattern_reads_every_line_the_tool_prints(self):
         """Kept in step with bootloader.py, which renders the same line."""

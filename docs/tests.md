@@ -182,8 +182,9 @@ so a board that starts answering a read it refused before, or refuses one it
 answered, fails the check. The alternate `btbr` image, for instance, has no
 channel or squelch request and no tool will read its CRC setting, and it is
 still guarded by its identity, image and revision, build, bootloader, LEDs,
-and transmit power level. The LED read is the exception: `-d` asks for all
-three LEDs in one command, and every image in this tree answers those, so a
+and, on an Ubertooth One, its transmit power level. The LED read is the
+exception to the tolerance: `-d` asks for all three LEDs in one command, and
+every image that answers these requests at all answers those three, so a
 stall there fails the read rather than being recorded — otherwise a board that
 answered two of the three would leave all three unguarded. Two things the
 readings themselves have to satisfy:

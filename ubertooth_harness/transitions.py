@@ -1815,31 +1815,39 @@ GUARD_CRC_KEY = "crc"
 # none of them has a baseline that pins nothing, which is what turns a
 # guarded test away (guard_baseline_problems).
 GUARD_PINNING_KEYS = tuple(key for key, *_rest in GUARD_STABLE_READBACK)
-# The one read whose answer is taken strictly: every image in this tree
-# answers the three LED reads, and `-d` makes all three requests in one
-# command, so a board that answered two and stalled the third would be
-# recorded as unable to answer any of them -- and all three would then go
-# unguarded for the rest of the run. A stall there fails the read instead.
-# Each of the other reads makes one request (`-V` makes two, and firmware too
-# old for the second is exactly the case worth tolerating).
+# The one read whose answer is taken strictly. `-d` makes all three LED
+# requests in one command, so a board that answered two and stalled the third
+# would be recorded as unable to answer any of them -- and all three would
+# then go unguarded for the rest of the run. A stall there fails the read
+# instead, which costs nothing: every image that answers these requests at
+# all answers the LED reads (bluetooth_rxtx and its receive-only build, btbr,
+# the assembly test), and a board whose firmware answers nothing is turned
+# away by the pinning rule below. Each of the other reads makes one request
+# (`-V` makes two, and firmware too old for the second is exactly the case
+# worth tolerating).
 GUARD_STRICT_KEYS = (LEDS.key,)
-_GUARD_SETTING_KEYS = tuple(key for key, *_rest in GUARD_SETTING_READBACK)
+# The reads below are the ones an image may refuse, so they are the only ones
+# an image can be held to here; a strict read is held to by every guard,
+# whatever it runs.
+_GUARD_TOLERATED_SETTINGS = tuple(
+    key for key, *_rest in GUARD_SETTING_READBACK
+    if key not in GUARD_STRICT_KEYS
+)
 # What each image implements and so has to answer. The stable reads above are
 # on no list: a request is only as old as the build that carries it, and a
 # guard refusing one of them is firmware history, not a board that cannot
-# hold its own settings. Nor is btbr listed, for the two reads it does
-# implement: it answers the LEDs, which every image is held to above, and the
-# transmit power level only on an Ubertooth One (its request handler puts
-# that one behind UBERTOOTH_ONE, where bluetooth_rxtx's is behind TX_ENABLE
-# alone).
+# hold its own settings. Nor is btbr listed for the transmit power level, the
+# one tolerated read it does implement: its request handler puts that behind
+# UBERTOOTH_ONE, where bluetooth_rxtx's is behind TX_ENABLE alone, so
+# requiring it would turn away a btbr guard on an Ubertooth Zero.
 GUARD_REQUIRED_OF_IMAGE = MappingProxyType({
-    APPLICATION_IMAGE: _GUARD_SETTING_KEYS + (GUARD_CRC_KEY,),
+    APPLICATION_IMAGE: _GUARD_TOLERATED_SETTINGS + (GUARD_CRC_KEY,),
     # The receive-only build is the same sources with the transmit half left
     # out, and the transmit power level goes with it (the TX_ENABLE block of
     # firmware/bluetooth_rxtx/bluetooth_rxtx.c answers that request), so a
     # board carrying it refuses that one read as a matter of its image.
     RX_ONLY_IMAGE: tuple(
-        key for key in _GUARD_SETTING_KEYS if key != PA_LEVEL.key
+        key for key in _GUARD_TOLERATED_SETTINGS if key != PA_LEVEL.key
     ) + (GUARD_CRC_KEY,),
 })
 # The images whose settings are guarded as their own, which is what
@@ -1878,11 +1886,11 @@ def guard_baseline_problems(boards, context) -> list[str]:
     fails the baseline exactly as it did before.
 
     Second: every guard needs at least one reading that pins something about
-    it. A guard that answered none is either wedged -- a board in that state
-    stalls every request, which reads the same way as an image without it --
-    or carrying firmware this host can read nothing of. Either way it is not
-    a guard, and the test is refused by name rather than run against a
-    guarantee that has quietly narrowed to nothing.
+    it. A guard that answered none is carrying firmware this host can read
+    nothing of, which is not a guard, so the test is refused by name rather
+    than run against a guarantee that has quietly narrowed to nothing. A
+    wedged board stalls every request and would read that way too, though the
+    strict LED read fails it first.
     """
     problems = []
     for board in boards:
@@ -1914,7 +1922,7 @@ def guard_baseline_problems(boards, context) -> list[str]:
                 + ", so nothing about it can be compared afterwards; it runs "
                 + (image if image else "an image it did not name")
                 + ". A board that stalls every request is wedged rather than "
-                "short of one; reset it with ubertooth-util -r"
+                "short of one; reset it with ubertooth-util -r on that board"
             )
     return problems
 
