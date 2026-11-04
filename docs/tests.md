@@ -2898,7 +2898,8 @@ its mode up — and neither is visible to this case's own checks.
 default of two allowed access-code bit errors.
 
 **Why the `hci` plan is still not in the release gate.** Both suites pass:
-smoke in 300 to 376 seconds over five runs, comprehensive in 390 and 400. Its smoke
+smoke in 300 to 407 seconds over seven runs, comprehensive in 390, 400 and
+526. Its smoke
 estimate is 345 s, which would take the release suite from about 1174 s to
 about 1519 s — roughly 25 minutes — on the one host that has an adapter, the
 way `Recover AFH map` already names a bench host. What holds it back is not

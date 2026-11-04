@@ -228,9 +228,13 @@ link and `peer audio` for the voice link.
 ### A host Bluetooth adapter (BlueZ)
 
 One bench has one, a USB adapter on the Linux host that also holds the two
-ESP32 Classic peers, and both tests that bind it have run against it. This
-section says what such an adapter has to be and how it is registered; the
-measurements below come from those runs.
+ESP32 Classic peers, and both tests that bind it have run against it. A
+second adapter was on that bench for a while, and both suites were run
+against each of the two, with a registry per adapter differing only in which
+one the host's default named: every command in a run named the adapter that
+run was given, and read back that adapter's own address. This section says
+what such an adapter has to be and how it is registered; the measurements
+below come from those runs.
 
 Two of the fork's host tools are built only when libbluetooth is found, and
 both drive a Bluetooth controller of the host's as well as an Ubertooth:

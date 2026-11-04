@@ -1819,9 +1819,9 @@ has to grant it (see [`docs/hardware.md`](docs/hardware.md)).
 ESP32 pair: the pair gives the adapter a discoverable device to find and the
 Ubertooth a piconet to sweep for.
 
-Both tests have run against a USB adapter on the one bench that has one:
-smoke passed in 300 to 376 s over five runs and comprehensive in 390 and
-400 s. The `hci` plan is
+Both tests have run against a USB adapter, and against a second one: smoke
+passed in 300 to 407 s over seven runs and comprehensive in 390, 400 and
+526 s. The `hci` plan is
 still not in `release.yaml`, and the reason is the peers rather than the
 adapter — the runs found serial bytes lost under load
 ([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310))
