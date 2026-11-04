@@ -1048,11 +1048,27 @@ on RTS leaves the board in the firmware's boot state, which is what every
 Classic case's cleanup does.
 
 That wiring is also why a peer's lock has to be the one a lab's own scripts
-take. Holding the bridge for the session protects it from the harness; it
-protects it from nothing else, and a second process that merely **opens** the
-port restarts the board, mid-capture, with the session reading the counters of
-a board that has just booted. So a peer is leased under both of its names, by
-a run as well as by a manual command (#317, `leases.board_for_resource`).
+take: holding the port protects the board from the harness and from nothing
+else. What a second session can do to it was measured for #317, one probe at
+a time, while a live session held the port with the link up:
+
+| a second process that | the board |
+|---|---|
+| opens the port, pyserial's defaults, raising DTR and RTS together | keeps running |
+| opens the port asking pyserial for an exclusive lock | cannot open it at all |
+| opens it and pulses RTS with DTR low, which is esptool's hard reset | **restarts**, `boot reason power on` |
+
+So a bare second open is harmless, because the two lines go up together and
+the auto-reset circuit wants them apart; the damage comes from the first open
+of a port nobody held, and from any opener that pulses the lines -- which is
+exactly what releasing a peer to its boot state does, so a second session
+need only *finish* with the board to restart it under a capture. A peer is
+therefore leased under both of its names, by a run as well as by a manual
+command (#317, `leases.board_for_resource`).
+
+Note also what the pyserial row means for the harness's own `exclusive=True`:
+it is an advisory `flock` on the tty, so it stops another pyserial caller
+that also asks for one and nothing else. It is not a substitute for the lease.
 
 One consequence is worth stating because it decides what a case can assert:
 in a Classic piconet the LAP on the air is the **central's**, and the central
