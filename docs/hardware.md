@@ -448,6 +448,44 @@ so they stay off an attenuated board with no plan saying so.
 without editing `rf:` makes every later report quote the wrong conditions, and
 nothing in the harness can catch it.
 
+**How much attenuation is useful, measured.** Stacking attenuators to force
+decode errors has a ceiling, and on this bench it is below 50 dB. A receiver
+taken to 50 dB about a meter from the Classic peers, against a dense Serial
+Port Profile link, recorded 62 packets across six 15-second windows where
+three 20 dB windows recorded 237; four of the six heard nothing at all, at
+`-e 0` it recorded nothing against 20 dB's 190, and no window recovered a
+piconet clock
+([#306](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/306)).
+Past a point, more attenuation stops producing damaged packets and starts
+producing no packets, and a test cannot be judged on what a board did not
+hear. `weaklink.CHARACTERIZED_UNUSABLE_DB` records such a point with its
+reason, and a plan that asks for one is refused with that reason instead of
+being told the figure is simply unmeasured. The worked receiver above is the
+20 dB one, which is what the bench layout table at the end of this file
+describes; 50 dB was a measurement taken, not a placement to keep.
+
+Three things that mislead when reading those runs:
+
+- **A reported signal power only covers what was decoded**, because a packet
+  the receiver never detected reports no power at all. Between 20 and 50 dB
+  the mean reported signal moved far less than the attenuation did while the
+  `-e 0` yield fell from 190 records a window to none, so a signal power that
+  barely moves is not evidence that the attenuator did nothing: the packets
+  it would have shown are missing from the mean rather than weak within it.
+- **Error flags are not ordered by attenuation.** Across 19 windows the
+  highest rate of failed header checks was on the *unattenuated* board, 3.6%
+  against 1.6% at 40 dB, with none at all in 195 checks at 20 dB and 49 at
+  50 dB. If a test wants a damaged packet, a bigger attenuator is not the
+  lever. Treat a failed CRC with more care still: every CRC check in that
+  sweep failed, and all of those records carried a valid HEC and a payload
+  length that decoded exactly, which is what a payload dewhitened against an
+  unsettled clock looks like rather than a damaged one.
+- **A clear board is only a baseline if it was placed like one.** At `-e 0`
+  an unattenuated board elsewhere on the bench recorded 39 packets where a
+  20 dB board deliberately set about a meter from the peers recorded 190.
+  Give a baseline board its own `rf:` with its distance, or do not read it as
+  the best case.
+
 ## Firmware
 
 | Device | Source | Version | Built with | Flashed with |

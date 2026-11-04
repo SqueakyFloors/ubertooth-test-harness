@@ -411,7 +411,10 @@ that is judged **per test** rather than per bench: the requirement must pin
 exactly one attenuation, and `weaklink.CHECKS` must record a measurement of
 that test, in that role, there. 40 dB is measured for a BLE advertiser
 capture and not for a Classic capture file, so a bench-wide list would have
-admitted the second on the first's evidence. A bare `min_attenuation_db` is
+admitted the second on the first's evidence. An attenuation the bench has
+been taken to and found to settle nothing is refused with that as the reason
+(`weaklink.CHARACTERIZED_UNUSABLE_DB`), rather than being reported as merely
+unmeasured. A bare `min_attenuation_db` is
 refused as well, because which board it binds depends on what the bench
 happens to hold. `validate-plan` applies this to a whole plan and `run-suite`
 to the suite it is about to run, so a suite is refused before a board is
