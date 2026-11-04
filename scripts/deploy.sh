@@ -509,6 +509,7 @@ check_registry() {
         # runner gets WorkingDirectory), so the deploy itself is fine.
         *:*)
             say "warning: not reading $hardware: this checkout's path contains ':', which cannot be named on PYTHONPATH ($ROOT)"
+            say "  The bench helpers in scripts/lab/ refuse to run from such a checkout for the same reason. Move it somewhere without a colon."
             return ;;
     esac
     if [ ! -x "$python" ]; then

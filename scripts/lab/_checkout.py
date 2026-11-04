@@ -59,9 +59,10 @@ VENV_MARKER = ".ubertooth-harness-venv"
 
 # Set across the re-run and dropped the moment it has arrived, so a .venv
 # whose interpreter does not report that environment as its own cannot make
-# this loop while nothing further down inherits a spent note. It holds the
-# checkout that re-ran rather than a flag, so one checkout's attempt is never
-# read as another's.
+# this loop while nothing further down inherits a spent note. It names the
+# process and the checkout, and `os.execv` keeps the process id, so the only
+# note this reads is one it left itself: another process's, or a caller's own,
+# cannot talk a helper out of its checkout's environment.
 REEXEC_ENV = "UBERTOOTH_HARNESS_LAB_REEXEC"
 
 # For a child started as `-m ubertooth_harness`; see the module docstring.
@@ -111,6 +112,12 @@ def importable_checkout_path() -> bool:
     relative and so read from the caller's working directory. That is the
     #312 failure over again, by another route, and it is better refused
     than worked around.
+
+    `hold` is the helper that needs it, for the delegate it starts; the
+    other two reach the harness through their own `sys.path`. One rule for
+    all three is deliberate, so that a checkout either serves as a bench's
+    helpers or says plainly that it cannot, rather than two of three
+    working and the one that takes the locks refusing.
     """
     return os.pathsep not in str(CHECKOUT)
 
@@ -137,9 +144,9 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
     if not importable_checkout_path():
         raise SystemExit(
             f"{label}: this checkout's path contains {os.pathsep!r}, which "
-            f"separates entries on an import path, so the harness beside "
-            f"this script cannot be named on one: {CHECKOUT}. Move the "
-            "checkout somewhere without that character."
+            "separates entries on an import path, so this checkout cannot be "
+            f"named on one: {CHECKOUT}. Move the checkout somewhere without "
+            "that character."
         )
     if in_checkout_environment():
         # Arrived: the note is spent. Dropping it here is what keeps it from
@@ -151,7 +158,7 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
         return
     if (VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)
             and not already_tried()):
-        os.environ[REEXEC_ENV] = str(CHECKOUT)
+        os.environ[REEXEC_ENV] = reexec_note()
         try:
             os.execv(str(VENV_PYTHON), reexec_argv(script))
         except OSError:
@@ -165,14 +172,22 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
     raise SystemExit(bootstrap_advice(label))
 
 
-def already_tried(environ=None) -> bool:
-    """Has this checkout re-run a helper in this process's ancestry?
+def reexec_note() -> str:
+    """What this process writes to say it has re-run itself once."""
+    return f"{os.getpid()} {CHECKOUT}"
 
-    Another checkout's attempt is not this one's: a command run under `hold`
-    may be a helper from elsewhere, and it has to reach its own environment.
+
+def already_tried(environ=None) -> bool:
+    """Did *this* process already re-run itself for this checkout?
+
+    `os.execv` keeps the process id, so a note worth believing names this
+    pid and this checkout. One with another pid was left by some other
+    process -- a command running under `hold`, which has its own re-run to
+    make -- or set by a caller by hand, and either way it says nothing
+    about what this process has done.
     """
     tried = (os.environ if environ is None else environ).get(REEXEC_ENV, "")
-    return tried == str(CHECKOUT)
+    return tried == reexec_note()
 
 
 def reexec_argv(script: str) -> list[str]:

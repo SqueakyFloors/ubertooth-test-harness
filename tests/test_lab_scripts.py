@@ -1378,31 +1378,6 @@ class CheckoutEnvironment(Bench):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("note=[unset]", result.stdout)
 
-    def test_a_note_left_in_the_environment_cannot_buy_a_foreign_interpreter(self):
-        """A caller cannot talk a helper into running outside an environment.
-
-        Setting the note by hand does suppress the re-run -- that is what it
-        is for -- and what the caller gains by it is a refusal, not a hold
-        under an interpreter nobody bootstrapped.
-        """
-        outside = self.outside_interpreter()
-        environment = self.plain_environment()
-        environment[_checkout.REEXEC_ENV] = str(REPO)
-        result = subprocess.run(
-            [
-                str(outside), str(HOLD),
-                "--hardware", str(self.registry),
-                "--lease-dir", str(self.leases),
-                "--wait-for-boards", "0",
-                "UT0", "--", "sh", "-c", "echo held",
-            ],
-            capture_output=True, text=True, env=environment,
-            cwd=str(self.root), timeout=120,
-        )
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("bootstrap.py", result.stderr)
-        self.assertNotIn("held", result.stdout)
-
     def test_a_venv_nobody_bootstrapped_is_not_this_checkouts_environment(self):
         """`.venv` is a path, not a promise: `python -m venv` makes one too,
         and running a device helper in one is what bootstrap.py avoids."""
@@ -1493,15 +1468,44 @@ class CheckoutEnvironment(Bench):
         # would turn the command into devices to hold.
         self.assertEqual(given, argv[3:])
 
-    def test_another_checkouts_attempt_does_not_stand_in_for_this_ones(self):
-        """A command run under `hold` may be a helper from elsewhere."""
-        self.assertFalse(
-            _checkout.already_tried({_checkout.REEXEC_ENV: "/some/other/checkout"})
-        )
+    def test_only_a_note_this_process_left_itself_counts(self):
+        """`os.execv` keeps the process id, so that is what makes a note
+        this process's own. Another process's, or a caller's, says nothing
+        about what this one has done."""
         self.assertTrue(
-            _checkout.already_tried({_checkout.REEXEC_ENV: str(_checkout.CHECKOUT)})
+            _checkout.already_tried({_checkout.REEXEC_ENV: _checkout.reexec_note()})
         )
+        for other in (
+            str(_checkout.CHECKOUT),                       # no pid at all
+            f"{os.getpid() + 1} {_checkout.CHECKOUT}",     # another process
+            f"{os.getpid()} /some/other/checkout",         # another checkout
+            "",
+        ):
+            with self.subTest(note=other):
+                self.assertFalse(
+                    _checkout.already_tried({_checkout.REEXEC_ENV: other})
+                )
         self.assertFalse(_checkout.already_tried({}))
+
+    def test_a_note_a_caller_set_cannot_suppress_the_re_run(self):
+        """Presetting it is how a caller would try to keep a helper in a
+        foreign environment; the pid in it is not the helper's."""
+        outside = self.outside_interpreter()
+        environment = self.plain_environment()
+        environment[_checkout.REEXEC_ENV] = f"{os.getpid()} {REPO}"
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c", "echo held",
+            ],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.root), timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("held", result.stdout)
 
     def test_it_does_not_re_run_when_it_is_already_this_environment(self):
         with unittest.mock.patch.object(_checkout.os, "execv") as execv:
@@ -1513,7 +1517,7 @@ class CheckoutEnvironment(Bench):
 
     def test_arriving_clears_the_note_about_the_re_run(self):
         with unittest.mock.patch.dict(
-            _checkout.os.environ, {_checkout.REEXEC_ENV: str(_checkout.CHECKOUT)}
+            _checkout.os.environ, {_checkout.REEXEC_ENV: _checkout.reexec_note()}
         ):
             with unittest.mock.patch.object(
                 _checkout, "in_checkout_environment", return_value=True
@@ -1522,9 +1526,13 @@ class CheckoutEnvironment(Bench):
             self.assertNotIn(_checkout.REEXEC_ENV, _checkout.os.environ)
 
     def test_a_second_attempt_is_not_made(self):
-        """An environment that does not report itself must not loop."""
+        """An environment that does not report itself must not loop.
+
+        The note is this process's own, which after `os.execv` is what the
+        re-run left: the process id did not change.
+        """
         with unittest.mock.patch.dict(
-            _checkout.os.environ, {_checkout.REEXEC_ENV: str(_checkout.CHECKOUT)}
+            _checkout.os.environ, {_checkout.REEXEC_ENV: _checkout.reexec_note()}
         ):
             with unittest.mock.patch.object(_checkout.os, "execv") as execv:
                 with unittest.mock.patch.object(
