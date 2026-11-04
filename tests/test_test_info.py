@@ -8,6 +8,7 @@ runs a test, builds anything, or touches a board -- which is itself one of
 the things asserted, since a missing or malformed file must never stop a run.
 """
 
+import dataclasses
 import inspect
 import os
 from pathlib import Path
@@ -37,6 +38,7 @@ from ubertooth_harness.testinfo import (
     load_test_info,
     test_information,
 )
+from ubertooth_harness.testinfo import _cache_key
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 PLANS = REPOSITORY / "testplans"
@@ -409,33 +411,51 @@ class UnavailableTests(unittest.TestCase):
         self.assertIn("Spectrum analyzer", reason)
         self.assertIn("theory must not be empty", reason)
 
+    def edit_in_place(self, path, old, new):
+        """Rewrite the file with a replacement of the same length, and put
+        its modification time back. The size, the inode and the modification
+        time are then what they were, which the caller asserts."""
+        before = path.stat()
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        self.assertEqual(len(old), len(new))
+        path.write_text(text.replace(old, new), encoding="utf-8")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        self.assertEqual(
+            (before.st_mtime_ns, before.st_size, before.st_ino),
+            (after.st_mtime_ns, after.st_size, after.st_ino),
+        )
+
     def test_the_answer_is_held_while_the_file_on_disk_is_the_same_one(self):
         # /api/plans asks for this on every page load and change of target,
-        # and a read is about 70 ms, so the answer is held. Each part of the
-        # key is exercised on its own, because any one of them left out
-        # would serve an answer from a file that is no longer there.
+        # and a read is about 70 ms, so the answer is held. What follows are
+        # the ways a file can change under it, each one asserted to be read
+        # again -- and for the hardest of them, which part of the key is the
+        # one that notices.
         with tempfile.TemporaryDirectory() as directory:
             path = write(directory, {"Host version": dict(ENTRY)})
             first = test_information(path, self.catalog)
             self.assertIs(first, test_information(path, self.catalog))
 
-            # Same size and same inode, older modification time: the
-            # modification time alone has to make it read again.
-            stat = path.stat()
-            path.write_text(
-                path.read_text(encoding="utf-8").replace(
-                    "What this catches.", "What this catches!"),
-                encoding="utf-8",
-            )
-            self.assertEqual(stat.st_size, path.stat().st_size)
-            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns - 1_000_000))
-            by_mtime = test_information(path, self.catalog)
-            self.assertIsNot(first, by_mtime)
-            self.assertIn("catches!", by_mtime.entries["Host version"].purpose)
+            # An in-place edit that keeps the size and puts the modification
+            # time back. This is what the change time is in the key for: of
+            # the file's five parts, it is the only one that moved, which is
+            # asserted rather than assumed.
+            key = _cache_key(path, self.catalog)
+            self.edit_in_place(path, "What this catches.", "What this catches!")
+            moved = _cache_key(path, self.catalog)
+            self.assertNotEqual(key, moved)
+            self.assertNotEqual(key[0], moved[0])          # the change time
+            self.assertEqual(key[1:], moved[1:])           # and nothing else
+            edited = test_information(path, self.catalog)
+            self.assertIsNot(first, edited)
+            self.assertIn("catches!", edited.entries["Host version"].purpose)
 
             # A file put in place by rename, carrying the modification time
-            # and the size of the one it replaced: only the inode differs,
-            # which is how a replacement is told from the original.
+            # and the size of the one it replaced. Its inode and its change
+            # time are its own, and either is enough to notice it; what
+            # matters is that a replacement is never served as the original.
             held = path.stat()
             replacement = Path(directory) / "replacement.yaml"
             replacement.write_text(
@@ -448,40 +468,43 @@ class UnavailableTests(unittest.TestCase):
             os.utime(replacement, ns=(held.st_atime_ns, held.st_mtime_ns))
             os.replace(replacement, path)
             self.assertEqual(held.st_mtime_ns, path.stat().st_mtime_ns)
-            by_inode = test_information(path, self.catalog)
-            self.assertIsNot(by_mtime, by_inode)
-            self.assertIn("catches?", by_inode.entries["Host version"].purpose)
+            renamed = test_information(path, self.catalog)
+            self.assertIsNot(edited, renamed)
+            self.assertIn("catches?", renamed.entries["Host version"].purpose)
 
-            # An in-place edit that keeps the size and puts the modification
-            # time back: only the change time moves, and nothing can put
-            # that back, so it has to be part of the key.
-            held = path.stat()
-            path.write_text(
-                path.read_text(encoding="utf-8").replace(
-                    "What this catches?", "What this catches,"),
-                encoding="utf-8",
-            )
-            os.utime(path, ns=(held.st_atime_ns, held.st_mtime_ns))
-            after = path.stat()
-            self.assertEqual(
-                (held.st_mtime_ns, held.st_size, held.st_ino),
-                (after.st_mtime_ns, after.st_size, after.st_ino),
-            )
-            by_ctime = test_information(path, self.catalog)
-            self.assertIsNot(by_inode, by_ctime)
-            self.assertIn("catches,", by_ctime.entries["Host version"].purpose)
-
-            # A file that is gone is not answered from the held copy.
+            # A file that is gone is reported missing, and nothing is kept
+            # for it: the moment it is back it is read, although nothing
+            # about the path changed in the meantime.
             path.unlink()
             gone = test_information(path, self.catalog)
             self.assertEqual({}, dict(gone.entries))
             self.assertIn("is missing", gone.error)
-            # Nor is a missing file itself held: the moment it is back, it is
-            # read, although nothing about it has changed in the meantime.
             self.assertIsNot(gone, test_information(path, self.catalog))
             write(directory, {"Spectrum analyzer": dict(ENTRY)})
             back = test_information(path, self.catalog)
             self.assertEqual(["Spectrum analyzer"], list(back.entries))
+
+    def test_the_held_answer_cannot_be_changed_by_a_caller(self):
+        # It is handed to every caller of the same file, so a caller that
+        # could write to it would change what the next one reads.
+        with tempfile.TemporaryDirectory() as directory:
+            path = write(directory, {"Host version": dict(ENTRY)})
+            held = test_information(path, self.catalog)
+            entry = held.entries["Host version"]
+            with self.assertRaises(TypeError):
+                held.entries["Spectrum analyzer"] = entry
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                entry.purpose = "something else"
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                held.error = "something else"
+            self.assertIsInstance(entry.related, tuple)
+            # Each view is built fresh, so a caller that edits one is only
+            # editing its own copy.
+            view = held.view("Host version")
+            self.assertIsNot(view, held.view("Host version"))
+            view["purpose"] = "rewritten"
+            self.assertEqual(ENTRY["purpose"], held.view("Host version")["purpose"])
+            self.assertIs(held, test_information(path, self.catalog))
 
     def test_a_different_catalog_is_not_answered_from_the_held_copy(self):
         # The entries are validated against the catalog's names, so an

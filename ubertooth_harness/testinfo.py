@@ -322,18 +322,27 @@ def test_information(
     request would be the slowest thing in that response.
 
     What makes a held answer still this file's own is `_cache_key`: the
-    file's modification time, size and inode, plus the catalog the entries
-    were checked against, since a different catalog would accept or refuse
-    different names. The key is taken again after the read and the answer is
-    held only if it has not moved, so a file replaced while it was being
-    read is not stored under the identity of the one before it. A file that
-    cannot be asked about at all (it is gone, or its directory refuses) is
-    never held, so the answer for it is worked out again every time.
+    file's change time, modification time, size, inode, and device, plus the
+    catalog the entries were checked against, since a different catalog
+    would accept or refuse different names. The change time is the part that
+    carries it, because it is the one a writer cannot put back; the rest are
+    there because a key of several parts costs nothing and each of them
+    moving is a reason to read again.
+
+    The key is taken again after the read and the answer is held only if it
+    has not moved, so a file replaced while it was being read is not stored
+    under the identity of the one before it. A file that cannot be asked
+    about at all (it is gone, or its directory refuses) is never held, and
+    the held answer is dropped, so nothing is kept for a file that is not
+    there.
     """
     info_path = Path(path) if path is not None else TEST_INFO_PATH
     resolved = catalog or builtin_catalog()
     before = _cache_key(info_path, resolved)
-    if before is not None:
+    if before is None:
+        with _CACHE_LOCK:
+            _CACHE.pop(info_path, None)
+    else:
         with _CACHE_LOCK:
             cached = _CACHE.get(info_path)
         if cached is not None and cached[0] == before:
@@ -353,17 +362,23 @@ def _cache_key(path: Path, catalog: TestCatalog):
     None when the file cannot be asked about, which is never held and never
     matches a held key, so a missing file is not answered from a copy taken
     when it was still missing: the moment it appears it is read.
+
+    The change time is the part that makes this sound. `os.utime` can put a
+    modification time back, so an in-place edit that kept the size would key
+    the same without it; nothing can put the change time back, because the
+    write itself sets it. That also covers an inode number reused after a
+    deletion, since the file that reuses it has a change time of its own.
+    The device is there because an inode number means nothing without it.
     """
     try:
         stat = path.stat()
-    except OSError:
+    # ValueError for a path with a NUL byte in it, which only a caller's own
+    # path could be: this answers "the file cannot be asked about" for that
+    # too, rather than raising out of a function that must not.
+    except (OSError, ValueError):
         return None
-    # The change time as well as the modification time: `os.utime` can put a
-    # modification time back, so an in-place edit that kept the size would
-    # otherwise key the same and be held. Nothing can put the change time
-    # back, because the write itself sets it.
-    return (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino,
-            tuple(catalog.names))
+    return (stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size, stat.st_ino,
+            stat.st_dev, tuple(catalog.names))
 
 
 def _read(info_path: Path, catalog: TestCatalog) -> "TestInformation":
@@ -384,18 +399,21 @@ def _read(info_path: Path, catalog: TestCatalog) -> "TestInformation":
 
 
 def _absent(path: Path) -> bool:
-    """True when the file is not there, and only then.
+    """True when nothing answers at this path, which is what "missing" means
+    to a reader: the file itself, or a symbolic link's target, is not there.
 
     Anything else that stops the path being read -- a permission error on a
-    parent directory, a symbolic link loop -- counts as present, so the
-    reason names the error rather than claiming the file is missing.
-    `Path.exists()` cannot be used for this: it answers False for both.
+    directory above it, a symbolic link loop, a parent that is not a
+    directory, a path with a NUL byte -- counts as present, so the reason
+    names the error rather than claiming the file is missing.
+    `Path.exists()` cannot be used for this: it answers False for all of
+    them.
     """
     try:
         path.stat()
     except FileNotFoundError:
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
     return False
 
@@ -412,16 +430,21 @@ def _one_line(error: Exception, path: Path) -> str:
     in the message.
     """
     text = " ".join(str(error).split()) or type(error).__name__
-    directory = str(Path(path).parent)
     found = [str(path)]
+    directories = [Path(path).parent]
     try:
-        # A symbolic link loop makes this raise, and this is the handler for
-        # a file that could not be read, so it may not raise in turn.
-        found.append(str(Path(path).resolve()))
-    except (OSError, RuntimeError):
+        # A symbolic link loop makes these raise, and this is the handler
+        # for a file that could not be read, so it may not raise in turn.
+        resolved = Path(path).resolve()
+        found.append(str(resolved))
+        directories.append(resolved.parent)
+    except (OSError, RuntimeError, ValueError):
         pass
-    if len(directory) > 2:
-        found.append(directory)
+    # The directory as written and as resolved: on a host where a parent of
+    # it is a symbolic link, a message can name either.
+    found.extend(
+        str(item) for item in directories if len(str(item)) > 2
+    )
     for item in found:
         text = text.replace(item, TEST_INFO_NAME)
     return text
