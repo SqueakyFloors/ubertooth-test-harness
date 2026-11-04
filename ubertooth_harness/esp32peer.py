@@ -1692,10 +1692,15 @@ def _with_restarts(boards, call):
 
     The sessions report a restart themselves where they can. This is the
     paths they cannot reach: a command that overran its deadline, a sample
-    that failed mid-capture, a bridge that went away, a cancellation. Each
-    of those leaves the session by raising, and a board that went away is
-    the likeliest reason for most of them, so the evidence goes out with
-    the failure rather than being dropped on the way past (#311).
+    that failed mid-capture, a bridge that went away. Each of those leaves
+    the session by raising a PeerError, and a board that went away is the
+    likeliest reason for most of them, so the evidence goes out with the
+    failure rather than being dropped on the way past (#311).
+
+    A cancellation is not one of them, and deliberately so: the sessions'
+    own ``finally`` blocks still release both boards, and turning a
+    KeyboardInterrupt into a report about a peer would both swallow the
+    cancellation and keep whoever sent it waiting on two more bridge reads.
     """
     try:
         return call()

@@ -2012,6 +2012,41 @@ class RestartTests(unittest.TestCase):
             esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
                              min_writes=1)
 
+    def test_a_cancellation_stays_a_cancellation_and_still_releases(self):
+        """What `_with_restarts()` deliberately does not touch.
+
+        Turning a cancellation into a report about a peer would swallow it
+        and keep whoever sent it waiting on two more bridge reads. The
+        boards are still released, which is the part that matters.
+        """
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        plain_run = esp32peer._run_command
+
+        def crash_then_cancel(command, timeout, drain=None):
+            shells["initiator"].port.crash()
+            raise KeyboardInterrupt
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        with mock.patch.object(esp32peer, "_run_command", crash_then_cancel), \
+                self.assertRaises(KeyboardInterrupt):
+            esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                             min_writes=1)
+
+        del plain_run
+        self.assertEqual(esp32peer.BOOT_ROLE, initiator.role)
+        self.assertFalse(initiator.connected)
+        self.assertFalse(acceptor.connected)
+
     def test_a_restart_found_after_the_command_is_still_reported(self):
         """A restart the post-command reads turned up, not the command.
 
