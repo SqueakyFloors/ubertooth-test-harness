@@ -11,16 +11,73 @@ any bench. See [`docs/hardware.md`](../../docs/hardware.md) for what a bench
 is made of and [`hardware.example.yaml`](../../hardware.example.yaml) for the
 registry.
 
-Run them with the harness environment's interpreter. The path to the script is
-all they need, from any working directory:
+The path to the script is all they need, from any working directory and with
+any interpreter. Each one re-runs itself under its own checkout's
+bootstrapped environment, so the harness it uses is always the one it belongs
+to:
 
 ```sh
 python3 bootstrap.py                      # once, in the checkout
-.venv/bin/python scripts/lab/hold --help
-~/checkout/.venv/bin/python ~/checkout/scripts/lab/hub-port --help
+scripts/lab/hold --help                   # or python3 scripts/lab/hold --help
+~/checkout/scripts/lab/hub-port --help
 ```
 
-Set the two paths once and the commands stay short:
+A wrapper on a bench is therefore what that bench knows and an `exec`, with
+no interpreter to name and no working directory to be in:
+
+```sh
+#!/bin/sh
+export UBERTOOTH_HARNESS_HARDWARE=/path/to/bench/hardware.yaml
+# Only a bench whose own scripts lock devices with per-device files:
+export UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK=/path/to/bench/board-{serial}.lock
+exec /path/to/checkout/scripts/lab/hold "$@"
+```
+
+The registry belongs in the wrapper, not in whoever calls it: a helper with
+no registry refuses rather than guessing, and a bench whose wrapper leaves
+that to the caller's environment works from a shell that happens to have
+exported it and not from cron, a script, or another agent's session. Written
+out rather than reached through `$HOME`, for the same reason: a caller with a
+different home would silently repoint both paths. Everything else a helper
+needs it works out for itself.
+
+An `export` reaches every command the wrapper runs, which is what you want
+until one of them takes devices of its own. A command run inside the wrapper
+above is inside a whole `hold`: the harness lease as well as the bench's
+file, and nothing recognizes itself, so asking for the same devices again
+finds them held however the template is set. Do not re-hold them. `peer`
+has `--no-hold` for exactly this, for the common case of driving the peers
+inside an outer `hold` that already has them.
+
+`--external-board-lock ''` is the lever for the other arrangement: a bench's
+*own* script holding the plain-serial files itself and then running a harness
+command, which would otherwise wait for the files its caller holds. There the
+template is the only thing in the way, and turning it off for that one
+command is right.
+
+Naming the environment's interpreter yourself still works and is what the
+harness's own commands take:
+
+```sh
+.venv/bin/python scripts/lab/hold --help
+```
+
+**The harness code is always the script's own, and an interpreter nobody
+bootstrapped is always refused.** A wrapper that named one checkout's
+interpreter while the script came from another is how a `hold` came to read
+the registry with one version of the harness and take its leases with a much
+older one, which refused a registry that was perfectly good and stopped every
+device command on that host
+([#312](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/312)).
+A helper now pins both halves to its own checkout, and
+[`_checkout.py`](_checkout.py) says how. Point a wrapper at a checkout that
+tracks `main`, the same one the harness is deployed from, so a registry
+change and the code that reads it move together.
+
+Running them by hand instead of through a wrapper, set them once and the
+commands stay short. `UBERTOOTH_HARNESS_OWNER` is how another holder's error
+names you, which is worth setting in a shell a person types in and has no
+place in a wrapper:
 
 ```sh
 export UBERTOOTH_HARNESS_HARDWARE=~/bench/hardware.yaml
@@ -68,25 +125,24 @@ second while already holding the first.
 devices with per-device `flock` files keeps both sides honest: every hold
 takes that file too. Point it at the bench's existing lock files.
 
-An Ubertooth's lock file is named after its serial. A DK's, a peer's and a
-programmer's are named after the harness's lease key for them
+A device has two names, and every harness command asks for both. Its **lease
+file** carries its type's prefix for everything but an Ubertooth
 (`nrf52840dk-<serial without leading zeros>`, `esp32-<serial>`,
-`programmer-<serial>`), because that is what a harness run takes. A bench
-script that names such a lock after the plain serial instead would not meet a
-harness run on the same file, so `hold` takes **both** names for those three
-types: the bench's own `board-<plain serial>.lock`, which is the file such a
-script locks, and, beside it, a lease file of its own named
-`bench-<plain serial>` — prefixed, because an unprefixed name of 32 hex
-digits is the lease file of an Ubertooth with that serial, and a peer's
-bridge serial is 32 hex digits
+`programmer-<serial>`), because an unprefixed name of 32 hex digits is the
+lease file of an Ubertooth with that serial and a peer's bridge serial is 32
+hex digits
 ([#290](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/290)).
+Its **external lock file** is the one the bench already had, named after the
+plain serial: `board-<plain serial>.lock` under the template above.
 
-That makes every `hold` exclude every other `hold`, whichever name a bench
-script was written against. It does not reach further than that: a
-`run-suite` or an `ubertooth-harness lease` takes only the harness's own key,
-so a bench script holding the plain name alone can still overlap a run on a DK
-or a peer. The way to be sure is for the bench's scripts to take their devices
-through `hold`, which is what this script is for.
+So a bench script that locks `board-<plain serial>.lock` and nothing else is
+met by a `hold`, by an `ubertooth-harness lease`, and by a `run-suite` run, on
+that same file. Until
+[#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317) a
+run asked for its lease key alone and `hold` made up the difference itself, so
+a bench script and a run could drive one DK or one peer at the same moment.
+On a peer that restarts the board, because opening its USB bridge pulls the
+chip's reset line, which is how a capture lost its traffic mid-run.
 
 ## `peer`
 
@@ -235,6 +291,32 @@ ubertooth-harness power --hardware hardware.yaml Hub_Linux1
 The udev rule that lets a normal account drive an Acroname USBHub3+. Install
 it, change the group to one the harness account is in, then reload and replug
 the hub; the file's own comments give the commands.
+
+## `_checkout.py`
+
+Not a command: what the three scripts use to make sure the harness they run
+is their own checkout's, both the interpreter and the package. Its docstring
+has the whole of it. Two things are worth knowing from outside:
+
+- A helper started with another interpreter re-runs itself under the one its
+  checkout bootstrapped, and only after that interpreter has confirmed it
+  would arrive. An attempt that does not arrive ends in a refusal naming
+  that interpreter, so one re-run is all there ever is, and the note
+  recording the attempt is dropped before any command runs. With *no*
+  environment in its own checkout a helper carries on in any environment
+  `bootstrap.py` built, since the harness code still comes from beside the
+  script; an interpreter nobody bootstrapped is turned down, naming the
+  checkout to bootstrap, because a bench runs helpers from more than one
+  path. A helper always answers: an interpreter that cannot be reached, or
+  cannot say where it would land, gets a refusal rather than another try.
+- `hold` hands the locks to `ubertooth-harness lease` in a child process, and
+  that child is given `-P`, which leaves the working directory off its import
+  path. Without it, a helper run from inside another checkout would validate
+  the registry with one harness and lease with the other.
+
+An error from loading a registry says which harness read the file. A registry
+a newer harness wrote can be turned down by an older one, and the message it
+gives otherwise reads as though the file were at fault.
 
 ## What stays off the bench's scripts
 
