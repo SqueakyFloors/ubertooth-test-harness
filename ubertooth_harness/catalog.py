@@ -494,6 +494,19 @@ class TestDefinition:
                 wanted[role] = placement
         return MappingProxyType(wanted)
 
+    def estimate_profile(self, arguments: Mapping) -> str | None:
+        """Which calibrated estimate these normalized arguments select.
+
+        The step's coverage profile, or `DEFAULT_PROFILE` for a test that
+        takes no `coverage:`. None for a test with no calibrated estimates,
+        whose expected time is its duration argument instead. One place,
+        because `estimated_seconds` and the plans listing both have to name
+        the same profile for the same step (#315).
+        """
+        if not self.estimates:
+            return None
+        return arguments.get("coverage", DEFAULT_PROFILE)
+
     def estimated_seconds(self, arguments: Mapping) -> float | None:
         """Expected seconds of one invocation with these normalized arguments.
 
@@ -502,8 +515,9 @@ class TestDefinition:
         an error, when there is no estimate for these arguments (for example
         a per-duration estimate without a duration argument).
         """
-        if self.estimates:
-            estimate = self.estimates.get(arguments.get("coverage", DEFAULT_PROFILE))
+        profile = self.estimate_profile(arguments)
+        if profile is not None:
+            estimate = self.estimates.get(profile)
             return None if estimate is None else estimate.seconds(arguments)
         return _duration_argument_seconds(arguments)
 

@@ -49,6 +49,7 @@ from ubertooth_harness.hostneeds import (
 )
 from ubertooth_harness.plan import PlanError, TestStep, image_label, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
+from ubertooth_harness.testinfo import TestInformation, test_information
 
 
 DEFAULT_UBERTOOTH_REPOSITORY = "https://github.com/SqueakyFloors/ubertooth.git"
@@ -591,6 +592,41 @@ def _build_needs(catalog: TestCatalog, test_name, arguments=None) -> dict:
     }
 
 
+def _catalog_contract(catalog: TestCatalog, test_name, arguments=None) -> dict:
+    """What the catalog says a step binds, takes, and runs at.
+
+    The information dialog needs the hardware roles and the accepted
+    arguments beside the prose, and the catalog is where both live
+    (#315). Reported from the catalog on every request rather than written
+    into ``test_info.yaml``, so a role or an argument has one source and the
+    prose cannot drift from it.
+
+    ``estimate_profile`` is the profile ``estimated_seconds`` read for these
+    arguments, asked of the definition itself
+    (``TestDefinition.estimate_profile``) rather than worked out again here,
+    so the profile and the estimate beside it cannot disagree. None for a
+    test with no calibrated estimates.
+
+    A test the catalog does not know binds nothing and takes nothing, which
+    is the same answer the rest of this listing gives for one.
+    """
+    try:
+        definition = catalog.get(test_name)
+    except CatalogError:
+        return {"hardware_roles": [], "arguments": [], "estimate_profile": None}
+    return {
+        "hardware_roles": [
+            {"role": role, "device": device}
+            for role, device in (definition.hardware_roles or {}).items()
+        ],
+        "arguments": [
+            {"name": name, "required": rule.required}
+            for name, rule in definition.arguments.items()
+        ],
+        "estimate_profile": definition.estimate_profile(arguments or {}),
+    }
+
+
 def _total(tests: Sequence[Mapping]) -> float | None:
     """The tests' estimates added up, or None unless every one has an
     estimate. 0.0 for no tests at all, which adds up with the other total."""
@@ -704,6 +740,13 @@ def list_plans(
     own host platform, which decides a step the target could not run
     whichever hosts it names. Without a target every step counts, which is
     the suite's whole time whichever host runs a part of it.
+
+    Each test also carries ``hardware_roles``, ``arguments``, and
+    ``estimate_profile``: what the catalog says this step binds, takes, and
+    is timed at (``_catalog_contract``). The prose a reader needs to
+    understand the test is not on the row, because a test appears in several
+    plans and the prose is the same every time; it is sent once per response
+    instead, by ``test_information_view`` (#315).
     """
     plans = []
     try:
@@ -746,6 +789,7 @@ def list_plans(
                     "runs_on_target": not reason,
                     "omitted_reason": reason,
                     **_build_needs(catalog, step.test_name, step.arguments),
+                    **_catalog_contract(catalog, step.test_name, step.arguments),
                 })
             check = run_plan_check(
                 catalog, steps, (target,) if target else (),
@@ -755,6 +799,45 @@ def list_plans(
         plans.append({"name": path.stem, "title": plan.name, "error": None,
                       "runnable": plan.runnable, "suites": suites})
     return plans
+
+
+def test_information_view(
+    plans: Sequence[Mapping],
+    *,
+    information: TestInformation | None = None,
+) -> dict[str, dict]:
+    """What each test listed in ``plans`` is for, keyed by its catalog name.
+
+    One entry per distinct test name in the listing, read from
+    ``ubertooth_harness/test_info.yaml``: purpose, theory of operation,
+    hardware and traffic, expected outcome, what a pass does not prove,
+    related references, and a link to the test's ``docs/tests.md`` section
+    (#315). Keyed by name rather than carried on each test row because a
+    test appears in several plans and suites -- the repository's own plans
+    list 122 steps of 53 distinct tests -- and the prose is the same every
+    time, so putting it on the row tripled the response (121 KB to 394 KB,
+    against 232 KB with the map).
+
+    Every name on any listed row has an entry here, so a client never has to
+    handle a row it cannot look up. Nothing here can stop a run: a test with
+    no entry, and a file that is missing or malformed, give an entry with
+    ``available`` false and the reason in ``unavailable_reason``.
+
+    The prose is data, not markup. Whoever renders it escapes it: the
+    entries quote the shapes the tools print, so they carry angle brackets
+    and quotation marks on purpose.
+    """
+    if information is None:
+        # Read once per response, as the plans themselves are: always the
+        # file as it now stands, and never a path a client chose.
+        information = test_information()
+    names = {
+        test["name"]
+        for plan in plans
+        for suite in plan.get("suites", ())
+        for test in suite.get("tests", ())
+    }
+    return {name: information.view(name) for name in sorted(names)}
 
 
 def suite_refusal(
