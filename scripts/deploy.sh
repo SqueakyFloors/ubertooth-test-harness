@@ -62,8 +62,10 @@
 #                             USBHub3+ power controller (proprietary; opt-in)
 #   --external-board-lock TEMPLATE
 #                             passed to the runner: every run also holds each
-#                             board's own lock file from other tools on this
-#                             host, TEMPLATE with {serial} (the lock key),
+#                             device's own lock file from other tools on this
+#                             host, TEMPLATE with {serial} (the device's plain
+#                             serial as registered, which is what such a tool
+#                             locks, not the harness's lease key),
 #                             e.g. /var/lock/board-{serial}.lock; absolute or
 #                             starting with ~/
 #   --no-start                write the units or agents only (Linux also

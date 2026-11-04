@@ -451,11 +451,11 @@ PEER_TYPE = "ESP32 Classic peer"
 # expand_pairs).
 PROGRAMMER_TYPE = "Debug programmer"
 LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE)
-# A lease key of this length is the budget every lock name built from a
-# serial has to fit, whichever prefix its type carries (max_serial_chars).
-# It is the longest prefix a name has ever used, kept as the budget so that
-# a registry the bench already wrote cannot become invalid.
-LOCK_PREFIX_BUDGET = 6
+# The shortest prefix any lease key carries (`esp32-`). Kept as a floor on
+# the serial-length budget so that a registry a bench has already written
+# cannot become invalid if a shorter prefix is ever added: the limit a serial
+# was accepted under never loosens.
+LOCK_PREFIX_FLOOR = 6
 
 
 def plain_serial(resource) -> str:
@@ -465,16 +465,20 @@ def plain_serial(resource) -> str:
     empty. A DK's, a peer's and a programmer's keys carry their type's
     prefix, so the lab's file and the lease file have different names and
     ``board_for_resource`` has to say which is which.
+
+    Every one of them is taken exactly as registered. The registry is also
+    what names the device on USB and what a lab script was written against,
+    and ``resource_key`` spells its key from the same string, so one
+    spelling is one device: a serial registered in capitals that was
+    lowercased here would name a file the lab's own wrapper never locks, on
+    any filesystem that tells the two apart.
     """
     if resource.type == PROGRAMMER_TYPE:
-        # As registered, not lowercased: a programmer's serial goes into its
-        # lease key verbatim, and the lab's own lock file is named after that
-        # same string, so another spelling would name another file.
         return str(resource.identity.get("serial", "") or "").strip()
     if resource.type not in (DK_TYPE, PEER_TYPE):
         return ""
     for key in ("jlink serial", "bridge serial"):
-        value = str(resource.identity.get(key, "") or "").strip().lower()
+        value = str(resource.identity.get(key, "") or "").strip()
         if value:
             return value
     return ""
@@ -543,7 +547,7 @@ def max_serial_chars(prefix: str) -> int:
     loads, so a bench learns the limit from the field it wrote rather than
     from the name the harness built.
     """
-    return LOCK_NAME_CHARS - max(len(prefix), LOCK_PREFIX_BUDGET)
+    return LOCK_NAME_CHARS - max(len(prefix), LOCK_PREFIX_FLOOR)
 
 
 def _keyed(resource, field: str, prefix: str, serial: str) -> str:

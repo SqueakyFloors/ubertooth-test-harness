@@ -2104,7 +2104,13 @@ Every path that leases a device asks for both names — a run, `lease`,
 `boards`, `runner`, and the helpers in `scripts/lab`. No other brace;
 `--external-board-lock` overrides the variable and
 `--external-board-lock ''` turns it off for one command. Unset, nothing
-changes. Each external lock is an exclusive `flock` on that file, taken in
+changes. A bench set up before
+[#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)
+may have `board-esp32-<serial>.lock`, `board-nrf52840dk-<serial>.lock` or
+`board-programmer-<serial>.lock` files left over from when a run asked for
+the lease key: nothing takes those now, so delete them and make sure the
+lab's own wrappers lock the plain-serial file, which is the one every harness
+command takes. Each external lock is an exclusive `flock` on that file, taken in
 the same all-or-nothing attempt as the leases and dropped by the kernel when
 the holder exits, like a lease. A missing file is created (mode 0644, an
 existing file keeps its mode and content; the harness opens it read-only and

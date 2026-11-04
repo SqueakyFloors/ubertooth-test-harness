@@ -182,9 +182,10 @@ def _bench_lock_names(resource) -> tuple[tuple[str, str], ...]:
 
     (compared, as registered) for each, lowercased for the comparison
     because one serial written two ways is still one device. One flat space,
-    shared by every device: such a name is the bench's own lock file that
-    `scripts/lab/hold` takes beside the harness's own lease key, so a second
-    device with the same serial would be held through the first one's file.
+    shared by every device: such a name is the bench's own lock file, which
+    every command that leases the device takes beside the harness's own
+    lease key (``leases.board_for_resource``), so a second device with the
+    same serial would be held through the first one's file.
     An Ubertooth's is its serial (its lease key too), a DK's its J-Link
     serial as nrfutil and sysfs each print it, a peer's its bridge serial,
     and a programmer's the serial its USB descriptor reports.
@@ -237,11 +238,10 @@ class _LockName:
 def _refuse_a_long_serial(resource, field: str, prefix: str) -> None:
     """A serial every lock file name built from it still fits.
 
-    A lease key carries its type's prefix and the bench's second lock name
-    carries its own, so a serial that is a file name on its own may still
-    build one that is not. Refused here, where the field it names is in
-    front of whoever wrote it, rather than left to the command that leases
-    the device (``leases.resource_key``, the backstop).
+    A lease key carries its type's prefix, so a serial that is a file name
+    on its own may still build one that is not. Refused here, where the
+    field it names is in front of whoever wrote it, rather than left to the
+    command that leases the device (``leases.resource_key``, the backstop).
     """
     from ubertooth_harness.leases import max_serial_chars
 
@@ -736,14 +736,19 @@ class FileResourceRegistry:
                 "the registry treated them as two devices"
             )
         if held.kind == "lease" or claim.kind == "lease":
-            # One device's serial is the other's lease name. Their lease
-            # files differ, because every key but a board's carries its
-            # type's prefix; the bench's own file is named after either
-            # kind, so that one would be shared.
+            # One device's serial is the other's lease name. Neither file is
+            # shared today: their lease files differ, because every key but a
+            # board's carries its type's prefix, and each device's own
+            # external file is named after its plain serial alone. Refused
+            # anyway, because a registry in which one device's serial is
+            # another's lease file reads as a mistake to whoever edits it
+            # next, and nothing is lost by saying so.
             return (
-                f"the bench's own lock file for {claim.describes} would be the "
-                f"one for {held.describes}: '{name}' is both of those names, so "
-                "a lock of one would be read as a lock of the other"
+                f"the serial of {claim.describes} is the name {held.describes} "
+                f"is leased under: '{name}' is both of those names, so a "
+                "registry that keeps them apart depends on which name a "
+                "command happens to take; give each device the serial its own "
+                "hardware reports"
             )
         # Two serials, which is the field a person writes. The name that
         # collides, not either device's spelling of it: a DK is also known

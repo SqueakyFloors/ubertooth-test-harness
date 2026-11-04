@@ -266,12 +266,14 @@ class OneBenchLockNameOneDevice(NamesTestCase):
         self.assertEqual(BOARD, leases.resource_key(registry.get("UT_A")))
 
     def test_a_serial_that_spells_another_device_s_lease_name_is_refused(self):
-        """The bench's own files are named after either kind of name.
+        """One device's serial may not be another device's lease name.
 
         A programmer's serial is chosen by whoever labels the adapter and
-        may be any name a file can carry, so it may be the very name
-        another device's lease uses; the bench would then have one file for
-        the two of them.
+        may be any name a file can carry, so it may be the very name another
+        device's lease uses. No file is shared by that pair today, because
+        each device's external lock is named after its own plain serial; it
+        is refused because a registry that depends on which of the two names
+        a command happens to take reads as a mistake to the next editor.
         """
         reason = self.refuse(
             peer("ESP_A", BRIDGE),
@@ -279,7 +281,8 @@ class OneBenchLockNameOneDevice(NamesTestCase):
         )
         self.assertIn("Prog_A (Debug programmer)", reason)
         self.assertIn("ESP_A", reason)
-        self.assertIn("lock of one would be read as a lock of the other", reason)
+        self.assertIn("is the name", reason)
+        self.assertIn("is leased under", reason)
         # The lease files themselves do not collide, which is why this needs
         # a check of its own.
         self.assertNotEqual(f"esp32-{BRIDGE}", f"programmer-esp32-{BRIDGE}")
@@ -509,6 +512,24 @@ class BenchLockFileNames(NamesTestCase):
         self.assertIsNone(board.external_key)
         self.assertEqual(BOARD, board.key)
         self.assertEqual(BOARD, board.lock_name)
+
+    def test_a_serial_keeps_the_spelling_it_was_registered_with(self):
+        """One spelling is one device, in both of its names.
+
+        The registry is what names a peer's bridge on USB and what a lab
+        script was written against, so a serial lowercased for the lock file
+        would name a file that script never locks, on a filesystem that tells
+        the two apart. A bridge serial may be registered in capitals.
+        """
+        upper = BRIDGE.upper()
+        registry = self.load(peer("ESP_A", upper))
+        board = leases.board_for_resource(registry.get("ESP_A"))
+        self.assertEqual(f"esp32-{upper}", board.key)
+        self.assertEqual(upper, board.lock_name)
+        self.assertEqual(
+            self.locks / f"board-{upper}.lock",
+            leases.external_lock_path(self.template, board),
+        )
 
     def test_every_leased_type_s_two_names(self):
         """One rule for all four, so no path can name a file no other does."""
