@@ -38,8 +38,9 @@ CONFIG_BT_HFP_WBS_ENABLE=n
 # This is headroom, not a fix for anything measured. It was tried because a
 # peer restarting under exactly that second link is harness #311, but the
 # bench then put 113 second links through a streaming initiator, on this
-# image and on the one before it, with no restart either way: the link
-# budget is not what makes a peer restart.
+# image and on the one before it, with no restart either way. Harness #317
+# found the real cause, and it is not on the air: a second process taking
+# turns with the bridge resets the board. This slot is only a spare.
 CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=3
 
 # Bluedroid with Classic does not fit the default 1 MB app partition.

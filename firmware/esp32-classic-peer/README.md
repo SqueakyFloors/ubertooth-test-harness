@@ -300,8 +300,12 @@ That is headroom and nothing more. It was tried because a peer restarting
 under that second link is
 [harness #311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311),
 but 113 second links paged to a streaming initiator on the bench, on this
-image and on `utesp-1.5.0`, gave no restart either way, so the link budget
-is not what makes a peer restart.
+image and on `utesp-1.5.0`, gave no restart either way. The cause turned out
+to be a second process taking turns with the bridge rather than anything on
+the air at all
+([harness #317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)),
+so the link budget is not what makes a peer restart and this slot is only a
+spare.
 
 A board with more than one link is in no one piconet, so `clock` and the
 link half of `status` report none rather than guessing which link to answer

@@ -731,11 +731,19 @@ panic, a watchdog, a brownout, and a software reset apart; the ROM's own
 beside it
 ([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)).
 
-What makes a peer restart under a `ubertooth-follow` case is not settled.
-Pressing the measured condition on the bench — 113 second links paged to the
-initiator from the host's adapter while it held its own link, with a clock
-read on each, across both the current image and the one before it — produced
-no restart, so the controller's baseband link budget is not the cause.
+Two things the bench then ruled out as the cause, which is why the evidence
+above was worth having rather than a guess. The controller's baseband link
+budget is not it: 113 second links paged to the initiator from the host's
+adapter while it held its own link, with a clock read on each, across both
+the current image and the one before it, produced no restart. Nor is the
+follow path on its own, measured separately in 13 runs. What it was is
+[a second process taking turns with the port](#esp32-wroom-32e-classic-peer):
+the first open of a port nobody holds resets the board, and so does the
+pulse that releases a peer at the end of a session
+([#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317),
+closed by [#328](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/328)).
+So the reason line a restart now carries should read `power on` for that
+case, and a panic or a watchdog for a board that really fell over.
 
 ### Reset behavior
 
