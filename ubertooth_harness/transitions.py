@@ -1673,9 +1673,10 @@ def btle_conflict_cases(_arguments, _resources, resource_identities):
 # first case.
 #
 # ubertooth-util never checks the firmware API, but ubertooth-btle calls
-# ubertooth_check_api(), which sends cmd_stop to a board whose firmware API is
-# older than the host's libubertooth. The CRC read therefore runs only when
-# this check's firmware read showed an API no older than the host tools'.
+# ubertooth_check_api(), which refuses any firmware API that is not the host
+# tools' own -- newer as well as older -- and sends cmd_stop to that board on
+# its way out. The CRC read therefore runs only when this check's firmware
+# read showed the host tools' own API, and is refused otherwise.
 # No host tool reports the host API, so it is read from UBERTOOTH_API_VERSION
 # in the resolved Ubertooth source at the manifest commit.
 HOST_API_HEADER = "host/libubertooth/src/ubertooth_interface.h"
@@ -1795,9 +1796,12 @@ def _tolerant(pattern, convert, values=None):
 
 # What every guard is read for, whatever image it carries: who it is, which
 # image and revision it runs, what built it, and which bootloader is under
-# that. Every image that answers these vendor requests at all answers these
-# four; a board whose firmware answers none of them is turned away by the
-# pinning rule below rather than guarded.
+# that. All four are answered by the images a guard is expected to carry --
+# bluetooth_rxtx, its receive-only build, and btbr. A board that answers
+# fewer, as the assembly-test image does (it has the revision and the serial,
+# not the build string or the bootloader), is still pinned by the ones it
+# answers; one that answers none is turned away by the pinning rule below
+# rather than guarded.
 GUARD_STABLE_READBACK = (
     (GUARD_FIRMWARE_KEY, "-v", GUARD_FIRMWARE_PATTERN, None),
     ("compile-info", "-V", GUARD_COMPILE_INFO_PATTERN, None),
@@ -2126,8 +2130,9 @@ def guard_steps(boards, after=None) -> tuple[Step, ...]:
     With ``after`` unset this records each guard's baseline; otherwise each
     read must equal the baseline (keys are suffixed so each check's observed
     values stay separate in the record). The ubertooth-btle CRC read comes
-    last and is refused unless this check's firmware read recorded an API no
-    older than the host tools'.
+    last and is refused unless this check's firmware read recorded the host
+    tools' own API, which is the only one that tool will work on without
+    stopping the board.
     """
     steps = []
     for board in boards:

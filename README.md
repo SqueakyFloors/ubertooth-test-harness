@@ -1122,8 +1122,9 @@ name the guards. The design is in
 [DESIGN.md, "Named test plan schema"](DESIGN.md#3b-named-test-plan-schema). A host with one
 registered Ubertooth has no guards. Preflight checks each guard-only board's
 serial (`ubertooth-util -U <serial> -s`) and that its firmware API (`-v`) is
-no older than the host tools' API; a guard below it is refused before any
-test. Its firmware revision is not required to match the resolved one. Guards do not count toward the
+the host tools' own; a guard carrying any other API is refused before any
+test, because `ubertooth-btle` would stop such a board rather than read it
+(below). Its firmware revision is not required to match the resolved one. Guards do not count toward the
 firmware-order check (a firmware-writing test must be the last test on its
 board), so a guarded test may follow a flash on another board.
 
@@ -1137,19 +1138,37 @@ access. Planning stays permissive: `validate-plan --hardware` prints a
 
 Before the first case the test records a baseline for each guard with
 read-only queries only: `ubertooth-util -U <serial>` with `-v` (firmware
-revision and API), `-V` (the version answer, whose `Firmware build:` line
-carries a build timestamp that also catches a reflash of the same revision),
-`-C` (channel), `-a` (PA level), `-z`
+image, revision and API), `-V` (the version answer, whose `Firmware build:`
+line carries a build timestamp that also catches a reflash of the same
+revision), `-s` (the serial the board itself reports), `-B` (the bootloader
+under that firmware), `-C` (channel), `-a` (PA level), `-z`
 (squelch), and `-d` (LEDs), then `ubertooth-btle -U <serial> -k` (CRC).
 `ubertooth-util` never checks the firmware API, but `ubertooth-btle` does, and
-it sends a stop to firmware whose API is older than the host tools'
-(`ubertooth_check_api` in the fork's
+it refuses any API that is not the one the tools were built for — newer as
+well as older — stopping that board as it goes (`ubertooth_check_api` in the
+fork's
 [`host/libubertooth/src/ubertooth.c`](https://github.com/SqueakyFloors/ubertooth/blob/main/host/libubertooth/src/ubertooth.c)).
 So the CRC read runs only when the same check's `ubertooth-util -v` read showed
-an API no older than the host tools' (no host tool reports it, so the harness reads
+that same API (no host tool reports it, so the harness reads
 `UBERTOOTH_API_VERSION` from the resolved Ubertooth source and refuses guarded
 tests if it cannot). Otherwise the read is refused without running and the
-baseline fails: the guard firmware API is too old to read CRC safely. The harness
+baseline fails, naming the API the guard reported and the one the tools need.
+
+Every read goes to every guard whatever firmware image it carries. A board
+refuses a request its image has not got by stalling it, and `ubertooth-btle`
+refuses a board carrying another of this tree's images (`btbr`) as it opens
+it; either answer is recorded as the reading and compared before and after
+like any value, so a board that starts answering a read it refused, or
+refuses one it answered, fails the check. The LED read is the exception: `-d`
+asks for all three LEDs in one command, so a stall there fails the read
+rather than being recorded. A guard running `bluetooth_rxtx`, or the
+receive-only `bluetooth_rx` build of it, must answer the radio settings that
+build implements, and a guard that answered none of `-v`, `-V`, `-s`, or `-B`
+is refused by name before any case: nothing about it could be compared
+afterwards. [docs/tests.md, "Guard Ubertooths"](docs/tests.md) has the whole
+rule.
+
+The harness
 never sets, stops, or resets a guard. One stop it cannot prevent: the fork's
 `ubertooth_connect_serial` sends a stop when it cannot claim the board's USB
 interface, so a guard held open by another process may receive one from any
@@ -1171,7 +1190,8 @@ restore it by hand. `test_finished` counts failed guard checks in
 beside the case count (for example `0 + 1 guard check`).
 
 The check sees only what it reads. It catches a leaked firmware change or
-reflash and any change to channel, PA level, squelch, LEDs, or CRC. On a guard
+reflash, a board answering as another serial, a changed bootloader, and any
+change to channel, PA level, squelch, LEDs, or CRC. On a guard
 idle at boot defaults it cannot see a leaked `-S` or `-r`, or a mode start
 (`-x`, `-t`, range test, repeater, `ubertooth-btle -n`/`-f`) that leaves those
 values unchanged, so a guard could be left transmitting without the test
@@ -1422,7 +1442,8 @@ naming `--no-flash-build`.
 - Which boards: every Ubertooth whose firmware revision preflight requires,
   in run order (`PreflightPolicy.boards_needing_firmware`). Guard-only boards
   are not flashed, because preflight only requires their firmware API to be
-  no older than the host tools'; boards a firmware-writing test (`Flash
+  the host tools' own, not the resolved revision; boards a firmware-writing
+  test (`Flash
   reliability`, `DFU images`) writes itself are not flashed either. A plan
   that uses no Ubertooth (the `host` plan) flashes nothing and needs no ARM
   compiler.

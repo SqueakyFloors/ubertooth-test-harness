@@ -924,9 +924,11 @@ so tolerating a stall there would accept a board that answered two of them.
 Differences are counted as `failed_guard_checks`,
 apart from `failed_cases`, and the reason names the guard to check and
 restore by hand; guards are never restored automatically. The CRC read uses
-`ubertooth-btle`, whose `ubertooth_check_api` stops firmware older than the
-host API, so it is refused (failing the check) unless the same check's `-v`
-read showed an API no older than the host tools'. That version is read from
+`ubertooth-btle`, whose `ubertooth_check_api` refuses any firmware API that is
+not the host tools' own — newer as well as older — and stops that board as it
+goes, so the read is refused (failing the check) unless the same check's `-v`
+read showed an equal API; preflight refuses a guard-only board whose API
+differs, before any test. That version is read from
 the resolved sources' `ubertooth_interface.h` (`UBERTOOTH_API_VERSION`,
 `transitions.host_api_version`), since no host tool reports it, and a run
 whose sources cannot be read that way refuses its guarded tests.

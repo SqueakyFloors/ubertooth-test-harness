@@ -246,17 +246,26 @@ class GuardPlanningTests(unittest.TestCase):
         self.assertEqual(
             ["Firmware version", "Firmware compile info", "Device serial"], by_board["UT_0"]
         )
-        # Guard-only: serial plus an API floor (the host API), not a revision.
+        # Guard-only: serial plus the host tools' own API, not a revision.
         self.assertEqual(["Device serial", "Guard firmware API"], by_board["UT_1"])
         self.assertIn(("ubertooth-util", "-U", B, "-s"), [c.argv for c in checks])
         (api_check,) = [c for c in checks if c.name == "Guard firmware API"]
-        self.assertEqual(HOST_API, api_check.minimum_api)
-        older = transitions.format_api(HOST_API - 1)
-        newer = transitions.format_api(HOST_API + 1)
-        ok = CommandResult(api_check.argv, 0, f"Firmware version: git-x (API:{newer})\n", "", 0.01, False)
-        old = CommandResult(api_check.argv, 0, f"Firmware version: git-x (API:{older})\n", "", 0.01, False)
+        self.assertEqual(HOST_API, api_check.required_api)
+        current = transitions.format_api(HOST_API)
+        ok = CommandResult(api_check.argv, 0,
+                           f"Firmware version: git-x (API:{current})\n", "", 0.01, False)
         self.assertEqual("", api_check.result_failure(ok))
-        self.assertIn("is older than the host tools API", api_check.result_failure(old))
+        # Either way about: ubertooth-btle refuses any other API and stops the
+        # board, so the guard check could not read its CRC.
+        for api in (HOST_API - 1, HOST_API + 1):
+            other = CommandResult(
+                api_check.argv, 0,
+                f"Firmware version: git-x (API:{transitions.format_api(api)})\n",
+                "", 0.01, False,
+            )
+            with self.subTest(transitions.format_api(api)):
+                self.assertIn("is not the host tools API",
+                              api_check.result_failure(other))
 
     def test_host_api_is_parsed_from_the_resolved_source_and_fails_closed(self):
         from types import SimpleNamespace
@@ -620,8 +629,8 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
             with self.subTest(transitions.format_api(api)):
                 self.assert_api_keeps_btle_off_the_guard(api)
 
-    def assert_api_keeps_btle_off_the_guard(self, older):
-        guard = FakeUbertooth(serial=B, api=older)
+    def assert_api_keeps_btle_off_the_guard(self, api):
+        guard = FakeUbertooth(serial=B, api=api)
         bench = Bench(FakeUbertooth(serial=A), guard)
         summary, events, _ = run_guarded(guarded_invocation("BLE CRC transitions"), bench)
 
@@ -634,7 +643,7 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertEqual("failed", check.status)
         reason = check.details["reason"]
         self.assertIn(
-            f"firmware API {transitions.format_api(older)} is not the host tools API",
+            f"firmware API {transitions.format_api(api)} is not the host tools API",
             reason,
         )
         self.assertIn("its API check would stop the guard", reason)
@@ -1054,8 +1063,9 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertIn("wedged rather than short of one", reason)
         self.assertIn("no case ran", reason)
         # The CRC read is the one that does not reach a board whose firmware
-        # this check could not confirm: ubertooth-btle would stop firmware
-        # older than the host tools, so it is refused and fails the check.
+        # this check could not confirm: ubertooth-btle would stop a board
+        # whose API is not the host tools' own, so it is refused and fails
+        # the check.
         self.assertEqual([], [c for c in bench.commands_for(B)
                               if c[0] == "ubertooth-btle"])
         self.assertIn(f"guard Ubertooth 1 {transitions.GUARD_CRC_KEY}",

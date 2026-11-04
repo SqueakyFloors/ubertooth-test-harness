@@ -52,7 +52,8 @@ Harness-wide checks that use the CLIs:
   before and after the test, with queries only, one command per read:
   `ubertooth-util -v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, and then
   `ubertooth-btle -k`. The `ubertooth-btle -k` read is refused, failing the
-  check, unless the board's firmware API is at least the host API. Every other
+  check, unless the board's firmware API is the host tools' own — that tool
+  refuses any other, newer as well as older, and stops the board. Every other
   read goes to every guard whatever image it carries: a request the image has
   not got is stalled, and a board on another of this tree's images is refused
   by `ubertooth-btle` itself, and either answer is the reading, compared

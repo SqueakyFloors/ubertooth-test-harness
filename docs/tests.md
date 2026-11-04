@@ -165,14 +165,16 @@ and after every case, with queries only and one command per read:
 others anyway). Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
-is refused, which fails the check, unless that board's firmware API is at
-least the host tools' API, because `ubertooth-btle` stops older firmware as
-part of its own API check.
+is refused, which fails the check, unless that board's firmware API is the
+host tools' own: `ubertooth-btle`'s own API check refuses any other, newer as
+well as older, and stops the board as it goes. Preflight refuses a guard-only
+board whose API differs, so that is caught before any test runs.
 
 Every guard gets every read, whatever firmware image it carries, and the CRC
-read is the one that may not reach the board: `ubertooth-btle` would stop
-firmware older than the host tools to make it, so it is refused, and that
-refusal fails the check rather than counting as a reading.
+read is the one that may not reach the board: `ubertooth-btle` works only on
+the firmware API it was built for and stops a board carrying any other, so
+that read is refused unless the API matched, and the refusal fails the check
+rather than counting as a reading.
 
 Two answers count as a reading this host could not make: a request the
 board's image has not got, which it refuses by stalling, and a board carrying
