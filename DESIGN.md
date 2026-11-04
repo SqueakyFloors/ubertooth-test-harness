@@ -1077,12 +1077,16 @@ both boards are discoverable from boot, so the inquiry has a known device to
 report, and the piconet they hold is what the Ubertooth sweeps for and what
 the follow is pointed at.
 
-No bench has an adapter yet
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
-so those cases have never run. They live in `testplans/hci.yaml`, which is
-not part of `release.yaml` until a real run passes, and `docs/tests.md`
-records per case which outcome is the tool's documented one and which is a
-reading of its source still to be confirmed.
+Those cases have run against a USB adapter on the one bench that has one.
+They live in `testplans/hci.yaml`, which is still not part of `release.yaml`:
+the two faults the runs found are both peer-side — serial bytes lost under
+load
+([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310))
+and a peer that restarts when a second link is paged to it
+([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311))
+— and four more pair-driven cases at the measured rates would fail a gate
+too often. `docs/tests.md` records per case what the runs settled and what
+they left open.
 
 ---
 

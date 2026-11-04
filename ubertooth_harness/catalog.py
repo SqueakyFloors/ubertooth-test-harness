@@ -1067,30 +1067,30 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Recover AFH map": _profiles(
         Estimate(40.0, per_duration=4), Estimate(60.0, per_duration=6)
     ),
-    # ESTIMATE_PENDING_HW: no bench has an adapter yet, so both of these are
-    # the pair's own bring-up (which the four tests above measured at about
-    # 20 s a case) plus two adapter reads, times the cases, and then what the
-    # tool spends outside the window the duration names.
-    #
-    # For the scan that is a whole BlueZ inquiry per -s case, because the
-    # tool arms the alarm -t asks for only after the inquiry has run, plus a
-    # name read per device either half found; -x then fetches a report from
-    # each of them over a connection. This is what the cases are expected to
-    # cost, not the deadlines they are allowed: `ubertooth-scan` ends its own
-    # sweep, so a healthy run finishes well inside them. Two cases in smoke,
-    # three comprehensive; the -x case is reckoned at about a minute.
+    # Measured on the bench at `duration: 25s`: the whole test took 112 s in
+    # one run and 155 s in another, the difference being how many of other
+    # people's devices answered the inquiry and had to be paged for a name.
+    # The estimate carries the slower of the two, so 105 s besides the
+    # durations. That is the pair's own
+    # bring-up and two adapter reads a case, plus what the tool spends
+    # outside the window `-t` names -- for `-s` a whole BlueZ inquiry, since
+    # the alarm is armed only after it, and a name read per device either
+    # half found. The measured commands ran 78 s (`-s`) and 61 s against
+    # windows of 111 s and 100 s: the tool ends its own sweep, so a healthy
+    # run finishes well inside the deadlines it is allowed. The same two
+    # cases in both profiles.
     "Bluetooth inquiry scan": _profiles(
-        Estimate(80.0, per_duration=2), Estimate(145.0, per_duration=3)
+        Estimate(105.0, per_duration=2), Estimate(105.0, per_duration=2)
     ),
-    # ESTIMATE_PENDING_HW. Unlike the scan, this tool bounds nothing itself:
-    # the driver ends the command, so a case costs its whole window whatever
-    # the page really took. The window is the duration plus FOLLOW_SETUP_S
-    # (52 s), and 3.4 s more for -a, so the fixed part is the allowance plus
-    # the pair's bring-up: smoke 2 * 52 + 3.4 + 2 * 20 of bring-up and about
-    # 8 s of board reads and cleanup each, comprehensive three cases of the
-    # same.
+    # Unlike the scan, this tool bounds nothing itself: the driver ends the
+    # command, so a case costs its whole window whatever the page really
+    # took. The window is the duration plus FOLLOW_SETUP_S (52 s), and 3.4 s
+    # more for -a, so the fixed part is the allowance plus the pair's
+    # bring-up. Measured at `duration: 25s`: 189 s for the two smoke cases,
+    # so 139 s besides the durations, with the commands themselves running
+    # 83 s and 87 s. The third case, `-q`, costs what the first does.
     "Follow Classic piconet over HCI": _profiles(
-        Estimate(165.0, per_duration=2), Estimate(245.0, per_duration=3)
+        Estimate(140.0, per_duration=2), Estimate(210.0, per_duration=3)
     ),
 })
 

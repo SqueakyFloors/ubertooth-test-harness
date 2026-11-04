@@ -2136,10 +2136,9 @@ Ubertooth restored.
 live capture: an access code is 64 bits and `-e` allows two bit errors by
 default, so ambient traffic matching the acceptor's access code within two
 bits is not something a run will see, but it is an absence over the air rather
-than a proof. `ubertooth-follow` is a different tool and still untested: it
-reads the clock and the AFH map from a local BlueZ controller, which the bench
-has no adapter for
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
+than a proof. `ubertooth-follow` is a different tool, which reads the clock
+and the AFH map from a local BlueZ controller; it has its own test now, under
+`Follow Classic piconet over HCI`, on a bench with an adapter.
 
 ## Classic capture record fields
 
@@ -2639,36 +2638,24 @@ is the scan's `-t`. Linux only: the tool is built just with libbluetooth, and
 the peers are reached through `/dev/serial/by-id`. The cases also need
 `hciconfig` and `hcitool` on the host. Lives in the `hci` plan.
 
-**It needs privileges the rest of the harness does not.** The harness runs as
-an ordinary user, and **everything** these cases run needs a raw
-Bluetooth HCI socket, which Linux allows only to a process holding
-`CAP_NET_RAW`: `hciconfig` and `hcitool` as much as the two tools, since all
-four open one. So the whole set needs the capability — `CAP_NET_ADMIN` as
-well for the commands that change the controller's state — or the run has to
-be made by a user that already holds it. Without it the first step of the
-first case fails, which is at least an early and obvious failure.
+**The page needs a privilege the rest of the harness does not.** The harness
+runs as an ordinary user, which is enough for every read here: the bench
+measured `hciconfig`, `hcitool con`, `hcitool inq`, `hcitool name` and
+`hcitool clock` all working with no capability anywhere. What an
+unprivileged process cannot do on a raw HCI socket is page —
+`hcitool cc <peer>` answers `Operation not permitted`, and so does
+`ubertooth-follow`, which pages its target in every case. So
+`ubertooth-follow` needs `CAP_NET_ADMIN`, and `ubertooth-scan` needs it for
+`-x` only; `hciconfig` and `hcitool` need nothing. See
+[`docs/hardware.md`](hardware.md) for how a bench grants it.
 `hostneeds.Needs` has no way to express a capability, so nothing checks this
 before the run.
 
-**Expected outcome.** Smoke runs two cases: `-s` alone, where the inquiry
-must report the acceptor at its registered address under its firmware name,
-and no `-s`, where the scan results must name the central's LAP and carry at
-least one `AFH map:` line. Comprehensive adds
-`-s -x`, where the extended report must hold the acceptor's address, its
-name, and an LMP version line, **in the acceptor's own report block** — the
-scan reports every device the inquiry answered, each with a report of its
-own, so three patterns over the whole output would let another device's
-`LMP Version:` line stand in for a missing one. That case pins a zero exit, like
-every other, and pays for it: `-x` exits 1 when any part of **any** device's
-report could not be fetched, and the devices it asks include whatever else in
-range answered the inquiry, so a stranger's device that refuses a read fails
-the case for a reason that is not the bench's. Accepting 1 instead would
-accept the other two things that status means — a capture stream that died,
-and a board that would not give its mode up — and neither is visible to this
-case's own checks, since the survey results show only that the sweep decoded
-the piconet at some point and a board answers a stop normally after a failed
-stream. That is one more reason `-x` is comprehensive-only and wants a quiet
-room. Every case also
+**Expected outcome.** Two cases, in smoke and comprehensive alike: `-s`
+alone, where the inquiry must report both peers at their registered addresses
+and one of them under its firmware name, and no `-s`, where the scan results
+must name the central's LAP and carry the `AFH map:` line the scan built for
+it. Each case also
 requires the driver's own
 report — both peers' addresses, the central's LAP and UAP, a link that came
 up, and a pair that streamed — so a capture of nothing cannot pass as a
@@ -2677,43 +2664,73 @@ and is still itself, resets both peers, and restores the board's channel,
 squelch, and LEDs — the adapter reads first, because a peer reset drops every
 link that peer holds.
 
-**Known limits.** **Nothing here has run against a real adapter.** No bench
-has a Bluetooth controller
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
-so the checks are written to what the tool's source prints and are exercised
-against samples of that output, not against a run. The `hci` plan is
-deliberately not in the release gate until a real run passes. What the first
-real run has to settle: whether the acceptor answers the inquiry while it is
-in a link (the scan mode says it should, and the controller's behavior under
-load is not documented), and whether a 25-second window reliably leaves the
-Ubertooth half a piconet to report, which for `ubertooth-rx` on this bench it
-does.
+**Measured.** Both cases ran against a USB adapter on a Linux bench, with the
+pair streaming and one Ubertooth sweeping, and both settled what was open.
+The test took 112 s in one run and 155 s in another; the difference is how
+many of other people's devices answered the inquiry and had to be paged for a
+name, which is also why the catalog estimate carries the slower figure.
+The acceptor answers the inquiry while it is in a link: every run listed both
+peers, alongside one to three of other people's devices in range. A
+25-second window left the sweep the pair's piconet to report, with the
+channel map the scan builds for it, in each run.
 
-Two things the tool does that no case can prevent. It reads the name of
-**every** piconet its sweep heard, by paging the address it put together, and
-`-x` fetches a report from every device the inquiry answered: both page
-devices this bench does not own if any are in range. The bench's ambient
-Classic traffic is sparse, and `-x` is comprehensive-only for this reason,
-but a run on a busy site will transmit to strangers' devices. That is the
-tool's design, not something the harness chooses. The addresses of such
-devices land in the run record, which is why no run output is committed.
+**Known limits.** A device's name is read over a page of it, and on a bench
+with strangers' devices in range the name can land on the wrong line: one run
+printed the acceptor's address against a television's name, while the
+television, whose own name read had just failed, was printed as `[unknown]`.
+The tool reads each name into a buffer of its own, so the swap is below it,
+in the reply the library matched to the read — [fork
+#1172](https://github.com/SqueakyFloors/ubertooth/issues/1172). Six runs and
+five further inquiries on the same bench had every name right. Nothing here
+can tell a swapped name from a wrongly reported one, so the case asks that
+**one** of the two peers came back under its own name, which proves a name
+read worked, rather than naming which; both peers wrong still fails.
 
-`-x` is also the one case whose deadline is not a worst case. The tool calls
-its per-device report for every device the inquiry answered **and** for every
-survey result whose UAP the sweep recovered — which the pair's own piconet is
-on any working run, and those go to the `00:00:` address the tool assembles,
-so each costs a page too. Per device
-that is a connect (25 s), a name read (25 s), a version read (20 s), the
-features and the first extended feature page (20 s each), the clock offset
-and channel map (1 s each), and dropping the link again (10 s). That is about 123 seconds a device if every
-read fails, and another 20 for each further extended feature page it reports.
-The case allows four minutes for it, which with the window and the inquiry
-puts its whole deadline at 356 seconds; that covers two devices behaving
-normally with a wide margin, and a run that needs more fails on the driver's
-deadline, with its message.
+One thing the tool does that no case can prevent. It reads the name of
+**every** piconet its sweep heard, by paging the address it put together, so
+it pages devices this bench does not own if any are in range. That is the
+tool's design, not something the harness chooses; the bench's ambient Classic
+traffic is sparse, but a run on a busy site will transmit to strangers'
+devices. Their addresses land in the run record, which is why no run output
+is committed.
+
+**`-s -x` is not exercised, and the bench settled why.** `-x` fetches its
+per-device report over a connection it makes to each device, and the acceptor
+is in the pair's link throughout, so the connection does not happen: a run
+had the inquiry list the acceptor and its extended report give the address as
+nothing at all. An idle acceptor would answer, but then the sweep has no
+piconet to report, and with two Classic boards the two cannot both hold. What
+the case wants is a third Classic device, idle and connectable, which this
+bench has not got ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
+
+The same run showed why the case could not have pinned an exit status either.
+`-x` asks every piconet the sweep heard as well, and about twenty of those
+reads failed against devices the bench does not own, each of which makes the
+tool exit 1. Accepting 1 instead would accept the other two things that
+status means — a capture stream that died, and a board that would not give
+its mode up — and neither is visible to this case's own checks.
 
 `-e` is not exercised: no case passes it, so the survey runs with the tool's
 default of two allowed access-code bit errors.
+
+**Why the `hci` plan is still not in the release gate.** Both suites pass:
+smoke in 332 to 376 seconds over four runs, comprehensive in 400. Its smoke
+estimate is 345 s, which would take the release suite from about 1174 s to
+about 1519 s — roughly 25 minutes — on the one host that has an adapter, the
+way `Recover AFH map` already names a bench host. What holds it back is not
+the adapter but the peers. Two faults were measured while running it, both
+peer-side:
+
+- bytes lost on a bridge's serial line while an Ubertooth captures on the
+  same host, which failed 4 of 70 pair sessions over an evening
+  ([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310));
+- a peer that restarts while a second link is paged to it, about one follow
+  case in eight, which the driver reports as a pair that never streamed
+  ([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)).
+
+Four more pair-driven cases at those rates would fail a gate run too often to
+trust, and both faults also reach the pair tests already in the gate. So the
+plan runs on its own, and goes into `release.yaml` when those are fixed.
 
 **A host without `hciconfig` and `hcitool` runs nothing.** Both are declared
 as host tools the harness does not install, and a missing host tool makes a
@@ -2779,17 +2796,19 @@ host tools as `Bluetooth inquiry scan`, and the same `hci` plan. The
 `duration:` is a **floor** on the capture, not an option of the tool's and not
 the length of the command: the driver adds the setup allowance to the window
 it interrupts at, so a tool whose page was answered at once captures for most
-of that allowance as well. A `duration: 25s` follow case normally runs for
-about 77 seconds and captures for most of them.
+of that allowance as well. Measured on the bench, a `duration: 25s` follow
+case runs the tool for about 83 seconds and captures for most of them.
 
 **Expected outcome.** Smoke runs two cases: `-t <central>`, where the tool
 must report following that piconet, say it is not using AFH, and print at
 least ten packet lines, all with the central's LAP; and `-t <central> -a`,
-which must additionally report `AFH map read: <n> of 79 channels in use` and
-print the map as an `AFH map:` line. Comprehensive adds `-q`, whose file must be a
-BR/EDR PCAP that the record decoder then reads: at least ten records, each
-carrying the central's LAP as its own and as its reference address, since a
-capture of the right size says nothing about whose packets are in it. As with
+which must report that the remote is not using AFH and follow without it,
+with no failed map read and no error — the outcome this bench gives, since
+the peer runs the paged link with AFH off. Comprehensive adds `-q`, whose
+file must be a BR/EDR PCAP holding at least ten packets, with the packet
+lines on standard output checked as in the other two cases. The records
+themselves are not decoded; see the known limits below for the measurement
+behind that. As with
 the scan, every case requires the pair's own report, reads the adapter before
 the tool and again first thing in the cleanup, then resets both peers and
 restores the board.
@@ -2804,57 +2823,58 @@ the UAP (Bluetooth Core, Vol 2, Part B 1.3, 6.4.6), so the two guessed bytes
 need not decide whether it arrives. A case either way would be asserting an
 outcome nobody has seen, so there is none.
 
-**Known limits.** **Nothing here has run against a real adapter**
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)):
-the checks come from the tool's source and are exercised against samples of
-its output, and the `hci` plan stays out of the release gate until a real run
-passes. Four things the first real run has to settle.
+**Measured.** Every case ran against a USB adapter on a Linux bench, and the
+two questions that could not be answered from the source are answered.
 
-Whether the ESP32 takes a second link at all. Paging it from the adapter
-makes it a peripheral in the adapter's piconet while it is already leading
-the piconet it holds with the other peer. Bluedroid may refuse that, in which
-case the page fails and the case fails with the tool's own message, which is
-the honest outcome; what the test would then be waiting on is a peer that
-allows it, or a different way to reach a clock.
+The ESP32 takes the second link. Paging it from the adapter makes it a
+peripheral in the adapter's piconet while it is already leading the one it
+holds with the other peer, and Bluedroid allows that: the page returned the
+clock offset in every run, and the pair's own link stayed up and streaming
+through it.
 
-What `-a`'s map describes. The map the tool reads is of the link the page
-made, between the adapter and the peer, not of the piconet the Ubertooth is
-following. The two need not agree: a central decides its own link's map. So
-the case checks that a map was read, printed and applied, and **not** which
-channels it holds — the ESP32's `afh` command sets the board's own channel
-classification, which is advice to whichever device leads a link, so it
-cannot be used to predict this map. Comparing a recovered map with a known
-one is `Recover AFH map`'s job, from the air.
+Following the target's clock does yield that piconet's packets. A 25-second
+capture carried a few hundred packet lines, every one of them the central's
+LAP and none of another piconet's — 248 in one run and 368 in another.
 
-Whether the allowance for the setup is enough. The window the driver
-interrupts at is the capture plus that allowance, and the parts of the setup
-with no deadline of their own are covered by a margin rather than a bound. If
-the setup ever outruns the whole allowance the capture is shorter than the
-plan asked for and nothing notices, because the tool prints no mark for the
-moment its capture begins. A bench that sees short captures should widen
-`BOARD_SETUP_S` rather than the duration.
+**Known limits.** What those packets' headers say is another matter, and it
+is what fork
+[#518](https://github.com/SqueakyFloors/ubertooth/issues/518) is open about.
+The `-q` case wrote 258 records, every one carrying the central's LAP and
+that LAP and UAP as its reference address, and then: **none** of them passed
+a header HEC, where `ubertooth-rx -l -u` on this same pair passes a fifth to
+a third of them, and 35 of them carried `transport 3`, which a receive-only
+basic-rate capture records as 0. Both fields come from the header, and both
+say the same thing — the access code is found and the header does not decode,
+which is about the clock the tool hops on. So the `-q` case checks that the
+file is a BR/EDR pcap holding the piconet's packets and leaves the records to
+`Classic capture record fields`, which reads a capture from a tool whose
+headers do decode. A bench measurement is what fork #518 was waiting for.
 
-Whether `-a` finds a map to read. The tool treats a remote that reports AFH
-**off** as a documented outcome: it says "the remote device is not using AFH;
-following without it", clears `-a`, follows anyway, and exits 0. The `-a`
-case fails on that, which is intended — `-a` was asked for and did not
-happen — but whether the adapter's link to the peer runs with AFH on is the
-adapter's choice and is not known here. The retry loop in the tool covers an
-empty map, not a mode of off.
+`-a` finds no map to read on this bench, and the case pins that outcome. The
+peer reports AFH **off** on the link the page made, so the tool says "the
+remote device is not using AFH; following without it", clears `-a`, follows
+anyway, and exits 0 — which is its documented behavior for a remote with AFH
+off, and what the case therefore requires, forbidding an `AFH map read:`
+failure or an error. Whether a link runs with AFH on is the central's choice,
+and the adapter's link to the peer does not, so the branch that reads a map,
+prints it and hands it to the board is **not** exercised: it wants a peer
+that offers one ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
+That is also narrower than it sounds even when it runs: nothing reads the
+board back, so what such a case could check is that the request was made and
+accepted. The map the tool reads is of the adapter's link to the peer, not of
+the piconet the Ubertooth follows, and the two need not agree, so comparing a
+map with a known one stays `Recover AFH map`'s job, from the air.
 
-What "applied" means in that case is also narrower than it sounds: the map is
-read, printed, and handed to the board, and nothing reads the board back, so
-what is checked is that the request was made and accepted. The board keeps
-that map until something clears it (a follow without `-a` does), and this
-test's cleanup does not: it restores channel, squelch, and LEDs, as the
-other capture tests do.
+Whether the allowance for the setup is enough is still not bounded, only
+margined. The window the driver interrupts at is the capture plus that
+allowance, and the parts of the setup with no deadline of their own are
+covered by a margin. If the setup ever outruns the whole allowance the
+capture is shorter than the plan asked for and nothing notices, because the
+tool prints no mark for the moment its capture begins. On this bench it did
+not: the captures came back full length in every passing run. A bench that
+sees short captures should widen `BOARD_SETUP_S` rather than the duration.
 
-Whether following the target's clock yields that piconet's packets at all.
-The clock arithmetic gives the target's native clock, and the piconet the
-target leads is the one on the air, so it should; this is what fork
-[#518](https://github.com/SqueakyFloors/ubertooth/issues/518) is open about,
-and a bench with an adapter is what would close it. `-w`, `-e`, `-r` and `-d`
-are not exercised here.
+`-w`, `-e`, `-r` and `-d` are not exercised here.
 
 ## CLI usage smoke
 

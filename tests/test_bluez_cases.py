@@ -246,8 +246,10 @@ class PlanTests(unittest.TestCase):
                              [step.test_name for step in plan.steps(suite)])
 
     def test_the_plan_is_not_in_the_release_suites(self):
-        """Nothing here has run against a real adapter, so it does not gate a
-        release (issue #88)."""
+        """These cases have run on hardware and passed, but they are four
+        more pair-driven cases, and the bench measured two peer-side faults
+        that would fail a gate too often: serial bytes lost under load (#310)
+        and a peer that restarts under a second link (#311)."""
         release = (ROOT / "testplans" / "release.yaml").read_text(encoding="utf-8")
         for name in (INQUIRY_TEST_NAME, FOLLOW_TEST_NAME):
             self.assertNotIn(name, release)

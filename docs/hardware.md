@@ -282,28 +282,37 @@ anything. A mechanism that cannot be missing this way (`btmgmt`,
 `bluetoothctl`, or `/sys/class/bluetooth/<device>/address`) is worth
 considering once a bench exists to test one on.
 
-**These cases need privileges nothing else here does.** Everything they run
-talks to the controller over a raw Bluetooth HCI socket, which Linux allows
-only to a process holding `CAP_NET_RAW`: `ubertooth-scan` and
-`ubertooth-follow` for the inquiry, the page and the clock and channel-map
-reads, and `hciconfig` and `hcitool` for the reads the harness makes around
-them. The commands that change the controller's state want `CAP_NET_ADMIN`
-too. Everything else in the harness runs as an ordinary user, so an adapter
-bench needs one of:
+**One step of these cases needs a privilege nothing else here does: the
+page.** Everything here talks to the controller over a raw Bluetooth HCI
+socket, and opening one is not itself privileged — the kernel's own filter
+on such a socket (`hci_sec_filter` in `net/bluetooth/hci_sock.c`) lets an
+unprivileged opener send a subset of the HCI commands and requires
+`CAP_NET_ADMIN` for the rest. Measured on the bench as an ordinary user with
+no capabilities anywhere: `hciconfig <device>`, `hcitool con`, `hcitool inq`,
+`hcitool name <peer>` and `hcitool clock <peer>` all work, and
+`hcitool cc <peer>` does not — `Can't create connection: Operation not
+permitted`. HCI Create Connection is the command outside the filter's subset,
+where Remote Name Request is inside it.
 
-- the capabilities on every one of those four binaries
-  (`sudo setcap cap_net_raw,cap_net_admin+ep <path>`) — which has to be
-  redone for each build of the two fork tools, since a `--build` run puts
-  fresh binaries in its own run prefix;
-- or the run made by a user or service that already holds them.
+So of the four binaries only the two fork tools need anything, and only for
+what they page: `ubertooth-follow` pages its target for the clock offset in
+every case, and `ubertooth-scan` pages only with `-x`. Without the
+capability `ubertooth-follow` fails with
+`error: connecting to <address> failed: Operation not permitted` — the tool's
+own message, early, before it opens the board. An adapter bench therefore
+needs one of:
 
-Without it the first step of the first case fails, on `hciconfig`, which is
-at least early and obvious. `hostneeds.Needs` has no way to express a
-capability, so nothing checks this before the run.
+- `CAP_NET_ADMIN` on `ubertooth-scan` and `ubertooth-follow`
+  (`sudo setcap cap_net_admin+ep <path>`) — which has to be redone for each
+  build of them, since a `--build` run puts fresh binaries in its own run
+  prefix. The bench granted `cap_net_raw,cap_net_admin+ep`, which also works
+  and is what the runs below were measured with;
+- or the run made by a user or service that already holds it.
 
-What is still unknown, and what the first real run on a bench will settle, is
-in [`docs/tests.md`](tests.md) under `Bluetooth inquiry scan` and
-`Follow Classic piconet over HCI`. One caution belongs here too:
+`hostneeds.Needs` has no way to express a capability, so nothing checks this
+before the run.
+
+One caution belongs here too:
 `ubertooth-scan` pages every piconet its sweep heard to read its name, and
 `-x` fetches a report from every device the inquiry answered. On a site with
 other people's Bluetooth devices in range, that transmits to them. Run it

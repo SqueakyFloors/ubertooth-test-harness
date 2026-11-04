@@ -40,13 +40,14 @@ it is signalled, so those cases give the driver ``--interrupt-after``, which
 is what ends the capture, and ``--min-seconds``, so a run that stopped early
 fails instead of passing on a shorter capture.
 
-**What these cases do not claim.** Nothing here has run against a real
-adapter: the bench has no Bluetooth controller
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
-The checks are written to what the two tools document and print, and the
-plan that names them is not in the release gate. ``docs/tests.md`` records,
-per case, which outcome is the tool's documented one and which is a reading
-of its source that the first real run has to confirm.
+**Measured.** Every case here has run against a real adapter, a USB
+controller on a Linux bench, with the two ESP32 peers holding their link and
+one Ubertooth sweeping: the inquiry reports both peers while they stream, the
+page for the clock offset succeeds against the peer that is already leading
+its own piconet, and the followed capture carries that piconet's packets.
+What the runs settled, and what they left open, is in ``docs/tests.md`` under
+each test -- including the two cases the bench argued out of existence, and
+what the capture ``-q`` writes does and does not decode.
 """
 
 from __future__ import annotations

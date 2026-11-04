@@ -12,12 +12,20 @@ plan: BlueZ tools with a host Bluetooth adapter
 # must already run firmware/esp32-classic-peer utesp-1.0.0 or a later 1.x
 # image: nothing here flashes them.
 #
-# This plan is deliberately NOT in release.yaml. No bench has a Bluetooth
-# adapter yet (issue #88), so nothing in it has run against real hardware:
-# the checks are written to what the two tools document and print. A bench
-# that has an adapter runs this plan on its own, and the cases move into the
-# release suites once a real run has passed. docs/tests.md records, per
-# case, which outcome is documented and which is still to be confirmed.
+# Every case here has run on a bench with a USB adapter, and both suites
+# have passed: smoke in 332 to 376 s over four runs and comprehensive in
+# 400 s, at the durations below. What the runs settled and what they left open is in
+# docs/tests.md under each test.
+#
+# This plan is still NOT in release.yaml, and the reason is now the peers
+# rather than the adapter. Two peer-side faults were measured while running
+# it: bytes lost on a bridge's serial line under load, which failed 4 of 70
+# pair sessions (issue #310), and a peer that restarts while a second link
+# is paged to it, about one follow case in eight (issue #311). Four more
+# pair-driven cases at those rates would fail a release gate too often to
+# trust, so the plan runs on its own until those are fixed. Its smoke
+# estimate is 345 s, which would take the release suite from about 1174 s to
+# about 1519 s (roughly 25 minutes) on the one host that has an adapter.
 #
 # 25 s per capture is what the bench needs for a useful count of this
 # piconet, as the classic plan records: the Ubertooth sweeps 79 channels and
@@ -30,9 +38,10 @@ plan: BlueZ tools with a host Bluetooth adapter
 # no capture timeout at all: the driver ends it, and the page (up to 25 s),
 # the clock reads, the teardown of the link it made, and the board setup all
 # happen inside the window it is given, so that window is the capture plus an
-# allowance for all of it -- about 77 s for a 25 s duration. The cases carry
-# those allowances; a run of this plan takes several times the sum of its
-# durations. The estimates in catalog.py have the figures.
+# allowance for all of it -- about 77 s for a 25 s duration, and the bench
+# measured the command at 83 s. The cases carry those allowances; a run of
+# this plan takes several times the sum of its durations. The estimates in
+# catalog.py have the measured figures.
 suites:
   hci:
     - Bluetooth inquiry scan:
