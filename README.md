@@ -1148,7 +1148,9 @@ but `ubertooth-btle` does, and
 it may refuse any API that is not the one the tools were built for — newer as
 well as older — stopping that board as it goes; whether it refuses or warns
 and reads on is how those tools were built and whether
-`UBERTOOTH_ALLOW_API_MISMATCH` is set, neither of which a run can read
+`UBERTOOTH_ALLOW_API_MISMATCH` is set; the run does not set that variable
+and cannot tell how the installed tools were built, so it cannot know which it
+would get
 (`ubertooth_check_api` in the
 fork's
 [`host/libubertooth/src/ubertooth.c`](https://github.com/SqueakyFloors/ubertooth/blob/main/host/libubertooth/src/ubertooth.c)).

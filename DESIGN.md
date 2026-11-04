@@ -927,7 +927,8 @@ restore by hand; guards are never restored automatically. The CRC read uses
 `ubertooth-btle`, whose `ubertooth_check_api` may refuse any firmware API that
 is not the host tools' own — newer as well as older — and stop that board as
 it goes; whether it refuses or warns and goes on is the host tools' build and
-`UBERTOOTH_ALLOW_API_MISMATCH`, neither of which the run can read. So the
+`UBERTOOTH_ALLOW_API_MISMATCH`, which the run does not set and cannot
+predict. So the
 read is refused (failing the check) unless the same check's `-v`
 read showed an equal API; preflight refuses a guard-only board whose API
 differs, before any test. That version is read from

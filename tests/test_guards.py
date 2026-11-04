@@ -258,8 +258,8 @@ class GuardPlanningTests(unittest.TestCase):
         ok = CommandResult(api_check.argv, 0,
                            f"Firmware version: git-x (API:{current})\n", "", 0.01, False)
         self.assertEqual("", api_check.result_failure(ok))
-        # Either way about: ubertooth-btle refuses any other API and stops the
-        # board, so the guard check could not read its CRC.
+        # Either way about: ubertooth-btle may refuse any other API and stop
+        # the board, so the guard check does not read its CRC.
         for api in (HOST_API - 1, HOST_API + 1):
             other = CommandResult(
                 api_check.argv, 0,
@@ -674,8 +674,8 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
                       crc.refuse({transitions.differs_key(firmware_key): "git-other (API:1.06)"}))
         self.assertIn("could not be read", crc.refuse({firmware_key: "git-test"}))
         self.assertEqual("", crc.refuse({firmware_key: f"git-test (API:{current})"}))
-        # Newer firmware as well: ubertooth-btle refuses any API that is not
-        # the one the tools were built for, and stops the board as it goes.
+        # Newer firmware as well: ubertooth-btle may refuse any API that is
+        # not the one the tools were built for, stopping the board as it goes.
         self.assertIn(f"API {newer} is not the host tools API {current}",
                       crc.refuse({firmware_key: f"git-test (API:{newer})"}))
 
@@ -1179,10 +1179,13 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
                     readings(text),
                 )
 
-        # A value the board did print wins over a stall beside it, whichever
-        # request stalled: that is the `-V` case, where firmware older than
-        # the build string answers the version and not the build.
-        firmware = f"{APPLICATION_IMAGE} git-test (API:{transitions.format_api(HOST_API)})"
+        # A value the board did print wins over a stall beside it. That is
+        # the `-v` case on firmware older than the info block: the image
+        # request stalls, libubertooth says so on stderr, and the revision
+        # fallback still prints a whole version line on stdout. Without
+        # stdout first, the firmware reading would be unsupported and the
+        # settings requirements would fall away with the image name.
+        firmware = f"2020-12-R1 (API:{transitions.format_api(HOST_API)})"
         (version_read,) = [
             step for step in reads
             if step.name.endswith(transitions.GUARD_FIRMWARE_KEY)

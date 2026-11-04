@@ -92,7 +92,7 @@ class PreflightCheck:
     # Guard-only boards: the firmware API must be the host tools' own.
     # ubertooth-btle may refuse any other, newer as well as older, and stop
     # the board as it goes -- whether it does is its own build and an
-    # environment variable, which a run cannot see -- so the guard check will
+    # environment variable the run does not set -- so the guard check will
     # not send such a board its CRC read and the baseline fails; this refuses
     # it before any test instead (transitions._btle_api_refusal).
     required_api: int | None = None
