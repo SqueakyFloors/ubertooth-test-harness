@@ -13,8 +13,8 @@ plan: BlueZ tools with a host Bluetooth adapter
 # image: nothing here flashes them.
 #
 # Every case here has run on a bench with a USB adapter, and both suites
-# have passed: smoke in 332 to 376 s over four runs and comprehensive in
-# 400 s, at the durations below. What the runs settled and what they left open is in
+# have passed: smoke in 300 to 376 s over five runs and comprehensive in
+# 390 and 400 s, at the durations below. What the runs settled and what they left open is in
 # docs/tests.md under each test.
 #
 # This plan is still NOT in release.yaml, and the reason is now the peers
