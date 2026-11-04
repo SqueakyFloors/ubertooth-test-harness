@@ -556,7 +556,7 @@ so each is recorded with where its sources come from and its SHA-256.
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
 | `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.4.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/242)) | `f98bb7b7a08eca4ab9999be6b00bface5e441e3de7592ebb7959ad64205f55c0` |
 | `zephyr.hex` (algorithm 1) | the same roles on a controller without channel selection algorithm 2, built with `chan-sel-1.conf` and `chan-sel-1.overlay` | `utdk-1.4.0-chansel1` | the same sources and the same change | `9fac198b2bdb7a46cb63219070f220cbb82fd0507fc369bae79b69fe3451f21b` |
-| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.6.0` | this repository, `firmware/esp32-classic-peer` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/312)) | `f7d71dff152731630aa356c3e5a396a34ad7e2d4b5f82003add40585ee520de4` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.6.0` | this repository, `firmware/esp32-classic-peer` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/316)) | `67270fd0fb36273d3b60efc0ce10150b6944b7ce394eea202c9711b2ea935951` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
 hash ([`testplans/slow.yaml`](../testplans/slow.yaml),
