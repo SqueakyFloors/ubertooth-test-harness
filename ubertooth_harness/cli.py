@@ -501,7 +501,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_suite.add_argument(
         "--bootloader", choices=bootloader.MODES, default=bootloader.MODE_RECORD,
-        help="what to do about each board's bootloader: record what is "
+        help="what to do about the bootloader of each board whose firmware "
+        "the run requires (not a guard-only board, nor one whose test writes "
+        "its own firmware): record what is "
         "installed (the default), check it against a bootloader built from "
         "the run's own source, or install that one on a stale board whose "
         "registry pairs it with a debug programmer. check and update need "

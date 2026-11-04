@@ -641,7 +641,11 @@ of a board whose firmware the run requires, and this test establishes its own,
 so the read is skipped for it
 ([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
 [#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
-Passing the option costs nothing and still covers any other board in the run.
+Passing the option costs nothing, and covers no board of this suite: the read
+leaves out a guard-only board too. `--bootloader update` installs over a
+programmer for the same boards, so it does not reach this board either; a
+board that needs a bootloader gets one before this plan runs, from a run that
+does require its firmware or by hand over the programmer.
 
 **Run it by hand, with someone who can reach the bench.** It is destructive:
 if the bootloader does start the unstartable image, the board faults on every

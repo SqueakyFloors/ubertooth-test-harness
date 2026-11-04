@@ -2026,7 +2026,8 @@ Reset into invalid application:
     One Ubertooth whose bootloader came from this tree, with the startable
     check in it, on a hub that can switch VBUS for its own port, plus every
     other registered board on the host as a guard. Linux only, because the
-    verdict is a USB enumeration check. The committed plan names the board
+    hub is reached through a serial-device path that only Linux has. The
+    committed plan names the board
     the registry pairs with a debug programmer, so a board that does fault
     has a recovery path at hand without re-cabling. On a board carrying the
     factory bootloader this test does not fail, it bricks the board.
@@ -2038,8 +2039,10 @@ Reset into invalid application:
     running the image, or that does not come back, fails the case and the
     message says which. The recovery step writes the run's own image back
     without a selector and waits for the application to answer with the
-    expected revision; the cleanup does the same whatever happened, so a
-    failed case still ends with a board on the test image.
+    expected revision -- without a selector, since a board in its bootloader
+    has none; the cleanup does the same whatever happened, naming the board
+    where it can answer, so a failed case still ends with a board on the test
+    image.
   limitations: >-
     A pass says what the bootloader in that board's flash does, and that
     bootloader is not what the run built: it cannot be written over USB, so a

@@ -433,7 +433,9 @@ name it.
 ## Bootloader identity
 
 **What it does.** Nothing as a plan entry: a catalog entry for the bootloader
-read, which mandatory preflight does on every board of every run instead.
+read, which mandatory preflight does instead -- for the boards whose
+firmware a run requires, which leaves out a guard-only board and a board
+whose test writes its own firmware.
 
 **Theory of operation.** A board's bootloader is the first 16 KiB of its
 flash, and `ubertooth-dfu` runs from there, so an ordinary firmware write
@@ -483,7 +485,8 @@ serial. `update` also needs a `Debug programmer` paired with the board, with a
 
 **Expected outcome.** No implementation as a plan entry; only a
 `runnable: false` plan may name it. As a preflight check: one `-B` per
-selected board, recorded in `run.jsonl` as a `bootloader_identity` record and
+selected board whose firmware the run requires, recorded in `run.jsonl` as a
+`bootloader_identity` record and
 shown in the report's Bootloader section and in the GUI's board list.
 `record` passes on any answer, including a factory bootloader; `check` and
 `update` pass only on the identity the artifact names.
@@ -3174,10 +3177,12 @@ firmware the run requires and this test establishes its own, so the read is
 skipped for it
 ([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
 [#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
-`--bootloader update` installs a bootloader over that programmer, which is
-how a board that needs one gets it. Required:
-`platforms:`, because the verdict is a USB
-enumeration check and that is fail-closed on Linux only, and
+`--bootloader update` does not reach this board either -- it installs over a
+programmer for the same boards the read covers -- so a board that needs a
+bootloader gets one before this plan is run: from a run that does require its
+firmware, or by hand over the programmer. Required:
+`platforms:`, because the hub is reached through a serial-device path that
+only Linux has, and
 `USB power controller:`, the hub the board must be on. A plan pointed at the
 wrong hub fails planning rather than switching whatever is on that hub's
 registered port, and a bench that has not got the named hub, or whose board
@@ -3282,8 +3287,10 @@ all, and the test does not read it where a hub can; a hub that reported a
 port off without cutting it would make the board's disappearance the only
 evidence, which is why the disappearance is what is required rather than the
 port's reported state. The hardware run is
-still outstanding
-([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
+done: one pass on the paired board, with the bootloader read by hand either
+side and the two `btbr` guards recording `channel`, `squelch` and `crc` as
+unanswered
+([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141#issuecomment-6638139774)).
 
 ## Receive-only firmware
 

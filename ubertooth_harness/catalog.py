@@ -1100,14 +1100,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Recover AFH map": _profiles(
         Estimate(40.0, per_duration=4), Estimate(60.0, per_duration=6)
     ),
-    # ESTIMATE_PENDING_HW. Not measured: this test has not run on hardware
-    # yet. It is built from what the same commands cost elsewhere -- the
-    # write and the read-back of DFU images, the power cycle and
-    # re-enumeration of Exclusive Ubertooth topology -- as the write of the
-    # unstartable image and its post-reset polling, the cycle, the recovery
-    # write with its read-back, and the cleanup's checks. Replace it with the
-    # measurement from the first hardware run.
-    invalidapp_cases.TEST_NAME: _default(Estimate(90.0)),
+    # Measured on the bench: 49 s for the whole invocation, of which the case
+    # itself was 36 s -- the write, the cycle, the recovery write with its
+    # read-back, and the cleanup's checks -- and the rest the guard baseline
+    # and the check after it, on a host with six other boards. Rounded up for
+    # a bench with more guards to read, or a slower hub.
+    invalidapp_cases.TEST_NAME: _default(Estimate(70.0)),
 })
 
 
