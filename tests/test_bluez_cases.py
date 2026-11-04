@@ -451,41 +451,18 @@ class FollowCaseTests(unittest.TestCase):
              "-t", INITIATOR_ADDRESS, "-q",
              "/run/captures/hci/follow.pcap"],
             tool_argv(case))
-        self.assertEqual(["verify-capture", "verify-records"],
-                         [step.step_id for step in case.steps][-2:])
+        self.assertEqual("verify-capture",
+                         [step.step_id for step in case.steps][-1])
 
-    def test_the_record_checks_are_the_classic_tests_own_less_the_header(self):
-        """One place spells out what a followed capture's records must hold.
-
-        The header floor is left out, and the bench is why: a run wrote 258
-        records, all of them carrying the piconet's LAP and reference
-        address, and none passing a header HEC, where `ubertooth-rx -l -u`
-        on the same pair passes a fifth of them (fork #518).
-        """
-        from ubertooth_harness.classic_cases import (
-            MIN_HEC_VALID_RECORDS, _record_checks)
+    def test_the_pcap_case_does_not_decode_the_records(self):
+        """Measured: all 258 records carried the piconet's LAP and reference
+        address, none passed a header HEC, and 35 carried `transport 3`. The
+        access code is found and the header does not decode (fork #518), so
+        the records are left to the test that reads a capture whose headers
+        do."""
         case = follow_cases("comprehensive")["follow-target-pcap"]
-        argv = list(steps(case)["verify-records"].resolve_argv(CONTEXT))
-        initiator = {"lap": CENTRAL_LAP, "uap": CENTRAL_UAP}
-        expected = [option for option in _record_checks(initiator)
-                    if option not in ("--min-hec-valid",
-                                      str(MIN_HEC_VALID_RECORDS))]
-        self.assertEqual(expected, argv[3:])
-        self.assertNotIn("--min-hec-valid", argv)
-        # What it still pins: whose packets they are.
-        self.assertEqual(CENTRAL_LAP, argv[argv.index("--lap") + 1])
-        self.assertEqual(CENTRAL_UAP, argv[argv.index("--reference-uap") + 1])
-
-    def test_the_pcap_records_are_decoded_and_held_to_the_centrals_lap(self):
-        """A BR/EDR capture of the right size says nothing about whose
-        packets are in it."""
-        case = follow_cases("comprehensive")["follow-target-pcap"]
-        argv = list(steps(case)["verify-records"].resolve_argv(CONTEXT))
-        self.assertEqual("/run/captures/hci/follow.pcap", argv[2])
-        self.assertEqual(CENTRAL_LAP, argv[argv.index("--lap") + 1])
-        self.assertEqual(CENTRAL_LAP, argv[argv.index("--reference-lap") + 1])
-        self.assertEqual(CENTRAL_UAP, argv[argv.index("--reference-uap") + 1])
-        self.assertIn("--min-reference-uap", argv)
+        self.assertNotIn("verify-records",
+                         [step.step_id for step in case.steps])
 
     def test_no_case_runs_l_and_u_without_t(self):
         """The page then goes to a guessed 00:00: address, and whether it

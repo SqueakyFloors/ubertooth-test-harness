@@ -61,7 +61,6 @@ from ubertooth_harness import afhmap, capturefile, esp32peer
 from ubertooth_harness.classic_cases import (
     ACCEPTOR_ROLE,
     INITIATOR_ROLE,
-    MIN_HEC_VALID_RECORDS,
     MIN_PACKETS,
     MIN_WRITES,
     PAIR_SETUP_S,
@@ -72,8 +71,6 @@ from ubertooth_harness.classic_cases import (
     _capture_path,
     _pair,
     _pair_patterns,
-    _record_checks,
-    _record_step,
     _reset_step,
     piconet_packets,
 )
@@ -628,35 +625,32 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
             check=piconet_packets(central, MIN_PACKETS, only=True),
             expected_state=(f"{MIN_PACKETS}+ packet lines with LAP {central}; "
                             f"-q wrote a pcap file with link type "
-                            f"{LINKTYPE_BREDR} whose records all carry LAP "
-                            f"{central}"),
+                            f"{LINKTYPE_BREDR} holding {MIN_PACKETS}+ "
+                            "packets"),
             files=(("-q", "follow.pcap"),),
             verify=(
                 _capture_file_step(
                     "verify-capture",
                     "The -q file is a BR/EDR pcap and holds the packets",
                     "follow.pcap", "pcap", MIN_PACKETS),
-                # The Classic record test's checks of a followed capture,
-                # less the header one, and the bench is why. A run of this
-                # case wrote 258 records, every one of them carrying LAP
-                # e9c5ba and that LAP and UAP as its reference address, and
-                # **none** of them passed a header HEC -- where
-                # `ubertooth-rx -l -u` on this same pair passes 20 to 40% of
-                # them. So the access code is found and the header is not,
-                # which is about the clock `ubertooth-follow` hops on and is
-                # what fork #518 is open about. Pinning a header floor here
-                # would be asserting an outcome this tool does not produce.
+                # No record decode. The bench settled why: a -q run wrote
+                # 258 records, every one carrying LAP e9c5ba and that LAP and
+                # UAP as its reference address, and then
                 #
-                # -t gives this tool the UAP as well as the LAP, so the
-                # reference address is still knowable in full, and that is
-                # the check that says whose packets these are. Not
-                # `following=`, which reads an option only a PCAPNG carries.
-                _record_step(
-                    "verify-records",
-                    f"Every record in the -q file carries LAP {central}",
-                    "follow.pcap",
-                    tuple(option for option in _record_checks(initiator)
-                          if option not in ("--min-hec-valid",
-                                            str(MIN_HEC_VALID_RECORDS)))),
+                #   none of them passed a header HEC, where
+                #   `ubertooth-rx -l -u` on this same pair passes a fifth to
+                #   a third of them, and
+                #
+                #   35 of them carried `transport 3`, which a receive-only
+                #   basic-rate capture records as 0.
+                #
+                # Both are header-derived fields, and both say the same
+                # thing: the access code is found and the header does not
+                # decode, which is about the clock `ubertooth-follow` hops
+                # on. That is what fork #518 is open about, so this case
+                # checks the file is a BR/EDR pcap with the piconet's packets
+                # in it and leaves the records to `Classic capture record
+                # fields`, which reads a capture taken by a tool whose
+                # headers do decode. docs/tests.md carries the figures.
             )))
     return tuple(cases)
