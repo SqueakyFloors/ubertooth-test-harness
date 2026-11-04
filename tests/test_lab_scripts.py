@@ -1295,22 +1295,74 @@ class CheckoutEnvironment(Bench):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("held", result.stdout)
 
-    def test_another_interpreter_starting_a_helper_re_runs_it_under_this_one(self):
-        """Any interpreter may start a helper; only one may finish it.
+    def outside_interpreter(self) -> Path:
+        """An interpreter no checkout bootstrapped, as a bench wrapper gives.
 
-        The interpreter that started this one came from outside the
-        checkout's environment, which is what a bench wrapper, a shebang, or
-        a plain `python3` gives. The command reports the interpreter that
-        held it, so this fails if the re-run goes away and only the child's
-        `-P` is left.
+        The environment this suite runs in was built from it, so it exists
+        wherever the suite does. Skipped rather than assumed, and checked
+        rather than assumed to be unbootstrapped: a helper succeeding under
+        it is only evidence of a re-run while that holds.
         """
         outside = Path(sys.base_prefix) / "bin" / "python3"
         if not outside.is_file():
             self.skipTest(f"no interpreter outside the environment at {outside}")
+        asked = subprocess.run(
+            [str(outside), "-c",
+             "import pathlib, sys;"
+             f"print((pathlib.Path(sys.prefix) / {_checkout.VENV_MARKER!r}).is_file())"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if asked.stdout.strip() != "False":
+            self.skipTest(f"{outside} reports itself a harness environment")
+        return outside
+
+    def plain_environment(self) -> dict:
+        """What a shell gives: no PYTHONPATH, no harness variables."""
         environment = dict(os.environ)
-        environment.pop("PYTHONPATH", None)
-        environment.pop("UBERTOOTH_HARNESS_HARDWARE", None)
-        environment.pop(_checkout.REEXEC_ENV, None)
+        for name in ("PYTHONPATH", "UBERTOOTH_HARNESS_HARDWARE",
+                     _checkout.REEXEC_ENV):
+            environment.pop(name, None)
+        return environment
+
+    def test_another_interpreter_starting_a_helper_re_runs_it_under_this_one(self):
+        """Any interpreter may start a helper; only one may finish it.
+
+        An interpreter nobody bootstrapped is turned down, so a hold that
+        completes under one is proof that the re-run happened. Remove the
+        re-run and leave the child's `-P`, and this fails.
+        """
+        outside = self.outside_interpreter()
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c", "echo held",
+            ],
+            capture_output=True, text=True, env=self.plain_environment(),
+            cwd=str(self.decoy_checkout()), timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("held", result.stdout)
+
+    def test_every_helper_re_runs_itself_not_only_hold(self):
+        """`peer` and `hub-port` carry the same locks and the same risk."""
+        outside = self.outside_interpreter()
+        for path in (HOLD, HUB_PORT, PEER):
+            with self.subTest(script=path.name):
+                result = subprocess.run(
+                    [str(outside), str(path), "--help"],
+                    capture_output=True, text=True,
+                    env=self.plain_environment(),
+                    cwd=str(self.root), timeout=120,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("usage:", result.stdout)
+
+    def test_the_note_about_the_re_run_does_not_reach_the_command(self):
+        """The command under `hold` may be a helper with its own to make."""
+        outside = self.outside_interpreter()
         result = subprocess.run(
             [
                 str(outside), str(HOLD),
@@ -1318,15 +1370,59 @@ class CheckoutEnvironment(Bench):
                 "--lease-dir", str(self.leases),
                 "--wait-for-boards", "0",
                 "UT0", "--", "sh", "-c",
-                f'echo "held by ${{{_checkout.REEXEC_ENV}:-nobody}}"',
+                f'echo "note=[${{{_checkout.REEXEC_ENV}:-unset}}]"',
             ],
-            capture_output=True, text=True, env=environment,
-            cwd=str(self.decoy_checkout()), timeout=120,
+            capture_output=True, text=True, env=self.plain_environment(),
+            cwd=str(self.root), timeout=120,
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        # The re-run records the checkout that made it, and the command
-        # inherits that, so this says which harness environment held it.
-        self.assertIn(f"held by {REPO}", result.stdout)
+        self.assertIn("note=[unset]", result.stdout)
+
+    def test_a_note_left_in_the_environment_does_not_stand_in_for_an_attempt(self):
+        """Nothing a caller supplies decides which harness runs."""
+        outside = self.outside_interpreter()
+        environment = self.plain_environment()
+        environment[_checkout.REEXEC_ENV] = str(REPO)
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c", "echo held",
+            ],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.root), timeout=120,
+        )
+        # Either the re-run still happens or the helper refuses; what it must
+        # never do is run the harness under an interpreter nobody built.
+        if result.returncode == 0:
+            self.assertIn("held", result.stdout)
+        else:
+            self.assertIn("bootstrap.py", result.stderr)
+            self.assertNotIn("held", result.stdout)
+
+    def test_an_unexecutable_environment_is_refused_not_a_traceback(self):
+        """Executable and not an executable image: os.execv raises."""
+        broken = self.root / "broken" / "bin" / "python"
+        broken.parent.mkdir(parents=True)
+        broken.write_text("not an executable image\n", encoding="utf-8")
+        broken.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", broken):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with unittest.mock.patch.object(
+                        _checkout.os, "execv", side_effect=OSError("exec format")
+                    ):
+                        with self.assertRaises(SystemExit) as caught:
+                            _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        self.assertIn("bootstrap.py", str(caught.exception))
+        # The spent note is cleared, so a later attempt is not suppressed.
+        self.assertNotIn(_checkout.REEXEC_ENV, os.environ)
 
     def test_the_re_run_names_this_checkouts_interpreter_and_the_script(self):
         given = ["UT0,DK0", "--", "ubertooth-util", "-U", "x", "-v"]
@@ -1356,6 +1452,16 @@ class CheckoutEnvironment(Bench):
             ):
                 _checkout.run_in_checkout_environment(str(HOLD), "hold")
         execv.assert_not_called()
+
+    def test_arriving_clears_the_note_about_the_re_run(self):
+        with unittest.mock.patch.dict(
+            _checkout.os.environ, {_checkout.REEXEC_ENV: str(_checkout.CHECKOUT)}
+        ):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=True
+            ):
+                _checkout.run_in_checkout_environment(str(HOLD), "hold")
+            self.assertNotIn(_checkout.REEXEC_ENV, _checkout.os.environ)
 
     def test_a_second_attempt_is_not_made(self):
         """An environment that does not report itself must not loop."""

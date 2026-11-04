@@ -3207,7 +3207,7 @@ runner (`After=`/`Wants=` the controller) dials
 |---|---|
 | `--runner-host NAME` | registry Host resource of this machine (required) |
 | `--ubertooth-source DIR` | Ubertooth checkout the runner runs the listed commit from (required; a commit missing there is fetched from its `origin` at run time) |
-| `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout); it is loaded with this checkout's own code, and one this code cannot read is refused here rather than at the next run or hold |
+| `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout); it is loaded with this checkout's own code, and one this code cannot read ends the deploy rather than the next run or hold (`--dry-run` says it would and carries on) |
 | `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
 | `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
 | `--libbtbb-source DIR` | libbtbb checkout the runner builds from (default: deploy's own clone of the [libbtbb fork](https://github.com/SqueakyFloors/libbtbb), see below) |

@@ -34,9 +34,10 @@ is as short as the bench's own wrapper was:
 
 The harness this uses is its own checkout's, start to finish: it re-runs
 itself under that checkout's bootstrapped interpreter, and the delegate it
-hands the locks to can take ``ubertooth_harness`` from nowhere else. So any
-interpreter may start it, the working directory does not matter, and a
-wrapper on a bench is one ``exec`` of this path. See ``_checkout.py``.
+hands the locks to is given that same checkout first on its import path with
+the working directory left off it. So any interpreter may start it, the
+working directory does not matter, and a wrapper on a bench is one ``exec``
+of this path. See ``_checkout.py``.
 
 Exit status is the command's, or 2 if a device could not be held, which is
 what the harness CLI exits on an error of its own.

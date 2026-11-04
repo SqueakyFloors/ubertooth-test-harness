@@ -27,7 +27,9 @@ devices is no place to go without it.
 ``-m ubertooth_harness``. With ``-m``, Python puts the *working directory*
 first on the child's import path, ahead of anything ``PYTHONPATH`` says, so a
 helper run from inside another checkout would hand its work to that
-checkout's harness. ``-P`` leaves the working directory off.
+checkout's harness. ``-P`` leaves the working directory off, and the caller
+names its own checkout first on ``PYTHONPATH``, so that checkout answers the
+import.
 
 ``harness_identity`` names the harness that read something, for the error
 message of a registry a different version wrote. The registry is not wrong
@@ -52,10 +54,11 @@ VENV_PYTHON = VENV / "bin" / "python"
 # checked against each other by tests/test_lab_scripts.py.
 VENV_MARKER = ".ubertooth-harness-venv"
 
-# Set across the re-run, so a .venv whose interpreter does not report that
-# environment as its own cannot make this loop. It holds the checkout that
-# re-ran, not just a flag, because a command run under `hold` may be another
-# checkout's helper: that one has its own attempt to make.
+# Set across the re-run and dropped the moment it has arrived, so a .venv
+# whose interpreter does not report that environment as its own cannot make
+# this loop while nothing further down inherits a spent note. It holds the
+# checkout that re-ran rather than a flag, so one checkout's attempt is never
+# read as another's.
 REEXEC_ENV = "UBERTOOTH_HARNESS_LAB_REEXEC"
 
 # For a child started as `-m ubertooth_harness`; see the module docstring.
@@ -107,11 +110,22 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
       dependencies this interpreter happens to have.
     """
     if in_checkout_environment():
+        # Arrived: the note is spent. Dropping it here is what keeps it from
+        # reaching the command run under `hold` -- which may be a helper of
+        # this same checkout, started by its shebang, with its own re-run to
+        # make -- and what stops a stray value in the caller's environment
+        # from standing in for an attempt.
+        os.environ.pop(REEXEC_ENV, None)
         return
     if (VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)
             and not already_tried()):
         os.environ[REEXEC_ENV] = str(CHECKOUT)
-        os.execv(str(VENV_PYTHON), reexec_argv(script))
+        try:
+            os.execv(str(VENV_PYTHON), reexec_argv(script))
+        except OSError:
+            # A file that is executable and not an executable image. Nothing
+            # has happened yet, so the refusal below is still the right end.
+            os.environ.pop(REEXEC_ENV, None)
     if in_harness_environment():
         return
     raise SystemExit(bootstrap_advice(name or Path(script).name))

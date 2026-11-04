@@ -38,8 +38,9 @@
 #                             (required)
 #   --hardware FILE           resource registry (default CHECKOUT/hardware.yaml);
 #                             it is loaded with this checkout's own code, and
-#                             a registry this code cannot read is refused here
-#                             rather than at the next run or hold
+#                             a registry this code cannot read ends the deploy
+#                             rather than the next run or hold (--dry-run says
+#                             it would and carries on)
 #   --plans-dir DIR           plans for the GUI and runner (default
 #                             CHECKOUT/testplans)
 #   --ubertooth-repo URL      repository whose refs the GUI offers (default:
@@ -498,31 +499,46 @@ fi
 # hold (#312). PYTHONPATH and -P together: the checkout is the only place the
 # package may come from.
 check_registry() {
-    local reason
+    local reason hint
     if [ ! -x "$python" ]; then
+        # Only reachable under --dry-run, where bootstrap.py was printed
+        # rather than run; a real deploy has already died on a missing
+        # interpreter above.
         say "warning: cannot read $hardware without $python"
         return
     fi
     if reason=$(PYTHONPATH=$ROOT "$python" -P - "$hardware" 2>&1 <<'PY'
 import sys
-from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+try:
+    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+except Exception as error:  # the checkout, not the registry
+    sys.exit(f"cannot import the harness from this checkout: {error}")
 try:
     # Unreadable, not YAML, and every rule the registry has: the loader
     # reports all of them as this one error.
     FileResourceRegistry.load(sys.argv[1])
 except RegistryError as error:
-    sys.exit(str(error))
+    sys.exit(f"registry: {error}")
+except Exception as error:  # neither the registry's fault nor the loader's
+    sys.exit(f"unexpected failure reading it: {error}")
 PY
     ); then
         say "registry $hardware loads with this checkout"
         return
     fi
     reason=${reason:-no reason given}
+    # The hint belongs only to a registry the loader turned down. An import
+    # that failed is this checkout's problem and saying "newer registry"
+    # would send the reader the wrong way.
+    hint=
+    case $reason in
+        registry:*) hint="
+  The registry may be newer than this code. Update the checkout and deploy again, or pass --hardware FILE for the registry this code reads." ;;
+    esac
     if [ "$dry_run" = 1 ]; then
         say "warning: would refuse: $hardware does not load with this checkout: $reason"
     else
-        die "$hardware does not load with this checkout (commit $commit): $reason
-  The registry may be newer than this code. Update the checkout and deploy again, or pass --hardware FILE for the registry this code reads."
+        die "$hardware does not load with this checkout (commit $commit): $reason$hint"
     fi
 }
 check_registry

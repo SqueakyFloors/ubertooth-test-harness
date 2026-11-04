@@ -730,7 +730,8 @@ an unambiguous prefix of one.
 **One checkout reads the registry and takes the leases.** A bench helper runs
 the harness of the checkout it lives in: it re-runs itself under that
 checkout's bootstrapped interpreter, and the `ubertooth-harness lease` it
-delegates to can take the package from nowhere else. So a wrapper on the
+delegates to is given that checkout first on its import path with the working
+directory left off it. So a wrapper on the
 bench names a path and nothing more, and the registry and the code that reads
 it cannot come from two different versions. They did once: a wrapper naming a
 deployed checkout's interpreter left every device command on the host
