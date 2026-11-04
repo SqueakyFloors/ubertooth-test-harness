@@ -761,6 +761,21 @@ class Shell:
             return None
         return text
 
+    def settle(self) -> None:
+        """Read what is waiting, then stop waiting for a boot to finish.
+
+        A restart that is still arriving when the session makes up its mind
+        is still a restart. :meth:`drain` leaves a boot open until its ready
+        notice arrives, so that a boot log spanning two drains is read as
+        one; this says there will be no third drain, so an open boot is
+        recorded with what it has. Without it a part-read restart was
+        dropped, and a run that had lost a board could pass (#311).
+        """
+        self.drain()
+        if self._booting is not None and not self._expect_boot:
+            self.restarts.append(self._booting)
+            self._booting = None
+
     def drain(self) -> None:
         """Read what is waiting on the bridge, keeping what the board said.
 
@@ -1010,8 +1025,10 @@ class Shell:
         # What the board has said since the last command, before any of it
         # is thrown away: a restart that happened just before a release
         # would otherwise be lost to the clear below, which is the one
-        # moment #311 could still hide in.
-        self.drain()
+        # moment #311 could still hide in. settle rather than drain, because
+        # the clear is the end of anything still arriving: a boot this has
+        # read the start of will get no third chance.
+        self.settle()
         self.port.reset_input_buffer()
         self._buffer = b""
         self._booting = None
@@ -1566,6 +1583,9 @@ def _restart_problems(out, boards) -> list[str]:
     """
     problems = []
     for peer, shell in boards:
+        # This is where the session makes up its mind, so a boot still
+        # arriving is recorded with what it has rather than waited for.
+        shell.settle()
         for event in shell.restarts:
             print(f"{peer.label} restarted: {event.describe()}", file=out)
             for line in event.lines:
@@ -1644,7 +1664,7 @@ def _with_restarts(boards, call):
     except PeerError as error:
         reasons = []
         for peer, shell in boards:
-            shell.drain()
+            shell.settle()
             reasons += [f"the {peer.label} restarted while the session ran, "
                         f"{event.describe()}" for event in shell.restarts]
         if not reasons or "restarted while the session ran" in str(error):

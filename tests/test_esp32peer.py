@@ -1954,6 +1954,64 @@ class RestartTests(unittest.TestCase):
         self.assertIn("utesp: spp disconnected", board.notices)
         self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
 
+    def test_a_restart_still_arriving_when_the_session_decides_counts(self):
+        """A boot read only as far as its ROM lines is still a restart.
+
+        The drain leaves a boot open until its ready notice arrives, so
+        that a boot log spanning two drains reads as one. The release reset
+        and the session's own verdict are the end of that: a boot read only
+        in part has to be recorded with what it has, or a run that lost a
+        board passes.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.port.crash()
+        # Only as far as the reason line: the ready notice never arrives.
+        whole = bytes(board.port.pending)
+        cut = whole.index(b"utesp: " + esp32peer.MINIMUM_FIRMWARE.encode())
+        board.port.pending = bytearray(whole[:cut])
+
+        board.settle()
+
+        self.assertEqual(1, len(board.restarts))
+        self.assertEqual(fake_esp32.PANIC_REASON, board.restarts[0].reason)
+        self.assertEqual("", board.restarts[0].version)
+        self.assertIn("had not finished booting", board.restarts[0].describe())
+
+    def test_a_session_whose_peer_half_restarted_still_fails(self):
+        # The same thing through a whole session: the restart arrives only
+        # as far as its reason line, and the run must not pass.
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        plain_run = esp32peer._run_command
+
+        def crash_half(command, timeout, drain=None):
+            port = shells["initiator"].port
+            port.crash()
+            whole = bytes(port.pending)
+            cut = whole.index(b"utesp: " + esp32peer.MINIMUM_FIRMWARE.encode())
+            port.pending = bytearray(whole[:cut])
+            return plain_run(command, timeout, drain)
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        with mock.patch.object(esp32peer, "_run_command", crash_half), \
+                self.assertRaisesRegex(
+                    esp32peer.PeerError,
+                    "a peer restarted while the session ran: the initiator "
+                    "restarted while the session ran"):
+            esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                             min_writes=1)
+
     def test_a_restart_found_after_the_command_is_still_reported(self):
         """A restart the post-command reads turned up, not the command.
 
