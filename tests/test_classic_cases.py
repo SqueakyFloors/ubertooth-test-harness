@@ -415,6 +415,35 @@ class RecordFieldCaseTests(unittest.TestCase):
                 self.assertEqual("restored-device-identity", cleanup[-1])
 
 
+class CaptureFileCheckTests(unittest.TestCase):
+    """The step that reads what a capture file holds (#274).
+
+    A Step.output_check is handed the stdout lines to iterate, not one
+    string, and this check used to search a regex over the object itself:
+    every comprehensive Classic case that writes a capture file raised a
+    TypeError the moment the file was checked. The first bench run of
+    `Follow Classic piconet over HCI`, which reuses the same step, is where
+    that surfaced.
+    """
+
+    def check(self, minimum=MIN_PACKETS):
+        from ubertooth_harness.classic_cases import _written_packets
+        return _written_packets(minimum)
+
+    def test_the_count_is_read_from_the_lines_it_is_given(self):
+        lines = ["Capture format: pcap, link type: 255, packets: 42"]
+        self.assertEqual("", self.check()(lines))
+        self.assertEqual("", self.check()(iter(lines)))
+
+    def test_too_few_packets_is_reported_with_the_count(self):
+        lines = ["Capture format: pcap, link type: 255, packets: 3"]
+        self.assertIn("holds 3 packets", self.check()(lines))
+
+    def test_no_count_line_is_reported(self):
+        self.assertIn("did not report a packet count",
+                      self.check()(["Capture format: pcap, link type: 255"]))
+
+
 class IdentityTests(unittest.TestCase):
 
     def test_both_peers_are_required_with_an_address(self):

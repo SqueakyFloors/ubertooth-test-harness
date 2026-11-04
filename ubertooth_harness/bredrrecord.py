@@ -402,8 +402,15 @@ def following_address(path: Path | str) -> dict | None:
 # Checks
 
 
-def _consistency(record: Record, *, payload_checks: bool) -> list[str]:
-    """What is wrong inside one record, with nothing else to compare it to."""
+def _consistency(record: Record, *, payload_checks: bool,
+                 transport_checks: bool = True) -> list[str]:
+    """What is wrong inside one record, with nothing else to compare it to.
+
+    ``transport_checks`` off leaves the transport nibble alone. It is derived
+    from the header, so a capture whose headers do not decode carries whatever
+    the bits gave -- which is a fault of the capture, not of a record, and the
+    caller says so once rather than per record.
+    """
     problems = []
     if record.rf_channel >= NUM_BREDR_CHANNELS:
         problems.append(f"RF channel {record.rf_channel}, and there are only "
@@ -448,10 +455,12 @@ def _consistency(record: Record, *, payload_checks: bool) -> list[str]:
     if record.has(CRC_CHECKED) and len(record.payload) < 3:
         problems.append(f"a CRC was checked over {len(record.payload)} payload "
                         "bytes, which cannot hold a CRC and a byte for it to cover")
-    if record.transport != TRANSPORT_ANY or record.rate != MOD_GFSK:
-        problems.append(f"transport {record.transport} rate {record.rate}, and a "
-                        f"receive-only basic-rate capture records "
-                        f"{TRANSPORT_ANY}/{MOD_GFSK}")
+    if transport_checks and record.transport != TRANSPORT_ANY:
+        problems.append(f"transport {record.transport}, and a receive-only "
+                        f"capture records {TRANSPORT_ANY}")
+    if record.rate != MOD_GFSK:
+        problems.append(f"rate {record.rate}, and a basic-rate capture records "
+                        f"{MOD_GFSK}")
     if not 0 <= record.corrected_header_bits <= MAX_CORRECTED_HEADER_BITS:
         problems.append(f"{record.corrected_header_bits} corrected header bits")
     if not 0 <= record.corrected_payload_bits <= MAX_CORRECTED_PAYLOAD_BITS:
@@ -494,7 +503,8 @@ def problems(found: list[Record], *, lap: int | None = None,
              min_crc_valid: int = 0, min_channels: int = 0,
              max_access_code_errors: int | None = None,
              types: tuple[str, ...] = (), require_types: tuple[str, ...] = (),
-             payload_checks: bool = True) -> list[str]:
+             payload_checks: bool = True,
+             transport_checks: bool = True) -> list[str]:
     """Everything wrong with these records, worst first; empty when they pass."""
     found = list(found)
     failures = []
@@ -571,7 +581,8 @@ def problems(found: list[Record], *, lap: int | None = None,
     # and the caller shows only the first few: the counts and addresses above
     # are what a reader needs first.
     for record in found:
-        for problem in _consistency(record, payload_checks=payload_checks):
+        for problem in _consistency(record, payload_checks=payload_checks,
+                                    transport_checks=transport_checks):
             failures.append(f"record {record.index}: {problem}")
     return failures
 
@@ -721,6 +732,10 @@ def main(argv: list[str] | None = None) -> int:
         "--no-payload-checks", action="store_true",
         help="skip the payload length and CRC checks, which need a link "
              "whose payloads are not encrypted")
+    parser.add_argument(
+        "--any-transport", action="store_true",
+        help="accept any transport nibble, for a capture whose headers do "
+             "not decode: the nibble comes from the header")
     args = parser.parse_args(argv)
     try:
         types = tuple(_type_name(name)
@@ -753,7 +768,8 @@ def main(argv: list[str] | None = None) -> int:
         max_access_code_errors=args.max_access_code_errors,
         min_crc_valid=args.min_crc_valid, min_channels=args.min_channels,
         types=types, require_types=require_types,
-        payload_checks=not args.no_payload_checks)
+        payload_checks=not args.no_payload_checks,
+        transport_checks=not args.any_transport)
     wanted = (("LAP", "lap", args.following_lap),
               ("UAP", "uap", args.following_uap),
               ("UAP mask", "uap_mask", args.following_uap_mask))

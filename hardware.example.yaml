@@ -14,6 +14,8 @@ resources:
       ESP32 Classic peer: ESP32_Linux0
       acceptor: ESP32_Linux0
       initiator: ESP32_Linux1
+      # The host Bluetooth controller the BlueZ-only tools drive.
+      Bluetooth adapter: BT_Linux0
 
   Host_Mac:
     type: Host
@@ -151,6 +153,43 @@ resources:
       bridge serial: "fedcba9876543210fedcba9876543210"
       BD_ADDR: "C8:00:00:00:00:02"
       name: UT-ESP32-000002
+
+  # A Bluetooth controller of the host's, which BlueZ drives. The two tools
+  # the fork builds only with libbluetooth need one and an Ubertooth cannot
+  # stand in for it: `ubertooth-scan` runs this controller's inquiry, and
+  # `ubertooth-follow` pages a target from it to read the target's clock
+  # offset and, with -a, the channel map of the link it made.
+  #
+  # `hci device` is the name BlueZ gave it, which the tools take with -b, and
+  # `BD_ADDR` is the address `hciconfig <device>` reports for it. The hciN
+  # number is the order the kernel attached controllers in rather than a
+  # property of the adapter, so the address is what identifies it: a case
+  # reads the device first and fails, naming what it found, if the address
+  # is not this one. `description` is a free note for a person reading the
+  # registry. No roles: a test binds one controller, named as the host's
+  # default above.
+  BT_Linux0:
+    type: Bluetooth adapter
+    attached to: Host_Linux
+    identity:
+      hci device: hci0
+      BD_ADDR: "00:1A:7D:00:00:01"
+      description: USB Bluetooth controller
+
+  # A host may have a second one, for multi-adapter testing or for another
+  # runner on the same host; no plan here needs two at once. Two adapters on
+  # one host may share neither their `hci device` nor their `BD_ADDR`: the
+  # first would have them drive one controller under two leases, and the
+  # second is one radio registered twice, which would share one lease, since
+  # the lease name is built from the address. Either is refused when the
+  # registry loads. Uncomment to register one.
+  # BT_Linux1:
+  #   type: Bluetooth adapter
+  #   attached to: Host_Linux
+  #   identity:
+  #     hci device: hci1
+  #     BD_ADDR: "00:1A:7D:00:00:02"
+  #     description: second USB Bluetooth controller
 
   # A debug programmer: a USB serial adapter, an SWD probe, or anything else
   # wired to one board's debug or in-system programming header and left there.

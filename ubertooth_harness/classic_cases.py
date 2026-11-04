@@ -357,14 +357,23 @@ def _capture_path(name):
     return path
 
 
+# The checker's own count line, read per line: a Step.output_check is handed
+# the stdout lines to iterate, not one string, so this used to raise a
+# TypeError the moment a capture file was checked. Found by the first bench
+# run of `Follow Classic piconet over HCI`, which reuses this step (#274).
+_PACKET_COUNT = re.compile(r"^Capture format: .*, packets: (\d+)$")
+
+
 def _written_packets(minimum: int) -> Check:
     """The capture file holds packets, not just a header."""
     def check(output) -> str:
-        match = re.search(r"(?m)^Capture format: .*, packets: (\d+)$", output)
-        if match is None:
+        found = next(
+            (match[1] for match in map(_PACKET_COUNT.match, text_lines(output))
+             if match), None)
+        if found is None:
             return "the checker did not report a packet count"
-        if int(match[1]) < minimum:
-            return (f"the capture holds {match[1]} packets, expected at least "
+        if int(found) < minimum:
+            return (f"the capture holds {found} packets, expected at least "
                     f"{minimum}")
         return ""
     return check
@@ -625,6 +634,7 @@ def _record_step(step_id, name, file_name, checks) -> Step:
 
 
 def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
+                   hec_valid=MIN_HEC_VALID_RECORDS,
                    extra=()) -> tuple[str, ...]:  # noqa: C901
     """What the records of a capture must hold.
 
@@ -632,6 +642,11 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
     follow, so every record belongs to it and carries it as the reference
     address. Without one, the capture is a survey: it records whatever is in
     range, and the caller says what to look for instead.
+
+    ``hec_valid`` is the floor on records whose header passed its HEC. A
+    caller lowers it for a capture taken by a tool whose headers are known
+    not to decode, which is a fault of that tool rather than of these
+    records; `bluez_cases` does, and says which tool and why.
     """
     if following and central is None:
         raise StateCaseError("the address a capture was following is the "
@@ -647,7 +662,7 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
         # header when it is working on one piconet's clock, and a survey,
         # which is working on every piconet it hears, decoded one header in
         # 235 records on the bench.
-        checks += ("--min-hec-valid", str(MIN_HEC_VALID_RECORDS),
+        checks += ("--min-hec-valid", str(hec_valid),
                    "--lap", central["lap"],
                    "--reference-lap", central["lap"],
                    # Every record that carries a reference UAP must carry

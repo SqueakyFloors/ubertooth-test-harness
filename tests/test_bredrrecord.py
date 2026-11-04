@@ -298,8 +298,16 @@ class Consistency(unittest.TestCase):
         self.assertEqual([], self.check(broken, payload_checks=False))
 
     def test_a_transport_or_rate_a_receive_capture_cannot_know_is_a_problem(self):
-        self.assertProblem("transport 3 rate 0", record(transport_rate=0x30))
-        self.assertProblem("transport 0 rate 1", record(transport_rate=0x01))
+        self.assertProblem("transport 3", record(transport_rate=0x30))
+        self.assertProblem("rate 1", record(transport_rate=0x01))
+
+    def test_any_transport_leaves_the_nibble_alone_and_keeps_the_rate(self):
+        """The nibble comes from the header, so a capture whose headers do
+        not decode carries whatever the bits gave; the rate does not."""
+        self.assertEqual([], self.check(record(transport_rate=0x30),
+                                        transport_checks=False))
+        self.assertProblem("rate 1", record(transport_rate=0x01),
+                           transport_checks=False)
 
     def test_corrected_bit_counts_outside_the_codes_are_problems(self):
         self.assertProblem("11 corrected header bits", record(corrected_header=11))

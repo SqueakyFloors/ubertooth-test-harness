@@ -62,6 +62,16 @@ class EstimateTests(unittest.TestCase):
     def test_estimates_name_only_catalog_tests(self):
         self.assertLessEqual(set(ESTIMATES), set(self.catalog.names))
 
+    # A test whose comprehensive profile runs exactly the smoke cases, so the
+    # two estimates are equal and must be allowed to be. `Bluetooth inquiry
+    # scan` is one because the bench argued its comprehensive case out of
+    # existence: `-s -x` reaches each device over a connection it makes, and
+    # the acceptor is in the pair's link throughout, so the case wants a
+    # third idle Classic device the bench has not got (#88). The test keeps
+    # its `coverage` argument, so the plan and the case that comes back do
+    # not have to change with it.
+    SAME_IN_BOTH_PROFILES = frozenset({"Bluetooth inquiry scan"})
+
     def test_comprehensive_takes_longer_than_smoke(self):
         def rate(estimate):
             return estimate.per_count[1] if estimate.per_count else 0.0
@@ -71,6 +81,9 @@ class EstimateTests(unittest.TestCase):
                 continue
             smoke, comprehensive = profiles["smoke"], profiles["comprehensive"]
             with self.subTest(name):
+                if name in self.SAME_IN_BOTH_PROFILES:
+                    self.assertEqual(smoke, comprehensive)
+                    continue
                 # Each part against its own, so a profile cannot pay for a
                 # larger fixed cost out of a smaller rate: the fixed part, the
                 # per-second rate, and the per-count rate.

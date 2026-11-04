@@ -186,11 +186,21 @@ class KilledCaptureTests(unittest.TestCase):
         self.assertTrue(self.gone(helper), "the process left behind is still running")
 
     def helper_pid(self):
-        """The pid the fake tool wrote, once it has."""
+        """The pid the fake tool wrote, once it has.
+
+        Waits for the number and not only for the file: creating it and
+        writing the pid into it are two steps, so a read that only waited
+        for it to exist could come back empty. A loaded macOS runner caught
+        exactly that, and `int("")` is what it raised.
+        """
         path = self.root / "capture.bin.helper"
         for _ in range(400):
-            if path.exists():
-                return path.read_text(encoding="utf-8")
+            try:
+                written = path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                written = ""
+            if written:
+                return written
             time.sleep(0.05)
         raise AssertionError("the fake tool never recorded its helper's pid")
 
