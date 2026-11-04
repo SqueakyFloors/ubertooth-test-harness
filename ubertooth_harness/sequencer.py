@@ -973,9 +973,10 @@ class NamedTestSequencer:
         equal it. Every read runs (they change nothing), so the record shows
         each difference, not only the first. The one read that may not reach
         the board is the CRC one: ``ubertooth-btle`` works only on the
-        firmware API it was built for, and stops a board carrying any other,
-        so that read is refused unless the same check found the API equal,
-        and the refusal fails the check rather than counting as a reading.
+        firmware API it was built for, and may stop a board carrying any
+        other, so that read is refused unless the same check found the API
+        equal, and the refusal fails the check rather than counting as a
+        reading.
 
         Every guard is read whatever image it carries, and a read this host
         cannot make of that image is recorded as such and compared like any

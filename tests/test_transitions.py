@@ -339,12 +339,24 @@ class FakeUbertooth:
             return fail(f"error: unexpected argument '{leftover[0]}'")
         if get_aa and set_aa:
             return fail("error: -a cannot both read and set the access address")
+        if sum(item in ("-f", "-n", "-p") for item in options) > 1:
+            # Another argument error, refused before a board is opened.
+            if self.reject_btle_conflicts:
+                return self._result(
+                    command, 1, "", "error: choose one of -f, -n or -p\n",
+                    on_output,
+                )
+            options = tuple(item for item in options if item != "-p")
+        # The board is opened here, and ubertooth_check_api() runs on it:
+        # first the API, then ubertooth_check_image(), both before anything of
+        # this tool's own.
         if self.api != HOST_API:
-            # ubertooth_check_api(): a firmware API that is not the one the
-            # tools were built for -- newer as well as older -- is refused by
-            # a release build of the host tools, and the board is stopped on
-            # the way out (ubertooth_stop()). Which way a build goes is not
-            # something a run can see, so the fake takes the refusing one.
+            # A firmware API that is not the one the tools were built for --
+            # newer as well as older -- is refused by host tools that refuse a
+            # mismatch, and the board is stopped on the way out
+            # (ubertooth_stop()). Tools that allow one warn and go on instead;
+            # which the installed tools do is not something a run can see, so
+            # the fake takes the refusing side, as the harness does.
             self.stops += 1
             self._stop_mode()
             return self._result(
@@ -352,16 +364,6 @@ class FakeUbertooth:
                 "libubertooth requires\n",
                 on_output,
             )
-        if sum(item in ("-f", "-n", "-p") for item in options) > 1:
-            if self.reject_btle_conflicts:
-                return self._result(
-                    command, 1,
-                    "error: choose one of -f, -n or -p, pick one pal\n", "",
-                    on_output,
-                )
-            options = tuple(item for item in options if item != "-p")
-        # ubertooth_check_api() ends with ubertooth_check_image(), after the
-        # argument checks above and before anything of this tool's own.
         refused = self._refused_image(command, on_output)
         if refused is not None:
             return refused

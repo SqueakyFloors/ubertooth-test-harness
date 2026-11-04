@@ -1129,6 +1129,56 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
                 self.assertIsNotNone(match)
                 self.assertEqual(identity.line(), match["value"])
 
+    def test_only_two_answers_are_read_as_a_reading_this_host_cannot_make(self):
+        """Every other line a failed read prints still fails the read.
+
+        The whole weight of the tolerance rests on this: a line the board or
+        the tool printed for some other reason must not become a value that
+        then compares equal for the rest of the run.
+        """
+        read = transitions.guard_steps(
+            (transitions.GuardBoard("guard Ubertooth 1", B, host_api=HOST_API),)
+        )[0]
+        pattern = read.observe.pattern
+
+        def reading(text):
+            match = re.search(pattern, text)
+            return None if match is None else read.observe.value(match)
+
+        unsupported = (
+            # libubertooth's stall wording, with and without the libusb code.
+            "error: could not read the firmware information: the board's "
+            "firmware does not support it (stalled, libusb -9)\n",
+            "error: could not read the firmware information: the board's "
+            "firmware does not support it (stalled)\n",
+            # The image refusal ubertooth-btle prints as it opens a board.
+            f"error: the Ubertooth is running {BTBR_IMAGE}; this tool needs "
+            f"{APPLICATION_IMAGE}\n",
+        )
+        for text in unsupported:
+            with self.subTest(text.split("\n")[0]):
+                self.assertEqual(transitions.GUARD_UNSUPPORTED, reading(text))
+
+        fails = (
+            # A board that has left the bus stalls requests too, and says so.
+            "error: could not read the firmware information: the board is no "
+            "longer attached\n",
+            "error: could not read the firmware information: the board did "
+            "not answer in time\n",
+            # The tool's own line after any failed read, whatever the cause.
+            "error: firmware information read failed\n",
+            "libUSB Error: Other error:  (4)\n",
+            # The API mismatch, in both the forms the tools print it.
+            "error: Ubertooth firmware API version 1.57 found, libubertooth "
+            "1.1 requires 1.58.\n",
+            "warning: Ubertooth firmware API version 1.57 found, "
+            "libubertooth 1.1 requires 1.58.\n",
+            "",
+        )
+        for text in fails:
+            with self.subTest(text.split("\n")[0] or "no output"):
+                self.assertIsNone(reading(text))
+
     def test_the_image_name_comes_off_the_firmware_reading(self):
         self.assertEqual(APPLICATION_IMAGE, transitions.guard_image(
             f"{APPLICATION_IMAGE} git-1c7f06d6 (API:1.35)"

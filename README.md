@@ -1123,7 +1123,7 @@ name the guards. The design is in
 registered Ubertooth has no guards. Preflight checks each guard-only board's
 serial (`ubertooth-util -U <serial> -s`) and that its firmware API (`-v`) is
 the host tools' own; a guard carrying any other API is refused before any
-test, because `ubertooth-btle` would stop such a board rather than read it
+test, because `ubertooth-btle` may stop such a board rather than read it
 (below). Its firmware revision is not required to match the resolved one. Guards do not count toward the
 firmware-order check (a firmware-writing test must be the last test on its
 board), so a guarded test may follow a flash on another board.
@@ -1144,8 +1144,11 @@ revision), `-s` (the serial the board itself reports), `-B` (the bootloader
 under that firmware), `-C` (channel), `-a` (PA level), `-z`
 (squelch), and `-d` (LEDs), then `ubertooth-btle -U <serial> -k` (CRC).
 `ubertooth-util` never checks the firmware API, but `ubertooth-btle` does, and
-it refuses any API that is not the one the tools were built for — newer as
-well as older — stopping that board as it goes (`ubertooth_check_api` in the
+it may refuse any API that is not the one the tools were built for — newer as
+well as older — stopping that board as it goes; whether it refuses or warns
+and reads on is how those tools were built and whether
+`UBERTOOTH_ALLOW_API_MISMATCH` is set, neither of which a run can read
+(`ubertooth_check_api` in the
 fork's
 [`host/libubertooth/src/ubertooth.c`](https://github.com/SqueakyFloors/ubertooth/blob/main/host/libubertooth/src/ubertooth.c)).
 So the CRC read runs only when the same check's `ubertooth-util -v` read showed

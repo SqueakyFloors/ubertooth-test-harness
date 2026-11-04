@@ -90,10 +90,11 @@ class PreflightCheck:
     # reads, so the patterns decide it.
     accepted_returncodes: tuple[int, ...] = (0,)
     # Guard-only boards: the firmware API must be the host tools' own.
-    # ubertooth-btle refuses any other, newer as well as older, and stops the
-    # board as it goes, so the guard check will not send it that board's CRC
-    # read and the baseline fails; this refuses such a board before any test
-    # instead (transitions._btle_api_refusal).
+    # ubertooth-btle may refuse any other, newer as well as older, and stop
+    # the board as it goes -- whether it does is its own build and an
+    # environment variable, which a run cannot see -- so the guard check will
+    # not send such a board its CRC read and the baseline fails; this refuses
+    # it before any test instead (transitions._btle_api_refusal).
     required_api: int | None = None
     # How to fix a firmware revision mismatch; FLASH_FIX when empty.
     fix: str = ""
@@ -209,9 +210,10 @@ class PreflightCheck:
                 return (
                     f"{self.name}: guard board {self.resource_alias} (serial "
                     f"{serial}) firmware API {found} is not the host tools "
-                    f"API {format_api(self.required_api)}; ubertooth-btle "
-                    "would stop it, so guarded tests cannot run on "
-                    f"{self.host}; update its firmware or unregister it"
+                    f"API {format_api(self.required_api)}; ubertooth-btle may "
+                    "stop a board it cannot read the CRC of, so guarded tests "
+                    f"cannot run on {self.host}; update its firmware or "
+                    "unregister it"
                 )
         return ""
 

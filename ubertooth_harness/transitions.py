@@ -1673,10 +1673,12 @@ def btle_conflict_cases(_arguments, _resources, resource_identities):
 # first case.
 #
 # ubertooth-util never checks the firmware API, but ubertooth-btle calls
-# ubertooth_check_api(), which refuses any firmware API that is not the host
-# tools' own -- newer as well as older -- and sends cmd_stop to that board on
-# its way out. The CRC read therefore runs only when this check's firmware
-# read showed the host tools' own API, and is refused otherwise.
+# ubertooth_check_api(), which may refuse any firmware API that is not the
+# host tools' own -- newer as well as older -- and sends cmd_stop to that
+# board on its way out. Whether it refuses or warns and goes on is the host
+# tools' own build and an environment variable, so the CRC read runs only
+# when this check's firmware read showed the host tools' own API, and is
+# refused otherwise.
 # No host tool reports the host API, so it is read from UBERTOOTH_API_VERSION
 # in the resolved Ubertooth source at the manifest commit.
 HOST_API_HEADER = "host/libubertooth/src/ubertooth_interface.h"
@@ -1856,10 +1858,7 @@ GUARD_REQUIRED_OF_IMAGE = MappingProxyType({
         key for key in _GUARD_TOLERATED_SETTINGS if key != PA_LEVEL.key
     ) + (GUARD_CRC_KEY,),
 })
-# The images whose settings are guarded as their own, which is what
-# GUARD_REQUIRED_OF_IMAGE lists: the application image and the receive-only
-# build of it, the two libubertooth accepts for every tool.
-GUARD_SETTINGS_IMAGES = tuple(GUARD_REQUIRED_OF_IMAGE)
+
 # A recorded firmware reading is the part of the `-v` line after the label,
 # so the image name is read off its front, the same optional name
 # FIRMWARE_VERSION_RE reads off the whole line.
@@ -1886,8 +1885,9 @@ def guard_baseline_problems(boards, context) -> list[str]:
     board carries; these are the two things the readings themselves have to
     satisfy before any case runs (the maintainer's decision on #275).
 
-    First: a board running one of GUARD_SETTINGS_IMAGES has to answer the
-    radio settings that build implements. One it says it cannot answer is a
+    First: a board running an image GUARD_REQUIRED_OF_IMAGE lists has to
+    answer the radio settings that build implements. One it says it cannot
+    answer is a
     board that is not holding those settings, not an image difference, so it
     fails the baseline exactly as it did before.
 
