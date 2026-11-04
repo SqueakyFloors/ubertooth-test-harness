@@ -65,7 +65,8 @@ static uint16_t shell_crc16(const char *data, int len)
     return crc;
 }
 
-void shell_line(const char *fmt, ...)
+/* Writes one line. The caller holds out_lock. */
+static void shell_vwrite(const char *fmt, va_list ap)
 {
     /* One buffer, held by out_lock, rather than 770 bytes on the caller's
      * stack: the notices below come from the Bluetooth task, whose stack is
@@ -75,15 +76,9 @@ void shell_line(const char *fmt, ...)
     char *line = buf + SHELL_FRAME_MAX;
     char *start = line;
     char head[SHELL_FRAME_MAX + 1];
-    va_list ap;
     int n, head_len;
 
-    if (out_lock) {
-        xSemaphoreTake(out_lock, portMAX_DELAY);
-    }
-    va_start(ap, fmt);
     n = vsnprintf(line, SHELL_OUT_MAX, fmt, ap);
-    va_end(ap);
     if (n >= 0) {
         if (n > SHELL_OUT_MAX - 1) {
             n = SHELL_OUT_MAX - 1; /* vsnprintf's count is what it wanted */
@@ -100,6 +95,50 @@ void shell_line(const char *fmt, ...)
         start[n++] = '\n';
         uart_write_bytes(SHELL_UART, start, n);
     }
+}
+
+/* Writes one line, holding out_lock itself. */
+void shell_line(const char *fmt, ...)
+{
+    va_list ap;
+
+    if (out_lock) {
+        xSemaphoreTake(out_lock, portMAX_DELAY);
+    }
+    va_start(ap, fmt);
+    shell_vwrite(fmt, ap);
+    va_end(ap);
+    if (out_lock) {
+        xSemaphoreGive(out_lock);
+    }
+}
+
+/* Writes one line with the lock already held, for a caller that needs its
+ * line and something else to happen with nothing in between. */
+static void shell_line_locked(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    shell_vwrite(fmt, ap);
+    va_end(ap);
+}
+
+/* Answers "frame" and changes the setting with the lock held across both.
+ *
+ * The answer is in the form that was in force, and the new form starts with
+ * the line after it. Taking the lock around both is what makes "the line
+ * after it" true for every writer: a Bluetooth callback that got in between
+ * the answer and the assignment would send a notice in the old form after
+ * the reply that announced the new one, and the host would read that notice
+ * as a line that had lost its frame. */
+static void answer_framing(bool on)
+{
+    if (out_lock) {
+        xSemaphoreTake(out_lock, portMAX_DELAY);
+    }
+    shell_line_locked("OK");
+    framing = on;
     if (out_lock) {
         xSemaphoreGive(out_lock);
     }
@@ -310,17 +349,14 @@ static void run(int argc, char **argv)
             answer("frame takes on or off");
             return;
         }
-        /* The answer comes first, so it is in the form that was in force
-         * when the command arrived and the new form starts with the line
-         * after it. Either way round there is no line whose form the host
-         * cannot predict, which there would be if the switch happened in
-         * the middle of answering.
+        /* The answer and the change happen under the one output lock, so
+         * the answer is in the form that was in force and the new form
+         * starts with the very next line, whichever task writes it.
          *
          * Nothing else touches this: it is about the wire, not the board,
          * so "defaults" leaves it alone. A reset clears it, because the
          * board that comes back has not been asked. */
-        answer(NULL);
-        framing = on;
+        answer_framing(on);
         return;
     }
     if (argc == 1 && strcmp(c, "defaults") == 0) {

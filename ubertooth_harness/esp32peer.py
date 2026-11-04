@@ -317,8 +317,9 @@ _CRASH = re.compile(
 # line that lost a run of bytes fails one or both (#310).
 _FRAMED = re.compile(r"^#(?P<len>\d{1,5}),(?P<crc>[0-9a-f]{4}):(?P<payload>.*)$",
                      re.DOTALL)
-# The command that turns that framing on, and what the shell calls it.
+# The two commands that turn that framing on and off.
 FRAME_ON = "frame on"
+FRAME_OFF = "frame off"
 
 # Commands that may be sent again when their answer did not arrive or did
 # not survive the bridge. Each is either a read, which reports state and
@@ -330,10 +331,15 @@ FRAME_ON = "frame on"
 # An entry ending in a space is the start of a command and its operands;
 # every other entry is the whole command line. Nothing is matched loosely,
 # so a command this list has not named cannot be repeated by accident.
+#
+# `frame off` is not here, though repeating it would change nothing either:
+# its answer is in the old form and the next line is in the new one, so a
+# second attempt's answer arrives bare where the first one's was framed, and
+# a retry would be reading for the wrong form. Nothing sends it; a reset is
+# how the framing goes away.
 REPEATABLE = ("status", "version", "help", "clock", "sco stats", FRAME_ON,
-              "frame off", "stream on", "stream off", "spp peer ",
-              "stream period ", "stream payload ", "disc ", "sco type ",
-              "afh ")
+              "stream on", "stream off", "spp peer ", "stream period ",
+              "stream payload ", "disc ", "sco type ", "afh ")
 
 # The status fields this driver reads, reports, or checks after a reset,
 # with the type each must have. A later image of the same major may add
@@ -616,8 +622,11 @@ class Shell:
         self.retried = 0
         # Whether the board is check-summing its lines. It is not after a
         # restart, whatever it was before, because the board that came back
-        # has not been asked.
+        # has not been asked. framed_seen counts the lines that really
+        # carried a good frame, which is how a board that has stopped
+        # framing is told from a bridge that is losing lines.
         self.framed = False
+        self.framed_seen = 0
 
     @classmethod
     def open(cls, path: str, label: str = "peer", log=None) -> "Shell":
@@ -678,6 +687,10 @@ class Shell:
         if (len(payload.encode("utf-8", "replace")) != int(found["len"])
                 or crc16(payload.encode("utf-8", "replace")) != int(found["crc"], 16)):
             return payload, False
+        # Counted, not just accepted: a line that carried a good frame is
+        # proof the board is still framing, which is what tells a board that
+        # has stopped from a bridge that is losing lines (_stopped_framing).
+        self.framed_seen += 1
         return payload, True
 
     def _boot_evidence(self, line: str) -> bool:
@@ -801,13 +814,21 @@ class Shell:
         can be checked is sent again on an answer that failed the check, the
         same as on one that never came (#310).
         """
-        attempts = 1 + (COMMAND_RETRIES if self.repeatable(text) else 0)
+        repeatable = self.repeatable(text)
+        attempts = 1 + (COMMAND_RETRIES if repeatable else 0)
         for attempt in range(1, attempts + 1):
             try:
                 lines = self._send(text, timeout)
-                return lines if parse is None else parse(lines)
+                answer = lines if parse is None else parse(lines)
+                self._took_effect(text)
+                return answer
             except SerialLoss as error:
                 if attempt == attempts:
+                    if repeatable:
+                        answered, answer = self._ask_unframed(text, timeout,
+                                                              parse)
+                        if answered:
+                            return answer
                     raise SerialLoss(
                         f"{error} (sent '{text}' {attempts} times)" if attempts > 1
                         else str(error)) from error
@@ -816,6 +837,53 @@ class Shell:
                     self.log(targets.SENT, f"# retrying '{text}': {error}")
                 time.sleep(RETRY_PAUSE_S)
         raise AssertionError("unreachable")  # pragma: no cover
+
+    def _took_effect(self, text: str) -> None:
+        """Note a command that changed what the board's lines look like."""
+        if text == FRAME_ON:
+            self.framed = True
+        elif text == FRAME_OFF:
+            self.framed = False
+
+    def _ask_unframed(self, text: str, timeout: float,
+                      parse) -> tuple[bool, object]:
+        """One last attempt, with the framing requirement dropped.
+
+        Every attempt so far came back unframed. That is either a bridge
+        losing line after line, or a board that has stopped framing - and
+        only a reset clears the framing, so the second is a restart whose
+        boot output never reached the host, which is what the bridge's
+        buffer overflowing during a capture leaves. Without this the restart
+        would be reported as a bridge that kept losing lines, which is the
+        symptom and not the cause (#311).
+
+        So the question is asked rather than guessed at, and the answer
+        settles it: one that comes back framed says the board never stopped,
+        and the requirement goes back on. Either way a good answer is used,
+        because a read that worked is a read that worked.
+
+        Returns whether it answered, and what it answered.
+        """
+        if not self.framed:
+            return False, None
+        seen = self.framed_seen
+        self.framed = False
+        try:
+            lines = self._send(text, timeout)
+            answer = lines if parse is None else parse(lines)
+        except PeerError:
+            # Not that either: put the framing back, and the loss stands.
+            self.framed = True
+            return False, None
+        if self.framed_seen != seen:
+            self.framed = True
+            return True, answer
+        self.restarts.append(Restart(
+            at=time.strftime("%H:%M:%SZ", time.gmtime()),
+            reason="the board stopped check-summing its lines, which only a "
+                   "reset does, and nothing of its boot reached the host"))
+        self._took_effect(text)
+        return True, answer
 
     def _send(self, text: str, timeout: float) -> list[str]:
         """One attempt at one command."""
@@ -876,9 +944,10 @@ class Shell:
         except PeerError:
             self.framed = False
             return False
+        # command() sets the flag, because the command is what changes what
+        # the board's lines look like and it is the same either way round.
         self.command(FRAME_ON)
-        self.framed = True
-        return True
+        return self.framed
 
     def confirm_framing(self, firmware: str) -> None:
         """The version in the board's status must agree about the framing.
@@ -1517,6 +1586,22 @@ def _back_at_boot(label: str, status: dict, role: str) -> str:
             "restarted while the session ran")
 
 
+def _lost_the_link_it_had(label: str, status: dict) -> str:
+    """Why this status says the board forgot a link the session saw, or "".
+
+    The role test above is the initiator's: it is the board a session sets a
+    role on, and the acceptor stays in the boot role all along. What the
+    acceptor can be held to is its link counter. The session read the link
+    up before the command, so this board answered a page, and a board that
+    now counts no link at all has been back to boot since (#311).
+    """
+    if status["connects"]:
+        return ""
+    return (f"the {label} counts no link at all, where this session saw the "
+            "pair's link come up to it: the board has been back to its boot "
+            "state, so it restarted while the session ran")
+
+
 def _settings_taken(label: str, status: dict, address: str, period: int,
                     payload: int) -> list[str]:
     """What the board made of the settings the session sent it.
@@ -1697,11 +1782,14 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     if not restarted:
         # Only where the bridge showed nothing. A restart the bridge did
         # report has already been named with its reason, which is more than
-        # this can say, so saying it twice would only lengthen the failure.
-        boot_state = _back_at_boot(initiator.label, after_initiator, "initiator")
-        if boot_state:
-            problems.append(boot_state)
-            restarted = True
+        # these can say, so saying it twice would only lengthen the failure.
+        # One test per board, because what each can be held to differs.
+        from_state = [
+            _back_at_boot(initiator.label, after_initiator, "initiator"),
+            _lost_the_link_it_had(acceptor.label, after_acceptor),
+        ]
+        problems += [reason for reason in from_state if reason]
+        restarted = any(from_state)
     if after_initiator["disconnects"]:
         problems.append(f"the link went down {after_initiator['disconnects']} "
                         "time(s) while the command ran")
@@ -2152,6 +2240,18 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 problems.append(str(error))
         problems += _audio_measured(out, boards, before, after,
                                     min_frames=min_frames)
+        if not restarts:
+            # The same last resort as the stream session's, for a restart
+            # the bridge showed nothing of: this session set the
+            # initiator's role, and only a board that has just booted is
+            # in the boot role with its SPP server listening (#311).
+            end = after.get(initiator.label)
+            if end is not None:
+                back = _back_at_boot(initiator.label, end["status"],
+                                     "initiator")
+                if back:
+                    restarts.append(back)
+                    problems.append(back)
         # The link the command ran against has to still be the one it was
         # given: one renegotiated part way through would otherwise pass on
         # having been right when it came up. A link that is no longer up at

@@ -1561,20 +1561,40 @@ class BridgeLossTests(unittest.TestCase):
         than the session carrying on with whatever happened to parse. On a
         framed board the frame is what refuses it; on an older image it is
         the JSON. Both are refusals, and neither is a retry forever.
+
+        A framed board costs one send more than the retries, because the
+        last of them is the question _ask_unframed has to put to tell a
+        board that stopped framing from a bridge that is losing lines.
         """
-        for version, reason in (
-            (self.FRAMED, "a line from the board lost bytes on its bridge"),
-            ("utesp-1.5.0", "status is not JSON"),
+        for version, reason, sends in (
+            (self.FRAMED, "a line from the board lost bytes on its bridge",
+             esp32peer.COMMAND_RETRIES + 2),
+            ("utesp-1.5.0", "status is not JSON",
+             esp32peer.COMMAND_RETRIES + 1),
         ):
             board, firmware, _bridge = self._shell(
-                *[('"role"', 60, 20)] * (esp32peer.COMMAND_RETRIES + 1),
-                version=version)
+                *[('"role"', 60, 20)] * sends, version=version)
             with self.subTest(version), self.assertRaisesRegex(
                 esp32peer.SerialLoss, reason
             ):
                 board.status()
-            self.assertEqual(esp32peer.COMMAND_RETRIES + 1,
-                             firmware.commands.count("status"))
+            self.assertEqual(sends, firmware.commands.count("status"))
+
+    def test_a_bridge_that_only_loses_lines_is_not_called_a_restart(self):
+        """The last resort for a restart must not fire for a lossy bridge.
+
+        A board that has stopped framing has restarted, and asking once
+        without the framing is how that is settled. An answer that comes
+        back framed says the board never stopped, so the attempts before it
+        lost their lines and that is all.
+        """
+        board, _firmware, _bridge = self._shell(
+            *[('"role"', 60, 20)] * (esp32peer.COMMAND_RETRIES + 2))
+
+        with self.assertRaises(esp32peer.SerialLoss):
+            board.status()
+        self.assertEqual([], board.restarts)
+        self.assertTrue(board.framed)
 
     def test_a_json_status_missing_a_field_is_refused_rather_than_patched(self):
         for line, reason in (
@@ -2045,6 +2065,100 @@ class RestartTests(unittest.TestCase):
         self.assertEqual(1, len(bridge.damaged))
         self.assertIn("initiator bridge: 0 line(s) lost, 1 command(s) sent "
                       "again", report.getvalue())
+
+    def test_a_framed_board_that_stops_framing_restarted(self):
+        """The last resort when no boot line at all arrived.
+
+        The bridge's buffer can overflow while the capture runs, and a
+        boot's lines are the ones with no command waiting on them, so a
+        restart can leave nothing behind. The board still gives it away:
+        framing is cleared by a reset and by nothing else, so a board that
+        was framing and answers bare has been away.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+        # A restart whose every line went missing: the board is back at
+        # boot and not framing, and the host heard none of it.
+        board.port.crash()
+        board.port.pending.clear()
+
+        status = board.status()
+
+        self.assertEqual(ACCEPTOR_ADDRESS, status["address"])
+        self.assertEqual(1, len(board.restarts))
+        self.assertIn("stopped check-summing its lines",
+                      board.restarts[0].reason)
+        self.assertFalse(board.framed)
+
+    def test_an_acceptor_that_forgot_the_link_restarted(self):
+        """The acceptor's own test, since no session sets its role.
+
+        The session read the pair's link up before the command, so the
+        acceptor answered a page. A board that afterwards counts no link at
+        all has been back to boot since.
+        """
+        acceptor, initiator = _pair()
+        plain = acceptor.handle
+
+        def handle(line):
+            if line == "status" and "stream off" in initiator.commands:
+                acceptor.defaults()  # back at boot, nothing of it heard
+            return plain(line)
+        acceptor.handle = handle
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "a peer restarted while the session ran: the acceptor counts no "
+            "link at all, where this session saw the pair's link come up to "
+            "it"
+        ):
+            esp32peer.stream(*_peers(acceptor, initiator), TRUE,
+                             out=io.StringIO(), settle_s=0.0, min_writes=1)
+
+    def test_an_audio_initiator_back_at_boot_restarted(self):
+        acceptor, initiator = _audio_pair()
+        plain = initiator.handle
+
+        del plain
+        # Back at boot while the command ran, with nothing of it heard: the
+        # session's reading after the command is what has to catch it.
+        initiator.during_the_command(initiator.defaults)
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "a peer restarted while the session ran: .*the initiator reports "
+            "role acceptor with its SPP server on"
+        ):
+            esp32peer.audio(*_peers(acceptor, initiator), TRUE,
+                            out=io.StringIO(), settle_s=0.0, min_frames=1)
+
+    def test_frame_off_puts_the_shell_back_in_step_with_the_board(self):
+        """The documented transition, driven through `Shell.command()`.
+
+        Nothing in the harness turns the framing off, but the command is
+        there for a person reading a board by hand, and a shell left
+        expecting frames after it would refuse every line that followed.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+        self.assertTrue(board.framed)
+
+        board.command(esp32peer.FRAME_OFF)
+
+        self.assertFalse(board.framed)
+        self.assertFalse(firmware.framing)
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+        self.assertEqual(0, board.lost)
+        # And it is not repeatable: its answer is in the old form and the
+        # next line is in the new one, so a second attempt would be read
+        # for the wrong form.
+        self.assertFalse(esp32peer.Shell.repeatable(esp32peer.FRAME_OFF))
 
 class DrainTests(unittest.TestCase):
     """The boards are read while the command under test runs (#311).
