@@ -9,9 +9,14 @@ the things asserted, since a missing or malformed file must never stop a run.
 """
 
 import inspect
+import os
 from pathlib import Path
+import re
+import socket
+import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 import yaml
 
@@ -112,14 +117,21 @@ class CommittedFileTests(unittest.TestCase):
                 self.assertIn("weak", text)
                 self.assertRegex(text, r"attenuat|\bdb\b")
 
-    def test_no_entry_duplicates_the_catalog_estimate(self):
-        # The catalog is authoritative for estimates and profiles, and
-        # /api/plans reports them from there; an entry that restated one
-        # would be a second source to drift (#315).
+    def test_no_entry_carries_an_argument_default_or_a_required_flag(self):
+        # The catalog owns which arguments a test takes, which are required,
+        # and what they default to, and /api/plans reports all three beside
+        # the prose; an entry that wrote one down would be a second source to
+        # drift (#315). What an entry may say is what the argument is for.
         for name, entry in self.info.items():
             prose = " ".join(getattr(entry, field) for field in PROSE_FIELDS)
             with self.subTest(test=name):
-                self.assertNotIn("estimated_s", prose)
+                for phrase in ("(default ", "defaults to 5", "is required;",
+                               "a required duration", "required sample",
+                               "arguments are required"):
+                    self.assertNotIn(phrase, prose)
+                # A boot default, a tool's own default and an RF placement
+                # default are not the catalog's, so "default" itself is
+                # allowed; a *catalog* default reads as one of the above.
 
     def test_related_references_resolve_to_a_known_repository(self):
         for name, entry in self.info.items():
@@ -202,6 +214,21 @@ class SchemaTests(unittest.TestCase):
     def test_malformed_yaml_is_refused_with_the_parser_s_reason(self):
         reason = self.refused(text="Host version: [unclosed\n")
         self.assertIn("unable to load", reason)
+
+    def test_a_key_that_is_not_a_test_name_is_refused_as_such(self):
+        # A YAML complex key builds a list, which is unhashable: the loader
+        # has to say so rather than raising TypeError out of PyYAML.
+        reason = self.refused(text="? [a, b]\n: x\n")
+        self.assertIn("a key must be a test name, not list", reason)
+
+    def test_a_byte_in_another_encoding_is_refused_as_unreadable(self):
+        # What an editor leaves when it saves a cp1252 quote or accent.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "test_info.yaml"
+            path.write_bytes(b"Host version:\n  purpose: caf\xe9\n")
+            with self.assertRaises(TestInfoError) as caught:
+                load_test_info(path, self.catalog)
+        self.assertIn("unable to load", str(caught.exception))
 
     def test_a_file_that_is_not_a_mapping_is_refused(self):
         self.assertIn("non-empty mapping", self.refused(text="- Host version\n"))
@@ -319,6 +346,66 @@ class UnavailableTests(unittest.TestCase):
             self.assertNotIn("\n", reason)
             self.assertNotIn(str(directory), reason)
 
+    def test_nothing_about_the_file_reaches_the_caller_as_an_exception(self):
+        # The controller serves the plans listing from here, so a file it
+        # cannot read must cost one information block and not the response.
+        # Each of these raised out of an earlier version of the loader.
+        files = {
+            "another encoding": b"Host version:\n  purpose: caf\xe9\n",
+            "a complex key": b"? [a, b]\n: x\n",
+            "a list at the root": b"- Host version\n",
+            "a flow sequence left open": b"Host version: [unclosed\n",
+            "nothing at all": b"",
+            "a binary blob": bytes(range(256)),
+        }
+        for description, content in files.items():
+            with self.subTest(file=description):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "test_info.yaml"
+                    path.write_bytes(content)
+                    information = test_information(path, self.catalog)
+                    view = information.view("Host version")
+                self.assertIs(False, view["available"])
+                self.assertIn("could not be read", view["unavailable_reason"])
+                self.assertNotIn("\n", view["unavailable_reason"])
+
+    def test_a_directory_in_place_of_the_file_is_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "test_info.yaml"
+            path.mkdir()
+            view = test_information(path, self.catalog).view("Host version")
+        self.assertIs(False, view["available"])
+        self.assertIn("could not be read", view["unavailable_reason"])
+
+    def test_the_reason_names_the_entry_that_is_wrong(self):
+        # One bad entry makes every test's information unavailable, which is
+        # strict on purpose; the reason has to say which entry it was, or a
+        # reader is told only that the file is broken.
+        with tempfile.TemporaryDirectory() as directory:
+            path = write(directory, {"Spectrum analyzer": {**ENTRY, "theory": " "}})
+            reason = test_information(path, self.catalog).view(
+                "Host version")["unavailable_reason"]
+        self.assertIn("Spectrum analyzer", reason)
+        self.assertIn("theory must not be empty", reason)
+
+    def test_an_edited_file_is_read_again_rather_than_held(self):
+        # The answer is held between calls, because /api/plans asks for it on
+        # every page load; an edit has to be picked up all the same.
+        with tempfile.TemporaryDirectory() as directory:
+            path = write(directory, {"Host version": dict(ENTRY)})
+            first = test_information(path, self.catalog)
+            self.assertIs(first, test_information(path, self.catalog))
+            os.utime(path, (0, 0))  # a different modification time
+            write(directory, {"Spectrum analyzer": dict(ENTRY)})
+            second = test_information(path, self.catalog)
+            self.assertIsNot(first, second)
+            self.assertEqual(["Spectrum analyzer"], list(second.entries))
+            # A file that is gone is not answered from the held copy either.
+            path.unlink()
+            gone = test_information(path, self.catalog)
+            self.assertEqual({}, dict(gone.entries))
+            self.assertIn("is missing", gone.error)
+
     def test_a_test_with_no_entry_is_unavailable_on_its_own(self):
         with tempfile.TemporaryDirectory() as directory:
             path = write(directory, {"Host version": dict(ENTRY)})
@@ -386,6 +473,35 @@ class PlansApiTests(unittest.TestCase):
                     [{"name": name, "required": rule.required}
                      for name, rule in definition.arguments.items()],
                     test["arguments"],
+                )
+
+    def test_no_entry_restates_the_catalog_estimate_of_a_planned_step(self):
+        # The catalog owns the wall-time estimate and the row beside the
+        # prose carries it, so an entry that wrote the figure down would be a
+        # second source to drift (#315). Checked against the estimate of
+        # every step a committed plan compiles for the test, which is the
+        # figure a reader of that row sees: a duration a case runs for is
+        # fine, the estimate for the invocation is not.
+        pattern = re.compile(r"\b(\d+(?:\.\d+)?)\s?s\b")
+        estimates = {}
+        for test in self.rows():
+            if test["catalog_estimated_s"] is not None:
+                estimates.setdefault(test["name"], set()).add(
+                    float(test["catalog_estimated_s"])
+                )
+        self.assertGreater(len(estimates), 20)
+        information = test_information(catalog=self.catalog)
+        for name, figures in estimates.items():
+            prose = " ".join(
+                getattr(information.entries[name], field)
+                for field in PROSE_FIELDS
+            )
+            said = {float(found) for found in pattern.findall(prose)}
+            with self.subTest(test=name):
+                self.assertEqual(
+                    set(), said & figures,
+                    "names a figure in seconds that is this test's own "
+                    "catalog estimate; the estimate belongs to catalog.py",
                 )
 
     def test_the_estimate_profile_names_the_estimate_beside_it(self):
@@ -460,17 +576,30 @@ class PlansApiTests(unittest.TestCase):
                 # The catalog half is unaffected: it does not come from the file.
                 self.assertIsInstance(test["arguments"], list)
 
+    def test_a_malformed_file_does_not_stop_the_listing_either(self):
+        # The same guarantee as a missing file, for the file a reader is more
+        # likely to produce: one byte saved in another encoding.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "test_info.yaml"
+            path.write_bytes(b"Host CLI surface:\n  purpose: caf\xe9\n")
+            plans = {
+                plan["name"]: plan
+                for plan in list_plans(
+                    PLANS, information=test_information(path, self.catalog)
+                )
+            }
+        self.assertEqual(sorted(self.plans), sorted(plans))
+        for test in self.rows(plans):
+            with self.subTest(test=test["name"]):
+                self.assertIs(False, test["info"]["available"])
+                self.assertIn("could not be read",
+                              test["info"]["unavailable_reason"])
+
     def test_the_listing_reads_one_committed_file_and_no_client_path(self):
         # The file is the one beside the package, and the endpoint takes no
         # path from a client: its only query parameter is still the target.
         self.assertEqual(
             REPOSITORY / "ubertooth_harness" / "test_info.yaml", TEST_INFO_PATH
-        )
-        source = (REPOSITORY / "ubertooth_harness" / "controller.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            "async def get_plans(target: str | None = None):", source
         )
         # `information` is keyword-only with a default, so nothing routes a
         # request value into it by position.
@@ -484,13 +613,25 @@ class PlansApiTests(unittest.TestCase):
 class NoExecutionTests(unittest.TestCase):
     """Reading the information runs nothing: no command, no board, no build."""
 
-    def test_the_module_starts_no_process_and_opens_no_device(self):
-        source = (REPOSITORY / "ubertooth_harness" / "testinfo.py").read_text(
-            encoding="utf-8"
-        )
-        for forbidden in ("subprocess", "asyncio", "usb", "socket", "os.system"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, source)
+    def test_reading_the_information_starts_no_process_and_opens_no_socket(self):
+        # Driven, not grepped: every way of starting a process or opening a
+        # socket raises, and reading the real file and building a view for
+        # every catalog test still has to work.
+        catalog = builtin_catalog()
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the information must not run anything")
+
+        with unittest.mock.patch.multiple(
+            subprocess, run=refuse, Popen=refuse, check_output=refuse,
+            call=refuse, check_call=refuse,
+        ), unittest.mock.patch.object(socket, "socket", refuse), \
+                unittest.mock.patch.object(os, "system", refuse), \
+                unittest.mock.patch.object(os, "fork", refuse, create=True):
+            information = test_information(catalog=catalog)
+            self.assertEqual((), information.missing(catalog))
+            for name in catalog.names:
+                self.assertIs(True, information.view(name)["available"])
 
     def test_a_test_with_no_information_is_still_a_test_a_plan_can_name(self):
         # The gate a run passes is the plan and the catalog, neither of which

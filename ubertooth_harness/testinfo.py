@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import threading
 from types import MappingProxyType
 from typing import Mapping
 
@@ -71,6 +72,13 @@ REPOSITORIES: Mapping[str, str] = MappingProxyType({
 })
 _REFERENCE_RE = re.compile(r"^(?P<repository>[a-z0-9][a-z0-9-]*)#(?P<number>[1-9][0-9]{0,5})$")
 _ANCHOR_DROP_RE = re.compile(r"[^a-z0-9 -]")
+# One type for "no entries", whichever way there are none.
+_EMPTY: Mapping[str, "TestInfo"] = MappingProxyType({})
+# The last answer per path, keyed by what the file was when it was read
+# (`_cache_key`). Read from a worker thread per request, so it takes a lock;
+# two threads racing would only parse twice and store the same answer.
+_CACHE: dict = {}
+_CACHE_LOCK = threading.Lock()
 
 
 class TestInfoError(ValueError):
@@ -90,6 +98,12 @@ def _no_duplicate_keys(loader, node, deep=False):
     mapping = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
+        # Before `key in mapping`: a YAML complex key (`? [a, b]`) builds a
+        # list, which is unhashable, and the lookup would raise TypeError
+        # out of the loader rather than this module's own error.
+        if not isinstance(key, str):
+            raise TestInfoError(
+                f"a key must be a test name, not {type(key).__name__}")
         if key in mapping:
             raise TestInfoError(f"duplicate entry for {key!r}")
         mapping[key] = loader.construct_object(value_node, deep=deep)
@@ -159,20 +173,20 @@ def documentation(test_name: str) -> dict:
     }
 
 
-def unavailable(reason: str, test_name: str = "") -> dict:
+def unavailable(reason: str, test_name: str) -> dict:
     """An information block for a test that has none, and why.
 
-    The shape is the one an entry gives, so a client reads the same fields
-    either way and only has to look at `available`. The link to the full
-    documentation is still there, because it is derived from the name rather
-    than read from the file.
+    The shape is the one an entry gives, field for field and type for type,
+    so a client reads the same response either way and only has to look at
+    `available`. The link to the full documentation is still a link, because
+    it is derived from the name rather than read from the file.
     """
     return {
         "available": False,
         "unavailable_reason": reason,
         **{field: "" for field in PROSE_FIELDS},
         "related": [],
-        "documentation": documentation(test_name) if test_name else None,
+        "documentation": documentation(test_name),
     }
 
 
@@ -192,6 +206,8 @@ def _reference(raw, where: str) -> Reference:
             f"{where}: related reference {text!r} names no known repository "
             "(" + ", ".join(sorted(REPOSITORIES)) + ")"
         )
+    # `/issues/N` for a pull request too: GitHub sends it to `/pull/N`, so
+    # one form covers both and an entry does not have to know which it is.
     return Reference(
         text, f"https://github.com/{REPOSITORIES[repository]}/issues/{match['number']}"
     )
@@ -269,7 +285,11 @@ def load_test_info(
             raw = yaml.load(stream, Loader=_StrictLoader)
     except TestInfoError as error:
         raise TestInfoError(f"{info_path}: {error}") from error
-    except (OSError, yaml.YAMLError) as error:
+    # UnicodeDecodeError for a byte an editor saved in another encoding, and
+    # a bare ValueError or TypeError for what PyYAML cannot construct: all
+    # of them are this file being unreadable, not a fault to propagate.
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError,
+            TypeError) as error:
         raise TestInfoError(f"unable to load {info_path}: {error}") from error
     if not isinstance(raw, Mapping) or not raw:
         raise TestInfoError(f"{info_path}: the file must be a non-empty mapping")
@@ -295,29 +315,86 @@ def test_information(
     Never raises: a missing or malformed file gives a set that has no entry
     for any test and says why, so a run is never blocked and the GUI says
     the information is unavailable rather than failing the request.
+
+    Held between calls while the file on disk is the same one: reading and
+    validating 62 entries takes about 70 ms, and ``/api/plans`` is asked for
+    on every page load and every change of target, so re-reading it per
+    request would be the slowest thing in that response. The file is still
+    checked on every call -- the key is its path, modification time and
+    size -- so an edited file is read again and a reader never sees an
+    answer from the file as it was.
     """
     info_path = Path(path) if path is not None else TEST_INFO_PATH
+    key = _cache_key(info_path)
+    with _CACHE_LOCK:
+        cached = _CACHE.get(info_path)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    information = _read(info_path, catalog)
+    with _CACHE_LOCK:
+        _CACHE.clear()  # one file in practice; never a growing map
+        _CACHE[info_path] = (key, information)
+    return information
+
+
+def _cache_key(path: Path):
+    """What makes a held answer still the file's own: its identity on disk.
+    None when it cannot be asked, which never matches, so an unreadable file
+    is read again rather than answered from a held copy."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def _read(
+    info_path: Path, catalog: TestCatalog | None = None
+) -> "TestInformation":
     try:
         return TestInformation(load_test_info(info_path, catalog), "")
-    except TestInfoError as error:
-        if not info_path.exists():
-            return TestInformation({}, f"{TEST_INFO_NAME} is missing")
+    # Nothing about this file may reach the caller as an exception: the
+    # controller serves the plans listing from here, so a file one byte of
+    # which an editor saved in another encoding would take the whole Run
+    # setup card down rather than one information block. `load_test_info`
+    # is where a fault is named and where CI fails on it.
+    except Exception as error:  # noqa: BLE001
+        if _absent(info_path):
+            return TestInformation(_EMPTY, f"{TEST_INFO_NAME} is missing")
         return TestInformation(
-            {}, f"{TEST_INFO_NAME} could not be read: {_one_line(error, info_path)}"
+            _EMPTY,
+            f"{TEST_INFO_NAME} could not be read: {_one_line(error, info_path)}",
         )
+
+
+def _absent(path: Path) -> bool:
+    """True when the file is not there. A path that cannot be asked about
+    (a permission error on a parent directory) counts as present, so the
+    reason names the error rather than claiming the file is missing."""
+    try:
+        return not path.exists()
+    except OSError:
+        return False
 
 
 def _one_line(error: Exception, path: Path) -> str:
     """An error as one line, with the filesystem path left out of it.
 
     The reason reaches a browser, so it says the repository-relative name
-    (`TEST_INFO_NAME`) rather than where this checkout happens to be. Both
-    the path and its directory are taken out, because a YAML parse error
-    names the file more than once and sometimes by its directory.
+    (`TEST_INFO_NAME`) rather than where this checkout happens to be. The
+    path is taken out as written and as resolved, and so is its directory,
+    because a YAML parse error names the file more than once and sometimes
+    by its directory. A directory of one or two characters (`/`, or a
+    relative `.`) is left alone: replacing it would rewrite every separator
+    in the message.
     """
-    text = " ".join(str(error).split())
-    for found in (str(path), str(Path(path).resolve()), str(Path(path).parent)):
-        text = text.replace(found, TEST_INFO_NAME)
+    text = " ".join(str(error).split()) or type(error).__name__
+    directory = str(Path(path).parent)
+    found = [str(path), str(Path(path).resolve())]
+    if len(directory) > 2:
+        found.append(directory)
+    for item in found:
+        text = text.replace(item, TEST_INFO_NAME)
     return text
 
 
@@ -333,10 +410,9 @@ class TestInformation:
         entry = self.entries.get(test_name)
         if entry is not None:
             return entry.view()
-        reason = self.error or (
-            f"no {TEST_INFO_NAME} entry for this test"
+        return unavailable(
+            self.error or f"no {TEST_INFO_NAME} entry for this test", test_name
         )
-        return unavailable(reason, test_name)
 
     def missing(self, catalog: TestCatalog | None = None) -> tuple[str, ...]:
         """Catalog tests with no entry, in catalog order."""

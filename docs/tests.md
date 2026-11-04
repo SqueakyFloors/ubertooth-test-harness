@@ -166,7 +166,7 @@ The points, and what each buys:
 |---|---|---|
 | clear | the baseline every test already runs over | everything, with the margin a short bench link gives |
 | 20 dB | marginal but comfortable: the point most weak-link entries use | the range test's reply level, a DK advertiser capture, a targeted Classic follow, exact AFH map recovery |
-| 40 dB | about 14 dB lower again, still with margin | a DK advertiser capture, Classic decode with the clock acquired, `-e 2` honored; AFH recovery starts losing edge channels |
+| 40 dB | 20 dB more attenuation, still with margin: the attenuated-device sweep read it about 14 dB below the 20 dB board from the Classic peer (`weaklink.py`) | a DK advertiser capture, Classic decode with the clock acquired, `-e 2` honored; AFH recovery starts losing edge channels |
 | 30 dB | asked for, uncharacterized | nothing yet: it is the point that would turn 20 against 40 into a curve (`weaklink.PLANNED_ATTENUATIONS_DB`) |
 | above 40 dB (50 dB and beyond) | not on the bench and not characterized | nothing. 40 dB is not an error regime here (74% of records `err=0` against 77% at 20 dB), so a case that needs a HEC or CRC flag to have fired may need more attenuation than the bench now has |
 
@@ -1207,7 +1207,7 @@ fail if one is actually in range.
 A weak-link entry for the access-code error threshold (`-e`) is the one piece
 of this test attenuation would be good for, and it is still waiting in
 [`weak-link.yaml`](../testplans/weak-link.yaml) rather than running. The
-attenuated-device sweep compared what `-e 0`, `-e 2` and `-e 4` find by hand
+attenuated-device sweep compared what `-e 0`, `-e 2`, and `-e 4` find by hand
 and the answer was clean at 20 and 40 dB; what the test cannot do is make that
 comparison, because its cases only require that no packet exceeded the limit,
 which zero packets satisfy, and this entry binds no peer to produce any. One

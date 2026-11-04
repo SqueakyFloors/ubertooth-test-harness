@@ -24,7 +24,6 @@ import time
 from typing import Awaitable, Callable, Mapping, Sequence
 
 from ubertooth_harness.catalog import (
-    DEFAULT_PROFILE,
     REQUIRED_HARDWARE_ARGUMENT,
     CatalogError,
     TestCatalog,
@@ -602,10 +601,11 @@ def _catalog_contract(catalog: TestCatalog, test_name, arguments=None) -> dict:
     into ``test_info.yaml``, so a role or an argument has one source and the
     prose cannot drift from it.
 
-    ``estimate_profile`` is the key ``estimated_seconds`` reads for these
-    arguments -- the coverage profile a step chose, or ``default`` for a test
-    with one estimate -- so a client can say which profile the estimate
-    beside it belongs to. None for a test with no calibrated estimates.
+    ``estimate_profile`` is the profile ``estimated_seconds`` read for these
+    arguments, asked of the definition itself
+    (``TestDefinition.estimate_profile``) rather than worked out again here,
+    so the profile and the estimate beside it cannot disagree. None for a
+    test with no calibrated estimates.
 
     A test the catalog does not know binds nothing and takes nothing, which
     is the same answer the rest of this listing gives for one.
@@ -614,9 +614,6 @@ def _catalog_contract(catalog: TestCatalog, test_name, arguments=None) -> dict:
         definition = catalog.get(test_name)
     except CatalogError:
         return {"hardware_roles": [], "arguments": [], "estimate_profile": None}
-    profile = None
-    if definition.estimates:
-        profile = (arguments or {}).get("coverage") or DEFAULT_PROFILE
     return {
         "hardware_roles": [
             {"role": role, "device": device}
@@ -626,7 +623,7 @@ def _catalog_contract(catalog: TestCatalog, test_name, arguments=None) -> dict:
             {"name": name, "required": rule.required}
             for name, rule in definition.arguments.items()
         ],
-        "estimate_profile": profile,
+        "estimate_profile": definition.estimate_profile(arguments or {}),
     }
 
 
@@ -747,9 +744,9 @@ def list_plans(
 
     Each test also carries what a reader needs to understand it (#315):
     ``info``, the prose from ``ubertooth_harness/test_info.yaml`` -- purpose,
-    theory, hardware, expected, limitations, related references and a link to
+    theory, hardware, expected, limitations, related references, and a link to
     its ``docs/tests.md`` section -- beside ``hardware_roles``,
-    ``arguments`` and ``estimate_profile``, which come from the catalog
+    ``arguments``, and ``estimate_profile``, which come from the catalog
     (``_catalog_contract``). Nothing here can stop a run: a test with no
     entry, or a file that is missing or malformed, is reported as
     ``info.available`` false with the reason in

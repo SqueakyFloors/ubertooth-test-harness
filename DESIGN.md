@@ -1122,9 +1122,15 @@ step.
   `arguments`, `estimate_profile`, and the estimate fields), so nothing has
   two sources. Nothing about it can stop a run: a test with no entry, or a
   file that is missing or malformed, is reported `available: false` with the
-  reason, and the listing is otherwise unchanged. The prose is data, never
-  markup, and whoever renders it escapes it; the info button and dialog that
-  show it are the GUI half of
+  reason, and the listing is otherwise unchanged. The answer is held between
+  requests while the file on disk is unchanged (its modification time, size
+  and inode), because reading and validating every entry takes about 70 ms
+  and the listing is asked for on every page load and change of target. The
+  prose is data, never markup, and whoever renders it escapes it: entries
+  carry angle brackets and quotation marks on purpose, because they quote the
+  shapes the tools print (`libubertooth <v> (<id>)`), so a renderer that
+  interpolates rather than escapes would drop text silently as well as being
+  a hole. The info button and dialog that show it are the GUI half of
   [#315](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/315),
   waiting on the layout review in
   [#133](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/133).

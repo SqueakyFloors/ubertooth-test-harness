@@ -75,10 +75,14 @@
   updates the fields that are no longer true, in the same PR and beside the
   `docs/tests.md` section it summarizes. Say "not established" rather than
   inventing a theory or a result. Do not restate what the catalog already
-  says: hardware roles, accepted arguments, coverage profiles and estimates
-  come from `catalog.py`, and `/api/plans` reads them from there. The unit
-  tests require an entry for every catalog test, so a missing one fails rather
-  than quietly leaving a test with no information. Reviewers check for it.
+  says: the hardware roles, the accepted arguments and which are required,
+  the coverage profiles, and the estimates come from `catalog.py`, and
+  `/api/plans` reports them from there beside the prose, so an entry carries
+  no argument default, no required flag, no role list, and no number of
+  seconds. What each profile decides, how many cases and which, is this
+  file's to say. The unit tests require an entry for every catalog test and
+  refuse an entry that restates a catalog estimate, so drift fails rather
+  than quietly misleading a reader. Reviewers check for it.
 - Run the unit suite with `python scripts/test.py` (one process per module,
   one per core; `--durations 10` for the slowest tests). It is what
   `scripts/ci.sh test` runs. `python -m unittest discover -s tests` runs the
