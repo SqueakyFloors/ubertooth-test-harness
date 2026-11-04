@@ -68,7 +68,7 @@ try:
     )
     from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 
-    from _bench import bench_lock_board, board as device_board
+    from _bench import board as device_board
 except ImportError:  # run from outside the harness environment
     sys.exit(
         "hub-port: run this from the harness environment "
@@ -255,13 +255,10 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
             # while it is being programmed leaves it needing hands on it.
             aliases, pairing = leases.expand_pairs(registry, [device.alias])
             for alias in aliases:
-                # Both lock names of each, exactly as `hold` takes them, so a
-                # bench script holding either one is met here too.
-                held = registry.get(alias)
-                boards.append(device_board(held))
-                second = bench_lock_board(held)
-                if second is not None:
-                    boards.append(second)
+                # Both lock names of each, the lease key and the lab's own
+                # file, exactly as a run and `hold` take them, so a bench
+                # script holding either one is met here too.
+                boards.append(device_board(registry.get(alias)))
         for clause in pairing:
             print(
                 f"note: {clause}, so it is held while the port is switched",

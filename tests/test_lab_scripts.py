@@ -283,11 +283,11 @@ class HoldLockKeys(Bench):
         # As registered, not lowercased: the bench's own lock file is named
         # after the same string the lease key carries.
         self.assertEqual(PROG_SERIAL, _bench.plain_serial(programmer))
-        second = _bench.bench_lock_board(programmer)
-        # The bench's own file keeps the plain serial; the lease file beside
-        # it is prefixed, so it cannot be an Ubertooth's (harness #290).
-        self.assertEqual(PROG_SERIAL, second.lock_name)
-        self.assertEqual(f"bench-{PROG_SERIAL}", second.key)
+        board = _bench.board(programmer)
+        # The lease file is prefixed, so it cannot be an Ubertooth's
+        # (harness #290); the bench's own file keeps the plain serial.
+        self.assertEqual(PROG_KEY, board.key)
+        self.assertEqual(PROG_SERIAL, board.lock_name)
 
     def test_a_type_this_does_not_hold_is_refused(self):
         from ubertooth_harness.resources import RegistryError
@@ -427,11 +427,17 @@ class HoldRuns(Bench):
         self.assertEqual(0, status)
         self.assertEqual("busy", marker.read_text())
 
-    def test_both_lock_names_are_taken_for_a_device_whose_key_is_not_its_serial(self):
-        """A bench script using the older plain-serial name must still be excluded."""
+    def test_the_lab_s_own_file_is_the_plain_serial_for_such_a_device(self):
+        """A bench script using the plain-serial name must be excluded.
+
+        That file is the lab's, and the only one its wrappers lock; the
+        device's prefixed name belongs to its lease file, where the prefix
+        keeps it off an Ubertooth's (harness #290). A run takes the same
+        file, so a session held here and a run exclude each other (#317).
+        """
         for device, paths in (
-            ("ESP0", (f"board-esp32-{BRIDGE}.lock", f"board-{BRIDGE}.lock")),
-            ("DK0", (f"board-nrf52840dk-{int(JLINK)}.lock", f"board-{JLINK}.lock")),
+            ("ESP0", (f"board-{BRIDGE}.lock", f"board-esp32-{BRIDGE}.lock")),
+            ("DK0", (f"board-{JLINK}.lock", f"board-nrf52840dk-{int(JLINK)}.lock")),
         ):
             with self.subTest(device=device):
                 checks = "\n".join(
@@ -454,18 +460,20 @@ class HoldRuns(Bench):
                 status, _, err = self.run_hold(device, [sys.executable, "-c", script])
                 self.assertEqual(0, status, err)
                 self.assertEqual(
-                    "busy busy", (self.root / f"{device}.txt").read_text()
+                    "busy free", (self.root / f"{device}.txt").read_text()
                 )
 
     def test_an_ubertooth_needs_only_one_lock_name(self):
         import _bench
 
-        board = self.load_registry().get("UT0")
-        self.assertEqual("", _bench.plain_serial(board))  # no second name
-        self.assertIsNone(_bench.bench_lock_board(board))
+        resource = self.load_registry().get("UT0")
+        self.assertEqual("", _bench.plain_serial(resource))  # no second name
+        self.assertIsNone(_bench.board(resource).external_key)
 
     def test_a_peer_is_held_here_and_its_external_lock_is_taken(self):
-        external = self.locks / f"board-esp32-{BRIDGE}.lock"
+        # The lab's own file, under the plain bridge serial, which is the one
+        # a lab wrapper locks and a run holds too (harness #317).
+        external = self.locks / f"board-{BRIDGE}.lock"
         script = (
             "import fcntl, pathlib\n"
             f"fd = open({str(external)!r}, 'a+')\n"
@@ -518,8 +526,8 @@ class HoldRuns(Bench):
             self.leases / f"{UT3_SERIAL}.lock",
             self.leases / f"{PROG_KEY}.lock",
             self.locks / f"board-{UT3_SERIAL}.lock",
-            self.locks / f"board-{PROG_KEY}.lock",
-            # The bench's older name for the programmer, as registered.
+            # The bench's own name for the programmer, as registered: its
+            # lease file is prefixed, its lock file is not.
             self.locks / f"board-{PROG_SERIAL}.lock",
         )
         for device, expected_note in (
@@ -568,7 +576,7 @@ class HoldRuns(Bench):
             self.leases / f"{UT_SERIAL}.lock",
             self.leases / f"esp32-{BRIDGE}.lock",
             self.locks / f"board-{UT_SERIAL}.lock",
-            self.locks / f"board-esp32-{BRIDGE}.lock",
+            self.locks / f"board-{BRIDGE}.lock",
         )
         status, _, err = self.run_hold(
             "UT0,ESP0",
@@ -863,26 +871,30 @@ class HubPortSwitches(Bench):
         self.assertEqual(f"esp32-{BRIDGE}", hub_port.device_board(peer).key)
 
     def test_a_held_bench_lock_name_also_prevents_switching(self):
-        """A hold of only the older name must be met here too.
+        """A lab script that locks only the plain serial must be met here too.
 
-        That hold takes the bench's own `board-<plain serial>.lock`, which is
-        where a bench script written against the serial meets it, and the
-        prefixed lease file beside it.
+        It holds the bench's own `board-<plain serial>.lock` and nothing of
+        the harness's, so that file is the only place it can be met.
         """
         holder = leases.acquire(
-            [leases.Board(
-                "DK0 (bench lock)", leases.bench_lock_key(JLINK), external_key=JLINK
-            )],
+            [leases.Board("a lab script", "bench-elsewhere", external_key=JLINK)],
             leases.holder_info(run_id=None, owner="bob", purpose="a DK session"),
             directory=self.leases,
             external_template=self.template,
         )
         self.addCleanup(holder.release)
-        # DK0 is mapped to port 5 in the registry below.
-        status, _, err = self.run_hub_port(["Hub0", "cycle", "5"])
+        # DK0 is mapped to port 5 in the registry below. The template is what
+        # tells this run where the lab's own files are; without it there is
+        # nowhere to meet a holder that took nothing of the harness's.
+        status, _, err = self.run_hub_port(
+            ["--external-board-lock", self.template, "Hub0", "cycle", "5"]
+        )
         self.assertEqual(2, status)
         self.assertEqual([], self.controller.calls)
-        self.assertIn("bob", err)
+        # Named by the file, not by a holder: the harness never writes to an
+        # external lock, so all it can report is which file is held.
+        self.assertIn("DK0 is in use: held outside the harness", err)
+        self.assertIn(f"board-{JLINK}.lock", err)
 
     def test_a_programmer_is_held_while_its_board_s_port_is_switched(self):
         """UT_Dbg is on port 2, with Prog0 wired to it.

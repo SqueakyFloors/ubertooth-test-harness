@@ -290,11 +290,14 @@ class LeaseError(RuntimeError):
 class Board:
     """One board to lease: its registry alias and the key its lock file uses.
 
-    ``external_key`` is the name the bench's own lock file for this device
-    is built from (``external_lock_path``), where that is not the lease key.
-    One device needs the two to differ: the bench's older name for a DK, a
-    peer, or a programmer is the plain serial, and the lease file that goes
-    with it is prefixed so that it cannot be a board's (``bench_lock_key``).
+    ``external_key`` is the name the lab's own lock file for this device is
+    built from (``external_lock_path``), where that is not the lease key. A
+    DK, a peer and a programmer need the two to differ: their lease keys
+    carry their type's prefix, because an unprefixed name of 32 hex digits
+    is the lease file of an Ubertooth with that serial and a CP2102N bridge
+    serial is 32 hex digits (#290), while the lab's file keeps the plain
+    serial. ``board_for_resource`` builds both names, for every path that
+    leases a device.
     """
 
     alias: str
@@ -374,9 +377,9 @@ def external_lock_template(
 def external_lock_path(template: str, board: Board) -> Path:
     """The board's external lock file: the template with its own name in it.
 
-    That name is the lease key for everything the harness leases, and the
-    plain serial for the bench's own older name for a device, whose lease
-    file is prefixed (``Board.external_key``, ``bench_lock_key``).
+    That name is the lease key for an Ubertooth, whose key is its serial,
+    and the plain serial for a DK, a peer or a programmer, whose lease key
+    is prefixed (``Board.external_key``, ``board_for_resource``).
     """
     return Path(template.replace(SERIAL_FIELD, board.lock_name))
 
@@ -448,21 +451,33 @@ PEER_TYPE = "ESP32 Classic peer"
 # expand_pairs).
 PROGRAMMER_TYPE = "Debug programmer"
 LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE)
-# The bench's older lock name for a device whose lease key is not its plain
-# serial (a DK, a peer, a programmer): `scripts/lab/hold` takes that name as
-# well as the key, so a bench script written against the serial is met on the
-# same file. The bench's own file keeps the plain serial, which is what makes
-# that work; the lease file taken beside it is prefixed, because an
-# unprefixed one of 32 hex digits is the lease file of an Ubertooth with that
-# serial, and a CP2102N bridge serial is 32 hex digits (#290). Nothing else
-# can spell this prefix: the three other keys carry their own type's, and an
-# Ubertooth's is 32 hex digits.
-BENCH_LOCK_PREFIX = "bench-"
 
 
-def bench_lock_key(serial: str) -> str:
-    """The lease file taken with the bench's own lock name for a device."""
-    return f"{BENCH_LOCK_PREFIX}{serial}"
+
+def plain_serial(resource) -> str:
+    """The serial a lab's own scripts name this device's lock file after.
+
+    An Ubertooth's lease key is its serial, so there is one name and this is
+    empty. A DK's, a peer's and a programmer's keys carry their type's
+    prefix, so the lab's file and the lease file have different names and
+    ``board_for_resource`` has to say which is which.
+
+    Every one of them is taken exactly as registered. The registry is also
+    what names the device on USB and what a lab script was written against,
+    and ``resource_key`` spells its key from the same string, so one
+    spelling is one device: a serial registered in capitals that was
+    lowercased here would name a file the lab's own wrapper never locks, on
+    any filesystem that tells the two apart.
+    """
+    if resource.type == PROGRAMMER_TYPE:
+        return str(resource.identity.get("serial", "") or "").strip()
+    if resource.type not in (DK_TYPE, PEER_TYPE):
+        return ""
+    for key in ("jlink serial", "bridge serial"):
+        value = str(resource.identity.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def resource_key(resource) -> str:
@@ -502,16 +517,34 @@ def resource_key(resource) -> str:
     return board_key(resource.alias, resource.identity)
 
 
-def max_serial_chars(prefix: str) -> int:
-    """How long a serial may be for every lock name built from it to fit.
+def board_for_resource(resource) -> Board:
+    """The device to lease: its lease key, and the lab's name for its lock.
 
-    Its lease key carries its type's prefix and the bench's second lock
-    name carries ``bench-``, and both are file names
-    (``LOCK_NAME_CHARS``). The registry refuses a longer serial where it
-    loads, so a bench learns the limit from the field it wrote rather than
-    from the name the harness built.
+    Every path that leases a device builds it here, so a run, ``lease``,
+    ``boards`` and the helpers in ``scripts/lab`` can never ask for
+    different files for one device. They used to: a DK, a peer and a
+    programmer carry a prefix in the lease key, the lab's own ``flock`` file
+    is named after the plain serial, and only the helpers took the second
+    name. So a run and a lab script could hold one device at the same
+    moment, which on an ESP32 peer restarts the board -- opening its bridge
+    pulls the chip's reset line -- in the middle of a capture (#317).
     """
-    return LOCK_NAME_CHARS - max(len(prefix), len(BENCH_LOCK_PREFIX))
+    key = resource_key(resource)
+    serial = plain_serial(resource)
+    second = serial if serial and serial != key else None
+    return Board(resource.alias, key, external_key=second)
+
+
+def max_serial_chars(prefix: str) -> int:
+    """How long a serial may be for the lease file built from it to fit.
+
+    A lease key carries its type's prefix and is a file name
+    (``LOCK_NAME_CHARS``). The device's other lock name is a path from the
+    lab's own template, which this says nothing about. The registry refuses a
+    longer serial where it loads, so a bench learns the limit from the field
+    it wrote rather than from the name the harness built.
+    """
+    return LOCK_NAME_CHARS - len(prefix)
 
 
 def _keyed(resource, field: str, prefix: str, serial: str) -> str:
@@ -646,7 +679,7 @@ def boards_for_invocations(invocations: Sequence, registry) -> tuple[Board, ...]
     aliases, _why = expand_pairs(registry, _named_aliases(invocations, registry))
     found: dict[str, Board] = {}
     for alias in aliases:
-        board = Board(alias, resource_key(registry.get(alias)))
+        board = board_for_resource(registry.get(alias))
         found.setdefault(board.key, board)
     return tuple(sorted(found.values(), key=lambda b: b.key))
 
@@ -1894,10 +1927,11 @@ def acquire(
     if external_template:
         for board in by_serial:
             path = external_lock_path(external_template, board)
-            # Both of this device's own lease names, which differ only for
-            # the bench's second lock name (Board.external_key): a template
-            # pointing at the lease directory would otherwise take the lease
-            # file of the device that name belongs to as an external lock.
+            # Both of this device's own lock names. A template pointing at
+            # the lease directory would otherwise take a lease file as an
+            # external lock: its own, or -- since a peer's 32-hex bridge
+            # serial could be the lease key of an Ubertooth in another
+            # registry sharing this directory -- that board's.
             own = {root / f"{board.key}.lock", root / f"{board.lock_name}.lock"}
             # realpath, so a symlink to the lease file is caught too: the
             # second flock of one file in one process conflicts with itself.
