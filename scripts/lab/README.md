@@ -22,13 +22,21 @@ scripts/lab/hold --help                   # or python3 scripts/lab/hold --help
 ~/checkout/scripts/lab/hub-port --help
 ```
 
-A wrapper on a bench is therefore one line, and there is nothing in it to get
-wrong:
+A wrapper on a bench is therefore the bench's own two settings and an `exec`,
+with no interpreter to name and no working directory to be in:
 
 ```sh
 #!/bin/sh
-exec ~/checkout/scripts/lab/hold "$@"
+export UBERTOOTH_HARNESS_HARDWARE="$HOME/bench/hardware.yaml"
+export UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK="$HOME/bench/board-{serial}.lock"
+exec "$HOME/checkout/scripts/lab/hold" "$@"
 ```
+
+The settings belong in the wrapper, not in whoever calls it: a helper with no
+registry refuses rather than guessing, and a bench whose wrapper leaves that
+to the caller's environment works from a shell that happens to have exported
+them and not from cron, a script, or another agent's session. Everything else
+a helper needs it works out for itself.
 
 Naming the environment's interpreter yourself still works and is what the
 harness's own commands take:
@@ -49,7 +57,9 @@ A helper now pins both halves to its own checkout, and
 tracks `main`, the same one the harness is deployed from, so a registry
 change and the code that reads it move together.
 
-Set the two paths once and the commands stay short:
+Running them by hand instead of through a wrapper, set the same two once and
+the commands stay short. `UBERTOOTH_HARNESS_OWNER` is how another holder's
+error names you, and is worth setting in a shell a person types in:
 
 ```sh
 export UBERTOOTH_HARNESS_HARDWARE=~/bench/hardware.yaml
