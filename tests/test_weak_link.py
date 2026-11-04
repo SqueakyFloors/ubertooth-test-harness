@@ -203,6 +203,44 @@ class PlacementTests(unittest.TestCase):
             & set(weaklink.PLANNED_ATTENUATIONS_DB)
         )
 
+    def test_a_point_found_unusable_is_not_measured_and_not_planned(self):
+        """A characterized-unusable figure stays out of a runnable plan.
+
+        It has been taken to, so "not measured" would be wrong to say, but a
+        test may not be pointed at it either: nothing can be judged there.
+        """
+        self.assertTrue(weaklink.CHARACTERIZED_UNUSABLE_DB)
+        for value, reason in weaklink.CHARACTERIZED_UNUSABLE_DB.items():
+            with self.subTest(value):
+                self.assertIsInstance(value, float)
+                self.assertFalse(weaklink.measured(value))
+                self.assertNotIn(value, weaklink.PLANNED_ATTENUATIONS_DB)
+                # The reason is what a refusal quotes, so it has to say
+                # something rather than name the figure again.
+                self.assertGreater(len(reason), 40)
+
+    def test_a_point_found_unusable_is_refused_with_its_reason(self):
+        """Not "is not measured": the reason says which way is worth trying."""
+        unusable = sorted(weaklink.CHARACTERIZED_UNUSABLE_DB)[0]
+        why = weaklink.unjudgeable(
+            weaklink.weak_receiver(unusable),
+            "Classic capture record fields", "Ubertooth",
+        )
+        self.assertIn(f"needs {unusable:g} dB", why)
+        self.assertIn("found unusable", why)
+        self.assertIn(weaklink.CHARACTERIZED_UNUSABLE_DB[unusable], why)
+        self.assertNotIn("is not measured", why)
+
+    def test_an_attenuation_nobody_has_tried_is_still_plainly_unmeasured(self):
+        """The new branch must not swallow the ordinary case."""
+        untried = 55.0
+        self.assertNotIn(untried, weaklink.CHARACTERIZED_UNUSABLE_DB)
+        self.assertEqual(
+            f"needs {untried:g} dB, which is not measured",
+            weaklink.unjudgeable(weaklink.weak_receiver(untried),
+                                 "Classic capture record fields", "Ubertooth"),
+        )
+
     def test_attenuations_are_described_for_a_refusal(self):
         self.assertEqual("20 dB", weaklink.describe_attenuations([20]))
         self.assertEqual("20 and 40 dB",

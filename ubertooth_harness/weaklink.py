@@ -116,6 +116,22 @@ MEASURED_ATTENUATIONS_DB: tuple[float, ...] = (20.0, 40.0)
 # 20-against-40 figures into a curve.
 PLANNED_ATTENUATIONS_DB: tuple[float, ...] = (30.0,)
 
+# Points the bench has been taken to and found useless, with why. These are
+# deliberately *not* in MEASURED_ATTENUATIONS_DB: a plan may not point a test
+# at one. They are kept because "not measured" is the wrong thing to tell
+# somebody who is about to fit the attenuator a previous session already
+# tried, and because the reason says which direction is worth trying next.
+CHARACTERIZED_UNUSABLE_DB: Mapping[float, str] = MappingProxyType({
+    50.0: (
+        "measured 2026-11-04 for the Classic damaged-packet checks "
+        "(#306) and the link is past its edge there: six 15 s windows of "
+        "dense SPP traffic gave 0, 0, 1, 0, 61 and 0 records, no window "
+        "recovered a clock or followed, and the one window that heard "
+        "anything had 49 of 49 header checks pass. It removes packets "
+        "without producing errors, so it buys no error regime"
+    ),
+})
+
 
 def measured(attenuation_db: float) -> bool:
     """True when the bench has been measured at this attenuation.
@@ -171,6 +187,11 @@ def unjudgeable(
             return (
                 f"needs {low:g} dB, which is measured on this bench but not "
                 f"for this test in this role; weaklink.CHECKS records what is"
+            )
+        if low in CHARACTERIZED_UNUSABLE_DB:
+            return (
+                f"needs {low:g} dB, which this bench has been taken to and "
+                f"found unusable: {CHARACTERIZED_UNUSABLE_DB[low]}"
             )
         return f"needs {low:g} dB, which is not measured"
     bound = []
@@ -388,12 +409,18 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "HEC and CRC error flags, Classic",
         "Classic capture record fields", "Ubertooth", 40.0,
-        "a capture whose records a flag actually fired on. The sweep decoded "
-        "packets at 40 dB but wrote no capture file, and 40 dB is not an "
-        "error regime on this bench anyway (74% against 77% err=0), so the "
-        "flags may simply not fire; more attenuation than the bench has may "
-        "be needed, and a case that requires a flag to have fired does not "
-        "exist yet",
+        "a capture carrying payload-bearing records, and a case that requires "
+        "a flag to have fired. Measured over capture files 2026-11-04 (#306), "
+        "which answers the older guess that more attenuation was the way: it "
+        "is not. The header flag does fire at 40 dB (26 of 534 checks failed "
+        "in one window, 4 of 47 in another) and even on a clear board (6 of "
+        "90), but it fires where many packets get decoded, which is follow "
+        "mode, not where the link is weak: 50 dB produced 0 to 61 records a "
+        "window with every check passing. The CRC flag is the real blocker "
+        "and attenuation cannot reach it, because the CRC needs a payload "
+        "and only 0 to 4 records a window carried one; across 19 windows no "
+        "record ever reported a CRC as valid. Follow mode is also a coin "
+        "flip at this length, reached by 2 of 4 windows at 40 dB",
     ),
     Check(
         "HEC and CRC error flags, BLE",

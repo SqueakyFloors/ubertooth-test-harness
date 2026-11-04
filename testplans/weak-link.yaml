@@ -88,13 +88,18 @@ suites:
         weak link: {Ubertooth: 20}
         coverage: smoke
         duration: 2m
-    # The one entry whose answer the bench may not be able to give. A capture
-    # over the 40 dB link was never written to a file, so no record's HEC or
-    # CRC flag has been read there; and the error profile at 40 dB is close
-    # to 20 dB's (74% against 77% err=0), so the flags may simply not fire at
-    # either. Finding out needs a capture file over this link, and a case
-    # that requires a flag to have fired rather than only that the fields
-    # agree. More attenuation than the bench has may be the real answer.
+    # The one entry whose answer the bench may not be able to give, and
+    # 2026-11-04's capture files (#306) say why it is not an attenuation
+    # problem. Over 19 windows of dense SPP traffic the header flag did fire
+    # -- 26 of 534 checks failed at 40 dB, 6 of 90 on a clear board -- but it
+    # fires where many packets get decoded, which is follow mode, and follow
+    # was reached by only 2 of 4 windows at 40 dB. The CRC flag is the
+    # blocker: a CRC needs a payload, only 0 to 4 records a window carried
+    # one without a clock, and no record in any window reported a CRC valid.
+    # More attenuation makes it worse rather than better, which 50 dB
+    # showed directly (0 to 61 records a window, every check passing); see
+    # weaklink.CHARACTERIZED_UNUSABLE_DB. So this entry waits on a capture
+    # with payload-bearing records, not on a bigger attenuator.
     - Classic capture record fields:
         hosts: [Host_Linux]
         Ubertooth: default

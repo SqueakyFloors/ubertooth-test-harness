@@ -448,6 +448,30 @@ so they stay off an attenuated board with no plan saying so.
 without editing `rf:` makes every later report quote the wrong conditions, and
 nothing in the harness can catch it.
 
+**How much attenuation is useful, measured.** Stacking attenuators to force
+decode errors has a ceiling, and on this bench it is below 50 dB. A receiver
+taken to 50 dB a metre from the Classic peers, against a dense Serial Port
+Profile link, heard 0 to 61 packets in a 15-second window, never recovered a
+piconet clock, and reported every header check it made as passing
+([#306](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/306)).
+Past a point, more attenuation stops producing damaged packets and starts
+producing no packets, so a test that wants errors gains nothing from it.
+`weaklink.CHARACTERIZED_UNUSABLE_DB` records such a point with its reason, and
+a plan that asks for one is refused with that reason instead of being told the
+figure is simply unmeasured.
+
+Two things that mislead when reading those runs:
+
+- **A reported signal power is censored**, because only a packet the receiver
+  detected reports one at all. Across 20, 40 and 50 dB the mean reported
+  signal stayed within about 10 dB while the packet yield fell from 190
+  records a window to none, so a flat RSSI is not evidence that attenuation
+  did nothing.
+- **A clear board is only a baseline if it was placed like one.** An
+  unattenuated board elsewhere on the bench heard fewer packets than a 20 dB
+  board deliberately set a metre from the peers. Give a baseline board its own
+  `rf:` with its distance, or do not read it as the best case.
+
 ## Firmware
 
 | Device | Source | Version | Built with | Flashed with |

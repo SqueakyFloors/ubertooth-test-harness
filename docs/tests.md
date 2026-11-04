@@ -2299,6 +2299,22 @@ here, which build records field by field and check each failure is named, and
 in the forks' own tests, which drive libbtbb and the callbacks with crafted
 input.
 
+**A weak link does not buy this test its error flags.** This is the entry
+`testplans/weak-link.yaml` still holds back, and the attenuation sweep of
+2026-11-04 answered which way to go: not further down. Over 19 windows of
+dense Serial Port Profile traffic the header's HEC flag did fire — 26 of 534
+checks failed in one 40 dB window, 4 of 47 in another, and 6 of 90 on a clear
+board — but it fired in the windows that decoded many packets, which means
+follow mode, and follow was reached by only 2 of 4 windows at 40 dB. Taking a
+receiver to 50 dB produced 0 to 61 records a window with every check passing,
+so it removed packets instead of damaging them. The CRC flag is the part
+attenuation cannot reach at all: a CRC needs a payload, only 0 to 4 records a
+window carried one without a settled clock, and across all 19 windows no
+record ever reported a CRC as valid. What this check waits on is therefore a
+capture carrying payload-bearing records, which is the clock question above,
+and a case that requires a flag to have fired rather than only that the
+fields agree.
+
 The survey case cannot assert whose records it reads. A survey is given no
 address, so it records every piconet in range, and the bench hears ambient
 traffic now and then; its checks are therefore the internal ones plus a count
