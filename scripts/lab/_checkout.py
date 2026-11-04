@@ -74,6 +74,20 @@ REVISION_TIMEOUT_S = 5
 # cannot get an answer must refuse rather than wait for a bench.
 PROBE_TIMEOUT_S = 30
 
+# A second pair of braces under `venv_python_would_arrive`, and nothing more.
+# The probe is what decides; this only says an attempt has been made, so that
+# a file answering one way and behaving another cannot be tried for ever.
+# Setting it by hand buys a caller a refusal, never a different harness, and
+# it is dropped before any command runs.
+ATTEMPT_ENV = "UBERTOOTH_HARNESS_LAB_ATTEMPTED"
+
+
+def attempted_once(environ=None) -> bool:
+    """Has a re-run for this checkout already been attempted?"""
+    return (os.environ if environ is None else environ).get(
+        ATTEMPT_ENV, ""
+    ) == str(CHECKOUT)
+
 
 def in_checkout_environment() -> bool:
     """Is this interpreter the one this checkout *bootstrapped*?
@@ -152,18 +166,27 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
             "that character."
         )
     if in_checkout_environment():
+        # Arrived, so the note is spent: the command run under `hold` may be
+        # a helper of this same checkout with its own re-run to make.
+        os.environ.pop(ATTEMPT_ENV, None)
         return
-    if (VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)
-            and venv_python_would_arrive()):
+    usable = VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)
+    if usable and not attempted_once() and venv_python_would_arrive():
+        os.environ[ATTEMPT_ENV] = str(CHECKOUT)
         # Nothing to clean up if this raises: a file that is executable and
         # not an executable image leaves the process as it was, with both
         # outcomes below still open.
         try:
             os.execv(str(VENV_PYTHON), reexec_argv(script))
         except OSError:
-            pass
+            del os.environ[ATTEMPT_ENV]
     if in_harness_environment():
+        os.environ.pop(ATTEMPT_ENV, None)
         return
+    if usable:
+        # The checkout has an environment and the interpreter would not put
+        # this script in it, which "run bootstrap.py" does not describe.
+        raise SystemExit(unreachable_environment_advice(label))
     raise SystemExit(bootstrap_advice(label))
 
 
@@ -179,12 +202,16 @@ def venv_python_would_arrive() -> bool:
 
     Asked rather than assumed, and asked before the `os.execv` rather than
     after, because afterwards there is no process left to notice a wrong
-    answer. Nothing a caller arranges and nothing that file turns out to be
-    can make this spin: a `bin/python` with no `pyvenv.cfg`, a `#!` wrapper,
-    a `PYTHONEXECUTABLE` in the environment that makes an interpreter report
-    a name that is not its own -- each of those simply answers `False`, and
-    a helper that cannot reach its own environment says so instead of
-    trying again.
+    answer. A `bin/python` with no `pyvenv.cfg`, a `#!` wrapper, a
+    `PYTHONEXECUTABLE` in the environment that makes an interpreter report a
+    name that is not its own: each of those answers `False`, and a helper
+    that cannot reach its own environment says so instead of trying again.
+
+    What this cannot cover is a file that answers one way when asked and
+    behaves another way when run. Nobody who can put such a file at
+    `.venv/bin/python` needs it, since the same write access reaches this
+    module, but a helper on a bench must end whatever it is given, so
+    `attempted_once` bounds the attempts as well.
     """
     try:
         asked = subprocess.run(
@@ -202,7 +229,14 @@ def venv_python_would_arrive() -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return asked.returncode == 0 and asked.stdout.strip() == "True"
+    if asked.returncode != 0:
+        return False
+    # The last line, not the whole output: an interpreter may have a
+    # `sitecustomize` or a `.pth` of its own that prints at startup, and a
+    # good environment must not be turned down over someone else's banner.
+    # It still cannot say yes by accident, since the answer is printed last.
+    lines = [line.strip() for line in asked.stdout.splitlines() if line.strip()]
+    return bool(lines) and lines[-1] == "True"
 
 
 def reexec_argv(script: str) -> list[str]:
@@ -249,6 +283,27 @@ def bootstrap_advice(name: str, error: BaseException | None = None) -> str:
         "(it then uses that environment whichever interpreter starts it)."
     )
     return advice if error is None else f"{advice} The import said: {error}"
+
+
+def unreachable_environment_advice(name: str) -> str:
+    """The checkout has an interpreter, and it would not arrive.
+
+    A different thing from a checkout nobody bootstrapped, and the advice
+    for that one would be wrong here: the environment may be perfectly
+    good and `bootstrap.py` will not change the answer. What does: a
+    `PYTHONEXECUTABLE` in the environment, which decides what an
+    interpreter calls itself and which some launchers set; something in
+    place of the interpreter rather than the interpreter; or an
+    environment that needs rebuilding.
+    """
+    return (
+        f"{name}: {VENV_PYTHON} did not confirm that it would run this "
+        f"script in the harness environment in {CHECKOUT}, so it was not "
+        "used. Check for PYTHONEXECUTABLE or PYTHONHOME in the environment, "
+        f"check that {VENV_PYTHON} is that environment's own interpreter, "
+        f"and rebuild it if need be with 'python3 "
+        f"{CHECKOUT / 'bootstrap.py'} --recreate'."
+    )
 
 
 def revision() -> str | None:

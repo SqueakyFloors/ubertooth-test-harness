@@ -1505,6 +1505,100 @@ class CheckoutEnvironment(Bench):
         execv.assert_not_called()
         self.assertIn("bootstrap.py", str(caught.exception))
 
+    def test_a_banner_from_someone_elses_sitecustomize_is_not_an_answer(self):
+        """An interpreter may print at startup for reasons of its own. A
+        good environment must not be turned down over a banner, and a
+        banner must not be able to pass for the answer."""
+        noisy = self.root / "noisy" / "python"
+        noisy.parent.mkdir(parents=True)
+        noisy.write_text(
+            "#!/bin/sh\necho 'loading site customizations'\necho True\n",
+            encoding="utf-8",
+        )
+        noisy.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", noisy):
+            self.assertTrue(_checkout.venv_python_would_arrive())
+        lying = self.root / "lying" / "python"
+        lying.parent.mkdir(parents=True)
+        lying.write_text(
+            "#!/bin/sh\necho 'True is a fine word'\necho False\n",
+            encoding="utf-8",
+        )
+        lying.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", lying):
+            self.assertFalse(_checkout.venv_python_would_arrive())
+
+    def test_an_interpreter_that_answers_one_way_and_runs_another_still_ends(self):
+        """Not a threat -- the same write access reaches this module -- but a
+        helper on a bench has to end whatever it is given, so the attempts
+        are bounded as well as decided."""
+        self.assertFalse(_checkout.attempted_once({}))
+        self.assertFalse(
+            _checkout.attempted_once({_checkout.ATTEMPT_ENV: "/elsewhere"})
+        )
+        self.assertTrue(
+            _checkout.attempted_once(
+                {_checkout.ATTEMPT_ENV: str(_checkout.CHECKOUT)}
+            )
+        )
+        with unittest.mock.patch.dict(
+            _checkout.os.environ, {_checkout.ATTEMPT_ENV: str(_checkout.CHECKOUT)}
+        ):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with unittest.mock.patch.object(
+                        _checkout, "venv_python_would_arrive", return_value=True
+                    ) as asked:
+                        with unittest.mock.patch.object(
+                            _checkout.os, "execv"
+                        ) as execv:
+                            with self.assertRaises(SystemExit):
+                                _checkout.run_in_checkout_environment(
+                                    str(HOLD), "hold"
+                                )
+        execv.assert_not_called()
+        asked.assert_not_called()
+
+    def test_the_attempt_note_does_not_reach_the_command(self):
+        outside = self.outside_interpreter()
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c",
+                "echo \"attempt vars: [$(env | grep -c UBERTOOTH_HARNESS_LAB)]\"",
+            ],
+            capture_output=True, text=True, env=self.plain_environment(),
+            cwd=str(self.root), timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("attempt vars: [0]", result.stdout)
+
+    def test_an_environment_that_would_not_arrive_is_told_apart_from_none(self):
+        """"Run bootstrap.py" is wrong advice for a checkout whose
+        environment is fine and whose interpreter cannot be reached."""
+        advice = _checkout.unreachable_environment_advice("hold")
+        self.assertIn(str(_checkout.VENV_PYTHON), advice)
+        self.assertIn("PYTHONEXECUTABLE", advice)
+        self.assertNotIn("has no environment yet", advice)
+        outside = self.outside_interpreter()
+        environment = self.plain_environment()
+        environment["PYTHONEXECUTABLE"] = "/usr/bin/not-this-interpreter"
+        result = subprocess.run(
+            [str(outside), str(HOLD), "--help"],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.root), timeout=120,
+        )
+        if result.returncode != 0:
+            self.assertIn("did not confirm", result.stderr)
+            self.assertNotIn("has no environment yet", result.stderr)
+
     def test_an_interpreter_that_never_answers_is_not_waited_on(self):
         """A bench gets an answer or a refusal, not a helper that hangs."""
         slow = self.root / "slow" / "python"
@@ -1529,9 +1623,9 @@ class CheckoutEnvironment(Bench):
             cwd=str(self.root), timeout=120,
         )
         # Whichever way it goes, it goes: the usage text if the interpreter
-        # still arrives, the advice if it cannot.
+        # still arrives, a refusal naming it if it cannot.
         self.assertIn(
-            "usage:" if result.returncode == 0 else "bootstrap.py",
+            "usage:" if result.returncode == 0 else "did not confirm",
             result.stdout + result.stderr,
         )
 
