@@ -1791,9 +1791,12 @@ list it), keyed by its bridge serial (`esp32-<serial>.lock` in the lease
 directory). A lab that guards devices with its own per-device `flock` files is
 met on those too, under the plain bridge serial, once the run is given the
 template ([External board locks](#external-board-locks)). Hold the pair that
-way for anything that drives it: opening a peer's bridge pulls the chip's
-reset line, so a second session that opens one restarts the board in the
-middle of the first session's capture
+way for anything that drives it. The bridge's RTS and DTR are wired to the
+chip's reset and boot pins, so a second session restarts the board under the
+first one's capture in either of two ways: by pulsing those lines, which is
+what releasing a peer to its boot state does, or by being the first to open a
+port nobody held. An overlapping open is harmless. What is not is two
+sessions taking turns with one peer
 ([#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)).
 
 The peers have no switchable power on this bench, so nothing power-cycles
