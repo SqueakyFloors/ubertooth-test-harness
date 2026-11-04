@@ -54,6 +54,13 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
 
+import _checkout  # noqa: E402  (nothing but the standard library)
+
+# This checkout's own environment, whichever interpreter started the script;
+# see the note in `hold` and `_checkout.py`.
+if __name__ == "__main__":
+    _checkout.run_in_checkout_environment(__file__, "hub-port")
+
 try:
     from ubertooth_harness import leases
     from ubertooth_harness.environment import (
@@ -66,14 +73,11 @@ try:
         controller_ports,
         snapshot_ports,
     )
-    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+    from ubertooth_harness.resources import RegistryError
 
-    from _bench import board as device_board
-except ImportError:  # run from outside the harness environment
-    sys.exit(
-        "hub-port: run this from the harness environment "
-        "(python3 bootstrap.py, then .venv/bin/python scripts/lab/hub-port ...)"
-    )
+    from _bench import board as device_board, load_registry
+except ImportError as error:  # no environment of its own, or a broken import
+    sys.exit(_checkout.bootstrap_advice("hub-port", error))
 
 HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 # How long to wait for the host lock and the device. A run holds the host lock
@@ -234,7 +238,7 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
         # the bootstrapped harness environment, as `ubertooth-harness power`
         # does. Reported like any other refusal, not as a traceback.
         require_harness_environment()
-        registry = FileResourceRegistry.load(args.hardware)
+        registry = load_registry(args.hardware)
         resource = registry.get(args.controller)
         ports = controller_ports(resource)
         if args.port not in ports:

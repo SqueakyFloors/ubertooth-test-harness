@@ -165,7 +165,12 @@ bench, or to judge what a result was measured on. The by-hand helpers that go
 with it are in [`scripts/lab/`](scripts/lab/README.md): `hold` holds devices
 by serial for one command, `peer` drives the Classic Bluetooth peers by
 registry alias, and `hub-port` switches a hub port to recover a device that has
-stopped answering.
+stopped answering. Each runs the harness of the checkout it lives in,
+whichever interpreter starts it and from whatever directory: it re-runs
+itself under that checkout's own bootstrapped environment, carries on in any
+other the harness bootstrapped if its own checkout has none, and refuses an
+interpreter nobody bootstrapped. So a wrapper on a bench is one `exec` of a
+path.
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
@@ -3223,7 +3228,7 @@ runner (`After=`/`Wants=` the controller) dials
 |---|---|
 | `--runner-host NAME` | registry Host resource of this machine (required) |
 | `--ubertooth-source DIR` | Ubertooth checkout the runner runs the listed commit from (required; a commit missing there is fetched from its `origin` at run time) |
-| `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout) |
+| `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout); it is loaded with this checkout's own code, and one this code cannot read ends the deploy rather than the next run or hold (`--dry-run` says it would and carries on) |
 | `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
 | `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
 | `--libbtbb-source DIR` | libbtbb checkout the runner builds from (default: deploy's own clone of the [libbtbb fork](https://github.com/SqueakyFloors/libbtbb), see below) |

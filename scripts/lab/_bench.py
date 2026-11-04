@@ -8,7 +8,9 @@ excluding each other, which is the whole point of the locks.
 from __future__ import annotations
 
 from ubertooth_harness import leases
-from ubertooth_harness.resources import RegistryError
+from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+
+import _checkout
 
 PEER_TYPE = leases.PEER_TYPE
 PROGRAMMER_TYPE = leases.PROGRAMMER_TYPE
@@ -18,6 +20,22 @@ HELD_TYPES = tuple(leases.LEASED_TYPES)
 # its first four hex digits, and an ambiguous prefix is refused, so a short
 # name can never quietly select the wrong device.
 MIN_PREFIX = 4
+
+
+def load_registry(path):
+    """The registry, or an error that also says which harness refused it.
+
+    A registry a newer harness wrote can be turned down by an older one --
+    a role-named default is the case that happened (#312) -- and the message
+    the older one gives reads like a mistake in the file. The file is fine;
+    what matters is which harness read it, so the error says.
+    """
+    try:
+        return FileResourceRegistry.load(path)
+    except RegistryError as error:
+        raise RegistryError(
+            f"{error} ({_checkout.harness_identity()})"
+        ) from None
 
 
 def lock_key(resource) -> str:

@@ -36,7 +36,11 @@
 #   --runner-host NAME        registry Host resource for the runner (required)
 #   --ubertooth-source DIR    Ubertooth checkout the runner resolves refs in
 #                             (required)
-#   --hardware FILE           resource registry (default CHECKOUT/hardware.yaml)
+#   --hardware FILE           resource registry (default CHECKOUT/hardware.yaml);
+#                             it is loaded with this checkout's own code, and
+#                             a registry this code cannot read ends the deploy
+#                             rather than the next run or hold (--dry-run says
+#                             it would and carries on)
 #   --plans-dir DIR           plans for the GUI and runner (default
 #                             CHECKOUT/testplans)
 #   --ubertooth-repo URL      repository whose refs the GUI offers (default:
@@ -488,6 +492,70 @@ if [ ! -x "$python" ]; then
         die "$python is missing after bootstrap"
     fi
 fi
+
+# The registry, read by the code this deploy installs. Existence was checked
+# above; this is whether this checkout can make sense of the file, which is
+# not the same question. A registry a newer harness wrote can be turned down
+# by an older one, and the refusal then reaches every run and every by-hand
+# device command on the host. A deploy is where that belongs, not the next
+# hold (#312). PYTHONPATH and -P together: the checkout is the only place the
+# package may come from.
+check_registry() {
+    local reason hint
+    case $ROOT in
+        # PYTHONPATH below is a colon-separated list, so a checkout path
+        # holding a colon arrives as two entries, neither of them this
+        # checkout. Another harness could then answer, and a check that
+        # might be reading the wrong code is worse than none: say so and
+        # skip it. The units this script writes do not use PYTHONPATH (the
+        # runner gets WorkingDirectory), so the deploy itself is fine.
+        *:*)
+            say "warning: not reading $hardware: this checkout's path contains ':', which cannot be named on PYTHONPATH ($ROOT)"
+            say "  The bench helpers in scripts/lab/ refuse to run from such a checkout for the same reason. Move it somewhere without a colon."
+            return ;;
+    esac
+    if [ ! -x "$python" ]; then
+        # Only reachable under --dry-run, where bootstrap.py was printed
+        # rather than run; a real deploy has already died on a missing
+        # interpreter above.
+        say "warning: cannot read $hardware without $python"
+        return
+    fi
+    if reason=$(PYTHONPATH=$ROOT "$python" -P - "$hardware" 2>&1 <<'PY'
+import sys
+try:
+    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+except Exception as error:  # the checkout, not the registry
+    sys.exit(f"cannot import the harness from this checkout: {error}")
+try:
+    # Unreadable, not YAML, and every rule the registry has: the loader
+    # reports all of them as this one error.
+    FileResourceRegistry.load(sys.argv[1])
+except RegistryError as error:
+    sys.exit(f"registry: {error}")
+except Exception as error:  # neither the registry's fault nor the loader's
+    sys.exit(f"unexpected failure reading it: {error}")
+PY
+    ); then
+        say "registry $hardware loads with this checkout"
+        return
+    fi
+    reason=${reason:-no reason given}
+    # The hint belongs only to a registry the loader turned down. An import
+    # that failed is this checkout's problem and saying "newer registry"
+    # would send the reader the wrong way.
+    hint=
+    case $reason in
+        registry:*) hint="
+  The registry may be newer than this code. Update the checkout and deploy again, or pass --hardware FILE for the registry this code reads." ;;
+    esac
+    if [ "$dry_run" = 1 ]; then
+        say "warning: would refuse: $hardware does not load with this checkout: $reason"
+    else
+        die "$hardware does not load with this checkout (commit $commit): $reason$hint"
+    fi
+}
+check_registry
 
 # git for a clone or fetch: bounded, never prompting for credentials.
 net_git() {

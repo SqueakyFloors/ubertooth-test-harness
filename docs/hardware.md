@@ -770,6 +770,22 @@ For a command you run by hand, [`scripts/lab/hold`](../scripts/lab/README.md)
 takes the leases and names devices the way a bench note does, by serial or by
 an unambiguous prefix of one.
 
+**One checkout reads the registry and takes the leases.** A bench helper runs
+the harness of the checkout it lives in: it re-runs itself under that
+checkout's bootstrapped interpreter, and the `ubertooth-harness lease` it
+delegates to is given that checkout first on its import path with the working
+directory left off it. So a wrapper on the
+bench names a path and nothing more, and the registry and the code that reads
+it cannot come from two different versions. They did once: a wrapper naming a
+deployed checkout's interpreter left every device command on the host
+refusing a registry that had just gained a role-named default, because the
+deployed half predated them
+(harness [#312](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/312)).
+Point the bench's wrappers at a checkout that tracks `main`, the one the
+harness is deployed from, and `scripts/deploy.sh` reads the registry with the
+code it installs so a pair that cannot work together is refused at the deploy
+rather than at the next hold.
+
 ## Host setup
 
 ### Linux
