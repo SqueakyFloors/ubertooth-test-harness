@@ -433,9 +433,9 @@ name it.
 ## Bootloader identity
 
 **What it does.** Nothing as a plan entry: a catalog entry for the bootloader
-read, which mandatory preflight does instead -- for the boards whose
-firmware a run requires, which leaves out a guard-only board and a board
-whose test writes its own firmware.
+read, which mandatory preflight does instead — for the boards whose
+firmware a run requires and then verifies, which leaves out a guard-only
+board and a board whose test establishes its own firmware.
 
 **Theory of operation.** A board's bootloader is the first 16 KiB of its
 flash, and `ubertooth-dfu` runs from there, so an ordinary firmware write
@@ -3177,8 +3177,8 @@ firmware the run requires and this test establishes its own, so the read is
 skipped for it
 ([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
 [#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
-`--bootloader update` does not reach this board either -- it installs over a
-programmer for the same boards the read covers -- so a board that needs a
+`--bootloader update` does not reach this board either — it installs over a
+programmer for the same boards the read covers — so a board that needs a
 bootloader gets one before this plan is run: from a run that does require its
 firmware, or by hand over the programmer. Required:
 `platforms:`, because the hub is reached through a serial-device path that

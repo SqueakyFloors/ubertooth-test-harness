@@ -195,7 +195,8 @@ Bootloader identity:
   expected: >-
     No implementation as a plan entry; only a plan declaring runnable: false
     may name it. As a mandatory preflight check, one -B read per selected
-    board, recorded as a bootloader_identity record and shown in the report
+    board whose firmware the run requires and then verifies, recorded as a
+    bootloader_identity record and shown in the report
     and the GUI board list. record passes on any answer, including a factory
     bootloader; check and update pass only on the identity the artifact names.
   limitations: >-
@@ -2037,12 +2038,12 @@ Reset into invalid application:
     the board's serial is absent, exactly one DFU bootloader device is
     attached, and every guard is where it was. A board that comes back
     running the image, or that does not come back, fails the case and the
-    message says which. The recovery step writes the run's own image back
-    without a selector and waits for the application to answer with the
-    expected revision -- without a selector, since a board in its bootloader
-    has none; the cleanup does the same whatever happened, naming the board
-    where it can answer, so a failed case still ends with a board on the test
-    image.
+    message says which. The recovery step writes the run's own image back and
+    waits for the application to answer with the expected revision; it names
+    the board where the board can answer and writes without a selector where
+    it cannot, which is the expected path, since a board in its bootloader has
+    no serial. The cleanup does the same whatever happened, so a failed case
+    still ends with a board on the test image.
   limitations: >-
     A pass says what the bootloader in that board's flash does, and that
     bootloader is not what the run built: it cannot be written over USB, so a

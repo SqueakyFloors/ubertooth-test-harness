@@ -2379,7 +2379,8 @@ def create_app(controller: Controller):
         with_firmware: bool = False
         with_btbr: bool = False
         with_python: bool = False
-        # What to do about each board's bootloader: record what is installed,
+        # What to do about the bootloader of each board whose firmware the
+        # run requires: record what is installed,
         # check it against one built from the run's source, or update a stale
         # board through its registered programmer. The last two need build,
         # and are refused (422) without it.

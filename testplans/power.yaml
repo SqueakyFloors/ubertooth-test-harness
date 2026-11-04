@@ -34,11 +34,15 @@ suites:
   # paired with `Prog_Linux0`.
   #
   # Read the bootloader by hand either side: `ubertooth-util -U <serial> -B`.
-  # `--bootloader check` is in the command above for the rest of the run, but
-  # it does not cover this board: preflight reads the bootloader of a board
-  # whose firmware the run requires, and this test establishes its own, so the
-  # read is skipped for it (#303, #327). `--bootloader update` is how a board
-  # that needs a bootloader gets one, over that programmer.
+  # `--bootloader check` is in the command above because it costs nothing,
+  # but it covers no board of this suite: preflight reads the bootloader of a
+  # board whose firmware the run requires and then verifies it, which leaves
+  # out a guard-only board and a board whose test establishes its own
+  # firmware -- this test's board is the second, its only guard the first
+  # (#303, #327). `--bootloader update` installs over a programmer for the
+  # same boards, so it does not reach this board either: a board that needs a
+  # bootloader gets one before this plan is run, from a run that does require
+  # its firmware, or by hand over the programmer.
   #
   # Requires: --allow-destructive (a person passes it; the runner service
   # never does, so no dispatched run and no GUI click can start this test),

@@ -1025,7 +1025,8 @@ class BootloaderArtifactBuilder:
 
 #: What a run may be asked to do about its boards' bootloaders.
 #:
-#: ``record`` reads `-B` on every selected board and records what it found,
+#: ``record`` reads `-B` on every board the run requires firmware of, and
+#: records what it found,
 #: and is the default for a bench run and for the release suite: a bootloader
 #: write is a physical operation on a board that cannot be undone over USB, so
 #: it is never implicit. ``check`` also compares what it found with the run's
@@ -1206,7 +1207,7 @@ class BootloaderStageSummary:
 
 
 class BootloaderUpdater:
-    """Read every selected board's bootloader, and install the artifact where asked.
+    """Read the bootloader of each board given, and install the artifact where asked.
 
     One board at a time, with hard deadlines, inside the run's own locks: the
     caller must already hold each board, its programmer (the registry pairs

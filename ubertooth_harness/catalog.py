@@ -1101,8 +1101,9 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
         Estimate(40.0, per_duration=4), Estimate(60.0, per_duration=6)
     ),
     # Measured on the bench: 49 s for the whole invocation, of which the case
-    # itself was 36 s -- the write, the cycle, the recovery write with its
-    # read-back, and the cleanup's checks -- and the rest the guard baseline
+    # itself was 36 s -- the write, the cycle, the recovery write and the
+    # revision read that confirms it, and the cleanup's checks -- and the
+    # rest the guard baseline
     # and the check after it, on a host with six other boards. Rounded up for
     # a bench with more guards to read, or a slower hub.
     invalidapp_cases.TEST_NAME: _default(Estimate(70.0)),
