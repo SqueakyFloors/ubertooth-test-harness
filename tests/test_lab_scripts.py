@@ -1300,7 +1300,9 @@ class CheckoutEnvironment(Bench):
 
         The interpreter that started this one came from outside the
         checkout's environment, which is what a bench wrapper, a shebang, or
-        a plain `python3` gives.
+        a plain `python3` gives. The command reports the interpreter that
+        held it, so this fails if the re-run goes away and only the child's
+        `-P` is left.
         """
         outside = Path(sys.base_prefix) / "bin" / "python3"
         if not outside.is_file():
@@ -1315,50 +1317,102 @@ class CheckoutEnvironment(Bench):
                 "--hardware", str(self.registry),
                 "--lease-dir", str(self.leases),
                 "--wait-for-boards", "0",
-                "UT0", "--", "sh", "-c", "echo held",
+                "UT0", "--", "sh", "-c",
+                f'echo "held by ${{{_checkout.REEXEC_ENV}:-nobody}}"',
             ],
             capture_output=True, text=True, env=environment,
             cwd=str(self.decoy_checkout()), timeout=120,
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertIn("held", result.stdout)
+        # The re-run records the checkout that made it, and the command
+        # inherits that, so this says which harness environment held it.
+        self.assertIn(f"held by {REPO}", result.stdout)
 
     def test_the_re_run_names_this_checkouts_interpreter_and_the_script(self):
-        argv = _checkout.reexec_argv(str(HOLD))
+        given = ["UT0,DK0", "--", "ubertooth-util", "-U", "x", "-v"]
+        with unittest.mock.patch.object(sys, "argv", ["hold", *given]):
+            argv = _checkout.reexec_argv(str(HOLD))
         self.assertEqual(str(_checkout.VENV_PYTHON), argv[0])
-        self.assertIn("-P", argv[1:argv.index(str(HOLD))])
-        self.assertEqual(sys.argv[1:], argv[argv.index(str(HOLD)) + 1:])
+        # The script's own path, and nothing of the caller's before it.
+        self.assertEqual(["-P", str(HOLD)], argv[1:3])
+        # Every argument through untouched, separator and all: a lost `--`
+        # would turn the command into devices to hold.
+        self.assertEqual(given, argv[3:])
+
+    def test_another_checkouts_attempt_does_not_stand_in_for_this_ones(self):
+        """A command run under `hold` may be a helper from elsewhere."""
+        self.assertFalse(
+            _checkout.already_tried({_checkout.REEXEC_ENV: "/some/other/checkout"})
+        )
+        self.assertTrue(
+            _checkout.already_tried({_checkout.REEXEC_ENV: str(_checkout.CHECKOUT)})
+        )
+        self.assertFalse(_checkout.already_tried({}))
 
     def test_it_does_not_re_run_when_it_is_already_this_environment(self):
         with unittest.mock.patch.object(_checkout.os, "execv") as execv:
             with unittest.mock.patch.object(
                 _checkout, "in_checkout_environment", return_value=True
             ):
-                _checkout.run_in_checkout_environment(str(HOLD))
+                _checkout.run_in_checkout_environment(str(HOLD), "hold")
         execv.assert_not_called()
 
     def test_a_second_attempt_is_not_made(self):
         """An environment that does not report itself must not loop."""
         with unittest.mock.patch.dict(
-            _checkout.os.environ, {_checkout.REEXEC_ENV: "1"}
+            _checkout.os.environ, {_checkout.REEXEC_ENV: str(_checkout.CHECKOUT)}
         ):
             with unittest.mock.patch.object(_checkout.os, "execv") as execv:
                 with unittest.mock.patch.object(
                     _checkout, "in_checkout_environment", return_value=False
                 ):
-                    _checkout.run_in_checkout_environment(str(HOLD))
+                    with unittest.mock.patch.object(
+                        _checkout, "in_harness_environment", return_value=True
+                    ):
+                        _checkout.run_in_checkout_environment(str(HOLD), "hold")
         execv.assert_not_called()
 
-    def test_without_an_environment_of_its_own_nothing_is_re_run(self):
-        """A checkout nobody bootstrapped: the helper's advice says so."""
+    def test_with_no_environment_here_another_bootstrapped_one_will_do(self):
+        """The package still comes from beside the script, so the two halves
+        of a hold cannot be different versions of the harness."""
         missing = self.root / "nothing" / "bin" / "python"
         with unittest.mock.patch.object(_checkout, "VENV_PYTHON", missing):
             with unittest.mock.patch.object(_checkout.os, "execv") as execv:
                 with unittest.mock.patch.object(
                     _checkout, "in_checkout_environment", return_value=False
                 ):
-                    _checkout.run_in_checkout_environment(str(HOLD))
+                    with unittest.mock.patch.object(
+                        _checkout, "in_harness_environment", return_value=True
+                    ):
+                        _checkout.run_in_checkout_environment(str(HOLD), "hold")
         execv.assert_not_called()
+
+    def test_an_interpreter_nobody_bootstrapped_is_turned_down(self):
+        """Whatever versions of the dependencies happen to be installed is
+        not an environment to drive devices from."""
+        missing = self.root / "nothing" / "bin" / "python"
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", missing):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        self.assertIn(str(REPO), str(caught.exception))
+        self.assertIn("bootstrap.py", str(caught.exception))
+
+    def test_the_environment_marker_is_the_one_bootstrap_writes(self):
+        """Named in two places because this module runs before the harness
+        is importable; they must not drift."""
+        from ubertooth_harness import environment
+
+        self.assertEqual(environment.MARKER, _checkout.VENV_MARKER)
+
+    def test_this_checkouts_environment_is_recognized_as_one(self):
+        self.assertTrue(_checkout.in_harness_environment())
+        self.assertTrue(_checkout.in_checkout_environment())
 
     def test_the_advice_names_the_checkout_to_bootstrap(self):
         """A bench runs helpers by path, so "run bootstrap.py" is not enough."""
@@ -1366,6 +1420,12 @@ class CheckoutEnvironment(Bench):
         self.assertIn(str(REPO), advice)
         self.assertIn("bootstrap.py", advice)
         self.assertTrue(advice.startswith("hold: "))
+
+    def test_the_advice_carries_the_import_error_it_came_from(self):
+        """An import that is broken rather than missing must not read as
+        a checkout nobody bootstrapped."""
+        advice = _checkout.bootstrap_advice("hold", ImportError("no module named yaml"))
+        self.assertIn("no module named yaml", advice)
 
     def test_a_refused_registry_names_the_harness_that_refused_it(self):
         """#312's error read as a mistake in a file that was perfectly good.

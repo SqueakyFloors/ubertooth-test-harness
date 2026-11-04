@@ -59,7 +59,7 @@ import _checkout  # noqa: E402  (nothing but the standard library)
 # This checkout's own environment, whichever interpreter started the script;
 # see the note in `hold` and `_checkout.py`.
 if __name__ == "__main__":
-    _checkout.run_in_checkout_environment(__file__)
+    _checkout.run_in_checkout_environment(__file__, "hub-port")
 
 try:
     from ubertooth_harness import leases
@@ -76,8 +76,8 @@ try:
     from ubertooth_harness.resources import RegistryError
 
     from _bench import bench_lock_board, board as device_board, load_registry
-except ImportError:  # this checkout has no environment of its own yet
-    sys.exit(_checkout.bootstrap_advice("hub-port"))
+except ImportError as error:  # no environment of its own, or a broken import
+    sys.exit(_checkout.bootstrap_advice("hub-port", error))
 
 HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 # How long to wait for the host lock and the device. A run holds the host lock

@@ -64,7 +64,7 @@ import _checkout  # noqa: E402  (nothing but the standard library)
 # anything. Whichever interpreter started it, what runs from here on is the
 # environment this checkout bootstrapped.
 if __name__ == "__main__":
-    _checkout.run_in_checkout_environment(__file__)
+    _checkout.run_in_checkout_environment(__file__, "hold")
 
 try:
     from ubertooth_harness import leases
@@ -75,8 +75,8 @@ try:
     from ubertooth_harness.resources import RegistryError
 
     from _bench import bench_lock_board, load_registry, lock_key, resolve
-except ImportError:  # this checkout has no environment of its own yet
-    sys.exit(_checkout.bootstrap_advice("hold"))
+except ImportError as error:  # no environment of its own, or a broken import
+    sys.exit(_checkout.bootstrap_advice("hold", error))
 
 HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 

@@ -18,7 +18,10 @@ one that makes a bench wrapper unnecessary:
 ``run_in_checkout_environment`` re-runs the script under its own checkout's
 ``.venv`` interpreter when it was started with a different one, so a caller
 never has to name an interpreter and cannot impose the wrong one. Plain
-``python3 scripts/lab/hold ...``, or the script's own path, is enough.
+``python3 scripts/lab/hold ...``, or the script's own path, is enough. An
+interpreter nobody bootstrapped is turned down rather than run with: the
+harness has an environment of its own for a reason, and a helper that drives
+devices is no place to go without it.
 
 ``CHILD_PYTHON_OPTIONS`` is what a helper passes an interpreter it starts for
 ``-m ubertooth_harness``. With ``-m``, Python puts the *working directory*
@@ -43,8 +46,16 @@ CHECKOUT = Path(__file__).resolve().parents[2]
 VENV = CHECKOUT / ".venv"
 VENV_PYTHON = VENV / "bin" / "python"
 
+# What bootstrap.py leaves in an environment it built, named here rather than
+# imported: this module runs before the harness is importable, and importing
+# the package under the wrong Python is itself an error. The two names are
+# checked against each other by tests/test_lab_scripts.py.
+VENV_MARKER = ".ubertooth-harness-venv"
+
 # Set across the re-run, so a .venv whose interpreter does not report that
-# environment as its own cannot make this loop.
+# environment as its own cannot make this loop. It holds the checkout that
+# re-ran, not just a flag, because a command run under `hold` may be another
+# checkout's helper: that one has its own attempt to make.
 REEXEC_ENV = "UBERTOOTH_HARNESS_LAB_REEXEC"
 
 # For a child started as `-m ubertooth_harness`; see the module docstring.
@@ -63,22 +74,57 @@ def in_checkout_environment() -> bool:
         return False
 
 
-def run_in_checkout_environment(script: str) -> None:
-    """Re-run `script` under this checkout's own interpreter, if it must.
+def in_harness_environment() -> bool:
+    """Is this interpreter an environment bootstrap.py built, any checkout's?
+
+    Not as good as the checkout's own, and good enough to run with: the
+    package still comes from beside the script, so the two halves of a hold
+    cannot be different versions of the harness. What this rules out is an
+    interpreter nobody bootstrapped, which has whatever versions of the
+    harness's dependencies happen to be installed, or none.
+    """
+    try:
+        return (Path(sys.prefix) / VENV_MARKER).is_file()
+    except OSError:
+        return False
+
+
+def run_in_checkout_environment(script: str, name: str | None = None) -> None:
+    """Put `script` in a harness environment, its own checkout's for choice.
 
     A helper calls this when it is being run as a program, before it imports
-    the harness. It does nothing when this interpreter is already the
-    checkout's own, when the checkout has no bootstrapped environment (the
-    caller then gets the helper's own advice to create one), and when a
-    re-run has already happened, which is what keeps a broken environment
-    from looping.
+    the harness. Three outcomes:
+
+    - Already in this checkout's own environment, or in another bootstrapped
+      one with no environment here to prefer: carry on.
+    - This checkout has an environment and we are not in it: re-run the
+      script under that interpreter. Once per checkout, which is what keeps
+      a broken environment from looping, and per checkout rather than once
+      overall, because a command run under `hold` may be a helper from
+      somewhere else with its own re-run to make.
+    - No environment anywhere: stop, and say which checkout to bootstrap.
+      Carrying on would run the harness with whichever versions of its
+      dependencies this interpreter happens to have.
     """
-    if in_checkout_environment() or os.environ.get(REEXEC_ENV):
+    if in_checkout_environment():
         return
-    if not (VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)):
+    if (VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)
+            and not already_tried()):
+        os.environ[REEXEC_ENV] = str(CHECKOUT)
+        os.execv(str(VENV_PYTHON), reexec_argv(script))
+    if in_harness_environment():
         return
-    os.environ[REEXEC_ENV] = "1"
-    os.execv(str(VENV_PYTHON), reexec_argv(script))
+    raise SystemExit(bootstrap_advice(name or Path(script).name))
+
+
+def already_tried(environ=None) -> bool:
+    """Has this checkout re-run a helper in this process's ancestry?
+
+    Another checkout's attempt is not this one's: a command run under `hold`
+    may be a helper from elsewhere, and it has to reach its own environment.
+    """
+    tried = (os.environ if environ is None else environ).get(REEXEC_ENV, "")
+    return tried == str(CHECKOUT)
 
 
 def reexec_argv(script: str) -> list[str]:
@@ -89,20 +135,23 @@ def reexec_argv(script: str) -> list[str]:
     ]
 
 
-def bootstrap_advice(name: str) -> str:
+def bootstrap_advice(name: str, error: BaseException | None = None) -> str:
     """Why a helper could not import the harness, and what to do about it.
 
-    Reached only when the checkout has no usable environment of its own,
-    since a helper started with another interpreter re-runs itself under
-    that one first. So it names the checkout: a bench runs helpers from a
-    path, often more than one checkout's, and "run bootstrap.py" without
-    saying where is no help at all.
+    Usually the checkout has no usable environment of its own, since a
+    helper started with another interpreter re-runs itself under that one
+    first. So it names the checkout: a bench runs helpers from a path, often
+    more than one checkout's, and "run bootstrap.py" without saying where is
+    no help at all. The import's own words come too, because the other
+    reason to land here is an import that is broken rather than missing.
     """
-    return (
-        f"{name}: no harness environment in {CHECKOUT}. Create it with "
+    advice = (
+        f"{name}: cannot import the harness in {CHECKOUT}. If that checkout "
+        f"has no environment yet, create it with "
         f"'python3 {CHECKOUT / 'bootstrap.py'}' and run this script again "
         "(it then uses that environment whichever interpreter starts it)."
     )
+    return advice if error is None else f"{advice} The import said: {error}"
 
 
 def revision() -> str | None:

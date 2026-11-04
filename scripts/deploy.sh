@@ -507,8 +507,10 @@ check_registry() {
 import sys
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 try:
+    # Unreadable, not YAML, and every rule the registry has: the loader
+    # reports all of them as this one error.
     FileResourceRegistry.load(sys.argv[1])
-except (RegistryError, OSError) as error:
+except RegistryError as error:
     sys.exit(str(error))
 PY
     ); then
