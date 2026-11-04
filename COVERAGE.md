@@ -58,7 +58,9 @@ Harness-wide checks that use the CLIs:
   by `ubertooth-btle` itself, and either answer is the reading, compared
   before and after like any value. So the alternate `btbr` image is guarded by
   its identity, image and revision, build, bootloader, LEDs, and transmit
-  power level, with no read skipped and nothing written to the board. A guard
+  power level, with no read skipped and nothing written to the board. The LED
+  read is the exception: `-d` asks for all three LEDs at once and every image
+  answers them, so a stall there fails the read. A guard
   on `bluetooth_rxtx`, or on the receive-only `bluetooth_rx` build, must answer
   the radio settings that build implements, and any guarded test is refused
   when a guard answered none of `-v`, `-V`, `-s`, or `-B`.

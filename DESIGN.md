@@ -917,14 +917,18 @@ guard on `bluetooth_rxtx`, or on the receive-only `bluetooth_rx` build, must
 answer the radio settings that build implements
 (`GUARD_REQUIRED_OF_IMAGE`), and any guarded test is refused when a guard
 answered none of the reads that pin it (`-v`, `-V`, `-s`, `-B`) — a wedged
-board stalls every request and reads the same way.
+board stalls every request and reads the same way. The LED read is taken
+strictly (`GUARD_STRICT_KEYS`), because `-d` makes all three LED requests in
+one command and every image in this tree answers them.
 Differences are counted as `failed_guard_checks`,
 apart from `failed_cases`, and the reason names the guard to check and
 restore by hand; guards are never restored automatically. The CRC read uses
 `ubertooth-btle`, whose `ubertooth_check_api` stops firmware older than the
 host API, so it is refused (failing the check) unless the same check's `-v`
-read showed an API no older than the host tools' (`HOST_TOOLS_API_VERSION`,
-the fork's `UBERTOOTH_API_VERSION` 0x0107, since no host tool reports it).
+read showed an API no older than the host tools'. That version is read from
+the resolved sources' `ubertooth_interface.h` (`UBERTOOTH_API_VERSION`,
+`transitions.host_api_version`), since no host tool reports it, and a run
+whose sources cannot be read that way refuses its guarded tests.
 The reads cannot see a leaked `-S`, `-r`, or mode start on a guard idle at
 boot defaults; modulation, access address, and re-enumeration are not read.
 Guard-only boards get a serial preflight. Guarded runs need every registered

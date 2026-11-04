@@ -342,9 +342,6 @@ class FakeUbertooth:
                 command, 1, "", "Ubertooth API version found, libubertooth requires\n",
                 on_output,
             )
-        refused = self._refused_image(command, on_output)
-        if refused is not None:
-            return refused
         if sum(item in ("-f", "-n", "-p") for item in options) > 1:
             if self.reject_btle_conflicts:
                 return self._result(
@@ -353,6 +350,11 @@ class FakeUbertooth:
                     on_output,
                 )
             options = tuple(item for item in options if item != "-p")
+        # ubertooth_check_api() ends with ubertooth_check_image(), after the
+        # argument checks above and before anything of this tool's own.
+        refused = self._refused_image(command, on_output)
+        if refused is not None:
+            return refused
         capture_lines = self._open_captures(options)
         if "-n" in options or "-f" in options:
             output = capture_lines
@@ -442,7 +444,10 @@ class FakeUbertooth:
         """The refusal a tool prints for another of this tree's images, or None.
 
         The board is closed without a STOP, so nothing on it changes, and the
-        command exits 1 having sent no request of its own.
+        command exits 1 having sent no request of its own. The image comes
+        from this board's firmware string, where the tool reads it with its
+        own quiet info request; a board that names no image is let through, as
+        the real check lets through one whose info read it could not make.
         """
         image = self.firmware.split()[0] if " " in self.firmware else None
         if image is None or image in self.TOOLS_IMAGES:

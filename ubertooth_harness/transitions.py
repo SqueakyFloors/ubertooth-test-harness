@@ -1756,31 +1756,29 @@ GUARD_UNSUPPORTED = "unsupported"
 # read fails the guard as it always did. ubertooth-util's own
 # "error: <what> read failed" is not matched either: it follows every failed
 # read, whatever the cause. One limit of reading this off the output: a
-# command that makes more than one request (`-d` reads three LEDs) is recorded
-# as unanswered when one request stalled and the rest answered, because the
-# value pattern no longer matches what was printed. No image from this tree
-# answers part of one.
+# command that makes more than one request is recorded as unanswered when one
+# request stalled and the rest answered, because the value pattern no longer
+# matches what was printed. The LED read, which makes three, is held strictly
+# for that reason (GUARD_STRICT_KEYS); `-V` makes two, and firmware too old
+# for the second is the case this tolerance is for.
 GUARD_UNANSWERED_PATTERN = (
     r"(?P<guard_unsupported>error: [^\n]*: the board's firmware does not "
     r"support it \(stalled(?:, libusb -9)?\)"
     r"|error: the Ubertooth is running \S+; this tool needs "
     rf"{re.escape(APPLICATION_IMAGE)})"
 )
-# The images the radio settings below belong to: the application image every
-# test but the ubertooth-btbr one needs, and the receive-only build of the
-# same sources, which the host tools accept in its place. A guard running one
-# of them has to answer the settings that build implements; any other image
-# may refuse them.
-GUARD_SETTINGS_IMAGES = (APPLICATION_IMAGE, RX_ONLY_IMAGE)
+# A guard running the application image, or the receive-only build of it, has
+# to answer the radio settings that build implements (GUARD_REQUIRED_OF_IMAGE
+# below); any other image may refuse them.
 
 
 def _tolerant(pattern, convert, values=None):
     """A guard read's pattern and convert, accepting "cannot answer" as well.
 
-    The reading is the value the board reported, or GUARD_UNSUPPORTED when it
-    said it cannot answer that request. Nothing else is accepted: a read that
-    failed any other way matches nothing and fails the guard, as it always
-    did.
+    The reading is the value the board reported, or GUARD_UNSUPPORTED when
+    this host could not read it of that image. Nothing else is accepted: a
+    read that failed any other way matches nothing and fails the guard, as it
+    always did. Not used for the reads in GUARD_STRICT_KEYS.
     """
     combined = rf"(?:{pattern})|{GUARD_UNANSWERED_PATTERN}"
 
@@ -1804,9 +1802,9 @@ GUARD_STABLE_READBACK = (
     (GUARD_IDENTITY_KEY, "-s", GUARD_IDENTITY_PATTERN, None),
     (GUARD_BOOTLOADER_KEY, "-B", GUARD_BOOTLOADER_PATTERN, None),
 )
-# The radio settings, which belong to GUARD_SETTINGS_IMAGE. They are read of
-# every guard too -- a guard is never skipped -- and a board on another image
-# refuses them in the wording above, which is then its reading.
+# The radio settings. They are read of every guard too -- a guard is never
+# skipped -- and a board whose image has not got one of these requests
+# refuses it in the wording above, which is then its reading.
 GUARD_SETTING_READBACK = tuple(
     (setting.key, setting.query, setting.pattern, setting.convert)
     for setting in (CHANNEL, PA_LEVEL, SQUELCH, LEDS)
@@ -1814,14 +1812,26 @@ GUARD_SETTING_READBACK = tuple(
 GUARD_READBACK = GUARD_STABLE_READBACK + GUARD_SETTING_READBACK
 GUARD_CRC_KEY = "crc"
 # The readings that say something about the board itself. A guard answering
-# none of them has a baseline that pins nothing, which is what blocks a
-# destructive test (guard_baseline_problems).
+# none of them has a baseline that pins nothing, which is what turns a
+# guarded test away (guard_baseline_problems).
 GUARD_PINNING_KEYS = tuple(key for key, *_rest in GUARD_STABLE_READBACK)
+# The one read whose answer is taken strictly: every image in this tree
+# answers the three LED reads, and `-d` makes all three requests in one
+# command, so a board that answered two and stalled the third would be
+# recorded as unable to answer any of them -- and all three would then go
+# unguarded for the rest of the run. A stall there fails the read instead.
+# Each of the other reads makes one request (`-V` makes two, and firmware too
+# old for the second is exactly the case worth tolerating).
+GUARD_STRICT_KEYS = (LEDS.key,)
 _GUARD_SETTING_KEYS = tuple(key for key, *_rest in GUARD_SETTING_READBACK)
-# What each of GUARD_SETTINGS_IMAGES implements and so has to answer. The
-# stable reads above are on neither list: a request is only as old as the
-# build that carries it, and a guard refusing one of them is firmware
-# history, not a board that cannot hold its own settings.
+# What each image implements and so has to answer. The stable reads above are
+# on no list: a request is only as old as the build that carries it, and a
+# guard refusing one of them is firmware history, not a board that cannot
+# hold its own settings. Nor is btbr listed, for the two reads it does
+# implement: it answers the LEDs, which every image is held to above, and the
+# transmit power level only on an Ubertooth One (its request handler puts
+# that one behind UBERTOOTH_ONE, where bluetooth_rxtx's is behind TX_ENABLE
+# alone).
 GUARD_REQUIRED_OF_IMAGE = MappingProxyType({
     APPLICATION_IMAGE: _GUARD_SETTING_KEYS + (GUARD_CRC_KEY,),
     # The receive-only build is the same sources with the transmit half left
@@ -1832,10 +1842,14 @@ GUARD_REQUIRED_OF_IMAGE = MappingProxyType({
         key for key in _GUARD_SETTING_KEYS if key != PA_LEVEL.key
     ) + (GUARD_CRC_KEY,),
 })
+# The images whose settings are guarded as their own, which is what
+# GUARD_REQUIRED_OF_IMAGE lists: the application image and the receive-only
+# build of it, the two libubertooth accepts for every tool.
+GUARD_SETTINGS_IMAGES = tuple(GUARD_REQUIRED_OF_IMAGE)
 # A recorded firmware reading is the part of the `-v` line after the label,
 # so the image name is read off its front, the same optional name
 # FIRMWARE_VERSION_RE reads off the whole line.
-_GUARD_IMAGE_RE = re.compile(rf"\A(?:(?P<image>\S+)\s+)?\S+\s+\(API:")
+_GUARD_IMAGE_RE = re.compile(r"\A(?:(?P<image>\S+)\s+)?\S+\s+\(API:")
 
 
 def guard_image(firmware: str | None) -> str | None:
@@ -2008,6 +2022,13 @@ def guard_boards(
 
 
 def _guard_step(board: GuardBoard, setting, option, pattern, convert, key, expected):
+    if setting in GUARD_STRICT_KEYS:
+        return Step(
+            f"{board.slug}-{setting}",
+            f"{board.role} {setting}",
+            _util(board.serial, option),
+            observe=Observation(key, pattern, expected, convert=convert),
+        )
     tolerant, value = _tolerant(pattern, convert)
     return Step(
         f"{board.slug}-{setting}",

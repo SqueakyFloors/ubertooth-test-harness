@@ -929,6 +929,29 @@ class ImageAwareGuardTests(unittest.TestCase):
         # The refusal is the reading, so the read itself did not fail.
         self.assertEqual([], failed_guard_reads(events))
 
+    def test_a_stalled_led_read_fails_instead_of_being_recorded(self):
+        """`-d` asks for three LEDs at once, so a stall there is not an answer.
+
+        Were it recorded, a board that answered two of the three would leave
+        all three unguarded for the rest of the run.
+        """
+        self.assertEqual(("leds",), transitions.GUARD_STRICT_KEYS)
+        guard = image_guard(BTBR_IMAGE, stalls=BTBR_STALLS + ("d",))
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertFalse(summary.passed)
+        self.assertEqual([], state_cases(events))
+        self.assertEqual(["guard Ubertooth 1 leds"], failed_guard_reads(events))
+        (check,) = guard_checks(events)
+        # Strict: the read is not allowed to exit 1 either.
+        self.assertIn("guard Ubertooth 1 leds: command exited 1",
+                      check.details["reason"])
+        self.assertIn("no case ran", check.details["reason"])
+
     def test_the_receive_only_build_is_held_to_the_settings_it_has(self):
         """It answers the same settings bar the transmit power level."""
         guard = image_guard(RX_ONLY_IMAGE, stalls=("a",))

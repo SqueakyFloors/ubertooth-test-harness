@@ -182,7 +182,11 @@ so a board that starts answering a read it refused before, or refuses one it
 answered, fails the check. The alternate `btbr` image, for instance, has no
 channel or squelch request and no tool will read its CRC setting, and it is
 still guarded by its identity, image and revision, build, bootloader, LEDs,
-and transmit power level. Two things the readings themselves have to satisfy:
+and transmit power level. The LED read is the exception: `-d` asks for all
+three LEDs in one command, and every image in this tree answers those, so a
+stall there fails the read rather than being recorded — otherwise a board that
+answered two of the three would leave all three unguarded. Two things the
+readings themselves have to satisfy:
 a guard running `bluetooth_rxtx`, or the receive-only `bluetooth_rx` build of
 it, must answer the radio settings that build implements, since a board that
 cannot is not holding them; and any guarded test is turned away when a guard
