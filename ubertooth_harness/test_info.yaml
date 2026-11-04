@@ -1379,9 +1379,12 @@ Capture known BLE connection:
     decoded with a correct CRC. How much of a connection arrives intact varies
     from capture to capture, which is what the repeated captures are for. A
     capture window spanning several reconnections has been seen to die partway
-    through, which is why the duration is bounded. No weak-link figure exists
-    for this test: only one registered DK declares both the central and
-    peripheral roles, so no pair can be bound at any attenuation.
+    through, which is why the duration is bounded. What a weak link adds here
+    is where the counts and the error flags say something: a clear bench
+    clears these floors with room and no flag fires. It needs the DK pair
+    bound distinctly, which is a hardware question rather than an RF one;
+    weaklink.CHECKS and the plan files are the live record of which
+    attenuation this test has figures for.
   related:
     - ubertooth#505
     - libbtbb#21
@@ -1433,9 +1436,10 @@ Follow a BLE connection across its end:
     together allow a narrow worst case that hides a longer dead follow than
     either suggests. A connection's packets look unexplained whether the board
     followed one it never announced or the CONNECT_IND was lost on the way to
-    the host. No weak-link figure exists: the 20 dB entry for an attenuated
-    receiver is blocked on hardware, because following a connection across its
-    end needs two DKs declaring those roles and the bench registers one.
+    the host. What a weak link adds here is a follow that has to reacquire the
+    pair's next connection over a marginal link, which a clear bench does not
+    ask for; weaklink.CHECKS and the plan files are the live record of which
+    attenuation this test has figures for.
   related:
     - ubertooth#505
     - ubertooth-test-harness#168
@@ -1579,10 +1583,11 @@ Classic capture record fields:
     here asserts a clock: a BR/EDR record has no clock field and the two
     figures the tool prints are already masked into range. The survey case
     cannot assert whose records it reads. The flag rules assume the libbtbb
-    this harness pins. The 40 dB weak-link entry waits on a capture whose
-    records a flag actually fired on; 40 dB is not an error regime on this
-    bench (74% against 77% err=0 at 20 dB), so more attenuation than the bench
-    has may be needed.
+    this harness pins. A weak link is what the error flags want, since a clear
+    bench checks the agreement over records that all passed; whether any case
+    requires a flag to have fired is a separate question, and today's do not.
+    weaklink.CHECKS and docs/tests.md are the live record of what each
+    attenuation measured here.
   related:
     - ubertooth-test-harness#264
     - ubertooth-test-harness#168

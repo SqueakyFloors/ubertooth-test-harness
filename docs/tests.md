@@ -168,7 +168,7 @@ The points, and what each buys:
 | 20 dB | marginal but comfortable: the point most weak-link entries use | the range test's reply level, a DK advertiser capture, a targeted Classic follow, exact AFH map recovery |
 | 40 dB | 20 dB more attenuation, still with margin: the attenuated-device sweep read it about 14 dB below the 20 dB board from the Classic peer (`weaklink.py`) | a DK advertiser capture, Classic decode with the clock acquired, `-e 2` honored; AFH recovery starts losing edge channels |
 | 30 dB | asked for, uncharacterized | nothing yet: it is the point that would turn 20 against 40 into a curve (`weaklink.PLANNED_ATTENUATIONS_DB`) |
-| above 40 dB (50 dB and beyond) | not on the bench and not characterized | nothing. 40 dB is not an error regime here (74% of records `err=0` against 77% at 20 dB), so a case that needs a HEC or CRC flag to have fired may need more attenuation than the bench now has |
+| above 40 dB | where the regime can stop being marginal and start being absent | more attenuation is not automatically better, and a point can be characterized and still be unusable. `weaklink.py` holds what the bench has measured and what a runnable plan may ask for, per test and per role; read it rather than assuming a figure further down is available |
 
 The limits of all of this are worth saying plainly. Only the attenuation is
 pinned, never the distance, because a placement requirement has no distance
@@ -1980,15 +1980,14 @@ capture window is all a second try costs. Each attempt writes its own file
 directory keeps the capture every attempt looked at; the report says which
 attempt a step ran on and how many attempts the case took.
 
-**No weak-link figure, and none is possible yet.** The HEC and CRC error flags
-in an LE capture are what a marginal link would exercise here, and
-[`weak-link.yaml`](../testplans/weak-link.yaml) carries a 40 dB entry for it.
-It is blocked on hardware rather than on a measurement: only one registered DK
-declares both the `central` and `peripheral` roles, so no pair can be bound at
-any attenuation and no figure can be taken. Planning says so rather than
-skipping, naming the roles it could not fill distinctly. A second DK declaring
-those roles is the whole fix, after which this needs one capture like any
-other entry. See "What attenuating a receiver is for" above.
+**What a weak link adds here.** The HEC and CRC error flags in an LE capture
+are what a marginal link exercises in this test: on a clear bench the floors
+are cleared with room and no error flag fires, so a weaker link is where the
+counts and the flags say something. Attenuating the receiver needs the DK pair
+to be bound distinctly, which is the hardware question rather than an RF one.
+`weaklink.CHECKS` and the plan files are the live record of which attenuation
+this test has figures for and what any remaining entry waits on; see "What
+attenuating a receiver is for" above for what the attenuation is and is not.
 
 **Known limits.** The packet counts are floors a working follow clears, not
 expected counts: of 18 packets in one followed connection measured on the
@@ -2088,13 +2087,13 @@ connects and two disconnects, and the board reads back idle with an unchanged
 self-reset count. Cleanup leaves both DKs idle in the advertiser
 role and restores the Ubertooth's channel, squelch, and LEDs.
 
-**No weak-link figure, for the same reason.** A follow across a connection's
-end over a marginal link is the thing to measure, and
-[`weak-link.yaml`](../testplans/weak-link.yaml) carries a 20 dB entry for it,
-blocked on the same single DK: following a connection across its end needs
-two boards declaring the `central` and `peripheral` roles, and the bench
-registers one. See "What attenuating a receiver is for" above for what an
-attenuated receiver is and is not.
+**What a weak link adds here.** A follow that has to reacquire the pair's next
+connection over a marginal link is the thing worth measuring, since a clear
+bench clears the floors with room. It needs the same DK pair bound distinctly
+as the single-connection test does. `weaklink.CHECKS` and the plan files are
+the live record of which attenuation this test has figures for; see "What
+attenuating a receiver is for" above for what an attenuated receiver is and is
+not.
 
 **Known limits.** Like the single-connection cases, the counts are floors a
 working follow clears, not expected counts, and a capture that misses them is
@@ -2373,20 +2372,16 @@ encrypted, which this pair's are not — they pair with nobody. A capture of an
 encrypted piconet would decode neither, and `--no-payload-checks` is there for
 one; no catalog case uses it.
 
-**A weak link is what the HEC and CRC flags want, and the bench may not have
-enough of one.** This is the test whose flag-to-field agreements would mean
-most over a marginal link, since on a clear bench the error flags simply never
-fire and the agreement is checked over records that all passed. Its 40 dB
-entry is therefore in [`weak-link.yaml`](../testplans/weak-link.yaml) rather
-than in a runnable plan, waiting on two things. First a capture file over that
-link: the attenuated-device sweep decoded packets at 40 dB but wrote no
-capture, so no record's HEC or CRC flag has ever been read there. Second a
-case that requires a flag to have fired, which does not exist — today's cases
-would pass over a capture with no errors in it. And the honest possibility is
-that 40 dB is not enough: its error profile sits close to 20 dB's (74%
-against 77% of records `err=0` at `-e 2`) on a comparable packet count, so the
-flags may not fire at either, and more attenuation than the bench now has may
-be the real answer. See "What attenuating a receiver is for" above.
+**A weak link is what the HEC and CRC flags want.** This is the test whose
+flag-to-field agreements mean most over a marginal link, because on a clear
+bench the error flags largely do not fire and the agreement is then checked
+over records that all passed. Two separate things decide whether a weak-link
+entry here is worth running: whether a capture over that link puts damaged
+records in a file at all, and whether any case requires a flag to have fired
+— today's cases pass over a capture with no errors in it, so they measure the
+agreement rather than the detection. `weaklink.CHECKS` and the measurements
+recorded in this section are the live record of both. See "What attenuating a
+receiver is for" above for what the attenuation is and is not.
 
 **The payload checks do not fire on the bench's own traffic.** Measured over
 four 25-second captures, no record carried a payload at all: `ubertooth-rx`
