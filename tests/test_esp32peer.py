@@ -48,7 +48,13 @@ class AddressTests(unittest.TestCase):
     def test_the_device_name_follows_from_the_address(self):
         # main/bt_peer.c builds it as UT-ESP32- and the LAP in upper case, and
         # the shell cannot set it, so a case derives it rather than asking a
-        # registry for it.
+        # registry for it. Read out of that source here, so the two cannot
+        # drift: `Bluetooth inquiry scan` checks what an inquiry reported
+        # against this name without reading the board.
+        source = (Path(__file__).resolve().parents[1] / "firmware"
+                  / "esp32-classic-peer" / "main" / "bt_peer.c").read_text(
+                      encoding="utf-8")
+        self.assertIn('"UT-ESP32-%02X%02X%02X"', source)
         self.assertEqual("UT-ESP32-2A1B2A", esp32peer.device_name(ACCEPTOR_ADDRESS))
         self.assertEqual("UT-ESP32-E9C5BA", esp32peer.device_name(INITIATOR_ADDRESS))
         with self.assertRaisesRegex(esp32peer.PeerError, "BD_ADDR must look like"):

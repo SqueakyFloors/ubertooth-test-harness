@@ -197,7 +197,8 @@ class PairRegistry(PairTestCase):
         check cannot be passing only for the type the bench happens to use.
         """
         self.assertEqual(
-            ("Ubertooth", "nRF52840 DK", "ESP32 Classic peer", DEBUG_PROGRAMMER),
+            ("Ubertooth", "nRF52840 DK", "ESP32 Classic peer", DEBUG_PROGRAMMER,
+             "Bluetooth adapter"),
             leases.LEASED_TYPES,
         )
         extra = (
@@ -215,8 +216,15 @@ class PairRegistry(PairTestCase):
             "    identity:\n"
             "      bridge serial: a1b2c3d400000000a1b2c3d400000000\n"
             '      BD_ADDR: "C8:00:00:00:00:01"\n'
+            "  BT_Pair:\n"
+            "    type: Bluetooth adapter\n"
+            "    attached to: Host_Linux\n"
+            "    identity:\n"
+            "      hci device: hci0\n"
+            '      BD_ADDR: "00:1A:7D:00:00:01"\n'
         )
-        for target in ("UT_Debug", "UT_Free", "DK_Pair", "ESP_Pair", "Prog1"):
+        for target in ("UT_Debug", "UT_Free", "DK_Pair", "ESP_Pair", "Prog1",
+                       "BT_Pair"):
             with self.subTest(target=target):
                 second = (
                     PROGRAMMER.replace("Prog0", "Prog1")
