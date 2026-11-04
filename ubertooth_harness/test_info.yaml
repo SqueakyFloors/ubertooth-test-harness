@@ -533,7 +533,7 @@ BLE mode conflicts:
     Requires that ubertooth-btle refuses two major modes before sniffing
     starts, so a regression that picked one of them and ran is caught.
   theory: >-
-    -f, -n and -p are alternatives, so any combination is a usage error. The
+    -f, -n, and -p are alternatives, so any combination is a usage error. The
     refusal is checked by its own message and exit 1, and the case reads the
     CRC flag, channel, squelch, and LEDs before and after, so a mode that
     started and stopped is caught by the settings it would have changed.
@@ -568,7 +568,7 @@ Ubertooth util conflicts:
     not a statement that a passing run transmits. Where one of the pair is
     range test or repeater, the PA level is recorded and restored too.
   expected: >-
-    15 cases, one per pair of -q, -n, -e, -t, -x and -I. Each must be a usage
+    15 cases, one per pair of -q, -n, -e, -t, -x, and -I. Each must be a usage
     error with the board left idle and every setting, including each LED,
     restored.
   limitations: >-
@@ -945,7 +945,7 @@ Interrupting a capture:
     interrupted once it has written a buffer's worth. Every case requires exit
     0 within 5 s of the one signal and not death by it, nothing left in the
     tool's process group, the capture file not grown when read again, no
-    error, warning or progress line on standard output, the unconditional
+    error, warning, or progress line on standard output, the unconditional
     teardown line on standard error for the two tools that print one, a
     readable capture file, the channel and squelch back at the values a mode
     stop leaves, ubertooth-util -v answered within 5 s, and the usual cleanup.
@@ -971,7 +971,7 @@ Raw receive replay:
     down, and it runs in CI with no board and no USB.
   theory: >-
     The fixture carries two LAPs, chosen errors, chosen channels, chosen host
-    times and decoy records, so the expected output is computed rather than
+    times, and decoy records, so the expected output is computed rather than
     pattern-matched: which packet lines appear, in what order, with which
     systime, which ones a filter drops, and how many packets reach a capture
     file.
@@ -998,7 +998,7 @@ Raw receive replay:
 Refused command lines:
   purpose: >-
     Requires that a refused command line naming output files creates,
-    truncates and leaves behind nothing at all, and that the refusal comes
+    truncates, and leaves behind nothing at all, and that the refusal comes
     before the board lookup.
   theory: >-
     Each case seeds its own directory with files of known contents, then runs
@@ -1049,7 +1049,7 @@ Failed capture files:
     ubertooth-rx -i replays a synthetic file with no board and no USB, which
     is the one path where a capture file is really created, written to and
     then judged. Each case states its whole directory before and after, so a
-    temporary file, a truncated destination or a file wrongly removed fails.
+    temporary file, a truncated destination, or a file wrongly removed fails.
   hardware: >-
     No board, no USB. Nothing transmits.
   expected: >-
@@ -1348,7 +1348,7 @@ Capture known BLE connection:
   theory: >-
     The central drops and remakes the link on a schedule, so a capture started
     at any moment contains a whole connection -- the CONNECT_IND, the data
-    length exchange, the parameter update and the data -- and nothing has to
+    length exchange, the parameter update, and the data -- and nothing has to
     be timed against the capture. The CONNECT_IND carries parameters the test
     chose, so the capture can be checked for exactly those: the interval, the
     latency, the supervision timeout, a legal hop increment, and every data
@@ -1470,7 +1470,7 @@ Capture known Classic device:
     Nothing flashes a peer, but each must already run utesp-1.0.0 or a later
     1.x image, which preflight checks. Opening a bridge resets the board, so
     one command holds both bridges, brings the link up, runs the tool as a
-    child and stops the pair afterwards.
+    child, and stops the pair afterwards.
   expected: >-
     Smoke runs 2 cases: ubertooth-rx -z lists the central's LAP in its survey
     results, and a run with no target reports at least ten packet lines
@@ -1609,7 +1609,7 @@ Classic btbr console:
     registry and the firmware builds its device name from that address, so an
     inquiry has to hear it, a page has to reach it, and the name it answers
     the LMP request with says on the air which device replied. The prompt: a
-    word that is no command, ? on one, and an address that is empty, not hex
+    word that is no command, ? on one, and an address that is empty, not hex,
     or too long are each one error line with the prompt left up and none of
     them reaching the radio -- the half of malformed input a shared bench can
     produce safely.
@@ -1638,7 +1638,7 @@ Classic btbr console:
   limitations: >-
     A pass says the image runs, the prompt answers, and the board can run an
     inquiry and hold a connection with one peer. It says nothing about
-    inquiry_scan, page_scan, discoverable, l2ping or monitor: answering an
+    inquiry_scan, page_scan, discoverable, l2ping, or monitor: answering an
     inquiry or a page needs something on the bench to make one. The refusals
     leave out an address shorter than six bytes, which the tool takes today
     and acts on as a different address; a case for it would pin that rather

@@ -221,7 +221,7 @@ def _related(raw, where: str) -> tuple[Reference, ...]:
     if len(raw) > MAX_RELATED:
         raise TestInfoError(
             f"{where}: related lists {len(raw)} references, at most "
-            f"{MAX_RELATED} are shown"
+            f"{MAX_RELATED} are carried"
         )
     references = [_reference(item, where) for item in raw]
     seen = [item.reference for item in references]
@@ -243,7 +243,7 @@ def _prose(raw, where: str, field: str) -> str:
     if len(text) > MAX_FIELD_CHARS:
         raise TestInfoError(
             f"{where}: {field} is {len(text)} characters, at most "
-            f"{MAX_FIELD_CHARS} are shown; the full account belongs in "
+            f"{MAX_FIELD_CHARS} are carried; the full account belongs in "
             f"{DOCUMENTATION_PATH}"
         )
     return text
@@ -358,7 +358,11 @@ def _cache_key(path: Path, catalog: TestCatalog):
         stat = path.stat()
     except OSError:
         return None
-    return (stat.st_mtime_ns, stat.st_size, stat.st_ino,
+    # The change time as well as the modification time: `os.utime` can put a
+    # modification time back, so an in-place edit that kept the size would
+    # otherwise key the same and be held. Nothing can put the change time
+    # back, because the write itself sets it.
+    return (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino,
             tuple(catalog.names))
 
 
@@ -380,13 +384,20 @@ def _read(info_path: Path, catalog: TestCatalog) -> "TestInformation":
 
 
 def _absent(path: Path) -> bool:
-    """True when the file is not there. A path that cannot be asked about
-    (a permission error on a parent directory) counts as present, so the
-    reason names the error rather than claiming the file is missing."""
+    """True when the file is not there, and only then.
+
+    Anything else that stops the path being read -- a permission error on a
+    parent directory, a symbolic link loop -- counts as present, so the
+    reason names the error rather than claiming the file is missing.
+    `Path.exists()` cannot be used for this: it answers False for both.
+    """
     try:
-        return not path.exists()
+        path.stat()
+    except FileNotFoundError:
+        return True
     except OSError:
         return False
+    return False
 
 
 def _one_line(error: Exception, path: Path) -> str:

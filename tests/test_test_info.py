@@ -414,7 +414,6 @@ class UnavailableTests(unittest.TestCase):
         # and a read is about 70 ms, so the answer is held. Each part of the
         # key is exercised on its own, because any one of them left out
         # would serve an answer from a file that is no longer there.
-        other = {**ENTRY, "purpose": "A different purpose of the same length."}
         with tempfile.TemporaryDirectory() as directory:
             path = write(directory, {"Host version": dict(ENTRY)})
             first = test_information(path, self.catalog)
@@ -452,6 +451,25 @@ class UnavailableTests(unittest.TestCase):
             by_inode = test_information(path, self.catalog)
             self.assertIsNot(by_mtime, by_inode)
             self.assertIn("catches?", by_inode.entries["Host version"].purpose)
+
+            # An in-place edit that keeps the size and puts the modification
+            # time back: only the change time moves, and nothing can put
+            # that back, so it has to be part of the key.
+            held = path.stat()
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "What this catches?", "What this catches,"),
+                encoding="utf-8",
+            )
+            os.utime(path, ns=(held.st_atime_ns, held.st_mtime_ns))
+            after = path.stat()
+            self.assertEqual(
+                (held.st_mtime_ns, held.st_size, held.st_ino),
+                (after.st_mtime_ns, after.st_size, after.st_ino),
+            )
+            by_ctime = test_information(path, self.catalog)
+            self.assertIsNot(by_inode, by_ctime)
+            self.assertIn("catches,", by_ctime.entries["Host version"].purpose)
 
             # A file that is gone is not answered from the held copy.
             path.unlink()
@@ -564,6 +582,10 @@ class PlansApiTests(unittest.TestCase):
         # every step a committed plan compiles for the test, which is the
         # figure a reader of that row sees: a duration a case runs for is
         # fine, the estimate for the invocation is not.
+        #
+        # A tripwire rather than a proof: it reads figures written as "40 s"
+        # and "0.4 s", which is how this file writes a time, and would not
+        # catch one spelled out in words.
         pattern = re.compile(r"\b(\d+(?:\.\d+)?)\s?s\b")
         estimates = {}
         for test in self.rows():
@@ -625,7 +647,7 @@ class PlansApiTests(unittest.TestCase):
             path = write(directory, {"Host CLI surface": entry})
             view = test_information_view(
                 list(self.plans.values()),
-                test_information(path, self.catalog),
+                information=test_information(path, self.catalog),
             )
         info = view["Host CLI surface"]
         self.assertEqual(payload, info["purpose"])
@@ -637,7 +659,8 @@ class PlansApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             view = test_information_view(
                 plans,
-                test_information(Path(directory) / "absent.yaml", self.catalog),
+                information=test_information(
+                    Path(directory) / "absent.yaml", self.catalog),
             )
         # The listing itself is untouched: the plans, their suites and every
         # estimate are what they are without the file.
@@ -662,7 +685,8 @@ class PlansApiTests(unittest.TestCase):
             path = Path(directory) / "test_info.yaml"
             path.write_bytes(b"Host CLI surface:\n  purpose: caf\xe9\n")
             view = test_information_view(
-                list(self.plans.values()), test_information(path, self.catalog)
+                list(self.plans.values()),
+                information=test_information(path, self.catalog),
             )
         for name, info in view.items():
             with self.subTest(test=name):
@@ -680,6 +704,9 @@ class PlansApiTests(unittest.TestCase):
         )
         parameters = inspect.signature(test_information_view).parameters
         self.assertEqual(["plans", "information"], list(parameters))
+        self.assertEqual(
+            inspect.Parameter.KEYWORD_ONLY, parameters["information"].kind
+        )
         self.assertIsNone(parameters["information"].default)
         self.assertNotIn("information", inspect.signature(list_plans).parameters)
 

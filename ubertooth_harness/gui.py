@@ -803,6 +803,7 @@ def list_plans(
 
 def test_information_view(
     plans: Sequence[Mapping],
+    *,
     information: TestInformation | None = None,
 ) -> dict[str, dict]:
     """What each test listed in ``plans`` is for, keyed by its catalog name.
@@ -813,8 +814,9 @@ def test_information_view(
     related references, and a link to the test's ``docs/tests.md`` section
     (#315). Keyed by name rather than carried on each test row because a
     test appears in several plans and suites -- the repository's own plans
-    list 122 steps of 43 distinct tests -- and the prose is the same every
-    time, so putting it on the row tripled the response.
+    list 122 steps of 53 distinct tests -- and the prose is the same every
+    time, so putting it on the row tripled the response (121 KB to 394 KB,
+    against 232 KB with the map).
 
     Every name on any listed row has an entry here, so a client never has to
     handle a row it cannot look up. Nothing here can stop a run: a test with
