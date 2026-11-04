@@ -1448,12 +1448,24 @@ class CheckoutEnvironment(Bench):
                 with unittest.mock.patch.object(
                     _checkout, "in_harness_environment", return_value=False
                 ):
+                    # Past the probe, which would otherwise answer for this
+                    # file before the exec was reached, so what this
+                    # exercises is the exec's own failure.
                     with unittest.mock.patch.object(
-                        _checkout.os, "execv", side_effect=OSError("exec format")
+                        _checkout, "venv_python_would_arrive", return_value=True
                     ):
-                        with self.assertRaises(SystemExit) as caught:
-                            _checkout.run_in_checkout_environment(str(HOLD), "hold")
-        self.assertIn("bootstrap.py", str(caught.exception))
+                        with unittest.mock.patch.object(
+                            _checkout.os, "execv",
+                            side_effect=OSError("exec format"),
+                        ):
+                            with self.assertRaises(SystemExit) as caught:
+                                _checkout.run_in_checkout_environment(
+                                    str(HOLD), "hold"
+                                )
+        self.assertIn("did not confirm", str(caught.exception))
+        # The attempt did not happen, so nothing is left behind to stop a
+        # process that goes on to make one.
+        self.assertNotIn(_checkout.ATTEMPT_ENV, os.environ)
 
     def test_the_re_run_names_this_checkouts_interpreter_and_the_script(self):
         given = ["UT0,DK0", "--", "ubertooth-util", "-U", "x", "-v"]
@@ -1587,6 +1599,11 @@ class CheckoutEnvironment(Bench):
         self.assertIn(str(_checkout.VENV_PYTHON), advice)
         self.assertIn("PYTHONEXECUTABLE", advice)
         self.assertNotIn("has no environment yet", advice)
+        # bootstrap.py refuses to touch a `.venv` it did not build, even
+        # with --recreate, and that is the likeliest cause of all, so the
+        # remedy it does accept comes first.
+        self.assertIn("move it aside", advice)
+        self.assertLess(advice.index("move it aside"), advice.index("--recreate"))
         outside = self.outside_interpreter()
         environment = self.plain_environment()
         environment["PYTHONEXECUTABLE"] = "/usr/bin/not-this-interpreter"
@@ -1598,6 +1615,35 @@ class CheckoutEnvironment(Bench):
         if result.returncode != 0:
             self.assertIn("did not confirm", result.stderr)
             self.assertNotIn("has no environment yet", result.stderr)
+
+    def test_an_interpreter_there_and_not_executable_is_not_called_absent(self):
+        """A malformed environment is not a missing one, and the advice for
+        a missing one would send the operator the wrong way."""
+        unrunnable = self.root / "unrunnable" / "python"
+        unrunnable.parent.mkdir(parents=True)
+        unrunnable.write_text("", encoding="utf-8")
+        unrunnable.chmod(0o644)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", unrunnable):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        self.assertIn("did not confirm", str(caught.exception))
+
+    def test_output_that_is_not_text_is_an_answer_not_a_traceback(self):
+        """A file in place of an interpreter may write anything at all."""
+        binary = self.root / "binary" / "python"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(
+            "#!/bin/sh\nprintf '\\377\\376 not text\\n'\n", encoding="utf-8"
+        )
+        binary.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", binary):
+            self.assertFalse(_checkout.venv_python_would_arrive())
 
     def test_an_interpreter_that_never_answers_is_not_waited_on(self):
         """A bench gets an answer or a refusal, not a helper that hangs."""
@@ -1629,17 +1675,34 @@ class CheckoutEnvironment(Bench):
             result.stdout + result.stderr,
         )
 
-    def test_no_environment_a_caller_arranges_changes_the_outcome(self):
-        """A wrapper cannot keep a helper out of its checkout's environment
-        by setting something, because there is nothing to set."""
+    def test_what_a_caller_can_arrange_is_a_refusal_at_most(self):
+        """Setting the attempt note is how a caller would try to keep a
+        helper out of its checkout's environment. What it buys is the
+        refusal, not a hold in whatever environment the caller preferred."""
         outside = self.outside_interpreter()
         environment = self.plain_environment()
-        for name, value in (
-            ("UBERTOOTH_HARNESS_LAB_REEXEC", f"{os.getpid()} {REPO}"),
-            ("UBERTOOTH_HARNESS_LAB_REEXEC_DONE", "1"),
-            ("PYTHONPATH", str(self.decoy_checkout())),
-        ):
-            environment[name] = value
+        environment[_checkout.ATTEMPT_ENV] = str(REPO)
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c", "echo held",
+            ],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.root), timeout=120,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("did not confirm", result.stderr)
+        self.assertNotIn("held", result.stdout)
+
+    def test_a_pythonpath_a_caller_sets_does_not_answer_for_the_delegate(self):
+        """The checkout is named ahead of it, and the working directory is
+        off the delegate's path entirely."""
+        outside = self.outside_interpreter()
+        environment = self.plain_environment()
+        environment["PYTHONPATH"] = str(self.decoy_checkout())
         result = subprocess.run(
             [
                 str(outside), str(HOLD),

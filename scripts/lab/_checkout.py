@@ -76,9 +76,9 @@ PROBE_TIMEOUT_S = 30
 
 # A second pair of braces under `venv_python_would_arrive`, and nothing more.
 # The probe is what decides; this only says an attempt has been made, so that
-# a file answering one way and behaving another cannot be tried for ever.
-# Setting it by hand buys a caller a refusal, never a different harness, and
-# it is dropped before any command runs.
+# a file answering one way and behaving another cannot be tried for ever. An
+# attempt that did not arrive ends in a refusal, which is also all a caller
+# can buy by setting this by hand. It is dropped before any command runs.
 ATTEMPT_ENV = "UBERTOOTH_HARNESS_LAB_ATTEMPTED"
 
 
@@ -150,9 +150,10 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
     - This checkout has an environment and we are not in it: re-run the
       script under that interpreter, once that interpreter has said it
       would arrive, which is what makes the re-run the last thing that
-      happens rather than something to guard against happening twice.
-      Nothing is written to the environment, so the command run under
-      `hold` inherits nothing of this.
+      happens rather than something to guard against happening twice. An
+      attempt that does not arrive ends in a refusal rather than a
+      fallback, and the note recording it is dropped before any command
+      runs, so nothing under `hold` inherits it.
     - No environment anywhere: stop, and say which checkout to bootstrap.
       Carrying on would run the harness with whichever versions of its
       dependencies this interpreter happens to have.
@@ -170,22 +171,31 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
         # a helper of this same checkout with its own re-run to make.
         os.environ.pop(ATTEMPT_ENV, None)
         return
-    usable = VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)
-    if usable and not attempted_once() and venv_python_would_arrive():
+    present = VENV_PYTHON.is_file()
+    runnable = present and os.access(VENV_PYTHON, os.X_OK)
+    if runnable and not attempted_once() and venv_python_would_arrive():
         os.environ[ATTEMPT_ENV] = str(CHECKOUT)
-        # Nothing to clean up if this raises: a file that is executable and
-        # not an executable image leaves the process as it was, with both
-        # outcomes below still open.
+        # A file that is executable and not an executable image leaves the
+        # process as it was, so the attempt did not happen and the note
+        # goes back.
         try:
             os.execv(str(VENV_PYTHON), reexec_argv(script))
         except OSError:
             del os.environ[ATTEMPT_ENV]
+    if attempted_once():
+        # An attempt was made and this is not the checkout's environment,
+        # so the interpreter did not arrive where it said it would -- or
+        # the note was set by a caller, which comes to the same refusal.
+        # Either way this does not fall back: the fallback is for a
+        # checkout with no environment, not for one whose own could not be
+        # reached.
+        raise SystemExit(unreachable_environment_advice(label))
     if in_harness_environment():
-        os.environ.pop(ATTEMPT_ENV, None)
         return
-    if usable:
-        # The checkout has an environment and the interpreter would not put
-        # this script in it, which "run bootstrap.py" does not describe.
+    if present:
+        # The checkout has an interpreter and it would not put this script
+        # in the harness environment, which "run bootstrap.py" does not
+        # describe.
         raise SystemExit(unreachable_environment_advice(label))
     raise SystemExit(bootstrap_advice(label))
 
@@ -226,6 +236,10 @@ def venv_python_would_arrive() -> bool:
             ],
             capture_output=True, text=True, timeout=PROBE_TIMEOUT_S,
             stdin=subprocess.DEVNULL,
+            # Whatever a file in place of an interpreter writes, it is an
+            # answer to read and not a traceback to raise: undecodable
+            # bytes become replacement characters, which are not "True".
+            errors="replace",
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -286,23 +300,26 @@ def bootstrap_advice(name: str, error: BaseException | None = None) -> str:
 
 
 def unreachable_environment_advice(name: str) -> str:
-    """The checkout has an interpreter, and it would not arrive.
+    """The checkout has an interpreter there, and it would not arrive.
 
     A different thing from a checkout nobody bootstrapped, and the advice
-    for that one would be wrong here: the environment may be perfectly
-    good and `bootstrap.py` will not change the answer. What does: a
-    `PYTHONEXECUTABLE` in the environment, which decides what an
-    interpreter calls itself and which some launchers set; something in
-    place of the interpreter rather than the interpreter; or an
-    environment that needs rebuilding.
+    for that one would be wrong here, so the likely causes are named in
+    the order a bench meets them. `bootstrap.py --recreate` leads the list
+    only for an environment that has the marker: it refuses to touch a
+    `.venv` that does not, which is the commonest cause of all -- a
+    `python -m venv` put there by hand -- so that one is told to move the
+    directory out of the way instead.
     """
     return (
         f"{name}: {VENV_PYTHON} did not confirm that it would run this "
         f"script in the harness environment in {CHECKOUT}, so it was not "
-        "used. Check for PYTHONEXECUTABLE or PYTHONHOME in the environment, "
-        f"check that {VENV_PYTHON} is that environment's own interpreter, "
-        f"and rebuild it if need be with 'python3 "
-        f"{CHECKOUT / 'bootstrap.py'} --recreate'."
+        f"used. Most likely {VENV} is a virtual environment that "
+        "bootstrap.py did not build, which it will not adopt or replace: "
+        f"move it aside and run 'python3 {CHECKOUT / 'bootstrap.py'}'. "
+        f"Otherwise check that {VENV_PYTHON} is executable and is that "
+        "environment's own interpreter, look for PYTHONEXECUTABLE or "
+        "PYTHONHOME in the environment, and rebuild a marked environment "
+        f"with 'python3 {CHECKOUT / 'bootstrap.py'} --recreate'."
     )
 
 
