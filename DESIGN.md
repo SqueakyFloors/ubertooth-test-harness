@@ -1112,6 +1112,22 @@ step.
   started/finished, a `report.md` link, and the failure summary from
   `GET /api/runs/{id}` (per failed phase or test: reason and last output
   lines; then the run's reason). Soak graphs remain.
+- **What each test is for:** every test row in `/api/plans` carries an
+  `info` block — purpose, theory of operation, hardware and traffic, expected
+  outcome, what a pass does not prove, related issues, and a link to the
+  test's `docs/tests.md` section — read from
+  `ubertooth_harness/test_info.yaml` by `testinfo.py` and keyed by the exact
+  catalog name. The catalog stays authoritative for what the test binds and
+  takes, which the same row reports beside the prose (`hardware_roles`,
+  `arguments`, `estimate_profile`, and the estimate fields), so nothing has
+  two sources. Nothing about it can stop a run: a test with no entry, or a
+  file that is missing or malformed, is reported `available: false` with the
+  reason, and the listing is otherwise unchanged. The prose is data, never
+  markup, and whoever renders it escapes it; the info button and dialog that
+  show it are the GUI half of
+  [#315](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/315),
+  waiting on the layout review in
+  [#133](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/133).
 
 Security: the GUI is served by the loopback-only controller behind the same
 Host/Origin/Sec-Fetch guard as the API, `POST`s stay JSON-only, every

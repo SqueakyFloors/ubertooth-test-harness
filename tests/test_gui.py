@@ -472,6 +472,44 @@ class PlanTests(ControllerTestCase):
             self.assertEqual(
                 [], [t["name"] for t in suite["tests"] if not t["runs_on_target"]])
 
+    async def test_each_listed_test_carries_its_information_over_http(self):
+        # The information the GUI shows beside a test name comes down the
+        # same response as the plans (#315). The file's own schema and the
+        # unavailable cases are tests.test_test_info; here the endpoint is
+        # asked for it, so the JSON a browser gets is what is checked.
+        status, payload, _ = await self.http("GET", "/api/plans")
+        self.assertEqual(200, status)
+        plans = {plan["name"]: plan for plan in payload["plans"]}
+        (suite,) = plans["fast"]["suites"]
+        for test in suite["tests"]:
+            with self.subTest(test=test["name"]):
+                info = test["info"]
+                self.assertIs(True, info["available"], info["unavailable_reason"])
+                for field in ("purpose", "theory", "hardware", "expected",
+                              "limitations"):
+                    self.assertIsInstance(info[field], str)
+                    self.assertTrue(info[field].strip())
+                self.assertIsInstance(info["related"], list)
+                self.assertEqual(
+                    "docs/tests.md", info["documentation"]["path"])
+                # Catalog-derived, beside the prose and never duplicated in it.
+                definition = builtin_catalog().get(test["name"])
+                self.assertEqual(
+                    [{"role": role, "device": device} for role, device
+                     in (definition.hardware_roles or {}).items()],
+                    test["hardware_roles"],
+                )
+                self.assertEqual(
+                    [{"name": name, "required": rule.required} for name, rule
+                     in definition.arguments.items()],
+                    test["arguments"],
+                )
+        identity = next(
+            test for test in suite["tests"] if test["name"] == "Ubertooth identity"
+        )
+        self.assertIn("serial", identity["info"]["theory"])
+        self.assertEqual("default", identity["estimate_profile"])
+
     def test_a_step_for_another_host_ticks_no_build_option_here(self):
         # The build options and the images only --artifact can pass are the
         # suite's as the chosen target would run it: a step the target does

@@ -2301,7 +2301,9 @@ ENDPOINTS = {
     "GET /ui/": "web GUI",
     "GET /api/refs": "branches and tags of the Ubertooth repository (git ls-remote)",
     "GET /api/plans": (
-        "test plans with suites, tests and duration estimates "
+        "test plans with suites, tests and duration estimates, each test "
+        "with the hardware roles and arguments the catalog gives it and the "
+        "information in ubertooth_harness/test_info.yaml "
         "(?target=HOST uses the durations learned on that target)"
     ),
     "GET /api/targets": "registered targets",

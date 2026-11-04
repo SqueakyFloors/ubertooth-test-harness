@@ -24,6 +24,7 @@ import time
 from typing import Awaitable, Callable, Mapping, Sequence
 
 from ubertooth_harness.catalog import (
+    DEFAULT_PROFILE,
     REQUIRED_HARDWARE_ARGUMENT,
     CatalogError,
     TestCatalog,
@@ -49,6 +50,7 @@ from ubertooth_harness.hostneeds import (
 )
 from ubertooth_harness.plan import PlanError, TestStep, image_label, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
+from ubertooth_harness.testinfo import TestInformation, test_information
 
 
 DEFAULT_UBERTOOTH_REPOSITORY = "https://github.com/SqueakyFloors/ubertooth.git"
@@ -591,6 +593,43 @@ def _build_needs(catalog: TestCatalog, test_name, arguments=None) -> dict:
     }
 
 
+def _catalog_contract(catalog: TestCatalog, test_name, arguments=None) -> dict:
+    """What the catalog says a step binds, takes, and runs at.
+
+    The information dialog needs the hardware roles and the accepted
+    arguments beside the prose, and the catalog is where both live
+    (#315). Reported from the catalog on every request rather than written
+    into ``test_info.yaml``, so a role or an argument has one source and the
+    prose cannot drift from it.
+
+    ``estimate_profile`` is the key ``estimated_seconds`` reads for these
+    arguments -- the coverage profile a step chose, or ``default`` for a test
+    with one estimate -- so a client can say which profile the estimate
+    beside it belongs to. None for a test with no calibrated estimates.
+
+    A test the catalog does not know binds nothing and takes nothing, which
+    is the same answer the rest of this listing gives for one.
+    """
+    try:
+        definition = catalog.get(test_name)
+    except CatalogError:
+        return {"hardware_roles": [], "arguments": [], "estimate_profile": None}
+    profile = None
+    if definition.estimates:
+        profile = (arguments or {}).get("coverage") or DEFAULT_PROFILE
+    return {
+        "hardware_roles": [
+            {"role": role, "device": device}
+            for role, device in (definition.hardware_roles or {}).items()
+        ],
+        "arguments": [
+            {"name": name, "required": rule.required}
+            for name, rule in definition.arguments.items()
+        ],
+        "estimate_profile": profile,
+    }
+
+
 def _total(tests: Sequence[Mapping]) -> float | None:
     """The tests' estimates added up, or None unless every one has an
     estimate. 0.0 for no tests at all, which adds up with the other total."""
@@ -677,6 +716,7 @@ def list_plans(
     estimates: EstimateStore | None = None,
     target: str | None = None,
     platform: str | None = None,
+    information: TestInformation | None = None,
 ) -> list[dict]:
     """Every ``<name>.yaml`` plan with its suites, tests and estimates.
 
@@ -704,6 +744,17 @@ def list_plans(
     own host platform, which decides a step the target could not run
     whichever hosts it names. Without a target every step counts, which is
     the suite's whole time whichever host runs a part of it.
+
+    Each test also carries what a reader needs to understand it (#315):
+    ``info``, the prose from ``ubertooth_harness/test_info.yaml`` -- purpose,
+    theory, hardware, expected, limitations, related references and a link to
+    its ``docs/tests.md`` section -- beside ``hardware_roles``,
+    ``arguments`` and ``estimate_profile``, which come from the catalog
+    (``_catalog_contract``). Nothing here can stop a run: a test with no
+    entry, or a file that is missing or malformed, is reported as
+    ``info.available`` false with the reason in
+    ``info.unavailable_reason``, and the rest of the listing is unaffected.
+    The prose is data, not markup; whoever renders it escapes it.
     """
     plans = []
     try:
@@ -711,6 +762,10 @@ def list_plans(
     except OSError:
         return []
     catalog = builtin_catalog()
+    # Read once per listing, as the plans themselves are: always the file as
+    # it now stands, and never a path a client chose.
+    if information is None:
+        information = test_information(catalog=catalog)
     for path in paths:
         if not _name(path.stem) or not path.is_file():
             continue
@@ -746,6 +801,8 @@ def list_plans(
                     "runs_on_target": not reason,
                     "omitted_reason": reason,
                     **_build_needs(catalog, step.test_name, step.arguments),
+                    **_catalog_contract(catalog, step.test_name, step.arguments),
+                    "info": information.view(step.test_name),
                 })
             check = run_plan_check(
                 catalog, steps, (target,) if target else (),

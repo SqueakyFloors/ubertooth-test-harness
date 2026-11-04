@@ -68,6 +68,17 @@
   records what the harness has decided not to test so that a missing catalog
   entry is not mistaken for an oversight; the file's own intro says so.
   Reviewers check for it.
+- Keep `ubertooth_harness/test_info.yaml` current: it holds one entry per
+  catalog test, keyed by the exact catalog name, and it is what the GUI shows
+  beside a test name. A PR that adds a catalog test adds its entry, one that
+  removes a test removes its entry, and one that changes what a test checks
+  updates the fields that are no longer true, in the same PR and beside the
+  `docs/tests.md` section it summarizes. Say "not established" rather than
+  inventing a theory or a result. Do not restate what the catalog already
+  says: hardware roles, accepted arguments, coverage profiles and estimates
+  come from `catalog.py`, and `/api/plans` reads them from there. The unit
+  tests require an entry for every catalog test, so a missing one fails rather
+  than quietly leaving a test with no information. Reviewers check for it.
 - Run the unit suite with `python scripts/test.py` (one process per module,
   one per core; `--durations 10` for the slowest tests). It is what
   `scripts/ci.sh test` runs. `python -m unittest discover -s tests` runs the
