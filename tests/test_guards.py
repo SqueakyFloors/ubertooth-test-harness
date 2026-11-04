@@ -615,8 +615,12 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertEqual("passed", checks[-1].status)
         self.assertIn("after crc-enabled-during-no-follow-adv37", checks[-1].details["case_name"])
 
-    def test_guard_with_an_older_api_never_runs_ubertooth_btle(self):
-        older = HOST_API - 1
+    def test_guard_with_another_api_never_runs_ubertooth_btle(self):
+        for api in (HOST_API - 1, HOST_API + 1):
+            with self.subTest(transitions.format_api(api)):
+                self.assert_api_keeps_btle_off_the_guard(api)
+
+    def assert_api_keeps_btle_off_the_guard(self, older):
         guard = FakeUbertooth(serial=B, api=older)
         bench = Bench(FakeUbertooth(serial=A), guard)
         summary, events, _ = run_guarded(guarded_invocation("BLE CRC transitions"), bench)
@@ -629,8 +633,11 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         (check,) = guard_checks(events)
         self.assertEqual("failed", check.status)
         reason = check.details["reason"]
-        self.assertIn(f"firmware API {transitions.format_api(older)} is older", reason)
-        self.assertIn("too old to read CRC safely", reason)
+        self.assertIn(
+            f"firmware API {transitions.format_api(older)} is not the host tools API",
+            reason,
+        )
+        self.assertIn("its API check would stop the guard", reason)
         self.assertEqual([f"guard Ubertooth 1 {transitions.GUARD_CRC_KEY}"],
                          failed_guard_reads(events))
         (refused,) = [e for e in events if e.event_type == "step_finished"
@@ -653,9 +660,12 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertIn("not confirmed", crc.refuse({}))
         self.assertIn("differs from its baseline",
                       crc.refuse({transitions.differs_key(firmware_key): "git-other (API:1.06)"}))
-        self.assertIn("unreadable", crc.refuse({firmware_key: "git-test"}))
+        self.assertIn("could not be read", crc.refuse({firmware_key: "git-test"}))
         self.assertEqual("", crc.refuse({firmware_key: f"git-test (API:{current})"}))
-        self.assertEqual("", crc.refuse({firmware_key: f"git-test (API:{newer})"}))
+        # Newer firmware as well: ubertooth-btle refuses any API that is not
+        # the one the tools were built for, and stops the board as it goes.
+        self.assertIn(f"API {newer} is not the host tools API {current}",
+                      crc.refuse({firmware_key: f"git-test (API:{newer})"}))
 
     def test_each_guard_read_catches_its_own_difference(self):
         invocation = guarded_invocation("Radio setting transitions")

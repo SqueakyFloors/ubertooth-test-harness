@@ -339,12 +339,17 @@ class FakeUbertooth:
             return fail(f"error: unexpected argument '{leftover[0]}'")
         if get_aa and set_aa:
             return fail("error: -a cannot both read and set the access address")
-        if self.api < HOST_API:
-            # ubertooth_check_api(): older firmware gets ubertooth_stop().
+        if self.api != HOST_API:
+            # ubertooth_check_api(): a firmware API that is not the one the
+            # tools were built for -- newer as well as older -- is refused by
+            # a release build of the host tools, and the board is stopped on
+            # the way out (ubertooth_stop()). Which way a build goes is not
+            # something a run can see, so the fake takes the refusing one.
             self.stops += 1
             self._stop_mode()
             return self._result(
-                command, 1, "", "Ubertooth API version found, libubertooth requires\n",
+                command, 1, "", "error: Ubertooth firmware API version found, "
+                "libubertooth requires\n",
                 on_output,
             )
         if sum(item in ("-f", "-n", "-p") for item in options) > 1:

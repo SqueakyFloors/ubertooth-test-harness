@@ -1795,7 +1795,9 @@ def _tolerant(pattern, convert, values=None):
 
 # What every guard is read for, whatever image it carries: who it is, which
 # image and revision it runs, what built it, and which bootloader is under
-# that. These are the requests any image from this tree answers.
+# that. Every image that answers these vendor requests at all answers these
+# four; a board whose firmware answers none of them is turned away by the
+# pinning rule below rather than guarded.
 GUARD_STABLE_READBACK = (
     (GUARD_FIRMWARE_KEY, "-v", GUARD_FIRMWARE_PATTERN, None),
     ("compile-info", "-V", GUARD_COMPILE_INFO_PATTERN, None),
@@ -2050,16 +2052,23 @@ def _guard_step(board: GuardBoard, setting, option, pattern, convert, key, expec
 
 
 def _btle_api_refusal(board: GuardBoard, firmware_key: str):
-    """Refuse the btle CRC read unless this check confirmed a current API.
+    """Refuse the btle CRC read unless this check confirmed the same API.
 
-    ubertooth-btle sends cmd_stop to firmware older than the host API, so an
-    unread, unparsable, or older API never reaches ubertooth-btle.
+    ubertooth-btle's own check (libubertooth ubertooth_check_api()) refuses
+    any firmware API that is not the one the tools were built for -- newer as
+    well as older -- and stops the board on its way out (ubertooth_stop(),
+    which sends cmd_stop). Whether it refuses or runs on is the host tools'
+    build and an environment variable, neither of which the run can see, so
+    the read is sent only to a board whose API this check read and found
+    equal. An unread, unparsable, or differing API never reaches
+    ubertooth-btle, and the refusal fails the check: a guard is read, not
+    written to.
     """
     def refusal(context) -> str:
         if board.host_api is None:
             return (
                 f"{board.role}: host tools API not derived; ubertooth-btle not "
-                "run, it would stop firmware older than the host tools"
+                "run, it would stop a board whose firmware API differs"
             )
         host = format_api(board.host_api)
         firmware = context.get(firmware_key)
@@ -2073,16 +2082,21 @@ def _btle_api_refusal(board: GuardBoard, firmware_key: str):
                 )
             return (
                 f"{board.role} firmware API was not confirmed in this check; "
-                "ubertooth-btle not run, it would stop firmware older than "
-                f"the host tools (API {host})"
+                "ubertooth-btle not run, it would stop a board whose firmware "
+                f"API differs from the host tools' (API {host})"
             )
         api = firmware_api(firmware)
-        if api is None or api < board.host_api:
-            found = "unreadable" if api is None else format_api(api)
+        if api is None:
             return (
-                f"{board.role} firmware API {found} is older than the host "
-                f"tools API {host}, too old to read CRC safely; ubertooth-btle "
-                "not run, its API check would stop the guard"
+                f"{board.role} firmware API could not be read from "
+                f"'{firmware}'; ubertooth-btle not run, it would stop a board "
+                f"whose firmware API differs from the host tools' (API {host})"
+            )
+        if api != board.host_api:
+            return (
+                f"{board.role} firmware API {format_api(api)} is not the host "
+                f"tools API {host}; ubertooth-btle not run, its API check "
+                "would stop the guard"
             )
         return ""
     return refusal

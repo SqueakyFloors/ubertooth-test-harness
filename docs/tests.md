@@ -192,9 +192,9 @@ a guard running `bluetooth_rxtx`, or the receive-only `bluetooth_rx` build of
 it, must answer the radio settings that build implements, since a board that
 cannot is not holding them; and any guarded test is turned away when a guard
 answered none of `-v`, `-V`, `-s`, or `-B`, because nothing about that board
-could be compared afterwards — a wedged board stalls every request, which
-reads the same way. A guard is never written to and never reflashed to make it
-readable.
+could be compared afterwards — a wedged board would read that way too, though
+the strict LED read fails it first. A guard is only ever read, never written
+to and never reflashed to make it readable.
 
 **Files.** Files a case writes (captures, dumps, images, FIFOs) go in a
 per-case directory under the run's `captures/`. Checker scripts read them and
