@@ -557,7 +557,7 @@ class BenchLockFileNames(NamesTestCase):
         registry = self.load(adapter("BT_A", "AC:00:00:00:00:01"))
         board = leases.board_for_resource(registry.get("BT_A"))
         self.assertEqual("bluez-ac0000000001", board.key)
-        self.assertFalse(board.external)
+        self.assertFalse(board.bench_lock)
         self.assertIsNone(leases.external_lock_path(self.template, board))
 
     def test_every_other_leased_type_does_have_one(self):
@@ -569,7 +569,7 @@ class BenchLockFileNames(NamesTestCase):
         for alias in ("UT_A", "ESP_A", "DK_A", "Prog_A"):
             board = leases.board_for_resource(registry.get(alias))
             with self.subTest(alias):
-                self.assertTrue(board.external)
+                self.assertTrue(board.bench_lock)
                 self.assertIsNotNone(
                     leases.external_lock_path(self.template, board))
 

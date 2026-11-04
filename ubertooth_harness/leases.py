@@ -299,7 +299,7 @@ class Board:
     serial. ``board_for_resource`` builds both names, for every path that
     leases a device.
 
-    ``external`` is whether the lab's own scripts have a lock file for this
+    ``bench_lock`` is whether the lab's own scripts have a lock file for this
     device at all. They do for every board, named after a serial. A host
     Bluetooth adapter has none: it has no serial, and no lab script locks a
     controller. Taking one anyway would put a name no other command uses
@@ -312,7 +312,9 @@ class Board:
     alias: str
     key: str
     external_key: str | None = None
-    external: bool = True
+    # Named apart from ``Lease.external``, which says whether a lease record
+    # is an external board lock rather than which devices have one.
+    bench_lock: bool = True
 
     @property
     def lock_name(self) -> str:
@@ -392,10 +394,10 @@ def external_lock_path(template: str, board: Board) -> Path | None:
     is prefixed (``Board.external_key``, ``board_for_resource``).
 
     ``None`` for a device the lab has no lock file for, which is a host
-    Bluetooth adapter and nothing else (``Board.external``): every caller
+    Bluetooth adapter and nothing else (``Board.bench_lock``): every caller
     then leaves it out rather than creating a file no other command takes.
     """
-    if not board.external:
+    if not board.bench_lock:
         return None
     return Path(template.replace(SERIAL_FIELD, board.lock_name))
 
@@ -576,7 +578,7 @@ def board_for_resource(resource) -> Board:
     serial = plain_serial(resource)
     second = serial if serial and serial != key else None
     return Board(resource.alias, key, external_key=second,
-                 external=resource.type != ADAPTER_TYPE)
+                 bench_lock=resource.type != ADAPTER_TYPE)
 
 
 def max_serial_chars(prefix: str) -> int:
