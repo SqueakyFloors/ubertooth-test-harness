@@ -462,7 +462,6 @@ LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE, ADAPTER_TYPE)
 _ADAPTER_ADDRESS = re.compile(r"^[0-9a-f]{12}$")
 
 
-
 def plain_serial(resource) -> str:
     """The serial a lab's own scripts name this device's lock file after.
 

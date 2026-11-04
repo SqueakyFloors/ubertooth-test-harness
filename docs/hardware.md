@@ -353,7 +353,7 @@ needs all three. They are complementary, not interchangeable: each one gives
 the harness a kind of control or a counter the other two cannot.
 
 - **The nRF52840 DKs are the deterministic LE endpoints.** Their firmware is
-  the harness's own, so a test sets the advertising payload, channel and
+  the harness's own, so a test sets the advertising payload, channel, and
   type, and the interval; the connection peer, interval, data length
   extension, write size and period, the data channel map, a parameter update,
   and connection cycling. Its address is **known rather than settable**: a
@@ -363,7 +363,7 @@ the harness a kind of control or a counter the other two cannot.
   or 2 is likewise chosen by **which of the two images is flashed**
   (`chan-sel-1.conf` turns algorithm 2 off in the controller) rather than by
   a command. The DK then reports endpoint-side counters — writes, write
-  errors, bytes received, parameter updates, connects and disconnects — and
+  errors, bytes received, parameter updates, connects, and disconnects — and
   the parameters in force, including the supervision timeout, so a check can
   compare what the Ubertooth saw against what the far end says it did.
 - **The ESP32 peers are the deterministic Classic endpoints.** Their firmware

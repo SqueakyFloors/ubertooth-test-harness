@@ -1749,7 +1749,9 @@ Bluetooth inquiry scan:
     find and the Ubertooth a piconet to sweep for. hciconfig and hcitool must
     be installed, and they are declared as host tools rather than installed,
     so a bench without them leaves the cases out instead of failing them.
-    Nothing here pages, so no capability is needed; ubertooth-scan pages only
+    Nothing here opens a connection, so no capability is needed: a name read
+    is inside the subset an unprivileged opener of a raw HCI socket may send,
+    where Create Connection is not. ubertooth-scan makes a connection only
     with -x, which has no case. The scan does transmit to other people's
     devices in range when it reads their names.
   expected: >-
@@ -1813,9 +1815,10 @@ Follow Classic piconet over HCI:
     Smoke runs two cases and comprehensive three, each pinning exit 0. -t
     against the central must report following that piconet, say it is not
     using AFH, and print at least ten packet lines all carrying the central's
-    LAP; adding -a must report the same disabled branch with no failed map
-    read; comprehensive adds -q, whose file must be a BR/EDR PCAP holding the
-    piconet's packets. All three have passed on a bench adapter, where the
+    LAP, which it prints without attempting a map read at all; the -a case
+    must instead reach the read, be told the remote is not using AFH, say it
+    is following without it, and claim no map, with no error; comprehensive
+    adds -q, whose file must be a BR/EDR PCAP holding the piconet's packets. All three have passed on a bench adapter, where the
     tool ran about 83 s for a 25 s capture.
   limitations: >-
     A pass says nothing about the headers of what was captured. The bench
