@@ -1085,6 +1085,20 @@ is whichever board paged. The initiator pages, so the initiator's LAP and UAP
 are what `ubertooth-rx -l` and `-u` take, and exchanging the two role
 bindings moves the piconet to the other board's address.
 
+Holding both bridges for a session put two properties of the bridge itself in
+the driver's hands, because no case can see them. One, the bridge is not a
+reliable link: on a host that is also capturing over USB it loses runs of
+bytes, and a line that lost some from its middle arrives with its newline, so
+nothing about the line says it is wrong. The peer firmware therefore
+check-sums every line it writes when asked (`frame on`), and a read, or a
+setter whose second application sets the same value, is sent again on a line
+that fails the check; a status line that is not readable is refused either
+way (#310). Two, the board can go away: nothing is asking it anything while
+the capture runs, so a restart used to be read as a pair whose counters were
+all zero. The driver reads both bridges on a cadence inside the command,
+keeps what the board said on its way down and back, and reports the restart
+with the reason the chip gave (#311).
+
 ---
 
 ### 3f. The host Bluetooth adapter

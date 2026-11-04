@@ -283,8 +283,8 @@ class CommandTests(unittest.TestCase):
             ("disconnects", 2, r"disconnects 2, not 0"),
         ):
             class Stale(FakePeerFirmware):
-                def boot(self):
-                    lines = super().boot()
+                def boot(self, *why):
+                    lines = super().boot(*why)
                     setattr(self, field, value)  # a reset that did not take
                     return lines
 
@@ -626,9 +626,10 @@ class AudioTests(unittest.TestCase):
         original = esp32peer.Shell.command
         seen = []
 
-        def record(shell, text, timeout=esp32peer.COMMAND_TIMEOUT_S):
+        def record(shell, text, timeout=esp32peer.COMMAND_TIMEOUT_S,
+                   parse=None):
             seen.append((text, timeout))
-            return original(shell, text, timeout)
+            return original(shell, text, timeout, parse)
 
         with unittest.mock.patch.object(esp32peer.Shell, "command", record):
             self._audio(min_frames=10)
@@ -897,8 +898,8 @@ class AudioCleanupTests(unittest.TestCase):
             proper one: it is the release at the end that does not take.
             """
 
-            def boot(self):
-                lines = super().boot()
+            def boot(self, *why):
+                lines = super().boot(*why)
                 if self.resets > 1:
                     self.sco = "ready"
                     self.sco_profile = "hf"
@@ -922,8 +923,8 @@ class AudioCleanupTests(unittest.TestCase):
         # Silent from the release reset onwards: no boot notice arrives.
         plain_boot = acceptor.boot
 
-        def silent_boot():
-            lines = plain_boot()
+        def silent_boot(*why):
+            lines = plain_boot(*why)
             if acceptor.resets > 1:
                 acceptor.silent = True
                 return []
@@ -968,8 +969,8 @@ class AudioCleanupTests(unittest.TestCase):
         acceptor_peer, initiator_peer = _peers(acceptor, initiator)
         plain_reset = initiator.boot
 
-        def interrupt_after_the_initiator():
-            lines = plain_reset()
+        def interrupt_after_the_initiator(*why):
+            lines = plain_reset(*why)
             if initiator.resets > 1:
                 raise KeyboardInterrupt
             return lines
@@ -1443,6 +1444,1109 @@ class ChannelMapTests(unittest.TestCase):
         with self.assertRaisesRegex(esp32peer.PeerError, "--map-report needs --map"):
             esp32peer.stream(acceptor, initiator, TRUE, out=io.StringIO(),
                              settle_s=0.0, map_report="/dev/null")
+
+
+class BridgeLossTests(unittest.TestCase):
+    """Bytes lost between the board and this process (#310).
+
+    What the bench measured is a contiguous run of bytes gone with the
+    newlines either side intact, so the line arrives looking whole: `OK` as
+    `K`, and a status line with a hole in the middle of it. Holding a
+    partial line until its newline, which the shell already did, cannot
+    catch that, and four of about seventy pair sessions hit it on a host
+    that was also capturing over USB.
+    """
+
+    FRAMED = esp32peer.FRAME_MINIMUM_FIRMWARE
+
+    def _shell(self, *losses, version=FRAMED, chunk=None, step=0.05):
+        bridge = fake_esp32.LossyBridge(*losses)
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS, version=version)
+        board = shell(firmware, "acceptor", bridge, chunk, step)
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+        return board, firmware, bridge
+
+    def test_the_crc_is_the_one_the_firmware_computes(self):
+        # CRC-16/CCITT-FALSE: 0xffff in, polynomial 0x1021, no reflection
+        # and no final xor. The check vectors the standard is usually
+        # quoted with, so a change of polynomial or seed on either side
+        # fails here rather than on the bench.
+        self.assertEqual(0x29B1, esp32peer.crc16(b"123456789"))
+        self.assertEqual(0xFFFF, esp32peer.crc16(b""))
+        self.assertEqual(0xF952, esp32peer.crc16(b"OK"))
+
+    def test_the_frame_measures_the_line_the_board_wrote(self):
+        """Blanks at the end of a line belong to it, and the length counts them.
+
+        Nothing the firmware writes ends in one today. Taking the blanks off
+        before the check would make the first line that does fail every read,
+        so they come off after it.
+        """
+        board, firmware, _bridge = self._shell()
+        firmware.refuse["status"] = "no  "
+
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    r"'status' refused: no"):
+            board.status()
+        self.assertEqual(0, board.lost)
+
+    def test_a_line_that_arrives_a_few_bytes_at_a_time_is_read_whole(self):
+        # The status line is longer than one read either way, and under
+        # three bytes a read it takes hundreds. A chunk boundary mid-line
+        # was never the fault: this is here so that stays true now that
+        # every line goes through the frame check as well.
+        board, _firmware, _bridge = self._shell(chunk=3, step=0.0005)
+
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+        self.assertEqual(0, board.lost)
+        self.assertEqual(0, board.retried)
+
+    def test_a_status_line_with_a_hole_in_it_is_read_again(self):
+        # 20 bytes out of the middle, which takes the JSON with them.
+        board, _firmware, bridge = self._shell(('"role"', 60, 20))
+
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+        self.assertEqual(1, len(bridge.damaged))
+        self.assertEqual(1, board.lost)
+        self.assertEqual(1, board.retried)
+        self.assertEqual("acceptor bridge: 1 line(s) lost, 1 command(s) sent "
+                         "again", board.serial_report())
+
+    def test_a_hole_that_leaves_the_status_readable_is_caught_by_the_frame(self):
+        """The case the firmware's framing is for.
+
+        Three bytes out of the channel map leave a shorter map, which is
+        still a string in still-valid JSON, so nothing about the line says
+        it is wrong and every field this driver type-checks is there. The
+        length and CRC the firmware puts around the line are what catch it.
+        """
+        board, _firmware, bridge = self._shell(('"afh"', 40, 3))
+
+        status = board.status()
+
+        self.assertEqual(1, len(bridge.damaged))
+        self.assertEqual(1, board.lost)
+        self.assertEqual(1, board.retried)
+        self.assertEqual(fake_esp32.ALL_CHANNELS, status["afh"])
+
+    def test_without_the_frame_that_same_hole_is_taken_at_face_value(self):
+        """Why the firmware had to change, stated as a test.
+
+        On an image with no framing the same loss passes: the line is JSON,
+        every field is of the right type, and the map it reports is three
+        bytes shorter than the one the controller has. A test comparing a
+        recovered map against it would be comparing against a lie.
+        """
+        board, _firmware, bridge = self._shell(('"afh"', 12, 3),
+                                               version="utesp-1.5.0")
+
+        status = board.status()
+
+        self.assertFalse(board.framed)
+        self.assertEqual(1, len(bridge.damaged))
+        self.assertEqual(0, board.lost)
+        self.assertEqual(0, board.retried)
+        self.assertNotEqual(fake_esp32.ALL_CHANNELS, status["afh"])
+
+    def test_an_ok_that_lost_its_first_byte_costs_a_second_attempt(self):
+        # The bench's other sighting: 'K', which is `OK` a byte short, so
+        # the command never saw its ending and timed out.
+        board, firmware, bridge = self._shell(("OK", 0, 1),
+                                              version="utesp-1.5.0")
+
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+        self.assertEqual(1, len(bridge.damaged))
+        self.assertEqual(1, board.retried)
+        self.assertEqual(["status", "status"], firmware.commands)
+
+    def test_a_status_that_stays_unreadable_is_still_refused(self):
+        """Every attempt damaged, so nothing readable ever arrives.
+
+        A half-read status is worse than none, so the read fails rather
+        than the session carrying on with whatever happened to parse. On a
+        framed board the frame is what refuses it; on an older image it is
+        the JSON. Both are refusals, and neither is a retry forever.
+
+        A framed board costs one send more than the retries, because the
+        last of them is the question _ask_unframed has to put to tell a
+        board that stopped framing from a bridge that is losing lines.
+        """
+        for version, reason, sends in (
+            (self.FRAMED, "a line from the board lost bytes on its bridge",
+             esp32peer.COMMAND_RETRIES + 2),
+            ("utesp-1.5.0", "status is not JSON",
+             esp32peer.COMMAND_RETRIES + 1),
+        ):
+            board, firmware, _bridge = self._shell(
+                *[('"role"', 60, 20)] * sends, version=version)
+            with self.subTest(version), self.assertRaisesRegex(
+                esp32peer.SerialLoss, reason
+            ):
+                board.status()
+            self.assertEqual(sends, firmware.commands.count("status"))
+
+    def test_a_bridge_that_only_loses_lines_is_not_called_a_restart(self):
+        """The last resort for a restart must not fire for a lossy bridge.
+
+        A board that has stopped framing has restarted, and asking once
+        without the framing is how that is settled. An answer that comes
+        back framed says the board never stopped, so the attempts before it
+        lost their lines and that is all.
+        """
+        board, _firmware, _bridge = self._shell(
+            *[('"role"', 60, 20)] * (esp32peer.COMMAND_RETRIES + 2))
+
+        with self.assertRaises(esp32peer.SerialLoss):
+            board.status()
+        self.assertEqual([], board.restarts)
+        self.assertTrue(board.framed)
+
+    def test_a_json_status_missing_a_field_is_refused_rather_than_patched(self):
+        for line, reason in (
+            ('{"role":"acceptor"}', "status has no valid 'fw'"),
+            ('["role"]', "status is not a JSON object"),
+            ('{"role":"acceptor"', "status is not JSON"),
+        ):
+            with self.subTest(line), self.assertRaisesRegex(
+                esp32peer.SerialLoss, reason
+            ):
+                esp32peer.parse_status(line, "acceptor")
+
+    def test_a_command_that_cannot_be_repeated_is_not(self):
+        """A lost answer to `role initiator` fails; the role is not set twice.
+
+        `spp start`, `spp stop`, `role`, `sco start`, `sco stop`,
+        `defaults` and `reset` each move the board or the link on, so
+        sending one again on a lost answer would act on a board that had
+        already done it.
+        """
+        board, firmware, bridge = self._shell(("OK", 0, 1),
+                                              version="utesp-1.5.0")
+
+        with self.assertRaisesRegex(esp32peer.SerialLoss,
+                                    "no answer to 'role initiator'"):
+            board.command(esp32peer.ROLE_INITIATOR)
+        self.assertEqual(1, len(bridge.damaged))
+        self.assertEqual(1, firmware.commands.count(esp32peer.ROLE_INITIATOR))
+        self.assertEqual(0, board.retried)
+
+    def test_which_commands_may_be_sent_again(self):
+        for text in ("status", "version", "sco stats", "frame on",
+                     f"spp peer {ACCEPTOR_ADDRESS}", "stream period 20",
+                     "stream payload 200", "stream on", "stream off",
+                     "disc off", "sco type ev3", "afh off"):
+            with self.subTest(text):
+                self.assertTrue(esp32peer.Shell.repeatable(text))
+        for text in ("spp start", "spp stop", "role initiator", "sco start",
+                     "sco stop", "defaults", "reset"):
+            with self.subTest(text):
+                self.assertFalse(esp32peer.Shell.repeatable(text))
+
+    def test_a_refusal_is_a_refusal_and_is_not_sent_again(self):
+        board, firmware, _bridge = self._shell()
+        firmware.refuse["status"] = "bluetooth is not up"
+
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "'status' refused: bluetooth is not up"):
+            board.status()
+        self.assertEqual(1, firmware.commands.count("status"))
+        self.assertEqual(0, board.retried)
+
+
+class FramingTests(unittest.TestCase):
+    """`frame on`, and what a session does on an image that has not got it."""
+
+    def test_the_frame_is_asked_for_and_the_answers_carry_it(self):
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+
+        self.assertTrue(board.ask_for_framing(board.version))
+        self.assertTrue(board.framed)
+        self.assertIn(esp32peer.FRAME_ON, firmware.commands)
+        self.assertTrue(firmware.framing)
+        # A framed line still reads as the line it is.
+        self.assertEqual([esp32peer.FRAME_MINIMUM_FIRMWARE],
+                         board.command("version"))
+
+    def test_the_answer_to_frame_on_is_in_the_form_that_was_in_force(self):
+        """So no line's form is unpredictable at the switch.
+
+        The firmware answers `frame` and then changes, which means the OK
+        to `frame on` is bare and the line after it is framed. Were it the
+        other way round, a driver would have to accept either form for one
+        line in each direction.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        port = FakePeerPort(firmware)
+        board = esp32peer.Shell(port, "acceptor", fake_esp32.FakeClock())
+        board.wait_ready()
+
+        port.write(b"frame on\n")
+        self.assertEqual("OK", port.pending.decode().strip())
+        port.pending.clear()
+        port.write(b"version\n")
+        self.assertTrue(port.pending.decode().startswith("#11,"))
+
+    def test_an_older_image_is_driven_without_the_frame(self):
+        # The command arrived in utesp-1.6.0 and nothing in the harness
+        # flashes a peer, so a board on an older 1.x image has to keep
+        # working: the retry is what saves its runs.
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS, version="utesp-1.5.0")
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+
+        self.assertFalse(board.ask_for_framing(board.version))
+        self.assertFalse(board.framed)
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+
+    def test_an_image_that_should_frame_and_will_not_fails_the_session(self):
+        """Carrying on unframed there would give up the check silently.
+
+        An older image has no such command and is driven as it always was.
+        One whose version says it has the command and refuses it is a board
+        whose lines cannot be checked, so that is the session's failure
+        rather than a quiet fallback.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        firmware.refuse[esp32peer.FRAME_ON] = "unknown command, try \"help\""
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "'frame on' refused"):
+            board.ask_for_framing(board.version)
+
+    def test_a_boot_notice_that_named_an_older_image_than_the_status_fails(self):
+        """The hole a corrupted boot notice would otherwise leave.
+
+        The framing is asked for on the version in the boot notice, which is
+        read before anything is checking the lines. A notice that lost bytes
+        could name an image too old to frame, and the session would then run
+        unchecked against a board that does. The status line is the version
+        check proper, so the two have to agree.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+
+        self.assertFalse(board.ask_for_framing("utesp-1.5.0"))
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            f"acceptor runs {esp32peer.FRAME_MINIMUM_FIRMWARE}, which "
+            "check-sums the lines it sends, but this session is not reading "
+            "framed lines: its boot notice named "
+            f"{esp32peer.FRAME_MINIMUM_FIRMWARE}"
+        ):
+            board.confirm_framing(esp32peer.FRAME_MINIMUM_FIRMWARE)
+
+    def test_an_older_image_passes_the_same_check(self):
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS, version="utesp-1.5.0")
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+
+        board.confirm_framing("utesp-1.5.0")  # no complaint
+        self.assertFalse(board.framed)
+
+    def test_a_session_says_whether_each_bridge_is_framed(self):
+        acceptor, initiator = _pair(version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        acceptor.version = "utesp-1.5.0"
+        report = io.StringIO()
+
+        esp32peer.stream(*_peers(acceptor, initiator), TRUE, out=report,
+                         settle_s=0.0, min_writes=1)
+
+        self.assertIn("initiator bridge: framed", report.getvalue())
+        self.assertIn("acceptor bridge: not framed, utesp-1.5.0 is older than "
+                      f"{esp32peer.FRAME_MINIMUM_FIRMWARE}", report.getvalue())
+
+    def test_a_pair_session_survives_a_lost_line_and_says_so(self):
+        acceptor, initiator = _pair(version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        acceptor.version = esp32peer.FRAME_MINIMUM_FIRMWARE
+        bridges = {INITIATOR: fake_esp32.LossyBridge(('"role"', 60, 20))}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator}, bridges)
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=open_one),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=open_one))
+        report = io.StringIO()
+
+        status = esp32peer.stream(*peers, TRUE, out=report, settle_s=0.0,
+                                  min_writes=1)
+
+        self.assertEqual(0, status)
+        self.assertIn("pair streamed: yes", report.getvalue())
+        self.assertIn("initiator bridge: 1 line(s) lost, 1 command(s) sent "
+                      "again", report.getvalue())
+
+    def test_the_settings_the_board_took_are_read_back(self):
+        """A command line can lose bytes too, and still be a command.
+
+        `stream payload 200` arriving as `stream payload 20` is another
+        valid setting, and its OK says nothing about which. So the session
+        reads the values back off the board rather than trusting the OK.
+        """
+        for field, value, reason in (
+            ("payload", 20, r"payload_len 20 where this session set 200"),
+            ("period", 2000, r"period_ms 2000 where this session set 20"),
+            ("peer", INITIATOR_ADDRESS, r"peer '20:50:0D:E9:C5:BA' where this "
+                                        r"session set 'C8:85:41:2A:1B:2A'"),
+        ):
+            acceptor, initiator = _pair()
+            plain = initiator.handle
+
+            def handle(line, field=field, value=value, initiator=initiator,
+                       plain=plain):
+                answer = plain(line)
+                if line == "stream on":
+                    # A setting that arrived as another valid one, which
+                    # is what a command line short of bytes can be.
+                    setattr(initiator, field, value)
+                return answer
+            initiator.handle = handle
+            with self.subTest(field), self.assertRaisesRegex(
+                esp32peer.PeerError,
+                "the initiator did not take this session's stream settings: "
+                "the initiator reports " + reason
+            ):
+                esp32peer.stream(*_peers(acceptor, initiator), TRUE,
+                                 out=io.StringIO(), settle_s=0.0,
+                                 period=20, payload=200, min_writes=1)
+
+
+class RestartTests(unittest.TestCase):
+    """A peer that goes away under a run, and is reported as that (#311).
+
+    One follow case in eight ended with the initiator back at boot, and
+    every counter reading zero was reported as a pair that never streamed.
+    The board says plenty on its way down and on its way back; the shell
+    was clearing the port before each command, so none of it was read.
+    """
+
+    def _crash_during(self, which=("initiator", "acceptor"), **options):
+        """Run a stream session whose named boards restart under the command."""
+        acceptor, initiator = _pair(version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        acceptor.version = esp32peer.FRAME_MINIMUM_FIRMWARE
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        plain = esp32peer._run_command
+
+        def crash_then_run(command, timeout, drain=None):
+            for label in which:
+                shells[label].port.crash()
+            return plain(command, timeout, drain)
+
+        report = io.StringIO()
+        with mock.patch.object(esp32peer, "_run_command", crash_then_run):
+            try:
+                esp32peer.stream(*peers, TRUE, out=report, settle_s=0.0,
+                                 min_writes=10, **options)
+            except esp32peer.PeerError as error:
+                return str(error), report.getvalue(), acceptor, initiator
+        self.fail("a session whose peer restarted must not pass")
+
+    def test_the_failure_names_the_restart_and_not_a_pair_that_never_streamed(self):
+        error, report, _acceptor, _initiator = self._crash_during(("initiator",))
+
+        self.assertIn("a peer restarted while the session ran", error)
+        self.assertIn("the initiator restarted while the session ran", error)
+        self.assertNotIn("the pair did not stream", error)
+        self.assertIn("initiator restarted:", report)
+
+    def test_the_reason_the_chip_gives_and_the_version_it_came_back_on(self):
+        error, report, _acceptor, _initiator = self._crash_during(("initiator",))
+
+        self.assertIn(fake_esp32.PANIC_REASON, error)
+        self.assertIn(f"back on {esp32peer.FRAME_MINIMUM_FIRMWARE}", error)
+        # And the lines themselves, so a reader can see what the board
+        # said rather than only this driver's reading of it.
+        self.assertIn(f"initiator restart line: {fake_esp32.PANIC_RST}", report)
+        self.assertIn("initiator restart line: Guru Meditation Error", report)
+
+    def test_both_peers_are_reset_after_a_restart(self):
+        _error, _report, acceptor, initiator = self._crash_during(("initiator",))
+
+        # The release reset at the end of the session, on top of the one
+        # opening the bridge caused and the restart itself.
+        self.assertEqual(2, acceptor.resets)
+        self.assertEqual(3, initiator.resets)
+        self.assertEqual(esp32peer.BOOT_ROLE, initiator.role)
+        self.assertFalse(initiator.connected)
+        self.assertFalse(acceptor.connected)
+
+    def test_a_restart_on_either_board_is_named_for_that_board(self):
+        error, _report, _acceptor, _initiator = self._crash_during(
+            ("initiator", "acceptor"))
+
+        self.assertIn("the initiator restarted while the session ran", error)
+        self.assertIn("the acceptor restarted while the session ran", error)
+
+    def test_a_restart_the_bridge_did_not_show_is_caught_by_the_role(self):
+        """The belt to the frame's braces.
+
+        The operating system's buffer holds what the board said while the
+        command ran, and a long enough capture with a chatty board can
+        overflow it. The board's own state still says what happened: this
+        session set `role initiator`, and a board is in the boot role with
+        its server listening only when it has just booted.
+        """
+        acceptor, initiator = _pair()
+        plain = initiator.handle
+
+        def handle(line):
+            answer = plain(line)
+            if line == "stream off":
+                # Back at boot, with nothing of the restart read.
+                initiator.defaults()
+            return answer
+        initiator.handle = handle
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "a peer restarted while the session ran: the initiator reports "
+            "role acceptor with its SPP server on, where this session set "
+            "initiator: the board is back in its boot state"
+        ):
+            esp32peer.stream(*_peers(acceptor, initiator), TRUE,
+                             out=io.StringIO(), settle_s=0.0, min_writes=1)
+
+    def test_the_resets_this_driver_asks_for_are_not_restarts(self):
+        # Opening the bridge resets the board, and so does the release at
+        # the end of a session. Neither is #311, and a session that
+        # reported them as one would fail every run.
+        acceptor, initiator = _pair()
+        report = io.StringIO()
+
+        esp32peer.stream(*_peers(acceptor, initiator), TRUE, out=report,
+                         settle_s=0.0, min_writes=1)
+
+        self.assertIn("pair streamed: yes", report.getvalue())
+        self.assertNotIn("restarted", report.getvalue())
+
+    def test_a_link_notice_while_nothing_is_asking_is_kept_not_mistaken(self):
+        """A link coming up or going down is news, not a restart.
+
+        Those notices arrive at the same moment a boot banner would, with
+        no command in flight, so the one has to be told from the other.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.port.pending += (
+            f"utesp: spp connected {INITIATOR_ADDRESS}\r\n"
+            "utesp: spp disconnected\r\n"
+            "W (12345) BT_APPL: something the stack says\r\n"
+        ).encode()
+
+        board.drain()
+
+        self.assertEqual([], board.restarts)
+        self.assertIn(f"utesp: spp connected {INITIATOR_ADDRESS}", board.notices)
+        self.assertIn("utesp: spp disconnected", board.notices)
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+
+    def test_a_restart_still_arriving_when_the_session_decides_counts(self):
+        """A boot read only as far as its ROM lines is still a restart.
+
+        The drain leaves a boot open until its ready notice arrives, so
+        that a boot log spanning two drains reads as one. The release reset
+        and the session's own verdict are the end of that: a boot read only
+        in part has to be recorded with what it has, or a run that lost a
+        board passes.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.port.crash()
+        # Only as far as the reason line: the ready notice never arrives.
+        whole = bytes(board.port.pending)
+        cut = whole.index(b"utesp: " + esp32peer.MINIMUM_FIRMWARE.encode())
+        board.port.pending = bytearray(whole[:cut])
+
+        board.settle()
+
+        self.assertEqual(1, len(board.restarts))
+        self.assertEqual(fake_esp32.PANIC_REASON, board.restarts[0].reason)
+        self.assertEqual("", board.restarts[0].version)
+        self.assertIn("had not finished booting", board.restarts[0].describe())
+
+    def test_a_session_whose_peer_half_restarted_still_fails(self):
+        # The same thing through a whole session: the restart arrives only
+        # as far as its reason line, and the run must not pass.
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        plain_run = esp32peer._run_command
+
+        def crash_half(command, timeout, drain=None):
+            port = shells["initiator"].port
+            port.crash()
+            whole = bytes(port.pending)
+            cut = whole.index(b"utesp: " + esp32peer.MINIMUM_FIRMWARE.encode())
+            port.pending = bytearray(whole[:cut])
+            return plain_run(command, timeout, drain)
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        with mock.patch.object(esp32peer, "_run_command", crash_half), \
+                self.assertRaisesRegex(
+                    esp32peer.PeerError,
+                    "a peer restarted while the session ran: the initiator "
+                    "restarted while the session ran"):
+            esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                             min_writes=1)
+
+    def test_a_cancellation_stays_a_cancellation_and_still_releases(self):
+        """What `_with_restarts()` deliberately does not touch.
+
+        Turning a cancellation into a report about a peer would swallow it
+        and keep whoever sent it waiting on two more bridge reads. The
+        boards are still released, which is the part that matters.
+        """
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        plain_run = esp32peer._run_command
+
+        def crash_then_cancel(command, timeout, drain=None):
+            shells["initiator"].port.crash()
+            raise KeyboardInterrupt
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        with mock.patch.object(esp32peer, "_run_command", crash_then_cancel), \
+                self.assertRaises(KeyboardInterrupt):
+            esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                             min_writes=1)
+
+        del plain_run
+        self.assertEqual(esp32peer.BOOT_ROLE, initiator.role)
+        self.assertFalse(initiator.connected)
+        self.assertFalse(acceptor.connected)
+
+    def test_a_restart_found_after_the_command_is_still_reported(self):
+        """A restart the post-command reads turned up, not the command.
+
+        The session used to take its restart report once, straight after the
+        command. A board that went away while `stream off` or the status
+        reads were running was then reported as whatever those reads made of
+        it, which is the symptom and not the cause.
+        """
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        plain = initiator.handle
+
+        def handle(line):
+            answer = plain(line)
+            if line == "stream off":
+                shells["initiator"].port.crash()
+            return answer
+        initiator.handle = handle
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "a peer restarted while the session ran: the initiator restarted "
+            f"while the session ran, .*{fake_esp32.PANIC_REASON}"
+        ):
+            esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                             min_writes=1)
+
+    def test_a_command_that_overran_says_the_peer_restarted_too(self):
+        """The path the session cannot reach by itself.
+
+        A command that overruns its deadline, a sample that fails, a bridge
+        that goes away: each leaves the session by raising, and a board that
+        went away is the likeliest reason for most of them. The evidence
+        goes out with the failure instead of being dropped on the way past.
+        """
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        plain_run = esp32peer._run_command
+
+        def crash_then_overrun(command, timeout, drain=None):
+            shells["initiator"].port.crash()
+            return plain_run(command, 0.2, drain)
+
+        with mock.patch.object(esp32peer, "_run_command", crash_then_overrun), \
+                self.assertRaisesRegex(
+                    esp32peer.PeerError,
+                    "a peer restarted while the session ran: the initiator "
+                    "restarted while the session ran, .*; and then: .*did not "
+                    "finish within"):
+            esp32peer.stream(*peers,
+                             (sys.executable, "-c", "import time; time.sleep(5)"),
+                             out=io.StringIO(), settle_s=0.0, min_writes=1)
+
+    def test_a_restart_just_before_the_release_is_not_thrown_away(self):
+        """`reset` used to clear the port before anything read it.
+
+        The release reset is the last thing a session does, and it cleared
+        the bridge before pulsing the board. A restart whose lines were
+        still waiting there went with them.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.port.crash()  # nothing has read this yet
+
+        board.reset()
+
+        self.assertEqual(1, len(board.restarts))
+        self.assertEqual(fake_esp32.PANIC_REASON, board.restarts[0].reason)
+
+    def test_an_audio_session_reports_a_restart_the_same_way(self):
+        acceptor, initiator = _audio_pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        plain = esp32peer._run_command
+
+        def crash_then_run(command, timeout, drain=None):
+            shells["initiator"].port.crash()
+            return plain(command, timeout, drain)
+
+        with mock.patch.object(esp32peer, "_run_command", crash_then_run), \
+                self.assertRaisesRegex(
+                    esp32peer.PeerError,
+                    "a peer restarted while the session ran: the initiator "
+                    "restarted while the session ran"):
+            esp32peer.audio(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                            min_frames=1)
+
+
+    def test_a_restart_is_seen_when_its_rom_line_lost_bytes(self):
+        """The hole the second review round found.
+
+        A board that has restarted is not framing, so its boot notices
+        arrive bare. The ROM's reset line is what normally tells the shell
+        the board rebooted; damage that line and, before the fix, every
+        notice after it was refused as a line that had lost its frame, so
+        the restart left nothing at all behind.
+        """
+        bridge = fake_esp32.LossyBridge((fake_esp32.PANIC_RST, 4, 12))
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor", bridge)
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+        board.port.crash()
+
+        board.drain()
+
+        self.assertEqual(1, len(board.restarts))
+        self.assertEqual(fake_esp32.PANIC_REASON, board.restarts[0].reason)
+        self.assertEqual(esp32peer.FRAME_MINIMUM_FIRMWARE,
+                         board.restarts[0].version)
+        self.assertFalse(board.framed)
+        # And the board is readable again afterwards, because the boot
+        # notice cleared the framing the board no longer has.
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+
+    def test_a_read_that_failed_after_the_command_is_not_called_a_restart(self):
+        """Only a restart makes a session report one.
+
+        The reads after the command can fail for their own reasons - a
+        bridge that went away, a line lost for the last time - and a session
+        that called those a restart would send a reader looking for a board
+        that never left.
+        """
+        acceptor, initiator = _pair()
+        plain = initiator.handle
+
+        def handle(line):
+            if line == "status" and "stream off" in initiator.commands:
+                initiator.commands.append(line)
+                return []  # silent, so the read runs out of attempts
+            return plain(line)
+        initiator.handle = handle
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            r"the pair did not stream: initiator: no answer to 'status'"
+        ):
+            esp32peer.stream(*_peers(acceptor, initiator), TRUE,
+                             out=io.StringIO(), settle_s=0.0, min_writes=1)
+
+    def test_an_audio_counter_line_that_lost_bytes_is_read_again(self):
+        """`sco stats` is repeatable, so its answer has to be parsed inside it.
+
+        On an image with no framing a damaged counter line is caught by
+        failing to parse, and that has to happen where the retry can see
+        it: parsing after the command returned made the one command whose
+        answer is JSON the one command that was never sent twice.
+        """
+        bridge = fake_esp32.LossyBridge(('"rx_total"', 8, 12))
+        acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.AUDIO_FIRMWARE)
+        initiator = FakePeerFirmware(INITIATOR_ADDRESS,
+                                     version=esp32peer.AUDIO_FIRMWARE)
+        acceptor.link(initiator)
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator},
+                          {INITIATOR: bridge})
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=open_one),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=open_one))
+        report = io.StringIO()
+
+        status = esp32peer.audio(*peers, TRUE, out=report, settle_s=0.0,
+                                 min_frames=1)
+
+        self.assertEqual(0, status)
+        self.assertIn("pair carried audio", report.getvalue())
+        self.assertEqual(1, len(bridge.damaged))
+        self.assertIn("initiator bridge: 0 line(s) lost, 1 command(s) sent "
+                      "again", report.getvalue())
+
+    def test_a_framed_board_that_stops_framing_restarted(self):
+        """The last resort when no boot line at all arrived.
+
+        The bridge's buffer can overflow while the capture runs, and a
+        boot's lines are the ones with no command waiting on them, so a
+        restart can leave nothing behind. The board still gives it away:
+        framing is cleared by a reset and by nothing else, so a board that
+        was framing and answers bare has been away.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+        # A restart whose every line went missing: the board is back at
+        # boot and not framing, and the host heard none of it.
+        board.port.crash()
+        board.port.pending.clear()
+
+        status = board.status()
+
+        self.assertEqual(ACCEPTOR_ADDRESS, status["address"])
+        self.assertEqual(1, len(board.restarts))
+        self.assertIn("stopped check-summing its lines",
+                      board.restarts[0].reason)
+        self.assertFalse(board.framed)
+
+    def test_an_acceptor_that_forgot_the_link_restarted(self):
+        """The acceptor's own test, since no session sets its role.
+
+        The session read the pair's link up before the command, so the
+        acceptor answered a page. A board that afterwards counts no link at
+        all has been back to boot since.
+        """
+        acceptor, initiator = _pair()
+        plain = acceptor.handle
+
+        def handle(line):
+            if line == "status" and "stream off" in initiator.commands:
+                acceptor.defaults()  # back at boot, nothing of it heard
+            return plain(line)
+        acceptor.handle = handle
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "a peer restarted while the session ran: the acceptor counts no "
+            "link at all, where this session saw the pair's link come up to "
+            "it"
+        ):
+            esp32peer.stream(*_peers(acceptor, initiator), TRUE,
+                             out=io.StringIO(), settle_s=0.0, min_writes=1)
+
+    def test_an_audio_initiator_back_at_boot_restarted(self):
+        acceptor, initiator = _audio_pair()
+        plain = initiator.handle
+
+        del plain
+        # Back at boot while the command ran, with nothing of it heard: the
+        # session's reading after the command is what has to catch it.
+        initiator.during_the_command(initiator.defaults)
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "a peer restarted while the session ran: .*the initiator reports "
+            "role acceptor with its SPP server on"
+        ):
+            esp32peer.audio(*_peers(acceptor, initiator), TRUE,
+                            out=io.StringIO(), settle_s=0.0, min_frames=1)
+
+    def test_frame_off_puts_the_shell_back_in_step_with_the_board(self):
+        """The documented transition, driven through `Shell.command()`.
+
+        Nothing in the harness turns the framing off, but the command is
+        there for a person reading a board by hand, and a shell left
+        expecting frames after it would refuse every line that followed.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+        self.assertTrue(board.framed)
+
+        board.command(esp32peer.FRAME_OFF)
+
+        self.assertFalse(board.framed)
+        self.assertFalse(firmware.framing)
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+        self.assertEqual(0, board.lost)
+        # And it is not repeatable: its answer is in the old form and the
+        # next line is in the new one, so a second attempt would be read
+        # for the wrong form.
+        self.assertFalse(esp32peer.Shell.repeatable(esp32peer.FRAME_OFF))
+
+class DrainTests(unittest.TestCase):
+    """The boards are read while the command under test runs (#311).
+
+    Nothing asks them anything then, which on the bench was the whole of
+    the capture, so this is the only moment a restart can be seen as it
+    happens rather than deduced afterwards.
+    """
+
+    SLEEP = (sys.executable, "-c", "import time; time.sleep(0.6)")
+
+    def test_the_plain_run_drains_on_its_cadence(self):
+        drains = []
+        with mock.patch.object(esp32peer, "DRAIN_S", 0.05):
+            status, seconds = esp32peer._run_command(
+                self.SLEEP, 30.0, lambda: drains.append(time.monotonic()))
+
+        self.assertEqual(0, status)
+        self.assertGreater(seconds, 0.5)
+        self.assertGreater(len(drains), 2)
+
+    def test_the_watched_run_drains_on_its_cadence(self):
+        drains = []
+        with mock.patch.object(esp32peer, "DRAIN_S", 0.05):
+            status, _seconds = esp32peer._run_command_watched(
+                self.SLEEP, timeout=30.0, out=io.StringIO(),
+                pass_through=io.StringIO(),
+                drain=lambda: drains.append(time.monotonic()))
+
+        self.assertEqual(0, status)
+        self.assertGreater(len(drains), 2)
+
+    def test_a_command_with_no_drain_still_runs_to_its_deadline(self):
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "did not finish within 0.2s"):
+            esp32peer._run_command(self.SLEEP, 0.2)
+
+    def test_a_command_being_drained_still_runs_to_its_deadline(self):
+        with mock.patch.object(esp32peer, "DRAIN_S", 0.05), \
+                self.assertRaisesRegex(esp32peer.PeerError,
+                                       "did not finish within 0.2s"):
+            esp32peer._run_command(self.SLEEP, 0.2, lambda: None)
+
+    def test_a_drain_keeps_a_line_that_has_not_finished_arriving(self):
+        # A boot log that spans two drains is still read as one boot, so
+        # the reason line is not lost to a read that caught half of it.
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.port.crash()
+        whole = bytes(board.port.pending)
+        half = whole.index(fake_esp32.PANIC_RST.encode()) + 10
+        board.port.pending = bytearray(whole[:half])
+
+        board.drain()
+        self.assertEqual([], board.restarts)  # still arriving
+        board.port.pending += whole[half:]
+        board.drain()
+
+        self.assertEqual(1, len(board.restarts))
+        self.assertIn(fake_esp32.PANIC_RST, board.restarts[0].lines)
+        self.assertEqual(fake_esp32.PANIC_REASON, board.restarts[0].reason)
+
+
+class PeerFirmwareFramingSourceTests(unittest.TestCase):
+    """The firmware's side of the frame, read out of its source."""
+
+    def test_the_firmware_computes_the_same_crc(self):
+        source = (FIRMWARE / "main" / "main.c").read_text()
+
+        self.assertIn("crc = 0xffff;", source)
+        self.assertIn("0x1021", source)
+        self.assertIn('"#%d,%04x:"', source)
+
+    def test_the_frame_command_is_in_the_help_text(self):
+        source = (FIRMWARE / "main" / "main.c").read_text()
+
+        self.assertIn('"frame <on|off>', source)
+
+    def test_the_reasons_the_fixture_boots_with_are_the_firmwares(self):
+        source = (FIRMWARE / "main" / "main.c").read_text()
+
+        self.assertIn(f'return "{fake_esp32.PANIC_REASON}";', source)
+        self.assertIn(f'return "{fake_esp32.POWER_ON_REASON}";', source)
+        self.assertIn('shell_line("utesp: boot reason %s", reset_reason());',
+                      source)
+
+    def test_the_frame_fits_in_the_room_the_line_buffer_leaves(self):
+        source = (FIRMWARE / "main" / "main.c").read_text()
+        frame_max = int(re.search(r"#define SHELL_FRAME_MAX (\d+)", source)[1])
+        out_max = int(re.search(r"#define SHELL_OUT_MAX\s+(\d+)", source)[1])
+
+        # "#<len>,<crc>:" at its widest, which is the longest line the
+        # buffer can hold followed by four hex digits.
+        self.assertLessEqual(len(f"#{out_max - 1},ffff:"), frame_max)
+
+
+class BridgeFailureTests(unittest.TestCase):
+    """A bridge that stops answering is an `error:` line, not a traceback.
+
+    pyserial raises OSError when a bridge is unplugged or the host's driver
+    gives up. Every failure in this module is reported as an `error:` line
+    and exit 1, so none of those may reach a reader as a traceback - and a
+    drain, which runs from inside the command under test, must not throw at
+    all or it would leave that command running with nobody to stop it.
+    """
+
+    def _gone(self, firmware=None):
+        board = shell(firmware or FakePeerFirmware(ACCEPTOR_ADDRESS),
+                      "acceptor")
+        board.wait_ready()
+
+        def dead(_size):
+            raise OSError(5, "Input/output error")
+        board.port.read = dead
+        return board
+
+    def test_a_read_that_fails_is_named_rather_than_thrown(self):
+        board = self._gone()
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "acceptor: its bridge stopped answering: .*Input/output error"
+        ):
+            board.status()
+
+    def test_a_write_that_fails_is_named_rather_than_thrown(self):
+        board = shell(FakePeerFirmware(ACCEPTOR_ADDRESS), "acceptor")
+        board.wait_ready()
+
+        def dead(_data):
+            raise OSError(5, "Input/output error")
+        board.port.write = dead
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "acceptor: 'status' could not be sent: .*Input/output error"
+        ):
+            board.status()
+
+    def test_a_drain_does_not_throw_and_the_next_command_reports_it(self):
+        # The drain runs under the command being measured. Throwing there
+        # would leave that command running, so it records the reason and
+        # the next command is where it comes out.
+        board = self._gone()
+
+        board.drain()
+
+        self.assertIn("stopped answering", board.bridge_error)
+        with self.assertRaisesRegex(esp32peer.PeerError, "stopped answering"):
+            board.command("version")
+
+    def test_a_session_whose_bridge_goes_away_reports_an_error_line(self):
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        plain_run = esp32peer._run_command
+
+        def unplug_then_run(command, timeout, drain=None):
+            def dead(_size):
+                raise OSError(5, "Input/output error")
+            shells["initiator"].port.read = dead
+            return plain_run(command, timeout, drain)
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        with mock.patch.object(esp32peer, "_run_command", unplug_then_run), \
+                self.assertRaisesRegex(esp32peer.PeerError,
+                                       "stopped answering"):
+            esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                             min_writes=1)
+
+    def test_main_turns_a_bridge_failure_into_an_error_line(self):
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+
+        def dead_open(peer):
+            board = shell(firmware, peer.label)
+            board.wait_ready()
+
+            def dead(_size):
+                raise OSError(5, "Input/output error")
+            board.port.read = dead
+            return board
+
+        errors = io.StringIO()
+        with mock.patch.object(esp32peer.Peer, "open", dead_open), \
+                mock.patch.object(sys, "stderr", errors):
+            status = esp32peer.main(["status", "--device", ACCEPTOR])
+
+        self.assertEqual(1, status)
+        self.assertTrue(errors.getvalue().startswith("error: "))
+        self.assertIn("stopped answering", errors.getvalue())
 
 
 class _captured_stdout:
