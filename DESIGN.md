@@ -384,8 +384,8 @@ Ubertooth, which keeps a 32-hex-digit serial off the lease file of an
 Ubertooth with that serial; the external file keeps the plain serial the
 lab's own scripts were written against. A run that asked for its lease key
 alone left those scripts free to drive the same device, which on an ESP32
-peer restarts the board, because opening its USB bridge pulls the chip's
-reset line (#317).
+peer costs the run its board: taking turns with a peer restarts it, for the
+reasons measured under "Two kinds of test device" below (#317).
 
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
@@ -1058,17 +1058,22 @@ a time, while a live session held the port with the link up:
 | opens the port asking pyserial for an exclusive lock | cannot open it at all |
 | opens it and pulses RTS with DTR low, which is esptool's hard reset | **restarts**, `boot reason power on` |
 
-So a bare second open is harmless, because the two lines go up together and
-the auto-reset circuit wants them apart; the damage comes from the first open
-of a port nobody held, and from any opener that pulses the lines -- which is
-exactly what releasing a peer to its boot state does, so a second session
-need only *finish* with the board to restart it under a capture. A peer is
-therefore leased under both of its names, by a run as well as by a manual
-command (#317, `leases.board_for_resource`).
+So an overlapping open is harmless and the damage comes from two other
+things: the first open of a port nobody held, and any opener that pulses the
+lines. The second of those is what releasing a peer to its boot state does,
+so a second session need only *finish* with the board to restart it under
+another's capture. A peer is therefore leased under both of its names, by a
+run as well as by a manual command (#317, `leases.board_for_resource`).
 
-Note also what the pyserial row means for the harness's own `exclusive=True`:
-it is an advisory `flock` on the tty, so it stops another pyserial caller
-that also asks for one and nothing else. It is not a substitute for the lease.
+Why the first open resets the board and a second one does not is **not
+established here**. Both raise the two lines, so it is not simply a matter of
+which of them goes up, and no behavior depends on the distinction: the lock
+has to be held for the whole session either way. The measurements are what
+the table records.
+
+Note also what the pyserial row means for the harness's own `exclusive=True`.
+It is an advisory `flock` on the tty, so it stops another pyserial caller
+that also asks for one, and nothing else. It is not a substitute for the lease.
 
 One consequence is worth stating because it decides what a case can assert:
 in a Classic piconet the LAP on the air is the **central's**, and the central

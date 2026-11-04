@@ -231,23 +231,26 @@ the Serial Port Profile link up and streaming):
 | opens the port asking pyserial for an exclusive lock | cannot open it: `errno 11, Could not exclusively lock port` |
 | opens it and pulses RTS with DTR low, which is `esptool`'s hard reset | **restarts**, then reports `utesp: boot reason power on`, `role` back to `acceptor` and writes at 0 |
 
-So the auto-reset circuit wants the two lines apart, and a bare overlapping
-open is harmless. Two sessions cost each other a board by *taking turns* with
-one: the first open of a port nobody held resets it, and so does the reset
-pulse that releases a peer to its boot state at the end of a session. That is
-why a peer's lock has to be held for the whole of a session and has to be the
-file the lab's own scripts take.
+So an overlapping open is harmless. Two sessions cost each other a board by
+*taking turns* with one: the first open of a port nobody held resets it, and
+so does the reset pulse that releases a peer to its boot state at the end of
+a session. That is why a peer's lock has to be held for the whole of a
+session, and has to be the file the lab's own scripts take. Why the first
+open resets the board and a second one does not is not established: both
+raise the two lines, and nothing here depends on the difference.
 
 Two limits that follow, worth knowing before relying on either:
 
 - `pyserial`'s `exclusive=True` is an advisory `flock` on the tty, not
   `TIOCEXCL`. It refuses another caller that also asks for exclusive and lets
   in one that does not, so it is not a substitute for the lease;
-- the peer pair survives the condition a follow case creates. 13 runs of
-  `ubertooth-follow -t <central> -a -b <device>` against the streaming pair
-  with nothing else on the bridges, 10 of 25 s and 3 of 150 s, gave 0 peer
-  restarts, with the peer's own log showing the second baseband link open and
-  close each time.
+- the follow case's own condition showed no restart in 13 runs.
+  `ubertooth-follow -t <central> -a -b <device>` against the streaming pair,
+  with nothing else on the bridges, 10 runs of 25 s and 3 of 150 s, gave 0
+  peer restarts, with the peer's own log showing the second baseband link
+  open and close each time. That is one bench and one firmware revision, so
+  it bounds how often the follow path alone does this rather than ruling it
+  out.
 
 By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
 their registry aliases, holds them, and runs that module, which is how a
@@ -681,8 +684,10 @@ assignment order, and two bridges of the same type swap between boots.
 
 **Opening an ESP32 bridge resets the board.** The CP2102N's DTR and RTS lines
 are wired to the module's EN and IO0 pins, the auto-program circuit that lets
-`esptool` flash with no button press and no jumper to move; asserting them as
-the port opens reboots the board. So one invocation is one session: a driver
+`esptool` flash with no button press and no jumper to move; the first open of
+an idle port reboots the board. (A second open, of a port a live session is
+already holding, does not: see "What a second session can do to a peer"
+above.) So one invocation is one session: a driver
 that opens the port, sends `role initiator`, and exits, then opens it again to
 send `spp start`, has reset the board in between and lost the first command's
 effect. Anything that needs several commands in order does them in one process
@@ -781,11 +786,11 @@ lease takes those too (`--external-board-lock`), under the plain serial those
 scripts were written against, for a run and for a manual command alike
 ([#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)).
 That matters most on the ESP32 peers, whose bridge has RTS and DTR wired to
-the chip's reset and boot pins: a second session restarts the board under the
-first one's capture as soon as it pulses those lines, which is what releasing
-a peer to its boot state does, or by being the first to open a port nobody
-held. Measured for #317: a bare second open of an already-open port leaves
-the board running, a reset pulse from a second process restarts it and the
+the chip's reset and boot pins. A second session restarts the board under the
+first one's capture by pulsing those lines, which is what releasing a peer to
+its boot state does, or by being the first to open a port nobody held.
+Measured for #317: an overlapping open of an already-open port leaves the
+board running, while a reset pulse from a second process restarts it and the
 board then reports `boot reason power on`. See
 [Sharing boards: leases](../README.md#sharing-boards-leases).
 
