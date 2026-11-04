@@ -565,9 +565,12 @@ def board_for_resource(resource) -> Board:
     different files for one device. They used to: a DK, a peer and a
     programmer carry a prefix in the lease key, the lab's own ``flock`` file
     is named after the plain serial, and only the helpers took the second
-    name. So a run and a lab script could hold one device at the same
-    moment, which on an ESP32 peer restarts the board -- opening its bridge
-    pulls the chip's reset line -- in the middle of a capture (#317).
+    name. So a run and a lab script could drive one device at the same
+    moment. On an ESP32 peer that costs the run its board: the bridge's RTS
+    and DTR are wired to the chip's reset and boot pins, so the first open
+    of the port restarts it, and so does any opener that pulses them --
+    which is what releasing a peer to its boot state does. Measured on the
+    bench for #317.
     """
     key = resource_key(resource)
     serial = plain_serial(resource)

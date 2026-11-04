@@ -39,7 +39,8 @@ the working directory left off it. With no environment in its own checkout it
 carries on in any the harness bootstrapped, since the code still comes from
 beside this file; an interpreter nobody bootstrapped is refused. So any
 interpreter may start it, the working directory does not matter, and a
-wrapper on a bench is one ``exec`` of this path. See ``_checkout.py``.
+wrapper on a bench says which registry and ``exec``s this path, with nothing
+in it about which harness runs. See ``_checkout.py`` and ``README.md``.
 
 Exit status is the command's, or 2 if a device could not be held, which is
 what the harness CLI exits on an error of its own.
