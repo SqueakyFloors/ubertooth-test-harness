@@ -248,9 +248,10 @@ class PlanTests(unittest.TestCase):
 
     def test_the_plan_is_not_in_the_release_suites(self):
         """These cases have run on hardware and passed, but they are four
-        more pair-driven cases, and the bench measured two peer-side faults
-        that would fail a gate too often: serial bytes lost under load (#310)
-        and a peer that restarts under a second link (#311)."""
+        more pair-driven cases, and the bench measured peer-side faults in
+        11 of 91 pair sessions -- serial bytes lost under load (#310) and
+        peers that would not come back to their boot state (#311) -- which
+        would fail about two gate runs in five."""
         release = (ROOT / "testplans" / "release.yaml").read_text(encoding="utf-8")
         for name in (INQUIRY_TEST_NAME, FOLLOW_TEST_NAME):
             self.assertNotIn(name, release)

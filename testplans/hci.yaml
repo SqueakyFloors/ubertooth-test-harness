@@ -19,11 +19,12 @@ plan: BlueZ tools with a host Bluetooth adapter
 #
 # This plan is still NOT in release.yaml, and the reason is now the peers
 # rather than the adapter. Two peer-side faults were measured while running
-# it: bytes lost on a bridge's serial line under load, which failed 4 of 70
-# pair sessions (issue #310), and a peer that restarts while a second link
-# is paged to it, about one follow case in eight (issue #311). Four more
-# pair-driven cases at those rates would fail a release gate too often to
-# trust, so the plan runs on its own until those are fixed. Its smoke
+# it: bytes lost on a bridge's serial line under load, which failed 7 of 91
+# pair sessions (issue #310), and peers that would not come back to their
+# boot state, 3 more of those 91 and one peer back at boot mid-capture in 47
+# follow runs (issue #311). Eleven of 91 sessions means a four-case suite
+# fails about two runs in five, so the plan runs on its own until those are
+# fixed. Its smoke
 # estimate is 345 s, which would take the release suite from about 1174 s to
 # about 1519 s (roughly 25 minutes) on the one host that has an adapter.
 #

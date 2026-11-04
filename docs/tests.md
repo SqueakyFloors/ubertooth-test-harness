@@ -2744,15 +2744,18 @@ the adapter but the peers. Two faults were measured while running it, both
 peer-side:
 
 - bytes lost on a bridge's serial line while an Ubertooth captures on the
-  same host, which failed 4 of 70 pair sessions over an evening
+  same host, which failed 7 of 91 pair sessions over an evening
   ([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310));
-- a peer that restarts while a second link is paged to it, about one follow
-  case in eight, which the driver reports as a pair that never streamed
+- peers that would not come back to their boot state when a bridge was
+  reopened, 3 of those same 91, and one peer in 47 follow runs that was back
+  at boot state mid-capture, which the driver reports as a pair that never
+  streamed
   ([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)).
 
-Four more pair-driven cases at those rates would fail a gate run too often to
-trust, and both faults also reach the pair tests already in the gate. So the
-plan runs on its own, and goes into `release.yaml` when those are fixed.
+That is 11 of 91 sessions, so a four-case suite fails about two runs in five
+and a five-case one nearly half. Both faults also reach the pair tests
+already in the gate. So the plan runs on its own, and goes into
+`release.yaml` when they are fixed.
 
 **A host without `hciconfig` and `hcitool` runs nothing.** Both are declared
 as host tools the harness does not install, and a missing host tool makes a

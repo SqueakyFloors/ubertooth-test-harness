@@ -1813,10 +1813,10 @@ smoke passed in 332 to 376 s over four runs and comprehensive in 400 s. The `hci
 still not in `release.yaml`, and the reason is the peers rather than the
 adapter — the runs found serial bytes lost under load
 ([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310))
-and a peer that restarts when a second link is paged to it
-([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)),
-and four more pair-driven cases at the measured rates would fail a gate too
-often. What the runs settled and what they left open is in
+and peers that would not come back to their boot state
+([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)) --
+11 of 91 pair sessions between them, so four more pair-driven cases would
+fail about two gate runs in five. What the runs settled and what they left open is in
 [`docs/tests.md`](docs/tests.md), per case. Every step of the plan binds the
 adapter, so running it on a bench without one is refused, naming the missing
 resource; in a suite that holds other work the two tests are left out as not
