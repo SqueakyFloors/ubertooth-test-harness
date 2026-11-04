@@ -42,12 +42,18 @@ different home would silently repoint both paths. Everything else a helper
 needs it works out for itself.
 
 An `export` reaches every command the wrapper runs, which is what you want
-until one of them takes devices of its own: it is already inside the
-wrapper's locks, so asking for the same files again finds them busy. `hold`
-waits for them, up to its deadline; `ubertooth-harness lease` and a
-`run-suite` run refuse at once. Either way, turn the template off for that
-command with `--external-board-lock ''`, or, for `peer` inside a `hold` that
-already has its devices, pass `--no-hold`.
+until one of them takes devices of its own. A command run inside the wrapper
+above is inside a whole `hold`: the harness lease as well as the bench's
+file, and nothing recognizes itself, so asking for the same devices again
+finds them held however the template is set. Do not re-hold them. `peer`
+has `--no-hold` for exactly this, for the common case of driving the peers
+inside an outer `hold` that already has them.
+
+`--external-board-lock ''` is the lever for the other arrangement: a bench's
+*own* script holding the plain-serial files itself and then running a harness
+command, which would otherwise wait for the files its caller holds. There the
+template is the only thing in the way, and turning it off for that one
+command is right.
 
 Naming the environment's interpreter yourself still works and is what the
 harness's own commands take:
