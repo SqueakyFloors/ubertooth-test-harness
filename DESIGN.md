@@ -385,7 +385,8 @@ Ubertooth with that serial; the external file keeps the plain serial the
 lab's own scripts were written against. A run that asked for its lease key
 alone left those scripts free to drive the same device, which on an ESP32
 peer costs the run its board: taking turns with a peer restarts it, for the
-reasons measured under "Two kinds of test device" below (#317).
+reasons measured under "Test radios: nRF52840 DKs and ESP32 Classic peers"
+below (#317).
 
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
