@@ -1007,6 +1007,11 @@ class Shell:
         into its application. The board is then in its boot state, so this is
         also how a case releases one.
         """
+        # What the board has said since the last command, before any of it
+        # is thrown away: a restart that happened just before a release
+        # would otherwise be lost to the clear below, which is the one
+        # moment #311 could still hide in.
+        self.drain()
         self.port.reset_input_buffer()
         self._buffer = b""
         self._booting = None
@@ -1478,13 +1483,16 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     try:
         initiator_shell = initiator.open()
         try:
-            return _stream(acceptor, acceptor_shell, initiator, initiator_shell,
-                           command, period=period, payload=payload,
-                           min_writes=min_writes, min_seconds=min_seconds,
-                           timeout=timeout, out=out, settle_s=settle_s,
-                           wanted_map=wanted, map_report=map_report,
-                           command_output=command_output,
-                           interrupt_after=interrupt_after)
+            return _with_restarts(
+                ((initiator, initiator_shell), (acceptor, acceptor_shell)),
+                lambda: _stream(
+                    acceptor, acceptor_shell, initiator, initiator_shell,
+                    command, period=period, payload=payload,
+                    min_writes=min_writes, min_seconds=min_seconds,
+                    timeout=timeout, out=out, settle_s=settle_s,
+                    wanted_map=wanted, map_report=map_report,
+                    command_output=command_output,
+                    interrupt_after=interrupt_after))
         finally:
             initiator_shell.close()
     finally:
@@ -1621,6 +1629,31 @@ def _settings_taken(label: str, status: dict, address: str, period: int,
     return wrong
 
 
+def _with_restarts(boards, call):
+    """Run a session, and let a failure on any path carry its restarts.
+
+    The sessions report a restart themselves where they can. This is the
+    paths they cannot reach: a command that overran its deadline, a sample
+    that failed mid-capture, a bridge that went away, a cancellation. Each
+    of those leaves the session by raising, and a board that went away is
+    the likeliest reason for most of them, so the evidence goes out with
+    the failure rather than being dropped on the way past (#311).
+    """
+    try:
+        return call()
+    except PeerError as error:
+        reasons = []
+        for peer, shell in boards:
+            shell.drain()
+            reasons += [f"the {peer.label} restarted while the session ran, "
+                        f"{event.describe()}" for event in shell.restarts]
+        if not reasons or "restarted while the session ran" in str(error):
+            raise
+        raise PeerError("a peer restarted while the session ran: "
+                        + "; ".join(reasons) + "; and then: "
+                        + str(error)) from error
+
+
 def _why(restarted: bool) -> str:
     """How a failed stream session names itself.
 
@@ -1736,11 +1769,6 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # The last of the command's own window: whatever the boards said in
         # it that the drains inside the command have not read yet.
         drain()
-        # Before anything else can fail: a restart is the one failure that
-        # explains every other reading, and the reads below are the ones a
-        # restarted board is least likely to answer as the session expects.
-        restarts = _restart_problems(out, boards)
-        problems += restarts
         try:
             if wanted_map is not None:
                 samples.append(read_link_map(initiator_shell, initiator.label,
@@ -1759,12 +1787,16 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # these reasons are only collected for a session that got this far.
         released = [_release(initiator_shell, initiator, BOOT_STATE),
                     _release(acceptor_shell, acceptor, BOOT_STATE)]
-    # How the failure reads: a run that lost a board did not fail to stream,
-    # it lost a board (#311). Only the restarts themselves decide that. The
-    # reads after the command can fail for their own reasons - a bridge that
-    # went away, a line lost for the last time - and none of those is a
-    # board that restarted.
+    # As late as the session can leave it: the reads after the command, and
+    # the release resets in the finally above, each drain the bridges again,
+    # and a restart one of those turned up belongs in this report as much as
+    # one the command's own window showed. Reported first, because a run
+    # that lost a board did not fail to stream, it lost a board (#311) - and
+    # only the restarts decide that, never the reads that failed because of
+    # one.
+    restarts = _restart_problems(out, boards)
     restarted = bool(restarts)
+    problems = restarts + problems
     _report_serial(out, boards)
     if wanted_map is not None and len(samples) == len(SAMPLE_POINTS):
         requested = requested_map(wanted_map)
@@ -1841,10 +1873,13 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     try:
         initiator_shell = initiator.open()
         try:
-            return _audio(acceptor, acceptor_shell, initiator, initiator_shell,
-                          command, packet_type=packet_type,
-                          min_frames=min_frames, min_seconds=min_seconds,
-                          timeout=timeout, out=out, settle_s=settle_s)
+            return _with_restarts(
+                ((initiator, initiator_shell), (acceptor, acceptor_shell)),
+                lambda: _audio(
+                    acceptor, acceptor_shell, initiator, initiator_shell,
+                    command, packet_type=packet_type, min_frames=min_frames,
+                    min_seconds=min_seconds, timeout=timeout, out=out,
+                    settle_s=settle_s))
         finally:
             initiator_shell.close()
     finally:
@@ -2205,7 +2240,7 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # possible before it starts. Everything up to here - the bring-up,
         # the settle, the status reads - put frames on the air as well, and
         # those are not frames the command saw.
-        before, problems = {}, []
+        before, problems, restarts = {}, [], []
         for peer, shell in boards:
             before[peer.label], missing = _reading(shell, peer)
             if missing:
@@ -2218,13 +2253,10 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         status, seconds = _run_command(command, timeout, drain)
         print(f"command exit: {status} after {seconds:.1f} s", file=out)
 
-        # A board that went away under the capture explains every figure
-        # below it, so it is named before them (#311). The drain first, for
-        # whatever the boards said that the ones inside the command have
-        # not read yet.
+        # Whatever the boards said in the command's window that the drains
+        # inside it have not read yet. What they said is reported further
+        # down, as late as this session can leave it (#311).
         drain()
-        restarts = _restart_problems(out, boards)
-        problems += restarts
 
         # Nothing below raises until the end. A session that measured
         # something reports all of it, and a stop or a release that fails
@@ -2240,18 +2272,15 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 problems.append(str(error))
         problems += _audio_measured(out, boards, before, after,
                                     min_frames=min_frames)
-        if not restarts:
-            # The same last resort as the stream session's, for a restart
-            # the bridge showed nothing of: this session set the
-            # initiator's role, and only a board that has just booted is
-            # in the boot role with its SPP server listening (#311).
-            end = after.get(initiator.label)
-            if end is not None:
-                back = _back_at_boot(initiator.label, end["status"],
-                                     "initiator")
-                if back:
-                    restarts.append(back)
-                    problems.append(back)
+        # The last resort for a restart the bridge showed nothing of: this
+        # session set the initiator's role, and only a board that has just
+        # booted is in the boot role with its SPP server listening (#311).
+        end = after.get(initiator.label)
+        if end is not None:
+            back = _back_at_boot(initiator.label, end["status"], "initiator")
+            if back:
+                restarts.append(back)
+                problems.append(back)
         # The link the command ran against has to still be the one it was
         # given: one renegotiated part way through would otherwise pass on
         # having been right when it came up. A link that is no longer up at
@@ -2306,6 +2335,12 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
                             f"{min_seconds:g} s this test needs: it stopped "
                             "early")
+        # As late as this session can leave it: the readings after the
+        # command, the stops, and the release resets each drain the bridges
+        # again, and a restart any of those turned up belongs here as much
+        # as one the command's own window showed (#311).
+        restarts = _restart_problems(out, boards) + restarts
+        problems = restarts + problems
         _report_serial(out, boards)
         if problems:
             raise PeerError(("a peer restarted while the session ran: "

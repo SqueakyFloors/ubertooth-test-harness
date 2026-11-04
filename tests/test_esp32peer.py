@@ -1954,6 +1954,96 @@ class RestartTests(unittest.TestCase):
         self.assertIn("utesp: spp disconnected", board.notices)
         self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
 
+    def test_a_restart_found_after_the_command_is_still_reported(self):
+        """A restart the post-command reads turned up, not the command.
+
+        The session used to take its restart report once, straight after the
+        command. A board that went away while `stream off` or the status
+        reads were running was then reported as whatever those reads made of
+        it, which is the symptom and not the cause.
+        """
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        plain = initiator.handle
+
+        def handle(line):
+            answer = plain(line)
+            if line == "stream off":
+                shells["initiator"].port.crash()
+            return answer
+        initiator.handle = handle
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "a peer restarted while the session ran: the initiator restarted "
+            f"while the session ran, .*{fake_esp32.PANIC_REASON}"
+        ):
+            esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                             min_writes=1)
+
+    def test_a_command_that_overran_says_the_peer_restarted_too(self):
+        """The path the session cannot reach by itself.
+
+        A command that overruns its deadline, a sample that fails, a bridge
+        that goes away: each leaves the session by raising, and a board that
+        went away is the likeliest reason for most of them. The evidence
+        goes out with the failure instead of being dropped on the way past.
+        """
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        plain_run = esp32peer._run_command
+
+        def crash_then_overrun(command, timeout, drain=None):
+            shells["initiator"].port.crash()
+            return plain_run(command, 0.2, drain)
+
+        with mock.patch.object(esp32peer, "_run_command", crash_then_overrun), \
+                self.assertRaisesRegex(
+                    esp32peer.PeerError,
+                    "a peer restarted while the session ran: the initiator "
+                    "restarted while the session ran, .*; and then: .*did not "
+                    "finish within"):
+            esp32peer.stream(*peers,
+                             (sys.executable, "-c", "import time; time.sleep(5)"),
+                             out=io.StringIO(), settle_s=0.0, min_writes=1)
+
+    def test_a_restart_just_before_the_release_is_not_thrown_away(self):
+        """`reset` used to clear the port before anything read it.
+
+        The release reset is the last thing a session does, and it cleared
+        the bridge before pulsing the board. A restart whose lines were
+        still waiting there went with them.
+        """
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        board = shell(firmware, "acceptor")
+        board.wait_ready()
+        board.port.crash()  # nothing has read this yet
+
+        board.reset()
+
+        self.assertEqual(1, len(board.restarts))
+        self.assertEqual(fake_esp32.PANIC_REASON, board.restarts[0].reason)
+
     def test_an_audio_session_reports_a_restart_the_same_way(self):
         acceptor, initiator = _audio_pair()
         shells = {}
