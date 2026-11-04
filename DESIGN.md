@@ -375,10 +375,17 @@ registry in which two leasable resources would take one lease key
 (`leases.resource_key`, which comes from one identity field where the
 duplicate-identity check compares whole mappings), or in which two devices
 are registered with one plain serial, since that is the name the bench's own
-lock files use (`scripts/lab/hold`). That second name takes a lease file of
-its own under a `bench-` prefix, so a 32-hex-digit serial cannot name the
-lease file of an Ubertooth with that serial, while the bench's own file keeps
-the plain serial it was written against.
+lock files use.
+
+A device therefore has two lock names, and `leases.board_for_resource` is the
+one place both are built, so no path can ask for a file another path does
+not. The lease file carries its type's prefix for everything but an
+Ubertooth, which keeps a 32-hex-digit serial off the lease file of an
+Ubertooth with that serial; the external file keeps the plain serial the
+lab's own scripts were written against. A run that asked for its lease key
+alone left those scripts free to drive the same device, which on an ESP32
+peer restarts the board, because opening its USB bridge pulls the chip's
+reset line (#317).
 
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
@@ -1018,8 +1025,9 @@ Both speak the same line shell over a serial port — one command line in,
 data lines out, then one `OK` or `ERR <reason>`, with `status` on a single
 JSON line — so a reader of one driver can read the other. Both are leased
 like an Ubertooth, under a prefixed key (`nrf52840dk-<J-Link serial>`,
-`esp32-<bridge serial>`), and both are checked in preflight by asking the
-board to identify itself.
+`esp32-<bridge serial>`) and, where a lab locks its devices with its own
+files, under the plain serial as well, and both are checked in preflight by
+asking the board to identify itself.
 
 They differ in one way that shapes how a case is written. **A DK keeps its
 state when its serial port is closed; an ESP32 does not.** On an ESP32 dev
@@ -1038,6 +1046,13 @@ which keeps the case's checks on the tool's real output
 (`classic_cases.py`). The same wiring gives a reliable release: a reset pulse
 on RTS leaves the board in the firmware's boot state, which is what every
 Classic case's cleanup does.
+
+That wiring is also why a peer's lock has to be the one a lab's own scripts
+take. Holding the bridge for the session protects it from the harness; it
+protects it from nothing else, and a second process that merely **opens** the
+port restarts the board, mid-capture, with the session reading the counters of
+a board that has just booted. So a peer is leased under both of its names, by
+a run as well as by a manual command (#317, `leases.board_for_resource`).
 
 One consequence is worth stating because it decides what a case can assert:
 in a Classic piconet the LAP on the air is the **central's**, and the central

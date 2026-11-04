@@ -3,9 +3,13 @@
 Two flat spaces of names decide which file a device is held through: the
 lease keys in the harness's own lease directory, and the plain serials the
 bench's own lock files are named after. A registry that puts two devices in
-one place in either space is refused where it is loaded, and the lease file
-that goes with a bench lock name is prefixed, so a serial of 32 hex digits
-can no longer be the lease file of an Ubertooth with that serial.
+one place in either space is refused where it is loaded, and a lease key
+carries its type's prefix for everything but an Ubertooth, so a serial of 32
+hex digits can no longer be the lease file of an Ubertooth with that serial.
+
+Every path that leases a device asks for both of its names
+(``leases.board_for_resource``), which is what makes a run and a lab's own
+``flock`` wrapper exclude each other (#317).
 
 Nothing here touches a device: every registry is a temporary file and every
 lock is a file in a temporary directory.
@@ -13,6 +17,7 @@ lock is a file in a temporary directory.
 
 from __future__ import annotations
 
+import fcntl
 import sys
 import tempfile
 import textwrap
@@ -314,7 +319,7 @@ class OneBenchLockNameOneDevice(NamesTestCase):
 
 
 class BenchLockFileNames(NamesTestCase):
-    """What the bench's own lock name takes, and what it no longer takes."""
+    """A device's two lock names: its lease file, and the lab's own file."""
 
     def setUp(self):
         super().setUp()
@@ -324,18 +329,14 @@ class BenchLockFileNames(NamesTestCase):
         self.locks.mkdir()
         self.template = str(self.locks / "board-{serial}.lock")
 
-    def bench_board(self, alias: str, serial: str) -> leases.Board:
-        """The second lock `scripts/lab/hold` takes for such a device."""
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lab"))
-        self.addCleanup(sys.path.pop, 0)
-        import _bench
-
+    def peer_board(self, alias: str, serial: str) -> leases.Board:
+        """The device every path that leases a peer asks for."""
         registry = self.load(peer(alias, serial))
-        return _bench.bench_lock_board(registry.get(alias))
+        return leases.board_for_resource(registry.get(alias))
 
     def test_the_lease_file_is_prefixed_and_the_bench_s_file_is_not(self):
-        board = self.bench_board("ESP_A", BRIDGE)
-        self.assertEqual(f"bench-{BRIDGE}", board.key)
+        board = self.peer_board("ESP_A", BRIDGE)
+        self.assertEqual(f"esp32-{BRIDGE}", board.key)
         self.assertEqual(BRIDGE, board.lock_name)
         self.assertEqual(
             self.locks / f"board-{BRIDGE}.lock",
@@ -349,7 +350,7 @@ class BenchLockFileNames(NamesTestCase):
         directory, so a serial that collides cannot always be refused where
         the registry is read; the prefix settles it either way.
         """
-        board = self.bench_board("ESP_A", BRIDGE)
+        board = self.peer_board("ESP_A", BRIDGE)
         held = leases.acquire(
             [board],
             leases.holder_info(run_id=None, owner="bench", purpose="a peer session"),
@@ -357,7 +358,7 @@ class BenchLockFileNames(NamesTestCase):
             external_template=self.template,
         )
         self.addCleanup(held.release)
-        self.assertTrue((self.leases / f"bench-{BRIDGE}.lock").exists())
+        self.assertTrue((self.leases / f"esp32-{BRIDGE}.lock").exists())
         self.assertTrue((self.locks / f"board-{BRIDGE}.lock").exists())
         states = leases.board_states(
             [leases.Board("UT_Elsewhere", BRIDGE)], directory=self.leases
@@ -368,12 +369,13 @@ class BenchLockFileNames(NamesTestCase):
         """What the second name is for: a script written against the serial.
 
         It holds `board-<serial>.lock` and must be met on that same file.
+        That is harness #317: a run that asked only for its lease key left
+        such a script free to open the peer's bridge, which resets the chip.
         """
-        board = self.bench_board("ESP_A", BRIDGE)
+        board = self.peer_board("ESP_A", BRIDGE)
         external = self.locks / f"board-{BRIDGE}.lock"
         held = leases.acquire(
-            [leases.Board("ESP_A (bench lock)", "bench-elsewhere",
-                          external_key=BRIDGE)],
+            [leases.Board("a lab script", "bench-elsewhere", external_key=BRIDGE)],
             leases.holder_info(run_id=None, owner="bench", purpose="a peer session"),
             directory=self.leases,
             external_template=self.template,
@@ -387,13 +389,55 @@ class BenchLockFileNames(NamesTestCase):
         )
         self.assertTrue(states[0]["held"])
 
+    def test_a_run_and_a_lab_script_meet_on_the_lab_s_own_file(self):
+        """#317, the other way round: the run holds it, the script waits.
+
+        The script's `flock` is all a lab wrapper takes, so a run that does
+        not hold that file does not exclude it, and two sessions can drive
+        one peer. The run holds it now.
+        """
+        board = self.peer_board("ESP_A", BRIDGE)
+        held = leases.acquire(
+            [board],
+            leases.holder_info(run_id=None, owner="a run", purpose="a pair session"),
+            directory=self.leases,
+            external_template=self.template,
+        )
+        self.addCleanup(held.release)
+        external = self.locks / f"board-{BRIDGE}.lock"
+        with open(external, "rb") as handle:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_a_run_asks_for_the_lab_s_own_file_for_every_device_it_takes(self):
+        """The path that matters: what a run holds while a case drives a peer.
+
+        This is where #317 was: a run asked for its lease key alone, so the
+        file a lab wrapper locks was free and a second process could open
+        the peer's bridge and reset the chip under a capture.
+        """
+        registry = self.load(
+            ubertooth("UT_A", BOARD), peer("ESP_A", BRIDGE), dk("DK_A", "000123456789")
+        )
+        invocation = SimpleNamespace(
+            test_name="a pair case", host="Host_Linux",
+            resources={"Ubertooth": "UT_A", "initiator": "ESP_A", "advertiser": "DK_A"},
+            power_isolation=(), exclusive_ubertooth=False,
+        )
+        boards = leases.boards_for_invocations([invocation], registry)
+        self.assertEqual(
+            {BOARD: BOARD, f"esp32-{BRIDGE}": BRIDGE,
+             "nrf52840dk-123456789": "000123456789"},
+            {board.key: board.lock_name for board in boards},
+        )
+
     def test_a_template_that_points_at_the_lease_directory_is_refused(self):
         """Either of a device's own names: one process cannot flock one file
         twice, and the file it would take is a device's lease."""
-        board = self.bench_board("ESP_A", BRIDGE)
+        board = self.peer_board("ESP_A", BRIDGE)
         for template in (
-            str(self.leases / "{serial}.lock"),          # the bench name
-            str(self.leases / "bench-{serial}.lock"),    # the lease key
+            str(self.leases / "{serial}.lock"),         # the lab's own name
+            str(self.leases / "esp32-{serial}.lock"),   # the lease key
         ):
             with self.subTest(template=template):
                 with self.assertRaises(leases.LeaseError) as caught:
@@ -413,20 +457,19 @@ class BenchLockFileNames(NamesTestCase):
         A lab's own lock file is never read from one, so the name the
         bench uses for a device is not in it; the queue's own file is.
         """
-        board = self.bench_board("ESP_A", BRIDGE)
+        board = self.peer_board("ESP_A", BRIDGE)
         queue = leases.TicketQueue(
             self.leases, [board],
             leases.holder_info(run_id=None, owner="bench", purpose="a peer session"),
             wait_s=60.0,
         )
         self.assertEqual(
-            [{"key": f"bench-{BRIDGE}", "resource": "ESP_A (bench lock)"}],
-            queue.waiting_for,
+            [{"key": f"esp32-{BRIDGE}", "resource": "ESP_A"}], queue.waiting_for
         )
         read_back = leases.waiting_resources(
             {"waiting_for": queue.waiting_for}, board
         )
-        self.assertEqual([f"bench-{BRIDGE}"], [item.key for item in read_back])
+        self.assertEqual([f"esp32-{BRIDGE}"], [item.key for item in read_back])
 
     def test_a_serial_too_long_for_a_lock_file_is_refused(self):
         """Every name built from it has to be one a file can carry.
@@ -461,14 +504,31 @@ class BenchLockFileNames(NamesTestCase):
 
     def test_a_board_needs_no_second_name_at_all(self):
         """Its lease key is its serial, so there is nothing to prefix."""
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lab"))
-        self.addCleanup(sys.path.pop, 0)
-        import _bench
-
         registry = self.load(ubertooth("UT_A", BOARD))
-        self.assertIsNone(_bench.bench_lock_board(registry.get("UT_A")))
-        board = leases.Board("UT_A", BOARD)
+        board = leases.board_for_resource(registry.get("UT_A"))
+        self.assertIsNone(board.external_key)
+        self.assertEqual(BOARD, board.key)
         self.assertEqual(BOARD, board.lock_name)
+
+    def test_every_leased_type_s_two_names(self):
+        """One rule for all four, so no path can name a file no other does."""
+        registry = self.load(
+            ubertooth("UT_A", BOARD), peer("ESP_A", BRIDGE),
+            dk("DK_A", "000123456789"), programmer("Prog_A", "Z9999ZZ0", "UT_A"),
+        )
+        self.assertEqual(
+            {
+                "UT_A": (BOARD, BOARD),
+                "ESP_A": (f"esp32-{BRIDGE}", BRIDGE),
+                "DK_A": ("nrf52840dk-123456789", "000123456789"),
+                "Prog_A": ("programmer-Z9999ZZ0", "Z9999ZZ0"),
+            },
+            {
+                alias: (board.key, board.lock_name)
+                for alias in ("UT_A", "ESP_A", "DK_A", "Prog_A")
+                for board in (leases.board_for_resource(registry.get(alias)),)
+            },
+        )
 
 
 if __name__ == "__main__":

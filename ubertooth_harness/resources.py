@@ -666,9 +666,9 @@ class FileResourceRegistry:
         Two kinds of name, one flat space (``_lock_names``). A lease key is
         a file in the lease directory (``leases.resource_key``) and a plain
         serial is what the bench's own lock files are named after
-        (``scripts/lab/_bench.plain_serial``) -- and the bench's files are
-        named after whichever of the two a command takes, so a name has to
-        belong to one device throughout.
+        (``leases.plain_serial``) -- and the bench's files are named after
+        whichever of the two a command takes, so a name has to belong to one
+        device throughout.
 
         What that catches, which nothing else did: two resources that take
         one lease file, each read as a device of its own, because a key
@@ -684,8 +684,7 @@ class FileResourceRegistry:
 
         ``host-power`` and ``takeover`` are names the lease directory keeps
         for itself. Nothing can reach either file any more, since every key
-        carries its type's prefix or is 32 hex digits and the bench's second
-        name is prefixed too (``leases.bench_lock_key``); refusing one is a
+        carries its type's prefix or is 32 hex digits; refusing one is a
         guard on the registry, because a device registered under a name of
         the harness's own is a mistake whoever reads that registry next
         should not have to know about.

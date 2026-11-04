@@ -1756,10 +1756,13 @@ by, and one image holds both roles anyway.
 
 A peer is leased like an Ubertooth (`ubertooth-harness boards` and `lease`
 list it), keyed by its bridge serial (`esp32-<serial>.lock` in the lease
-directory). As with the DKs, a lab that guards boards with its own per-board
-lock files must hold both bridges' lock files around the run until the
-harness takes external board locks
-([#123](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/123)).
+directory). A lab that guards devices with its own per-device `flock` files is
+met on those too, under the plain bridge serial, once the run is given the
+template ([External board locks](#external-board-locks)). Hold the pair that
+way for anything that drives it: opening a peer's bridge pulls the chip's
+reset line, so a second session that opens one restarts the board in the
+middle of the first session's capture
+([#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)).
 
 The peers have no switchable power on this bench, so nothing power-cycles
 one: a board that stops answering needs someone at it.
@@ -1790,10 +1793,9 @@ serial — and the duplicate-identity check compares whole identity mappings,
 so two resources whose other fields differ could otherwise take one file
 while everything that read the registry treated them as two devices (a run
 binding both ends of a connection to one DK, with the lease saying nothing).
-The serials themselves are compared the same way, because
-[`scripts/lab/hold`](scripts/lab/README.md) also names a lock after a
-device's plain serial: one serial is one device, whichever way it is written,
-and on whatever type it is registered.
+The serials themselves are compared the same way, because a device's external
+lock is named after its plain serial: one serial is one device, whichever way
+it is written, and on whatever type it is registered.
 
 If a board is held, the run fails before any build or device command and names
 the holder. `--wait-for-boards MINUTES` waits instead; `--owner LABEL` (or
@@ -2089,13 +2091,17 @@ ubertooth-harness lease --external-board-lock '/var/lock/board-{serial}.lock' \
 ```
 
 The template is an absolute path (or starts with `~/`) with exactly one
-`{serial}`, replaced by the board's lock key, the same key its lease file
-uses: an Ubertooth's full 32-hex-digit serial in lowercase, or
-`nrf52840dk-<J-Link serial without leading zeros>` for a DK,
-`esp32-<bridge serial>` for a Classic peer, `programmer-<serial>` for a debug
-programmer. ([`scripts/lab/hold`](scripts/lab/README.md) takes one more file
-per DK, peer and programmer, the bench's own older name for it: that one is
-the plain serial.) No other brace;
+`{serial}`, replaced by the device's plain serial, which is what a lab's own
+script was written against: an Ubertooth's full 32-hex-digit serial in
+lowercase, a DK's J-Link serial as registered, a Classic peer's bridge
+serial, a debug programmer's serial. That is not always the device's lease
+key, which carries its type's prefix for everything but an Ubertooth
+(`nrf52840dk-<J-Link serial without leading zeros>`, `esp32-<bridge serial>`,
+`programmer-<serial>`); the external file keeps the plain serial so that a
+lab wrapper and a harness run meet on one file
+([#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)).
+Every path that leases a device asks for both names — a run, `lease`,
+`boards`, `runner`, and the helpers in `scripts/lab`. No other brace;
 `--external-board-lock` overrides the variable and
 `--external-board-lock ''` turns it off for one command. Unset, nothing
 changes. Each external lock is an exclusive `flock` on that file, taken in

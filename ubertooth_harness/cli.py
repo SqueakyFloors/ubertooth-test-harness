@@ -1437,11 +1437,11 @@ def _registered_boards(registry, host: str | None = None):
         if host and resource.attached_to != host:
             continue
         try:
-            key = board_leases.resource_key(resource)
+            board = board_leases.board_for_resource(resource)
         except board_leases.LeaseError as error:
             boards.append((resource.alias, str(error)))
             continue
-        boards.append((board_leases.Board(resource.alias, key), None))
+        boards.append((board, None))
     return boards
 
 
@@ -1645,7 +1645,7 @@ def _lease_command(args: argparse.Namespace) -> int:
                 f"resource {alias} is not leasable; leasable types are "
                 + ", ".join(board_leases.LEASED_TYPES)
             )
-        boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
+        boards.append(board_leases.board_for_resource(resource))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.
     host_lock = args.host_lock

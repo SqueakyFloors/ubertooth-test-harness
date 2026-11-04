@@ -68,25 +68,24 @@ second while already holding the first.
 devices with per-device `flock` files keeps both sides honest: every hold
 takes that file too. Point it at the bench's existing lock files.
 
-An Ubertooth's lock file is named after its serial. A DK's, a peer's and a
-programmer's are named after the harness's lease key for them
+A device has two names, and every harness command asks for both. Its **lease
+file** carries its type's prefix for everything but an Ubertooth
 (`nrf52840dk-<serial without leading zeros>`, `esp32-<serial>`,
-`programmer-<serial>`), because that is what a harness run takes. A bench
-script that names such a lock after the plain serial instead would not meet a
-harness run on the same file, so `hold` takes **both** names for those three
-types: the bench's own `board-<plain serial>.lock`, which is the file such a
-script locks, and, beside it, a lease file of its own named
-`bench-<plain serial>` — prefixed, because an unprefixed name of 32 hex
-digits is the lease file of an Ubertooth with that serial, and a peer's
-bridge serial is 32 hex digits
+`programmer-<serial>`), because an unprefixed name of 32 hex digits is the
+lease file of an Ubertooth with that serial and a peer's bridge serial is 32
+hex digits
 ([#290](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/290)).
+Its **external lock file** is the one the bench already had, named after the
+plain serial: `board-<plain serial>.lock` under the template above.
 
-That makes every `hold` exclude every other `hold`, whichever name a bench
-script was written against. It does not reach further than that: a
-`run-suite` or an `ubertooth-harness lease` takes only the harness's own key,
-so a bench script holding the plain name alone can still overlap a run on a DK
-or a peer. The way to be sure is for the bench's scripts to take their devices
-through `hold`, which is what this script is for.
+So a bench script that locks `board-<plain serial>.lock` and nothing else is
+met by a `hold`, by an `ubertooth-harness lease`, and by a `run-suite` run, on
+that same file. Until
+[#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317) a
+run asked for its lease key alone and `hold` made up the difference itself, so
+a bench script and a run could drive one DK or one peer at the same moment.
+On a peer that restarts the board, because opening its USB bridge pulls the
+chip's reset line, which is how a capture lost its traffic mid-run.
 
 ## `peer`
 
