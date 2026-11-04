@@ -57,14 +57,6 @@ VENV_PYTHON = VENV / "bin" / "python"
 # checked against each other by tests/test_lab_scripts.py.
 VENV_MARKER = ".ubertooth-harness-venv"
 
-# Set across the re-run and dropped the moment it has arrived, so a .venv
-# whose interpreter does not report that environment as its own cannot make
-# this loop while nothing further down inherits a spent note. It names the
-# process and the checkout, and `os.execv` keeps the process id, so the only
-# note this reads is one it left itself: another process's, or a caller's own,
-# cannot talk a helper out of its checkout's environment.
-REEXEC_ENV = "UBERTOOTH_HARNESS_LAB_REEXEC"
-
 # For a child started as `-m ubertooth_harness`; see the module docstring.
 CHILD_PYTHON_OPTIONS = ("-P",)
 
@@ -132,10 +124,11 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
     - Already in this checkout's own environment, or in another bootstrapped
       one with no environment here to prefer: carry on.
     - This checkout has an environment and we are not in it: re-run the
-      script under that interpreter. Once per checkout, which is what keeps
-      a broken environment from looping, and per checkout rather than once
-      overall, because a command run under `hold` may be a helper from
-      somewhere else with its own re-run to make.
+      script under that interpreter, unless this interpreter already is it,
+      which is what keeps an environment that does not report itself from
+      looping. Nothing is written to the environment, so nothing a caller
+      arranges there changes the outcome and the command run under `hold`
+      inherits nothing of this.
     - No environment anywhere: stop, and say which checkout to bootstrap.
       Carrying on would run the harness with whichever versions of its
       dependencies this interpreter happens to have.
@@ -149,45 +142,38 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
             "that character."
         )
     if in_checkout_environment():
-        # Arrived: the note is spent. Dropping it here is what keeps it from
-        # reaching the command run under `hold` -- which may be a helper of
-        # this same checkout, started by its shebang, with its own re-run to
-        # make -- and what stops a stray value in the caller's environment
-        # from standing in for an attempt.
-        os.environ.pop(REEXEC_ENV, None)
         return
     if (VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)
-            and not already_tried()):
-        os.environ[REEXEC_ENV] = reexec_note()
+            and not running_checkout_interpreter()):
+        # Nothing to clean up if this raises: a file that is executable and
+        # not an executable image leaves the process as it was, with both
+        # outcomes below still open.
         try:
             os.execv(str(VENV_PYTHON), reexec_argv(script))
         except OSError:
-            # A file that is executable and not an executable image. Nothing
-            # has happened yet, so the two outcomes below are still open:
-            # another bootstrapped environment will do, and otherwise this
-            # stops with the advice.
-            os.environ.pop(REEXEC_ENV, None)
+            pass
     if in_harness_environment():
         return
     raise SystemExit(bootstrap_advice(label))
 
 
-def reexec_note() -> str:
-    """What this process writes to say it has re-run itself once."""
-    return f"{os.getpid()} {CHECKOUT}"
+def running_checkout_interpreter() -> bool:
+    """Is this interpreter the file at `CHECKOUT/.venv/bin/python`?
 
+    This is the whole loop guard, and it needs nothing in the environment
+    and so nothing a caller can arrange: after the re-run, `sys.executable`
+    *is* the path that was run, which no other interpreter's is. It answers
+    where `in_checkout_environment` cannot, for a `.venv` that is not a
+    virtual environment at all -- a `bin/python` with no `pyvenv.cfg` beside
+    it reports the base prefix, so the environment check alone would re-run
+    for ever.
 
-def already_tried(environ=None) -> bool:
-    """Did *this* process already re-run itself for this checkout?
-
-    `os.execv` keeps the process id, so a note worth believing names this
-    pid and this checkout. One with another pid was left by some other
-    process -- a command running under `hold`, which has its own re-run to
-    make -- or set by a caller by hand, and either way it says nothing
-    about what this process has done.
+    The path, not what it resolves to: a virtual environment's `python` is
+    usually a symlink to the interpreter it was built from, and so is the
+    one on `PATH`, so resolving would make any system `python3` look like
+    this one and the re-run would never happen.
     """
-    tried = (os.environ if environ is None else environ).get(REEXEC_ENV, "")
-    return tried == reexec_note()
+    return Path(sys.executable) == VENV_PYTHON
 
 
 def reexec_argv(script: str) -> list[str]:

@@ -1319,8 +1319,7 @@ class CheckoutEnvironment(Bench):
     def plain_environment(self) -> dict:
         """What a shell gives: no PYTHONPATH, no harness variables."""
         environment = dict(os.environ)
-        for name in ("PYTHONPATH", "UBERTOOTH_HARNESS_HARDWARE",
-                     _checkout.REEXEC_ENV):
+        for name in ("PYTHONPATH", "UBERTOOTH_HARNESS_HARDWARE"):
             environment.pop(name, None)
         return environment
 
@@ -1360,8 +1359,9 @@ class CheckoutEnvironment(Bench):
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertIn("usage:", result.stdout)
 
-    def test_the_note_about_the_re_run_does_not_reach_the_command(self):
-        """The command under `hold` may be a helper with its own to make."""
+    def test_the_re_run_leaves_nothing_in_the_commands_environment(self):
+        """The command under `hold` may be a helper with its own to make,
+        so it must not inherit anything about this one's."""
         outside = self.outside_interpreter()
         result = subprocess.run(
             [
@@ -1370,13 +1370,13 @@ class CheckoutEnvironment(Bench):
                 "--lease-dir", str(self.leases),
                 "--wait-for-boards", "0",
                 "UT0", "--", "sh", "-c",
-                f'echo "note=[${{{_checkout.REEXEC_ENV}:-unset}}]"',
+                "echo \"harness vars: [$(env | grep -c UBERTOOTH_HARNESS_LAB)]\"",
             ],
             capture_output=True, text=True, env=self.plain_environment(),
             cwd=str(self.root), timeout=120,
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertIn("note=[unset]", result.stdout)
+        self.assertIn("harness vars: [0]", result.stdout)
 
     def test_a_venv_nobody_bootstrapped_is_not_this_checkouts_environment(self):
         """`.venv` is a path, not a promise: `python -m venv` makes one too,
@@ -1454,8 +1454,6 @@ class CheckoutEnvironment(Bench):
                         with self.assertRaises(SystemExit) as caught:
                             _checkout.run_in_checkout_environment(str(HOLD), "hold")
         self.assertIn("bootstrap.py", str(caught.exception))
-        # The spent note is cleared, so a later attempt is not suppressed.
-        self.assertNotIn(_checkout.REEXEC_ENV, os.environ)
 
     def test_the_re_run_names_this_checkouts_interpreter_and_the_script(self):
         given = ["UT0,DK0", "--", "ubertooth-util", "-U", "x", "-v"]
@@ -1468,31 +1466,55 @@ class CheckoutEnvironment(Bench):
         # would turn the command into devices to hold.
         self.assertEqual(given, argv[3:])
 
-    def test_only_a_note_this_process_left_itself_counts(self):
-        """`os.execv` keeps the process id, so that is what makes a note
-        this process's own. Another process's, or a caller's, says nothing
-        about what this one has done."""
-        self.assertTrue(
-            _checkout.already_tried({_checkout.REEXEC_ENV: _checkout.reexec_note()})
-        )
-        for other in (
-            str(_checkout.CHECKOUT),                       # no pid at all
-            f"{os.getpid() + 1} {_checkout.CHECKOUT}",     # another process
-            f"{os.getpid()} /some/other/checkout",         # another checkout
-            "",
-        ):
-            with self.subTest(note=other):
-                self.assertFalse(
-                    _checkout.already_tried({_checkout.REEXEC_ENV: other})
-                )
-        self.assertFalse(_checkout.already_tried({}))
+    def test_the_loop_guard_is_the_interpreter_itself(self):
+        """Nothing in the environment, so nothing a caller can arrange.
 
-    def test_a_note_a_caller_set_cannot_suppress_the_re_run(self):
-        """Presetting it is how a caller would try to keep a helper in a
-        foreign environment; the pid in it is not the helper's."""
+        After the re-run `sys.executable` is the file that was run, which
+        no other interpreter's is -- and the comparison is of paths, not of
+        what they resolve to, or every system python3 sharing a venv's
+        target binary would look like this one.
+        """
+        with unittest.mock.patch.object(
+            sys, "executable", str(_checkout.VENV_PYTHON)
+        ):
+            self.assertTrue(_checkout.running_checkout_interpreter())
+        with unittest.mock.patch.object(
+            sys, "executable", str(Path(sys.base_prefix) / "bin" / "python3")
+        ):
+            self.assertFalse(_checkout.running_checkout_interpreter())
+
+    def test_a_venv_that_is_not_a_virtual_environment_does_not_loop(self):
+        """A `bin/python` with no `pyvenv.cfg` beside it reports the base
+        prefix, so the environment check alone would re-run for ever. The
+        interpreter check answers where that one cannot."""
+        with unittest.mock.patch.object(
+            sys, "executable", str(_checkout.VENV_PYTHON)
+        ):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with unittest.mock.patch.object(
+                        _checkout.os, "execv"
+                    ) as execv:
+                        with self.assertRaises(SystemExit) as caught:
+                            _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        execv.assert_not_called()
+        self.assertIn("bootstrap.py", str(caught.exception))
+
+    def test_no_environment_a_caller_arranges_changes_the_outcome(self):
+        """A wrapper cannot keep a helper out of its checkout's environment
+        by setting something, because there is nothing to set."""
         outside = self.outside_interpreter()
         environment = self.plain_environment()
-        environment[_checkout.REEXEC_ENV] = f"{os.getpid()} {REPO}"
+        for name, value in (
+            ("UBERTOOTH_HARNESS_LAB_REEXEC", f"{os.getpid()} {REPO}"),
+            ("UBERTOOTH_HARNESS_LAB_REEXEC_DONE", "1"),
+            ("PYTHONPATH", str(self.decoy_checkout())),
+        ):
+            environment[name] = value
         result = subprocess.run(
             [
                 str(outside), str(HOLD),
@@ -1506,6 +1528,7 @@ class CheckoutEnvironment(Bench):
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("held", result.stdout)
+        self.assertNotIn("decoy harness imported", result.stdout + result.stderr)
 
     def test_it_does_not_re_run_when_it_is_already_this_environment(self):
         with unittest.mock.patch.object(_checkout.os, "execv") as execv:
@@ -1513,35 +1536,6 @@ class CheckoutEnvironment(Bench):
                 _checkout, "in_checkout_environment", return_value=True
             ):
                 _checkout.run_in_checkout_environment(str(HOLD), "hold")
-        execv.assert_not_called()
-
-    def test_arriving_clears_the_note_about_the_re_run(self):
-        with unittest.mock.patch.dict(
-            _checkout.os.environ, {_checkout.REEXEC_ENV: _checkout.reexec_note()}
-        ):
-            with unittest.mock.patch.object(
-                _checkout, "in_checkout_environment", return_value=True
-            ):
-                _checkout.run_in_checkout_environment(str(HOLD), "hold")
-            self.assertNotIn(_checkout.REEXEC_ENV, _checkout.os.environ)
-
-    def test_a_second_attempt_is_not_made(self):
-        """An environment that does not report itself must not loop.
-
-        The note is this process's own, which after `os.execv` is what the
-        re-run left: the process id did not change.
-        """
-        with unittest.mock.patch.dict(
-            _checkout.os.environ, {_checkout.REEXEC_ENV: _checkout.reexec_note()}
-        ):
-            with unittest.mock.patch.object(_checkout.os, "execv") as execv:
-                with unittest.mock.patch.object(
-                    _checkout, "in_checkout_environment", return_value=False
-                ):
-                    with unittest.mock.patch.object(
-                        _checkout, "in_harness_environment", return_value=True
-                    ):
-                        _checkout.run_in_checkout_environment(str(HOLD), "hold")
         execv.assert_not_called()
 
     def test_with_no_environment_here_another_bootstrapped_one_will_do(self):
