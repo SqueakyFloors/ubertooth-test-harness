@@ -2287,11 +2287,12 @@ one; no catalog case uses it.
 
 **The payload checks barely fire on the bench's own traffic.** Measured over
 four 25-second captures, no record carried a payload at all: `ubertooth-rx`
-kept re-seeding its CLK1-27 candidates and never entered follow mode, so it
-decoded headers but no payloads. A larger sweep of 19 windows found the same
-thing with the edge on it: 11 payload-bearing records in all, between 0 and 4
-per window, and never more than a handful even in a window that did follow.
-So no case puts a floor on records with a
+kept re-seeding its CLK1-27 candidates and never entered follow mode. A
+larger sweep of 19 windows found a handful rather than none — 11
+payload-bearing records in all, between 0 and 4 per window — and corrected
+the explanation: 7 of the 11 came from windows that recovered no clock, so a
+payload-bearing record is not something follow mode is needed for. They are
+simply rare, 11 records in 2620. So no case puts a floor on records with a
 payload, and the payload length and CRC checks are there for the capture that
 does settle a clock — they are exercised deterministically by the unit tests
 and by replaying the synthetic fixture, where a DH1 payload's length field and
@@ -2307,29 +2308,36 @@ here, which build records field by field and check each failure is named, and
 in the forks' own tests, which drive libbtbb and the callbacks with crafted
 input.
 
-**Both error flags do fire here; what is missing is a rate.** This is the
-entry `testplans/weak-link.yaml` still holds back, and the sweep of
-2026-11-04 settled what it is waiting on — 19 windows of dense Serial Port
-Profile traffic, 12 interleaved across four receivers and 7 in a repeat
-session ([#306](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/306)).
-The header's HEC flag failed in 4 of the 19 windows: 26 of 534 checks in one
-40 dB window, 4 of 47 in another, 3 of 1395 in a third, and 6 of 90 on a
-clear board. Every CRC check made in any window failed — 11 of 11. So a
-capture whose records a flag fired on exists, and the older note that the
-flags might simply never fire here was wrong.
+**The header flag fires; a failed CRC here is not yet a damaged packet.**
+This is the entry `testplans/weak-link.yaml` still holds back, and the sweep
+of 2026-11-04 gave it most of its answer — 19 windows of dense Serial Port
+Profile traffic, 12 interleaved across four receivers at 15 seconds and 7 in
+a repeat session at 15 and 25
+([#306](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/306)).
+A capture file over the weak link exists now, which is what this entry was
+first waiting on, and the header's HEC flag does fire: checks failed in 4 of
+the 19 windows, at 4.9% (26 of 534), 8.5% (4 of 47), and 0.2% (3 of 1395) in
+the three 40 dB windows that saw any, and at 3.6% (6 of 167) on the clear
+board.
 
-What is not there is repeatability. A CRC is only checked on a
-payload-bearing record, and a window held between 0 and 4 of those, so just
-5 windows saw a CRC at all and 4 a header failure: a case requiring a flag to
-have fired would fail about three runs in four. **Attenuation is not the
-lever for it**, which is the part worth not re-learning. The clear board
-produced 6 of the 11 CRC failures, and 50 dB produced neither kind, heard 62
-records across six windows and never recovered a clock. Both of the windows
-with the most header failures by rate were ones that never followed, so
-follow mode is not the discriminator either. What this check waits on is a
-capture that reliably carries payload-bearing records, which is the clock
-question above, and a case that requires a flag to have fired rather than
-only that the fields agree.
+**Attenuation does not order that**, which is the part worth not
+re-learning: the unattenuated board had the highest rate of the four
+receivers, 20 dB failed none of 195 checks, and 50 dB none of 49. Pointing
+this test at a weaker link is not what would earn it, and 50 dB is unusable
+outright — 62 records across six windows, no clock recovered in any.
+
+The CRC half is the real blocker, and it is not a question of how often the
+flag fires. Every CRC check made in any window failed, 11 of 11, which reads
+as evidence until the records themselves are read: all 11 are DM1 carrying a
+**valid HEC** and a payload length field that decoded **exactly**, at every
+receiver including the unattenuated one, in windows with and without a
+recovered clock. A BR/EDR payload is dewhitened with the clock, so that is
+the signature of a payload decoded against a clock that never settled rather
+than of a packet damaged on the air — the same open question as the clock
+note above. A case that required the CRC flag to have fired would enshrine
+that artifact rather than test the link. What this check waits on is a
+capture whose CRC failures can be shown to come from the air, and a case that
+requires a flag to have fired rather than only that the fields agree.
 
 The survey case cannot assert whose records it reads. A survey is given no
 address, so it records every piconet in range, and the bench hears ambient

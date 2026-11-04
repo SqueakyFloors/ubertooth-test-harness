@@ -432,17 +432,22 @@ was required to be (`placement_requirements`).
 
 `weaklink.unjudgeable` is what a run has to pass: a requirement may leave no
 attenuated link possible (an ordinary board) or pin exactly one attenuation,
-which must be in `weaklink.MEASURED_ATTENUATIONS_DB`. A requirement that
+which must be in `weaklink.MEASURED_ATTENUATIONS_DB` and must be recorded in
+`weaklink.CHECKS` for that test in that role. A requirement that
 leaves a band open above 0 dB, which `rf:` can write and `weak link:` cannot,
 is refused too, because which board it binds depends on what the bench
-happens to hold. `plan.check_runnable` applies that to a whole plan for
+happens to hold. A fourth reason is a figure the bench was taken to where
+nothing could be measured: `weaklink.CHARACTERIZED_UNUSABLE_DB` holds those
+with why, so the refusal gives the reason rather than calling the figure
+unmeasured to somebody about to fit an attenuator a previous session tried. `plan.check_runnable` applies that to a whole plan for
 `validate-plan`, honoring `runnable: false`; `plan.check_suite_runnable`
 applies it to the one suite a `run-suite` is about to run and does not
 consult the flag, since `runnable: false` says a plan may name those entries,
 not that a run may judge them. Both also refuse a test with no
 implementation. `weaklink.CHECKS` is the list of weak-link checks and what
-each one still needs; none is in a runnable plan, and
-`testplans/weak-link.yaml` is where they wait. The requirement
+each one still needs; the ones with nothing left to need sit in the runnable
+plans their test belongs to (`ble.yaml`, `classic.yaml`, `range.yaml`), and
+`testplans/weak-link.yaml` is where the rest wait. The requirement
 narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
 is filtered by the role as well, so a unit that could never take the role is
 not offered as the one that satisfies the placement: `default` prefers the

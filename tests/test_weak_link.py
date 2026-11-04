@@ -192,7 +192,11 @@ class PlacementTests(unittest.TestCase):
 
     def test_unmeasured_reports_the_attenuations_with_no_bench_measurement(self):
         self.assertEqual((), weaklink.unmeasured([20, 20.0, 40, 40.0]))
-        self.assertEqual((30.0, 50.0), weaklink.unmeasured([40, 20, 30, 50, 30]))
+        # 50 dB is deliberately not the exemplar here: the bench HAS been
+        # taken to it (CHARACTERIZED_UNUSABLE_DB), and `unmeasured` draws no
+        # such distinction, so using it would read as the wording this
+        # module now avoids. 25 and 30 dB are figures nobody has fitted.
+        self.assertEqual((25.0, 30.0), weaklink.unmeasured([40, 20, 30, 25, 30]))
         self.assertTrue(weaklink.measured(40))
         for planned in weaklink.PLANNED_ATTENUATIONS_DB:
             with self.subTest(planned):
@@ -247,13 +251,40 @@ class PlacementTests(unittest.TestCase):
         )
 
     def test_an_int_attenuation_reaches_the_unusable_branch_too(self):
-        """`rf:` is hand-written, so 50 and 50.0 must behave alike."""
+        """An int bound must behave as the float does.
+
+        Both ways into a requirement coerce today (``weak_receiver`` and
+        ``rf._number``), so the ``float()`` in the lookup is defensive. It is
+        tested through a requirement built directly, which is the only way to
+        get an int that far, so the branch is covered rather than the
+        coercion being tested twice.
+        """
         unusable = sorted(weaklink.CHARACTERIZED_UNUSABLE_DB)[0]
-        for value in (unusable, int(unusable)):
-            with self.subTest(value):
-                self.assertIn("found unusable", weaklink.unjudgeable(
-                    weaklink.weak_receiver(value),
-                    "Classic capture record fields", "Ubertooth"))
+        built = PlacementRequirement(
+            antenna=True,
+            min_attenuation_db=int(unusable),
+            max_attenuation_db=int(unusable),
+        )
+        self.assertIsInstance(built.min_attenuation_db, int)
+        self.assertIn("found unusable", weaklink.unjudgeable(
+            built, "Classic capture record fields", "Ubertooth"))
+
+    def test_no_check_sits_at_a_figure_found_unusable(self):
+        """Otherwise the unusable branch would be unreachable, and worse.
+
+        ``measured_for`` is consulted first, so a non-pending ``Check`` at an
+        unusable figure would make a plan pointed there *runnable* and judge
+        a test against a link that settled nothing.
+        """
+        for check in weaklink.CHECKS:
+            with self.subTest(check.test, at=check.attenuation_db):
+                if check.attenuation_db in weaklink.CHARACTERIZED_UNUSABLE_DB:
+                    self.assertTrue(
+                        check.pending,
+                        f"{check.test} claims a measurement at "
+                        f"{check.attenuation_db:g} dB, which "
+                        "CHARACTERIZED_UNUSABLE_DB says settled nothing",
+                    )
 
     def test_attenuations_are_described_for_a_refusal(self):
         self.assertEqual("20 dB", weaklink.describe_attenuations([20]))

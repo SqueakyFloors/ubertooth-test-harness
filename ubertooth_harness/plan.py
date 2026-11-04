@@ -198,13 +198,14 @@ def _refuse_unrunnable(plan: Plan, catalog, suite: str | None, what: str) -> Non
             f"{name}: " + ", ".join(reasons)
             for name, reasons in unjudgeable.items()
         )
-        # "No figure has been taken over" is not true of every refusal here:
-        # a point in CHARACTERIZED_UNUSABLE_DB has been taken to, and the
-        # whole point of recording it is to stop telling somebody it is
-        # merely unmeasured. So the opening clause has to allow for a link
-        # that was measured and found to settle nothing.
+        # The opening clause has to fit all four reasons unjudgeable() gives:
+        # never measured here, measured but not for this test in this role,
+        # an open band that would bind whichever board the bench holds, and a
+        # point the bench was taken to where nothing could be measured. "No
+        # figure has been taken over" was wrong for the middle two, where a
+        # figure certainly has been; "cannot be judged over" covers all four.
         raise PlanError(
-            f"{what} asks for a link no figure can be taken over: {named}. "
+            f"{what} asks for a link it cannot be judged over: {named}. "
             "The bench is measured at "
             f"{weaklink.describe_attenuations(weaklink.MEASURED_ATTENUATIONS_DB)}"
             ", so a test pointed anywhere else would be judged against "
@@ -218,9 +219,12 @@ def check_runnable(plan: Plan, catalog: TestCatalog | None = None) -> None:
     """Refuse a runnable plan that cannot judge what it would run.
 
     Two ways it cannot: a test with no implementation, whose suite run-suite
-    would refuse; and a test pointed at a link no figure can be taken over,
-    whether because the bench has never been measured there or because it has
-    been and the link settled nothing (weaklink.CHARACTERIZED_UNUSABLE_DB).
+    would refuse; and a test pointed at a link it cannot be judged over,
+    which weaklink.unjudgeable() gives four reasons for -- never measured
+    here, measured but not for this test in this role, an open band that
+    would bind whichever board the bench holds, or a point the bench was
+    taken to where nothing could be measured
+    (weaklink.CHARACTERIZED_UNUSABLE_DB).
     Both wait in a plan with ``runnable: false`` (testplans/backlog.yaml,
     testplans/weak-link.yaml), which is why a plan declaring that is left
     alone here.
