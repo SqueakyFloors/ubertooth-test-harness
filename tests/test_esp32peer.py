@@ -2404,6 +2404,110 @@ class PeerFirmwareFramingSourceTests(unittest.TestCase):
         self.assertLessEqual(len(f"#{out_max - 1},ffff:"), frame_max)
 
 
+class BridgeFailureTests(unittest.TestCase):
+    """A bridge that stops answering is an `error:` line, not a traceback.
+
+    pyserial raises OSError when a bridge is unplugged or the host's driver
+    gives up. Every failure in this module is reported as an `error:` line
+    and exit 1, so none of those may reach a reader as a traceback - and a
+    drain, which runs from inside the command under test, must not throw at
+    all or it would leave that command running with nobody to stop it.
+    """
+
+    def _gone(self, firmware=None):
+        board = shell(firmware or FakePeerFirmware(ACCEPTOR_ADDRESS),
+                      "acceptor")
+        board.wait_ready()
+
+        def dead(_size):
+            raise OSError(5, "Input/output error")
+        board.port.read = dead
+        return board
+
+    def test_a_read_that_fails_is_named_rather_than_thrown(self):
+        board = self._gone()
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "acceptor: its bridge stopped answering: .*Input/output error"
+        ):
+            board.status()
+
+    def test_a_write_that_fails_is_named_rather_than_thrown(self):
+        board = shell(FakePeerFirmware(ACCEPTOR_ADDRESS), "acceptor")
+        board.wait_ready()
+
+        def dead(_data):
+            raise OSError(5, "Input/output error")
+        board.port.write = dead
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "acceptor: 'status' could not be sent: .*Input/output error"
+        ):
+            board.status()
+
+    def test_a_drain_does_not_throw_and_the_next_command_reports_it(self):
+        # The drain runs under the command being measured. Throwing there
+        # would leave that command running, so it records the reason and
+        # the next command is where it comes out.
+        board = self._gone()
+
+        board.drain()
+
+        self.assertIn("stopped answering", board.bridge_error)
+        with self.assertRaisesRegex(esp32peer.PeerError, "stopped answering"):
+            board.command("version")
+
+    def test_a_session_whose_bridge_goes_away_reports_an_error_line(self):
+        acceptor, initiator = _pair()
+        shells = {}
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
+
+        def remember(device, label):
+            shells[label] = open_one(device, label)
+            return shells[label]
+
+        plain_run = esp32peer._run_command
+
+        def unplug_then_run(command, timeout, drain=None):
+            def dead(_size):
+                raise OSError(5, "Input/output error")
+            shells["initiator"].port.read = dead
+            return plain_run(command, timeout, drain)
+
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=remember),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=remember))
+        with mock.patch.object(esp32peer, "_run_command", unplug_then_run), \
+                self.assertRaisesRegex(esp32peer.PeerError,
+                                       "stopped answering"):
+            esp32peer.stream(*peers, TRUE, out=io.StringIO(), settle_s=0.0,
+                             min_writes=1)
+
+    def test_main_turns_a_bridge_failure_into_an_error_line(self):
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+
+        def dead_open(peer):
+            board = shell(firmware, peer.label)
+            board.wait_ready()
+
+            def dead(_size):
+                raise OSError(5, "Input/output error")
+            board.port.read = dead
+            return board
+
+        errors = io.StringIO()
+        with mock.patch.object(esp32peer.Peer, "open", dead_open), \
+                mock.patch.object(sys, "stderr", errors):
+            status = esp32peer.main(["status", "--device", ACCEPTOR])
+
+        self.assertEqual(1, status)
+        self.assertTrue(errors.getvalue().startswith("error: "))
+        self.assertIn("stopped answering", errors.getvalue())
+
+
 class _captured_stdout:
     """Replace the real file descriptor 1, which a child process inherits."""
 

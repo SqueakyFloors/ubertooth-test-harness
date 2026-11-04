@@ -627,6 +627,10 @@ class Shell:
         # framing is told from a bridge that is losing lines.
         self.framed = False
         self.framed_seen = 0
+        # Why the bridge stopped answering, if it has. A drain cannot throw
+        # it, because it runs under the command being measured, so it is
+        # kept here and the next command reports it.
+        self.bridge_error = ""
 
     @classmethod
     def open(cls, path: str, label: str = "peer", log=None) -> "Shell":
@@ -653,6 +657,20 @@ class Shell:
     def close(self) -> None:
         self.port.close()
 
+    def _read_port(self, size: int = 256) -> bytes:
+        """Bytes from the bridge, with its own failures named as ours.
+
+        pyserial raises OSError when a bridge is unplugged or the host's
+        driver gives up. Every command here fails closed with an ``error:``
+        line, so that has to become a PeerError rather than a traceback out
+        of whatever was reading at the time.
+        """
+        try:
+            return self.port.read(size)
+        except OSError as error:
+            raise PeerError(f"{self.label}: its bridge stopped answering: "
+                            f"{error}") from error
+
     def _lines(self, deadline: float):
         while True:
             while b"\n" in self._buffer:
@@ -660,7 +678,7 @@ class Shell:
                 yield self._decode(raw)
             if self.clock() >= deadline:
                 return
-            chunk = self.port.read(256)
+            chunk = self._read_port()
             if chunk:
                 self._buffer += chunk
 
@@ -786,11 +804,19 @@ class Shell:
         (#311). A partial line is kept for the next call, so a boot log that
         spans two drains is still read as one.
 
-        Nothing here raises: a drained line that lost bytes is counted and
-        dropped, because no command is waiting on it.
+        Nothing here raises, and that matters twice over: a drained line
+        that lost bytes is counted and dropped, because no command is
+        waiting on it; and a bridge that has stopped answering is recorded
+        rather than thrown, because this runs from inside the command under
+        test and a failure here would leave that command running with
+        nobody to stop it. The next command says so instead.
         """
         for _ in range(DRAIN_READS_MAX):
-            chunk = self.port.read(256)
+            try:
+                chunk = self._read_port()
+            except PeerError as error:
+                self.bridge_error = str(error)
+                return
             if not chunk:
                 break
             self._buffer += chunk
@@ -907,9 +933,17 @@ class Shell:
         # with it (#311); then the leftovers go, because a part of an answer
         # to an earlier command must not be read as this one's.
         self.drain()
+        if self.bridge_error:
+            # A drain inside the command under test found the bridge gone
+            # and could not say so then; this is where it says so.
+            raise PeerError(self.bridge_error)
         self._buffer = b""
-        self.port.write(text.encode("ascii") + b"\n")
-        self.port.flush()
+        try:
+            self.port.write(text.encode("ascii") + b"\n")
+            self.port.flush()
+        except OSError as error:
+            raise PeerError(f"{self.label}: '{text}' could not be sent: "
+                            f"{error}") from error
         if self.log is not None:
             self.log(targets.SENT, text)
         data: list[str] = []
@@ -1029,14 +1063,18 @@ class Shell:
         # the clear is the end of anything still arriving: a boot this has
         # read the start of will get no third chance.
         self.settle()
-        self.port.reset_input_buffer()
         self._buffer = b""
         self._booting = None
         self.framed = False
-        self.port.dtr = False
-        self.port.rts = True
-        time.sleep(RESET_PULSE_S)
-        self.port.rts = False
+        try:
+            self.port.reset_input_buffer()
+            self.port.dtr = False
+            self.port.rts = True
+            time.sleep(RESET_PULSE_S)
+            self.port.rts = False
+        except OSError as error:
+            raise PeerError(f"{self.label}: its bridge would not reset the "
+                            f"board: {error}") from error
         self.wait_ready()
 
     def serial_report(self) -> str:
@@ -1664,7 +1702,13 @@ def _with_restarts(boards, call):
     except PeerError as error:
         reasons = []
         for peer, shell in boards:
-            shell.settle()
+            # Nothing of this may raise: the failure in hand is the report,
+            # and a bridge that went away must not replace it with a second
+            # failure from the attempt to explain the first.
+            try:
+                shell.settle()
+            except Exception:  # noqa: BLE001 - a dead bridge, a dead board
+                pass
             reasons += [f"the {peer.label} restarted while the session ran, "
                         f"{event.describe()}" for event in shell.restarts]
         if not reasons or "restarted while the session ran" in str(error):
@@ -2483,6 +2527,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             status_command(peer)
     except PeerError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        # The backstop for a bridge or a file that went away somewhere this
+        # module does not name. Every failure here is an `error:` line and
+        # exit 1, so none of them may reach a reader as a traceback.
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0
