@@ -89,9 +89,13 @@ class PreflightCheck:
     # board this run may not even use. The version line is what the check
     # reads, so the patterns decide it.
     accepted_returncodes: tuple[int, ...] = (0,)
-    # Guard-only boards: the firmware API must be no older than the host
-    # tools' (ubertooth-btle would stop older firmware). Newer is fine.
-    minimum_api: int | None = None
+    # Guard-only boards: the firmware API must be the host tools' own.
+    # ubertooth-btle may refuse any other, newer as well as older, and stop
+    # the board as it goes -- whether it does is its own build and an
+    # environment variable the run does not set -- so the guard check will
+    # not send such a board its CRC read and the baseline fails; this refuses
+    # it before any test instead (transitions._btle_api_refusal).
+    required_api: int | None = None
     # How to fix a firmware revision mismatch; FLASH_FIX when empty.
     fix: str = ""
     # The libbtbb the host tools must report, for the host version check.
@@ -195,20 +199,21 @@ class PreflightCheck:
                     f"{carries}, not {self.libbtbb.expected_revision}, which "
                     f"is {self.libbtbb.origin}: {self.libbtbb.fix}"
                 )
-        if self.minimum_api is not None:
+        if self.required_api is not None:
             reported = output.search(API_PATTERN)
             output.note_pattern("observed", f"{self.name} API", API_PATTERN,
                                 reported)
             api = firmware_api(reported[0]) if reported else None
-            if api is None or api < self.minimum_api:
+            if api is None or api != self.required_api:
                 found = "unreadable" if api is None else format_api(api)
                 serial = self.resource_identity.get("serial", "")
                 return (
                     f"{self.name}: guard board {self.resource_alias} (serial "
-                    f"{serial}) firmware API {found} is older than the host "
-                    f"tools API {format_api(self.minimum_api)}; ubertooth-btle "
-                    "would stop it, so guarded tests cannot run on "
-                    f"{self.host}; update its firmware or unregister it"
+                    f"{serial}) firmware API {found} is not the host tools "
+                    f"API {format_api(self.required_api)}; ubertooth-btle may "
+                    "stop a board it cannot read the CRC of, so guarded tests "
+                    f"cannot run on {self.host}; update its firmware or "
+                    "unregister it"
                 )
         return ""
 
@@ -520,9 +525,9 @@ class PreflightPolicy:
 
         These are the boards a building run flashes with its own firmware
         first (cli.py, the default with --build). Guard-only boards are left
-        out: preflight only requires their firmware API to be no older than
-        the host tools', not the resolved revision. Boards a firmware-writing
-        test establishes itself are left out too.
+        out: preflight only requires their firmware API to be the host tools'
+        own, not the resolved revision. Boards a firmware-writing test
+        establishes itself are left out too.
         """
         established = self._firmware_established_by_suite(invocations)
         found: list[str] = []
@@ -653,20 +658,20 @@ class PreflightPolicy:
                         (rf"Serial No:\s+{self._pattern(serial.lower())}(?:\s|$)",),
                     ),
                 )
-                minimum_api = None
+                required_api = None
                 if alias in established or alias not in tested:
                     device_checks = tuple(
                         check for check in device_checks if check[0] == "Device serial"
                     )
                 if alias not in tested:
                     # Guard-only: refuse the run before any test if its API
-                    # is older than the host tools'.
+                    # is not the host tools' own, either way about.
                     if host_api is None:
                         try:
                             host_api = host_api_version(ubertooth_source)
                         except StateCaseError as error:
                             raise PreflightError(str(error)) from error
-                    minimum_api = host_api
+                    required_api = host_api
                     device_checks += (
                         ("Guard firmware API", common + ("-v",), (r"Firmware version:",)),
                     )
@@ -708,8 +713,8 @@ class PreflightPolicy:
                                 bootloader_identity.IDENTITY_TIMEOUT_S
                                 if name == BOOTLOADER_CHECK_NAME else 5.0
                             ),
-                            minimum_api=(
-                                minimum_api if name == "Guard firmware API" else None
+                            required_api=(
+                                required_api if name == "Guard firmware API" else None
                             ),
                             fix=firmware_fix,
                             bootloader=(

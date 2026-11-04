@@ -737,7 +737,9 @@ cannot flash at all. Because flashing implies the firmware build, such a run
 needs `arm-none-eabi-gcc`, and is refused up front without it.
 
 Guard boards are not flashed: preflight only requires their firmware API to be
-no older than the host tools'. Boards that a firmware-writing test
+the host tools' own — any other, newer as well as older, is refused there,
+because `ubertooth-btle` may stop such a board rather than read it (README,
+"Guard Ubertooths") — not the resolved revision. Boards that a firmware-writing test
 (`Flash reliability`, `DFU images`, `Classic btbr console`) writes itself are
 not flashed either.
 

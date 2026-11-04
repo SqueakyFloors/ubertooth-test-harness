@@ -195,7 +195,8 @@ Bootloader identity:
   expected: >-
     No implementation as a plan entry; only a plan declaring runnable: false
     may name it. As a mandatory preflight check, one -B read per selected
-    board, recorded as a bootloader_identity record and shown in the report
+    board whose firmware the run requires and then verifies, recorded as a
+    bootloader_identity record and shown in the report
     and the GUI board list. record passes on any answer, including a factory
     bootloader; check and update pass only on the identity the artifact names.
   limitations: >-
@@ -2115,22 +2116,61 @@ Recover a BLE connection promiscuously:
 
 Reset into invalid application:
   purpose: >-
-    A catalog entry for verifying that a board with an invalid application
-    firmware can be recovered. No implementation yet.
+    Checks that the bootloader refuses to start an application image it
+    cannot start, and keeps running so the next image can go on over USB.
+    Before that check existed, such a board faulted on every power-up and
+    came back only when someone bridged its P4 entry pin at the bench, so
+    what this proves is that an interrupted download is recoverable without
+    opening the case.
   theory: >-
-    Not established. The recovery path it would need now exists, since the
-    bench's hub can switch board power.
+    The image is a valid Ubertooth DFU file whose two vector words are
+    erased, which is what an interrupted download leaves in flash: the
+    initial stack pointer must be inside RAM and word-aligned and the reset
+    vector must be a Thumb address above the bootloader, and erased flash
+    fails both. That is the first thing the bootloader asks, before either
+    checksum, and the checksums could not be failed from a file anyway
+    because ubertooth-dfu fills them in as it writes. The cycle cuts the
+    board's USB power rather than resetting it, because the decision under
+    test is the one taken on a cold boot, and the board has no serial while
+    it sits in its bootloader, so it is identified by elimination: exactly
+    one serial-less Ubertooth device attached, every other board still
+    enumerated by its own serial.
   hardware: >-
-    One Ubertooth on a switchable USB power controller. Destructive by nature:
-    it deliberately leaves a board outside its application firmware, so it
-    needs both power control and an agreed recovery path before it can run.
+    One Ubertooth whose bootloader came from this tree, with the startable
+    check in it, on a hub that can switch VBUS for its own port, plus every
+    other registered board on the host as a guard. Linux only, because the
+    hub is reached through a serial-device path that only Linux has. The
+    committed plan names the board
+    the registry pairs with a debug programmer, so a board that does fault
+    has a recovery path at hand without re-cabling. On a board carrying the
+    factory bootloader this test does not fail, it bricks the board.
   expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
+    One case. The write reaches the flash and reports no verified revision,
+    since the board stays in its bootloader; then, after the port comes back,
+    the board's serial is absent, exactly one DFU bootloader device is
+    attached, and every guard is where it was. A board that comes back
+    running the image, or that does not come back, fails the case and the
+    message says which. The recovery step writes the run's own image back and
+    waits for the application to answer with the expected revision; it names
+    the board where the board can answer and writes without a selector where
+    it cannot, which is the expected path, since a board in its bootloader has
+    no serial. The cleanup does the same whatever happened, so a failed case
+    still ends with a board on the test image.
   limitations: >-
-    Destructive by nature, and the agreed recovery path is the gate rather
-    than the code.
+    A pass says what the bootloader in that board's flash does, and that
+    bootloader is not what the run built: it cannot be written over USB, so a
+    pass cannot be attributed to the commit the run was given. It is
+    destructive -- if the bootloader does start the image, the board faults,
+    leaves USB and needs its entry pin bridged by hand -- so it lives in a
+    plan of its own, is run with someone at the bench, and no dispatched run
+    or GUI click can start it. A run killed outright leaves the port off or
+    the board in DFU, both put right by hand. The one hardware case covers
+    erased vectors; the other unstartable images the harness can build are
+    checked on the host only, because each extra case is another cold boot
+    with the same risk.
   related:
     - ubertooth-test-harness#141
+    - ubertooth#863
 
 Receive-only firmware:
   purpose: >-

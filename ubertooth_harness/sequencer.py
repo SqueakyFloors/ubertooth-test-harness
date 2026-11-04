@@ -67,6 +67,8 @@ from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     EXPECTED_REVISION_KEY,
     MissingContext,
+    POWER_CYCLE_PORT_KEY,
+    REGISTRY_PATH_KEY,
     StateCase,
     StateCaseError,
     Unrestorable,
@@ -210,6 +212,7 @@ class NamedTestSequencer:
         clock=time.monotonic,
         isolation: IsolationRuntime | None = None,
         registry=None,
+        registry_path=None,
         watchdog_search=None,
     ):
         self.executor = executor
@@ -219,6 +222,11 @@ class NamedTestSequencer:
         self.isolation = isolation
         # Hosts' platforms and other Ubertooths (flash guards) come from here.
         self.registry = registry
+        # The registry file itself, for a case step that reads the bench: the
+        # board's power mapping, which no plan or case builder may invent.
+        # A run started without one leaves the context entry out, and such a
+        # step fails saying which value it needed.
+        self.registry_path = registry_path
         # How the run looks for an open fork issue about a board's self-reset;
         # `gh issue list` by default (watchdog.py). Injected by tests, which
         # must not reach GitHub.
@@ -789,6 +797,10 @@ class NamedTestSequencer:
             },
         )
         context: dict[str, str] = {}
+        if self.registry_path is not None:
+            context[REGISTRY_PATH_KEY] = str(self.registry_path)
+        if invocation.power_cycle is not None:
+            context[POWER_CYCLE_PORT_KEY] = invocation.power_cycle.describe()
         if case.artifacts or case.optional_artifacts:
             # Checked when the run was planned; hashed again here. Nothing
             # has run yet, so a refusal leaves the device as it was.
@@ -959,7 +971,17 @@ class NamedTestSequencer:
 
         Without ``after`` this records the baseline; otherwise every read must
         equal it. Every read runs (they change nothing), so the record shows
-        each difference, not only the first.
+        each difference, not only the first. The one read that may not reach
+        the board is the CRC one: ``ubertooth-btle`` is built for one
+        firmware API and may stop a board carrying any other, so that read is
+        refused unless the same check found the API equal, and the refusal
+        fails the check rather than counting as a reading.
+
+        Every guard is read whatever image it carries, and a read this host
+        cannot make of that image is recorded as such and compared like any
+        other. The baseline is then judged (``guard_baseline_problems``): it
+        has to hold the settings of a guard whose own image implements them,
+        and something comparable about every guard.
         """
         label = (
             "baseline" if after is None
@@ -1010,6 +1032,13 @@ class NamedTestSequencer:
                 changed.append(f"{board.role} ({alias}, serial {board.serial})")
             if canceled:
                 break
+        if after is None and not canceled:
+            # Reads that all succeeded can still leave a baseline the run
+            # cannot rely on; judged here, where no case has run yet. Judged
+            # after a failed read as well, so a run turned away for a guard it
+            # cannot observe says that in as many words rather than only
+            # naming the read that came back empty.
+            failures.extend(transitions.guard_baseline_problems(boards, context))
         failure = ""
         if failures:
             if after is None:

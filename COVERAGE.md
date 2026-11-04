@@ -15,8 +15,8 @@ from the harness catalog (`ubertooth_harness/catalog.py`,
 `ubertooth_harness/transitions.py`, `ubertooth_harness/util_cases.py`,
 `ubertooth_harness/receive_cases.py`, `ubertooth_harness/dfu_cases.py`,
 `ubertooth_harness/refusal_cases.py`, `ubertooth_harness/dfu_host_cases.py`,
-`ubertooth_harness/util_refusal_cases.py`, `ubertooth_harness/btbr_cases.py`),
-its plans (`testplans/*.yaml`) and its
+`ubertooth_harness/util_refusal_cases.py`, `ubertooth_harness/btbr_cases.py`,
+`ubertooth_harness/invalidapp_cases.py`), its plans (`testplans/*.yaml`) and its
 preflight, flash, and guard code. Profiles: **smoke** runs in the `fast` plan,
 **comprehensive** in the `release` plan; tests without a profile name their
 plan. The `mac` plan picks per test what a Mac host changes (see the README),
@@ -50,9 +50,24 @@ Harness-wide checks that use the CLIs:
   line carries), and `-s`, one command each.
 - **Guards** (stateful tests): every other registered board on the host is read
   before and after the test, with queries only, one command per read:
-  `ubertooth-util -v`, `-V`, `-C`, `-a`, `-z`, `-d`, and then
-  `ubertooth-btle -k`. The `ubertooth-btle -k` read is skipped unless
-  the board's firmware API is at least the host API.
+  `ubertooth-util -v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, and then
+  `ubertooth-btle -k`. The `ubertooth-btle -k` read is refused, failing the
+  check, unless the board's firmware API is the host tools' own — that tool
+  may refuse any other, newer as well as older, and stop the board, depending
+  on how it was built. Every other
+  read goes to every guard whatever image it carries: a request the image has
+  not got is stalled, and a board on another of this tree's images is refused
+  by `ubertooth-btle` itself, and either answer is the reading, compared
+  before and after like any value. So the alternate `btbr` image is guarded by
+  its identity, image and revision, build, bootloader, LEDs, and, on an
+  Ubertooth One, its transmit power level. The LED read is the one read that
+  is not tolerant: `-d` asks for all three LEDs at once and every image that
+  answers these requests answers those, so a stall there fails the read. No
+  read is skipped for the image a board carries, and every command sent is a
+  query. A guard
+  on `bluetooth_rxtx`, or on the receive-only `bluetooth_rx` build, must answer
+  the radio settings that build implements, and any guarded test is refused
+  when a guard answered none of `-v`, `-V`, `-s`, or `-B`.
 - **Board state between runs** (`slow` plan): the only test that kills a
   capture instead of stopping it. `killedcapture.py` SIGKILLs `ubertooth-dump`
   or `ubertooth-specan` while it is streaming, so no STOP reaches the board,
@@ -64,6 +79,12 @@ Harness-wide checks that use the CLIs:
 - **DFU images** (smoke in the `slow` and `mac` plans, comprehensive in the
   `firmware` plan): writes the test image, reads it back, and tries bad images on the
   selected board; every case ends with the test image read back and verified.
+- **Reset into invalid application** (`power` plan, run by hand): writes an
+  image the bootloader must refuse to start, power-cycles the board's
+  registered hub port, and requires it to come up as a DFU bootloader device;
+  then `ubertooth-dfu -d <test image> -r` with no `-U` writes the run's image
+  back. Destructive: a bootloader that did start the image leaves a board
+  needing its entry pin bridged, so it is not in an unattended plan.
 - **DFU image checks** (no Ubertooth; smoke in the `host` and `fast` plans and
   CI, comprehensive in `release`): `ubertooth-dfu -d <image> -r` and `-s` with
   `UBERTOOTH_TEST_NO_DEVICES=1` on a synthetic image; the test build only for
@@ -487,7 +508,11 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
   than hard (below).
 - **Leaves the application firmware:** `ubertooth-util -i` and
   `ubertooth-dfu -d` or `-u` without `-r`. They need a recovery path (USB power cycle,
-  DFU/ISP reflash). The Reset into invalid application backlog item covers part of this.
+  DFU/ISP reflash). Reset into invalid application (`power` plan) now covers
+  part of this: it leaves a board outside its application on purpose, power-cycles
+  it, and writes the run's image back. It is destructive -- a bootloader that
+  started the bad image leaves a board needing its entry pin bridged -- so it is
+  run by hand with someone at the bench, never in an unattended plan.
 - **Needs an RF peer:** `ubertooth-follow` against a piconet (the two ESP32
   Classic peers make one, so live `ubertooth-rx -l -u` is covered by Follow
   Classic Bluetooth piconet and `ubertooth-afh` by Recover AFH map; follow

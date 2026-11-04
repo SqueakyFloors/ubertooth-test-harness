@@ -1,0 +1,66 @@
+plan: Ubertooth board power
+suites:
+  # Run by hand, with someone who can reach the bench.
+  #
+  #   run-suite --hardware <registry> --plan testplans/power.yaml \
+  #       --suite power --host Host_Linux \
+  #       --bootloader check \
+  #       --allow-power-changes --allow-destructive \
+  #       --build --with-firmware
+  #
+  # The test writes an image the bootloader must refuse to start, cuts the
+  # board's USB power through its registered port, turns it back on, and
+  # requires the board to come up as a DFU bootloader device rather than
+  # running the image. Its own step, and then its cleanup, write the run's
+  # image back and check the revision.
+  #
+  # Why it is not in an unattended plan: if the bootloader does start the
+  # image, the board faults on every power-up and needs the P4 entry pin
+  # bridged by hand at the bench. Nothing the harness can do reaches such a
+  # board, so a run nobody is watching could leave one unusable.
+  #
+  # The board's bootloader is the precondition. The verdict is about the
+  # bootloader already in flash, and ubertooth-dfu writes the application
+  # region only: a bootloader is installed over a programmer on the board's
+  # in-system programming header. On a board whose bootloader came from this
+  # tree the test is a test; on a board with the factory bootloader it is a
+  # way to brick it.
+  #
+  # So this step names the board the registry pairs with a `Debug programmer`
+  # rather than taking the host's default: that pairing is what makes a
+  # recovery over ISP possible without re-cabling, and holding the board
+  # holds the programmer with it (#287). Check the alias against your own
+  # registry before the run -- it is `UT_Linux1` in hardware.example.yaml,
+  # paired with `Prog_Linux0`.
+  #
+  # Read the bootloader by hand either side: `ubertooth-util -U <serial> -B`.
+  # `--bootloader check` is in the command above because it costs nothing,
+  # but it covers no board of this suite: preflight reads the bootloader of a
+  # board whose firmware the run requires and then verifies it, which leaves
+  # out a guard-only board and a board whose test establishes its own
+  # firmware -- this test's board is the second, its only guard the first
+  # (#303, #327). `--bootloader update` installs over a programmer for the
+  # same boards, so it does not reach this board either: a board that needs a
+  # bootloader gets one before this plan is run, from a run that does require
+  # its firmware, or by hand over the programmer.
+  #
+  # Requires: --allow-destructive (a person passes it; the runner service
+  # never does, so no dispatched run and no GUI click can start this test),
+  # --allow-power-changes, `platforms: [linux]` and
+  # `USB power controller:` in the step, the run's own firmware image
+  # (--build --with-firmware, or --artifact "test build=PATH"), and a board
+  # with a `power:` mapping on a controller that can switch VBUS per port.
+  # The plan names the hub so a bench whose wiring moved fails planning
+  # rather than switching whatever is on the registered port; the port itself
+  # comes from the board's registry entry. It writes the board's firmware, so
+  # it must be the last test on that board, and the run holds the host lock
+  # throughout.
+  power:
+    - Reset into invalid application:
+        hosts: [Host_Linux]
+        platforms: [linux]
+        # The board a debug programmer is wired to, so a bootloader can be
+        # read and reinstalled without re-cabling, and so a board that does
+        # fault has its own recovery path at hand.
+        Ubertooth: UT_Linux1
+        USB power controller: Hub_Linux0

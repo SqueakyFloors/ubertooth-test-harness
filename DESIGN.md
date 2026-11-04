@@ -637,6 +637,37 @@ takeover of a lease whose command is gone holds that file exclusively
 README "Stale leases"); it locks no resource and nothing ever blocks on it,
 so it is in no cycle.
 
+Power-cycling the board under test is the other use of the same boundary, for
+`Reset into invalid application` ([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
+It is not isolation: nothing is switched around the test, and the port goes off
+and on inside one case step. A test definition declares `switches_power`, and
+the planner then resolves a `PowerCycleTarget` (board alias, controller alias,
+port) with `plan_power_cycle` from the selected board's own `power:` mapping,
+refusing a plan that names a different controller from the one the board is
+registered on; `run-suite` requires `--allow-power-changes` before anything is
+built, and such a run holds the host lock for the whole test like an isolating
+one. The step itself runs
+[`ubertooth_harness/invalidapp.py`](ubertooth_harness/invalidapp.py), which
+reads the registry again for the port: the path comes from the case context
+(`stateful.REGISTRY_PATH_KEY`, set by the sequencer from the run's
+`--hardware`), so no port number travels on a command line. The port is
+restored on every exit — a failed check, a controller or bus error, SIGTERM,
+SIGINT, or SIGHUP, each turned into an exception so the restoration unwinds —
+and the command's last act is to read the port back and say whether it is
+powered; a controller that has stopped answering is the one thing that
+defeats it, and then that is what the command reports. `run-suite` also
+refuses the test without `--allow-destructive`, which the runner service
+never passes on, so no dispatched run can start it. Restoration still runs in-process, so the case's first cleanup step reads the
+port and switches it on before the second writes the run's image back; that
+covers the step's own command being killed, which the executor does with
+SIGKILL when a command outlives its deadline. A SIGKILL of the run itself
+leaves the port off and someone switches it on by hand, as for isolation: the
+next run cannot, because preflight reads the board's serial before any case.
+The recovery writes the image rather than comparing the flash, because a
+board that started the unstartable image reports the same revision as the
+test image, and a read-back differs from the file in the bytes ubertooth-dfu
+fills in as it writes (the LPC vector checksum and the image check block).
+
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor
 starts each command in a new session and signals that group on cancellation
@@ -882,18 +913,41 @@ descriptive literals and generation is deterministic.
 
 Transition and composition tests also bind every other registered Ubertooth
 on the host as a `guard Ubertooth N` resource (planner `_guarded`, mirroring
-`alternated Ubertooth N`). The sequencer records each guard's firmware
-revision and API, firmware compile info, channel, PA level, squelch, LEDs, and
+`alternated Ubertooth N`). The sequencer records each guard's firmware image,
+revision and API, firmware compile info, serial, bootloader identity, channel,
+PA level, squelch, LEDs, and
 CRC with query-only commands before the first case, re-reads them after every
 state-changing case and, if read-only cases ran since the last check, once
 after the test, and fails and stops the test on any difference (even with
-`continue_on_case_failure`). Differences are counted as `failed_guard_checks`,
+`continue_on_case_failure`). Every read is sent to every guard whatever image
+it carries: a request the image has not got is stalled, and a board on another
+of this tree's images is refused by `ubertooth-btle` before it reads anything
+(`ubertooth_check_image`), and either answer is recorded as the reading
+(`transitions.GUARD_UNSUPPORTED`) and compared like any other, so the
+alternate `btbr` image is guarded by what it does answer instead of being
+skipped or reflashed. `guard_baseline_problems` then judges the baseline: a
+guard on `bluetooth_rxtx`, or on the receive-only `bluetooth_rx` build, must
+answer the radio settings that build implements
+(`GUARD_REQUIRED_OF_IMAGE`), and any guarded test is refused when a guard
+answered none of the reads that pin it (`-v`, `-V`, `-s`, `-B`) — a wedged
+board stalls every request and would read that way too. The LED read is taken
+strictly (`GUARD_STRICT_KEYS`), because `-d` makes all three LED requests in
+one command and every image that answers these requests answers those three,
+so tolerating a stall there would accept a board that answered two of them.
+Differences are counted as `failed_guard_checks`,
 apart from `failed_cases`, and the reason names the guard to check and
 restore by hand; guards are never restored automatically. The CRC read uses
-`ubertooth-btle`, whose `ubertooth_check_api` stops firmware older than the
-host API, so it is refused (failing the check) unless the same check's `-v`
-read showed an API no older than the host tools' (`HOST_TOOLS_API_VERSION`,
-the fork's `UBERTOOTH_API_VERSION` 0x0107, since no host tool reports it).
+`ubertooth-btle`, whose `ubertooth_check_api` may refuse any firmware API that
+is not the host tools' own — newer as well as older — and stop that board as
+it goes; whether it refuses or warns and goes on is the host tools' build and
+`UBERTOOTH_ALLOW_API_MISMATCH`, which the run does not set and cannot
+predict. So the
+read is refused (failing the check) unless the same check's `-v`
+read showed an equal API; preflight refuses a guard-only board whose API
+differs, before any test. That version is read from
+the resolved sources' `ubertooth_interface.h` (`UBERTOOTH_API_VERSION`,
+`transitions.host_api_version`), since no host tool reports it, and a run
+whose sources cannot be read that way refuses its guarded tests.
 The reads cannot see a leaked `-S`, `-r`, or mode start on a guard idle at
 boot defaults; modulation, access address, and re-enumeration are not read.
 Guard-only boards get a serial preflight. Guarded runs need every registered

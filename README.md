@@ -618,6 +618,74 @@ python -m ubertooth_harness run-suite \
   --output runs --allow-power-changes
 ```
 
+[`testplans/power.yaml`](testplans/power.yaml) runs the `Reset into invalid
+application` test, which uses a hub port the other way round: instead of
+switching other boards off, it power-cycles the board under test. It writes an
+image the bootloader must refuse to start (a valid Ubertooth DFU file whose
+two vector words are erased), cuts the board's registered port, turns it back
+on, and requires the board to come up as a DFU bootloader device rather than
+running the image; then it writes the run's own image back and checks the
+revision. The port comes from the board's `power:` mapping, and the plan names
+the controller it must be on, so a bench whose wiring moved fails planning
+rather than switching whatever is on that port.
+
+**The board's bootloader is the precondition.** The verdict is about the
+bootloader already in the board's flash, and `ubertooth-dfu` writes the
+application region only: a bootloader is installed over a programmer on the
+board's in-system programming header. On a board whose bootloader came from
+this tree the test is a test; on a board with the factory bootloader it is a
+way to brick that board, which then needs its P4 entry pin bridged. So the
+plan names the board the registry pairs with a `Debug programmer` — the board
+that has a recovery path — and the run holds the programmer with it. Read the
+bootloader before and after with `ubertooth-util -U <serial> -B` yourself.
+`--bootloader check` does not cover this board: preflight reads the bootloader
+of a board whose firmware the run requires, and this test establishes its own,
+so the read is skipped for it
+([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
+[#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+Passing the option costs nothing, and covers no board of this suite: the read
+leaves out a guard-only board too. `--bootloader update` installs over a
+programmer for the same boards, so it does not reach this board either; a
+board that needs a bootloader gets one before this plan runs, from a run that
+does require its firmware or by hand over the programmer.
+
+**Run it by hand, with someone who can reach the bench.** It is destructive:
+if the bootloader does start the unstartable image, the board faults on every
+power-up and needs its P4 entry pin bridged by hand, which no harness command
+can do. That is why it is in a plan of its own and not in `release.yaml` or
+any other unattended plan. The case's cleanup powers the port on and writes
+the run's image back whatever happened, including when the cycle command
+itself is killed, so an ordinary failure still ends with a usable board. A
+run killed outright (SIGKILL) is the exception: it leaves whatever it was in
+the middle of — the port off, or the board in its DFU bootloader with the
+unstartable image in flash — and both are put right by hand, as after a
+killed power-isolation run (above). The next run cannot do it for you:
+preflight reads the board's serial before any case runs, and a board in DFU
+reports none.
+
+```sh
+python -m ubertooth_harness run-suite \
+  --plan testplans/power.yaml --suite power \
+  --hardware hardware.yaml --host Host_Linux \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --build --with-firmware --output runs \
+  --bootloader check \
+  --allow-power-changes --allow-destructive
+```
+
+`--allow-destructive` is what makes this a decision somebody takes: without
+it `run-suite` refuses the test before anything is built.
+`--allow-power-changes` cannot stand for it, because a runner service is
+deployed with that option so an exclusive-Ubertooth plan can run, and then
+passes it to every run it dispatches. `--allow-destructive` it never passes
+on, so no dispatched run, and no click in the GUI, can start a test that
+could leave a board needing the bench.
+
+It writes the board's firmware, so it must be the last test on that board, and
+the run holds the [host lock](#sharing-boards-leases) throughout. Both options
+are needed for `--dry-run` as well, since the refusal comes before it: a dry
+run that exits 0 means the suite can run as asked.
+
 [`testplans/mac.yaml`](testplans/mac.yaml) is the macOS plan, for a Mac
 host (`Host_Mac` in the registry). The firmware and radio are the same on every
 host, so it leaves out what the Linux plans already prove about a board pair
@@ -1079,8 +1147,9 @@ name the guards. The design is in
 [DESIGN.md, "Named test plan schema"](DESIGN.md#3b-named-test-plan-schema). A host with one
 registered Ubertooth has no guards. Preflight checks each guard-only board's
 serial (`ubertooth-util -U <serial> -s`) and that its firmware API (`-v`) is
-no older than the host tools' API; a guard below it is refused before any
-test. Its firmware revision is not required to match the resolved one. Guards do not count toward the
+the host tools' own; a guard carrying any other API is refused before any
+test, because `ubertooth-btle` may stop such a board rather than read it
+(below). Its firmware revision is not required to match the resolved one. Guards do not count toward the
 firmware-order check (a firmware-writing test must be the last test on its
 board), so a guarded test may follow a flash on another board.
 
@@ -1094,23 +1163,49 @@ access. Planning stays permissive: `validate-plan --hardware` prints a
 
 Before the first case the test records a baseline for each guard with
 read-only queries only: `ubertooth-util -U <serial>` with `-v` (firmware
-revision and API), `-V` (the version answer, whose `Firmware build:` line
-carries a build timestamp that also catches a reflash of the same revision),
-`-C` (channel), `-a` (PA level), `-z`
+image, revision and API), `-V` (the version answer, whose `Firmware build:`
+line carries a build timestamp that also catches a reflash of the same
+revision), `-s` (the serial the board itself reports), `-B` (the bootloader
+under that firmware), `-C` (channel), `-a` (PA level), `-z`
 (squelch), and `-d` (LEDs), then `ubertooth-btle -U <serial> -k` (CRC).
-`ubertooth-util` never checks the firmware API, but `ubertooth-btle` does, and
-it sends a stop to firmware whose API is older than the host tools'
-(`ubertooth_check_api` in the fork's
+None of the `ubertooth-util` options these reads use checks the firmware API,
+but `ubertooth-btle` does, and
+it may refuse any API that is not the one the tools were built for — newer as
+well as older — stopping that board as it goes; whether it refuses or warns
+and reads on is how those tools were built and whether
+`UBERTOOTH_ALLOW_API_MISMATCH` is set; the run does not set that variable
+and cannot tell how the installed tools were built, so it cannot know which it
+would get
+(`ubertooth_check_api` in the
+fork's
 [`host/libubertooth/src/ubertooth.c`](https://github.com/SqueakyFloors/ubertooth/blob/main/host/libubertooth/src/ubertooth.c)).
 So the CRC read runs only when the same check's `ubertooth-util -v` read showed
-an API no older than the host tools' (no host tool reports it, so the harness reads
+that same API (no host tool reports it, so the harness reads
 `UBERTOOTH_API_VERSION` from the resolved Ubertooth source and refuses guarded
 tests if it cannot). Otherwise the read is refused without running and the
-baseline fails: the guard firmware API is too old to read CRC safely. The harness
-never sets, stops, or resets a guard. One stop it cannot prevent: the fork's
-`ubertooth_connect_serial` sends a stop when it cannot claim the board's USB
-interface, so a guard held open by another process may receive one from any
-read.
+baseline fails, naming the API the guard reported and the one the tools need.
+
+Every read goes to every guard whatever firmware image it carries. A board
+refuses a request its image has not got by stalling it, and `ubertooth-btle`
+refuses a board carrying another of this tree's images (`btbr`) as it opens
+it; either answer is recorded as the reading and compared before and after
+like any value, so a board that starts answering a read it refused, or
+refuses one it answered, fails the check. The LED read is the exception: `-d`
+asks for all three LEDs in one command, so a stall there fails the read
+rather than being recorded. A guard running `bluetooth_rxtx`, or the
+receive-only `bluetooth_rx` build of it, must answer the radio settings that
+build implements, and a guard that answered none of `-v`, `-V`, `-s`, or `-B`
+is refused by name before any case: nothing about it could be compared
+afterwards. [docs/tests.md, "Guard Ubertooths"](docs/tests.md) has the whole
+rule.
+
+The harness
+never sets, stops, or resets a guard: every command a guard is sent is a
+query, and the one that could write to it — `ubertooth-btle`, whose API check
+may stop a board — is refused rather than sent whenever that board's API is
+not the one this check read. A board another process holds open is not
+disturbed either: libubertooth reports the claim failure and closes the board
+without a stop, so that it does not interrupt whatever has it.
 
 The same reads run after every state-changing case (`Guard Ubertooths
 unchanged after <case>`) and, if read-only cases ran since the last check,
@@ -1128,7 +1223,8 @@ restore it by hand. `test_finished` counts failed guard checks in
 beside the case count (for example `0 + 1 guard check`).
 
 The check sees only what it reads. It catches a leaked firmware change or
-reflash and any change to channel, PA level, squelch, LEDs, or CRC. On a guard
+reflash, a board answering as another serial, a changed bootloader, and any
+change to channel, PA level, squelch, LEDs, or CRC. On a guard
 idle at boot defaults it cannot see a leaked `-S` or `-r`, or a mode start
 (`-x`, `-t`, range test, repeater, `ubertooth-btle -n`/`-f`) that leaves those
 values unchanged, so a guard could be left transmitting without the test
@@ -1379,7 +1475,8 @@ naming `--no-flash-build`.
 - Which boards: every Ubertooth whose firmware revision preflight requires,
   in run order (`PreflightPolicy.boards_needing_firmware`). Guard-only boards
   are not flashed, because preflight only requires their firmware API to be
-  no older than the host tools'; boards a firmware-writing test (`Flash
+  the host tools' own, not the resolved revision; boards a firmware-writing
+  test (`Flash
   reliability`, `DFU images`) writes itself are not flashed either. A plan
   that uses no Ubertooth (the `host` plan) flashes nothing and needs no ARM
   compiler.

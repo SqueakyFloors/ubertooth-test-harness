@@ -476,6 +476,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_suite.add_argument("--run-id")
     run_suite.add_argument(
+        "--allow-destructive", action="store_true",
+        help="run a test that can leave a board needing someone at the bench "
+             "(Reset into invalid application). A person passes this; the "
+             "runner service never does, so a dispatched run cannot start one",
+    )
+    run_suite.add_argument(
         "--allow-power-changes",
         action="store_true",
         help="allow real USB power switching for exclusive-Ubertooth tests",
@@ -495,7 +501,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_suite.add_argument(
         "--bootloader", choices=bootloader.MODES, default=bootloader.MODE_RECORD,
-        help="what to do about each board's bootloader: record what is "
+        help="what to do about the bootloader of each board whose firmware "
+        "the run requires and then verifies (not a guard-only board, nor one "
+        "whose test establishes its own firmware): record what is "
         "installed (the default), check it against a bootloader built from "
         "the run's own source, or install that one on a stale board whose "
         "registry pairs it with a debug programmer. check and update need "
@@ -771,6 +779,13 @@ def _validate(
                     print(
                         "    exclusive: no other registered Ubertooth; "
                         "read-only enumeration check"
+                    )
+                if invocation.power_cycle is not None:
+                    target = invocation.power_cycle
+                    print(
+                        f"    power cycle: {target.resource_alias} off and on "
+                        f"via {target.controller_alias} port {target.port} "
+                        "(needs --allow-power-changes)"
                     )
     return 0
 
@@ -1168,6 +1183,10 @@ def _run_suite(args: argparse.Namespace) -> int:
                 "installed; install it, or use --no-flash-build to keep the "
                 "boards' firmware"
             )
+    # Before the dry run too, so a dry run that exits 0 means what the
+    # README says it means: this host can run the suite as asked.
+    _check_power_cycles_allowed(args, catalog, invocations)
+
     # Which images the firmware build makes, when it runs at all: the
     # application image every other test needs on its board, and the
     # alternate btbr image when the run asked for it or a selected test says
@@ -1325,6 +1344,54 @@ def _dry_run(
     return 0
 
 
+def _check_power_cycles_allowed(args, catalog, invocations) -> None:
+    """Refuse a run that would power-cycle a board without being asked to.
+
+    Two options, checked together so a person is told about both at once,
+    and checked before the run takes a lease or writes a run directory, so a
+    dispatched run that cannot have them fails having touched nothing.
+
+    ``--allow-power-changes`` is the arming power isolation needs as well.
+    ``--allow-destructive`` is this test's own: a runner service is deployed
+    with the first, so every run it dispatches carries it, and the second it
+    never passes on. So a test that can leave a board needing its entry pin
+    bridged is started by a person who is there, and never by a click.
+    """
+    cycling = [
+        invocation for invocation in invocations
+        if getattr(invocation, "power_cycle", None) is not None
+    ]
+    destructive = [
+        invocation for invocation in invocations
+        if catalog.get(invocation.test_name).destructive
+    ]
+    missing = []
+    if cycling and not args.allow_power_changes:
+        named = ", ".join(sorted({
+            f"{invocation.test_name} ({invocation.power_cycle.resource_alias} on "
+            f"{invocation.power_cycle.controller_alias} port "
+            f"{invocation.power_cycle.port})"
+            for invocation in cycling
+        }))
+        missing.append(
+            f"--allow-power-changes, because {named} power-cycles the board "
+            "it selects"
+        )
+    if destructive and not getattr(args, "allow_destructive", False):
+        named = ", ".join(sorted({i.test_name for i in destructive}))
+        missing.append(
+            f"--allow-destructive, because {named} can leave a board needing "
+            "recovery at the bench"
+        )
+    if missing:
+        raise HarnessError(
+            "this suite needs " + "; and ".join(missing)
+            + ". Rerun with " + " ".join(
+                option.split(",")[0] for option in missing
+            ) + ", with someone who can reach the board"
+        )
+
+
 def _run_leased(
     args, catalog, plan, registry, invocations, sources, artifacts, run_id, leases,
     not_applicable=(), blocked=(), pairings=(),
@@ -1407,6 +1474,7 @@ def _run_leased(
             event_sink=_terminal_sink(),
             isolation=isolation,
             registry=registry,
+            registry_path=args.hardware,
         ).run(
             invocations,
             run_dir,

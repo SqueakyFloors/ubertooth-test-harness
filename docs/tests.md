@@ -53,12 +53,12 @@ the run as not applicable. `max_watchdog_resets:` turns the firmware's
 self-reset counter into a pass/fail measure for that step; without it a
 self-reset is reported and judged by a person, not failed
 ([`watchdog.py`](../ubertooth_harness/watchdog.py)). `Flash reliability`,
-`Exclusive Ubertooth topology`, and `MAC polling soak` must state their
-platforms. Every test that binds hardware also accepts `rf:`, one placement
-requirement per role, and `required hardware: true`, which says the hardware
-that step names is what the step measures: a registry without it blocks the
-step and fails the run rather than leaving it out ("Hardware a step is
-about", below).
+`Exclusive Ubertooth topology`, `MAC polling soak`, and `Reset into invalid
+application` must state their platforms. Every test that binds hardware also
+accepts `rf:`, one placement requirement per role, and
+`required hardware: true`, which says the hardware that step names is what
+the step measures: a registry without it blocks the step and fails the run
+rather than leaving it out ("Hardware a step is about", below).
 
 **Hardware the bench has not got.** A step whose `hosts:` name a host this
 registry does not have, or whose hardware roles no selected host can bind (no
@@ -223,13 +223,50 @@ access address (`-a`).
 **Guard Ubertooths.** A guarded test binds every other registered Ubertooth on
 the host as a `guard Ubertooth N` resource and reads each one before the test
 and after every case, with queries only and one command per read:
-`ubertooth-util -v`, `-V`, `-C`, `-a`, `-z`, `-d`, then `ubertooth-btle -k`
-(`-V` ends the command, so it could not share one with the others anyway).
-Every read must match the baseline taken before the
+`ubertooth-util -v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, then
+`ubertooth-btle -k` (`-V` ends the command, so it could not share one with the
+others anyway). Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
-is left out unless that board's firmware API is at least the host tools' API,
-because `ubertooth-btle` stops older firmware as part of its own API check.
+is refused, which fails the check, unless that board's firmware API is the
+host tools' own: `ubertooth-btle`'s own API check may refuse any other, newer
+as well as older, and stop the board as it goes — whether it does is how the
+host tools were built and whether `UBERTOOTH_ALLOW_API_MISMATCH` is set,
+which the run does not set and cannot predict, so it does not send the
+read. Preflight refuses
+a guard-only board whose API differs, so that is caught before any test runs.
+
+Every guard gets every read, whatever firmware image it carries, and the CRC
+read is the one that may not reach the board: `ubertooth-btle` is built for
+one firmware API and may refuse any other, stopping the board as it goes, so
+that read is refused unless the API matched, and the refusal fails the check
+rather than counting as a reading.
+
+Two answers count as a reading this host could not make: a request the
+board's image has not got, which it refuses by stalling, and a board carrying
+another of this tree's images, which `ubertooth-btle` refuses as it opens it.
+Either is recorded as the reading (`unsupported`) and compared with the rest,
+so a board that starts answering a read it refused before, or refuses one it
+answered, fails the check. The alternate `btbr` image, for instance, has no
+channel or squelch request and no tool will read its CRC setting, and it is
+still guarded by its identity, image and revision, build, bootloader, LEDs,
+and, on an Ubertooth One, its transmit power level. The LED read is the
+exception to the tolerance: `-d` asks for all three LEDs in one command, and
+every image that answers these requests at all answers those three, so a
+stall there fails the read rather than being recorded — otherwise a board that
+answered two of the three would leave all three unguarded. Two things the
+readings themselves have to satisfy:
+a guard running `bluetooth_rxtx`, or the receive-only `bluetooth_rx` build of
+it, must answer the radio settings that build implements, since a board that
+cannot is not holding them; and any guarded test is turned away when a guard
+answered none of `-v`, `-V`, `-s`, or `-B`, because nothing about that board
+could be compared afterwards — a wedged board would read that way too, though
+the strict LED read fails it first.
+
+A guard is only ever read: every command it is sent is a query, it is never
+reflashed to make it readable, and the one command that could write to it —
+`ubertooth-btle`, which may stop a board whose firmware API is not the host
+tools' own — is refused rather than sent.
 
 **Files.** Files a case writes (captures, dumps, images, FIFOs) go in a
 per-case directory under the run's `captures/`. Checker scripts read them and
@@ -396,7 +433,9 @@ name it.
 ## Bootloader identity
 
 **What it does.** Nothing as a plan entry: a catalog entry for the bootloader
-read, which mandatory preflight does on every board of every run instead.
+read, which mandatory preflight does instead — for the boards whose
+firmware a run requires and then verifies, which leaves out a guard-only
+board and a board whose test establishes its own firmware.
 
 **Theory of operation.** A board's bootloader is the first 16 KiB of its
 flash, and `ubertooth-dfu` runs from there, so an ordinary firmware write
@@ -446,7 +485,8 @@ serial. `update` also needs a `Debug programmer` paired with the board, with a
 
 **Expected outcome.** No implementation as a plan entry; only a
 `runnable: false` plan may name it. As a preflight check: one `-B` per
-selected board, recorded in `run.jsonl` as a `bootloader_identity` record and
+selected board whose firmware the run requires, recorded in `run.jsonl` as a
+`bootloader_identity` record and
 shown in the report's Bootloader section and in the GUI's board list.
 `record` passes on any answer, including a factory bootloader; `check` and
 `update` pass only on the identity the artifact names.
@@ -3450,22 +3490,174 @@ the case is not written to a result nobody has seen.
 
 ## Reset into invalid application
 
-**What it does.** Nothing yet: a catalog entry for verifying that a board with
-an invalid application firmware can be recovered.
+**What it does.** Writes an image the bootloader must refuse to start, cuts
+the board's USB power and turns it back on, and requires the board to come up
+as a DFU bootloader device rather than running the image. Then it writes the
+run's own image back and checks the revision.
 
-**Theory of operation.** Not established. The recovery path it would need now
-exists, since the lab hub can switch board power; the test itself is tracked
-as [#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141).
+**Theory of operation.** On every power-up the bootloader decides whether
+there is an application it can start. The first thing it asks is about the
+two words at the start of the application region: the initial stack pointer
+must be inside RAM and word-aligned, and the reset vector must be a Thumb
+address above the bootloader (`firmware/bootloader/app_image.h`,
+`app_image_startable()`). Erased flash fails both, which is what an
+interrupted download leaves there. Before that check existed, such a board
+faulted on every power-up and came back only when someone bridged its P4
+entry pin at the bench; with it, the bootloader keeps running and the next
+image can go on over USB. The test makes exactly that situation on purpose,
+so the answer is knowable: the board must enumerate, and must enumerate as a
+bootloader.
 
-**Hardware and arguments.** One `Ubertooth` and a required `USB power
-controller:` resource.
+It is that check the image fails, not either of the two checksums the
+bootloader goes on to ask for (the LPC vector checksum at offset 0x1c, and a
+checksum over the whole region when the image carries an image check block).
+`ubertooth-dfu` fills both of those in as it writes the first block, so they
+say whether what was written reached the flash whole rather than anything
+about the file; an image that fails the two words is refused before either is
+read.
 
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
+Two things make the image the right instrument. It is a valid Ubertooth DFU
+file — correct suffix, firmware info block intact, only the two vector words
+changed — so `ubertooth-dfu` has no reason to refuse it and the flash really
+does end up holding it. And the cycle is a power cycle, not the reset `-r`
+already does, because the decision under test is the one taken on a cold
+boot. The board under test has no serial while it sits in its bootloader, so
+it is identified by elimination, as the DFU images test does it: exactly one
+serial-less Ubertooth device attached, and every guard board enumerated by
+its own serial.
 
-**Known limits.** This is a destructive test by nature: it deliberately leaves
-a board outside its application firmware, so it needs both power control and
-an agreed recovery path before it can run.
+**Hardware and arguments.** One `Ubertooth` whose **bootloader came from this
+tree**, with the startable check in it, and which has a `power:` mapping in
+the registry on a `USB power controller` that can switch VBUS per port, plus
+every other registered board as guards. The bootloader is the precondition
+that matters most: `ubertooth-dfu` writes the application region only, so a
+bootloader is installed over a programmer on the board's in-system
+programming header. On a board carrying the factory bootloader this test does
+not fail — it bricks the board, which then needs its P4 entry pin bridged,
+because that bootloader jumps into the erased vectors it was given. So the
+committed plan names the board the registry pairs with a `Debug programmer`,
+which is also what gives that board a recovery path, and holding the board
+holds the programmer with it. Read the bootloader before and after
+(`ubertooth-util -U <serial> -B`) by hand: `--bootloader check` does not
+cover this board, because preflight reads the bootloader of a board whose
+firmware the run requires and this test establishes its own, so the read is
+skipped for it
+([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
+[#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+`--bootloader update` does not reach this board either — it installs over a
+programmer for the same boards the read covers — so a board that needs a
+bootloader gets one before this plan is run: from a run that does require its
+firmware, or by hand over the programmer. Required:
+`platforms:`, because the hub is reached through a serial-device path that
+only Linux has, and
+`USB power controller:`, the hub the board must be on. A plan pointed at the
+wrong hub fails planning rather than switching whatever is on that hub's
+registered port, and a bench that has not got the named hub, or whose board
+has no `power:` mapping, blocks the step: the run it belonged to fails
+instead of passing without the check. The port itself is only ever read from
+the registry; what the planner resolved — the hub, its driver and identity,
+and the port — goes into the run record and is passed back to the step, which
+refuses if the registry now says anything else. So a registry edited after
+the run was planned switches nothing, whether the board moved port or the
+alias was pointed at another hub. The run
+needs `--allow-destructive` and `--allow-power-changes` and the run's own
+firmware image (`--build --with-firmware`, or a `test build` artifact), holds
+the host lock throughout, and leases the board and its guards.
+`--allow-destructive` is a person's decision: the runner service never passes
+it on, so a dispatched run, or a click in the GUI, cannot start this test. It writes firmware and
+establishes it, so preflight checks only the board's serial and the test must
+be the last one on that board.
+
+Its guard Ubertooths matter more here than in a test that writes nothing, and
+they are read under the rules in "Guard Ubertooths" above: a guard that
+answered none of `-v`, `-V`, `-s`, or `-B` turns the run away by name before
+any case, since nothing about that board could be compared after the write. A
+guard carrying the alternate `btbr` image is not in that position — it answers
+all four — and it is guarded by what it answers, not reflashed to make it
+answer more.
+
+**Expected outcome.** One case. The write must reach the flash and must not
+report a verified revision afterwards: the board stays in its bootloader, so
+`ubertooth-dfu -d <image> -r` ends with an error and exit 1, and that is the
+expected outcome here. The step accepts exit 0 as well, so that the forbidden
+`Verified firmware revision` line is what decides: what that line catches is
+a write that did not take, leaving the board still running the application it
+had, which answers the revision check and looks like a successful flash. The cycle must then show, after the port comes back,
+the board's serial absent and exactly one DFU bootloader device, with every
+guard where it was. A board that comes back running the image, or that does
+not come back at all, fails the case and the message says which. The
+recovery step writes the run's image back — without a selector, since a board
+in its bootloader has none — and waits for the application to answer with the
+expected revision. It always writes, and does not compare the flash: the
+unstartable image carries the same firmware info block as the image it was
+made from, so a board that did start it answers with the very revision the
+recovery is aiming for, and a comparison would need a read-back that differs
+from the file by design (`ubertooth-dfu` fills in the checksums as it writes)
+and that itself fails about once in twenty. The board coming back into its
+application after the write is the proof that what is in the flash now is
+startable. The cleanup runs whatever happened: it powers the port on if it is
+off, then writes the image and reads the revision, so a failed case still
+ends with a board on the test image. It writes even where the recovery step
+already did, which is one write more than a passing run needs: the cleanup
+cannot see what the steps did, and a board that started the unstartable image
+answers with the same revision as the test image, so a verified write costs
+less than being wrong about which it is.
+
+**Known limits.** A pass says what the bootloader in that board's flash does,
+and that bootloader is not what the run built: it cannot be written over USB,
+so a hardware pass cannot be attributed to the commit the run was given. What
+it does show is that the board the lab keeps for this comes up in its
+bootloader after a cold boot with an image it must refuse.
+
+It is destructive. If the bootloader does start the
+unstartable image, the board faults, leaves USB, and needs its P4 entry pin
+bridged by hand — the failure the test exists to catch is also the failure
+nothing in the harness can recover from. So it lives in `testplans/power.yaml`
+and is run by hand with someone at the bench, not in an unattended plan. A
+run killed outright (SIGKILL) leaves whatever it was in the middle of: the
+port off if it was between the switch-off and the restore, and the board in
+its DFU bootloader with the unstartable image in flash if it was anywhere
+between the write and the recovery. Both are put right by hand — switch the
+port on (README, "USB power controllers") and write an image back with
+`ubertooth-dfu -d <image> -r` — because the next run cannot do it for you:
+preflight reads the board's serial before any case runs, and a board in DFU
+reports none. What the cleanup steps do cover is the case's own command being
+stopped: the harness signals a command that outlives its step deadline, with
+SIGTERM and then SIGKILL two seconds later, so the helper's own handlers
+normally restore the port before it goes. The GUI lists the `power` plan like any other, with nothing to say it is
+destructive, and a run dispatched from it is refused for want of
+`--allow-destructive`: fail-closed, but it advertises a suite that cannot run
+there. The one case covers erased vectors; the other unstartable images the
+harness can build (a misaligned or out-of-RAM stack pointer, an ARM-mode
+reset vector, an entry inside the bootloader) are checked on the host only,
+in the unit tests, because each extra hardware case is another cold boot with
+the same risk and the same bootloader check behind it. The recovery writes
+without a selector, because a board in its bootloader has no serial and `-U`
+takes no bus path, so if that board left the bus between the check and the
+write, `ubertooth-dfu` writes whichever board a no-selector command would
+reach. The harness cannot prevent that; it catches it where it can, by
+requiring every guard board to still run what it ran before the write, and by
+the run's own guard checks afterwards. A revision is all there is to compare,
+so a guard that was already running the image that was written cannot be told
+from one that was not written at all — the ordinary case on a bench whose
+boards all carry the run's build; there the run still fails, on the board
+under test not answering, but names that rather than the guard. And none of
+it covers an Ubertooth nobody registered: a stranger in its own DFU
+bootloader, attached while the board under test is off the bus, looks exactly
+like the board. The run assumes the registry describes the bench, as leases
+and isolation do.
+
+The cold boot is read from the bus, not measured at the board: what the case
+requires is that the board leaves USB enumeration and stays gone for a second
+before the port comes back. The committed plan's hub cannot measure VBUS at
+all, and the test does not read it where a hub can; a hub that reported a
+port off without cutting it would make the board's disappearance the only
+evidence, which is why the disappearance is what is required rather than the
+port's reported state. The hardware run is
+done: one pass on the paired board, with the bootloader read by hand either
+side and the two `btbr` guards recording `channel`, `squelch` and `crc` as
+unanswered
+([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141#issuecomment-6638139774)).
 
 ## Receive-only firmware
 

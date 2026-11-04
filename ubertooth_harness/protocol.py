@@ -255,7 +255,8 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
     # alternate btbr firmware image, asked for in its own right because a
     # firmware build makes the application image without it (#279).
     # ``bootloader`` is run-suite ``--bootloader``: ``record`` what each board
-    # has, ``check`` it against a bootloader built from the run's source, or
+    # the run requires firmware of has, ``check`` it against a bootloader
+    # built from the run's source, or
     # ``update`` a stale board through the programmer its registry pairs with
     # it. The last two need ``build`` as well.
     "run": {
