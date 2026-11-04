@@ -500,6 +500,17 @@ fi
 # package may come from.
 check_registry() {
     local reason hint
+    case $ROOT in
+        # PYTHONPATH below is a colon-separated list, so a checkout path
+        # holding a colon arrives as two entries, neither of them this
+        # checkout. Another harness could then answer, and a check that
+        # might be reading the wrong code is worse than none: say so and
+        # skip it. The units this script writes do not use PYTHONPATH (the
+        # runner gets WorkingDirectory), so the deploy itself is fine.
+        *:*)
+            say "warning: not reading $hardware: this checkout's path contains ':', which cannot be named on PYTHONPATH ($ROOT)"
+            return ;;
+    esac
     if [ ! -x "$python" ]; then
         # Only reachable under --dry-run, where bootstrap.py was printed
         # rather than run; a real deploy has already died on a missing

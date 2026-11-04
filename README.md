@@ -166,8 +166,11 @@ with it are in [`scripts/lab/`](scripts/lab/README.md): `hold` holds devices
 by serial for one command, `peer` drives the Classic Bluetooth peers by
 registry alias, and `hub-port` switches a hub port to recover a device that has
 stopped answering. Each runs the harness of the checkout it lives in,
-whichever interpreter starts it and from whatever directory, so a wrapper on
-a bench is one `exec` of a path.
+whichever interpreter starts it and from whatever directory: it re-runs
+itself under that checkout's own bootstrapped environment, carries on in any
+other the harness bootstrapped if its own checkout has none, and refuses an
+interpreter nobody bootstrapped. So a wrapper on a bench is one `exec` of a
+path.
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a

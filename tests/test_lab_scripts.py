@@ -1378,8 +1378,13 @@ class CheckoutEnvironment(Bench):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("note=[unset]", result.stdout)
 
-    def test_a_note_left_in_the_environment_does_not_stand_in_for_an_attempt(self):
-        """Nothing a caller supplies decides which harness runs."""
+    def test_a_note_left_in_the_environment_cannot_buy_a_foreign_interpreter(self):
+        """A caller cannot talk a helper into running outside an environment.
+
+        Setting the note by hand does suppress the re-run -- that is what it
+        is for -- and what the caller gains by it is a refusal, not a hold
+        under an interpreter nobody bootstrapped.
+        """
         outside = self.outside_interpreter()
         environment = self.plain_environment()
         environment[_checkout.REEXEC_ENV] = str(REPO)
@@ -1394,13 +1399,66 @@ class CheckoutEnvironment(Bench):
             capture_output=True, text=True, env=environment,
             cwd=str(self.root), timeout=120,
         )
-        # Either the re-run still happens or the helper refuses; what it must
-        # never do is run the harness under an interpreter nobody built.
-        if result.returncode == 0:
-            self.assertIn("held", result.stdout)
-        else:
-            self.assertIn("bootstrap.py", result.stderr)
-            self.assertNotIn("held", result.stdout)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("bootstrap.py", result.stderr)
+        self.assertNotIn("held", result.stdout)
+
+    def test_a_venv_nobody_bootstrapped_is_not_this_checkouts_environment(self):
+        """`.venv` is a path, not a promise: `python -m venv` makes one too,
+        and running a device helper in one is what bootstrap.py avoids."""
+        plain = self.root / "plain-venv"
+        (plain / "bin").mkdir(parents=True)
+        with unittest.mock.patch.object(_checkout, "VENV", plain):
+            with unittest.mock.patch.object(sys, "prefix", str(plain)):
+                self.assertFalse(_checkout.in_harness_environment())
+                self.assertFalse(_checkout.in_checkout_environment())
+        marked = self.root / "marked-venv"
+        (marked / "bin").mkdir(parents=True)
+        (marked / _checkout.VENV_MARKER).write_text("", encoding="utf-8")
+        with unittest.mock.patch.object(_checkout, "VENV", marked):
+            with unittest.mock.patch.object(sys, "prefix", str(marked)):
+                self.assertTrue(_checkout.in_checkout_environment())
+
+    def test_a_checkout_path_that_cannot_go_on_an_import_path_is_refused(self):
+        """It would arrive as two entries, neither of them this checkout."""
+        colon = self.root / f"check{os.pathsep}out"
+        with unittest.mock.patch.object(_checkout, "CHECKOUT", colon):
+            self.assertFalse(_checkout.importable_checkout_path())
+            with self.assertRaises(SystemExit) as caught:
+                _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        self.assertIn(str(colon), str(caught.exception))
+        self.assertIn("import path", str(caught.exception))
+        self.assertTrue(_checkout.importable_checkout_path())
+
+    def test_unbuffered_output_survives_the_re_run(self):
+        """A hold runs as long as its command; output through a pipe should
+        not start buffering because the script re-ran itself."""
+        with unittest.mock.patch.object(sys, "argv", ["hold", "UT0", "--", "true"]):
+            with unittest.mock.patch.object(_checkout, "unbuffered", lambda: True):
+                self.assertEqual(
+                    ["-P", "-u", str(HOLD)], _checkout.reexec_argv(str(HOLD))[1:4]
+                )
+            with unittest.mock.patch.object(_checkout, "unbuffered", lambda: False):
+                self.assertEqual(
+                    ["-P", str(HOLD)], _checkout.reexec_argv(str(HOLD))[1:3]
+                )
+
+    def test_the_u_flag_is_read_from_what_it_leaves_behind(self):
+        """`sys.flags` has nothing for `-u`; a write-through stdout does.
+
+        Asked of real interpreters, with the output piped, because that is
+        the case the carrying is for and the one an attribute check could
+        get wrong.
+        """
+        for flag, expected in ((["-u"], "True"), ([], "False")):
+            with self.subTest(flag=flag or "none"):
+                probe = subprocess.run(
+                    [sys.executable, *flag, "-c",
+                     f"import sys; sys.path.insert(0, {str(LAB)!r});"
+                     " import _checkout; print(_checkout.unbuffered())"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                self.assertEqual(expected, probe.stdout.strip(), probe.stderr)
 
     def test_an_unexecutable_environment_is_refused_not_a_traceback(self):
         """Executable and not an executable image: os.execv raises."""

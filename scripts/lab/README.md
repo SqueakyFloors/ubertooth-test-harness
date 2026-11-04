@@ -37,11 +37,12 @@ harness's own commands take:
 .venv/bin/python scripts/lab/hold --help
 ```
 
-**Nothing a caller supplies may decide which harness runs.** A wrapper that
-named one checkout's interpreter while the script came from another is how a
-`hold` came to read the registry with one version of the harness and take its
-leases with a much older one, which refused a registry that was perfectly
-good and stopped every device command on that host
+**The harness code is always the script's own, and an interpreter nobody
+bootstrapped is always refused.** A wrapper that named one checkout's
+interpreter while the script came from another is how a `hold` came to read
+the registry with one version of the harness and take its leases with a much
+older one, which refused a registry that was perfectly good and stopped every
+device command on that host
 ([#312](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/312)).
 A helper now pins both halves to its own checkout, and
 [`_checkout.py`](_checkout.py) says how. Point a wrapper at a checkout that

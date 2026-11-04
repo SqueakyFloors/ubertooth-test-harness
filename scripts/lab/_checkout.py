@@ -23,13 +23,16 @@ interpreter nobody bootstrapped is turned down rather than run with: the
 harness has an environment of its own for a reason, and a helper that drives
 devices is no place to go without it.
 
-``CHILD_PYTHON_OPTIONS`` is what a helper passes an interpreter it starts for
-``-m ubertooth_harness``. With ``-m``, Python puts the *working directory*
-first on the child's import path, ahead of anything ``PYTHONPATH`` says, so a
-helper run from inside another checkout would hand its work to that
-checkout's harness. ``-P`` leaves the working directory off, and the caller
-names its own checkout first on ``PYTHONPATH``, so that checkout answers the
-import.
+``CHILD_PYTHON_OPTIONS`` is for an interpreter a helper starts to run
+``-m ubertooth_harness``, which ``hold`` does for ``ubertooth-harness
+lease``. With ``-m``, Python puts the *working directory* first on the
+child's import path, ahead of anything ``PYTHONPATH`` says, so a helper run
+from inside another checkout would hand its work to that checkout's harness.
+``-P`` leaves the working directory off, and the caller names its own
+checkout first on ``PYTHONPATH``, so that checkout answers the import.
+(``peer`` starts ``hold`` and ``esp32peer.py`` by path, where the working
+directory is not on the import path to begin with, so they need none of
+this.)
 
 ``harness_identity`` names the harness that read something, for the error
 message of a registry a different version wrote. The registry is not wrong
@@ -70,9 +73,16 @@ REVISION_TIMEOUT_S = 5
 
 
 def in_checkout_environment() -> bool:
-    """Is this interpreter the one this checkout bootstrapped?"""
+    """Is this interpreter the one this checkout *bootstrapped*?
+
+    Sitting at `.venv` is not enough. A plain `python -m venv .venv` put
+    there by hand is a virtual environment and not a harness environment,
+    and running a device helper in one is what `bootstrap.py` exists to
+    avoid, so the marker decides here as it does anywhere else.
+    """
     try:
-        return Path(sys.prefix).resolve() == VENV.resolve()
+        return (Path(sys.prefix).resolve() == VENV.resolve()
+                and in_harness_environment())
     except OSError:
         return False
 
@@ -92,11 +102,25 @@ def in_harness_environment() -> bool:
         return False
 
 
+def importable_checkout_path() -> bool:
+    """Can this checkout's path be named on an import path at all?
+
+    `PYTHONPATH` is a list separated by `os.pathsep`, so a checkout whose
+    own path contains that character cannot be put on one: it would arrive
+    as two entries, neither of them this checkout, and one of them possibly
+    relative and so read from the caller's working directory. That is the
+    #312 failure over again, by another route, and it is better refused
+    than worked around.
+    """
+    return os.pathsep not in str(CHECKOUT)
+
+
 def run_in_checkout_environment(script: str, name: str | None = None) -> None:
     """Put `script` in a harness environment, its own checkout's for choice.
 
     A helper calls this when it is being run as a program, before it imports
-    the harness. Three outcomes:
+    the harness. A checkout whose path cannot be named on an import path is
+    refused outright. Otherwise, three outcomes:
 
     - Already in this checkout's own environment, or in another bootstrapped
       one with no environment here to prefer: carry on.
@@ -109,6 +133,14 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
       Carrying on would run the harness with whichever versions of its
       dependencies this interpreter happens to have.
     """
+    label = name or Path(script).name
+    if not importable_checkout_path():
+        raise SystemExit(
+            f"{label}: this checkout's path contains {os.pathsep!r}, which "
+            f"separates entries on an import path, so the harness beside "
+            f"this script cannot be named on one: {CHECKOUT}. Move the "
+            "checkout somewhere without that character."
+        )
     if in_checkout_environment():
         # Arrived: the note is spent. Dropping it here is what keeps it from
         # reaching the command run under `hold` -- which may be a helper of
@@ -124,11 +156,13 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
             os.execv(str(VENV_PYTHON), reexec_argv(script))
         except OSError:
             # A file that is executable and not an executable image. Nothing
-            # has happened yet, so the refusal below is still the right end.
+            # has happened yet, so the two outcomes below are still open:
+            # another bootstrapped environment will do, and otherwise this
+            # stops with the advice.
             os.environ.pop(REEXEC_ENV, None)
     if in_harness_environment():
         return
-    raise SystemExit(bootstrap_advice(name or Path(script).name))
+    raise SystemExit(bootstrap_advice(label))
 
 
 def already_tried(environ=None) -> bool:
@@ -142,11 +176,30 @@ def already_tried(environ=None) -> bool:
 
 
 def reexec_argv(script: str) -> list[str]:
-    """The command line the re-run uses, with this script's own arguments."""
+    """The command line the re-run uses, with this script's own arguments.
+
+    `-u` is carried over where the caller asked for it: a hold can run for
+    as long as its command does, and someone who asked for unbuffered output
+    through a pipe should not lose it to the re-run. `PYTHONUNBUFFERED`
+    needs no carrying, being in the environment the re-run inherits; the
+    flag leaves no trace but this one.
+    """
+    options = list(CHILD_PYTHON_OPTIONS)
+    if unbuffered():
+        options.append("-u")
     return [
-        str(VENV_PYTHON), *CHILD_PYTHON_OPTIONS,
+        str(VENV_PYTHON), *options,
         str(Path(script).resolve()), *sys.argv[1:],
     ]
+
+
+def unbuffered() -> bool:
+    """Was this interpreter started with `-u`?
+
+    There is no flag in `sys.flags` for it; what it leaves behind is a
+    standard output that writes through rather than buffering.
+    """
+    return bool(getattr(sys.stdout, "write_through", False))
 
 
 def bootstrap_advice(name: str, error: BaseException | None = None) -> str:

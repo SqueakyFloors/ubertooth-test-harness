@@ -759,8 +759,9 @@ class DeployTest(unittest.TestCase):
         # Named, because a registry newer than the code is the likely cause
         # and updating the checkout is the fix.
         self.assertIn("newer than this code", result.stderr)
-        # Nothing installed, so a working runner is not replaced by one that
-        # could not read its own registry.
+        # No unit or agent written, so a working runner is not replaced by
+        # one that could not read its own registry. The check runs after
+        # bootstrap.py, so the checkout's .venv may have been created.
         self.assertEqual(_tree(self.lab.home), {})
 
     def test_a_failure_that_is_not_the_registry_is_not_blamed_on_it(self):
@@ -780,6 +781,23 @@ class DeployTest(unittest.TestCase):
         self.assertOk(result)
         self.assertIn("would refuse", result.stdout)
         self.assertEqual(_tree(self.lab.home), {})
+
+    def test_a_checkout_path_pythonpath_cannot_name_skips_the_check(self):
+        """A check that might be reading another checkout's code is worse
+        than none, and the units this writes do not use PYTHONPATH."""
+        moved = self.lab.root / "check:out"
+        shutil.copytree(self.lab.checkout, moved, symlinks=True)
+        result = subprocess.run(
+            ["bash", str(moved / "scripts" / "deploy.sh"),
+             "--runner-host", "Host_Linux",
+             "--ubertooth-source", str(self.lab.ubertooth)],
+            env=self.lab.env, capture_output=True, text=True, timeout=60,
+            check=False,
+        )
+        self.assertOk(result)
+        self.assertIn("cannot be named on PYTHONPATH", result.stdout)
+        self.assertEqual([], self.lab.registry_reads())
+        self.assertTrue((self.lab.unit_dir / CONTROLLER_UNIT).is_file())
 
     def test_rejects_bad_port_and_unquotable_values(self):
         for port in ("0", "65536", "80a", "-1"):
