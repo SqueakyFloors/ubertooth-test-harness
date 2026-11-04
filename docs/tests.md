@@ -3168,11 +3168,14 @@ because that bootloader jumps into the erased vectors it was given. So the
 committed plan names the board the registry pairs with a `Debug programmer`,
 which is also what gives that board a recovery path, and holding the board
 holds the programmer with it. Read the bootloader before and after
-(`ubertooth-util -U <serial> -B`), and run it with
-`--bootloader check`, which refuses a board whose bootloader is not the one
-the run's sources build
-([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303));
-`--bootloader update` installs it over that programmer first. Required:
+(`ubertooth-util -U <serial> -B`) by hand: `--bootloader check` does not
+cover this board, because preflight reads the bootloader of a board whose
+firmware the run requires and this test establishes its own, so the read is
+skipped for it
+([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
+[#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+`--bootloader update` installs a bootloader over that programmer, which is
+how a board that needs one gets it. Required:
 `platforms:`, because the verdict is a USB
 enumeration check and that is fail-closed on Linux only, and
 `USB power controller:`, the hub the board must be on. A plan pointed at the

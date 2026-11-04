@@ -33,10 +33,12 @@ suites:
   # registry before the run -- it is `UT_Linux1` in hardware.example.yaml,
   # paired with `Prog_Linux0`.
   #
-  # Run it with `--bootloader check`, as the command above does: the run then
-  # refuses a board whose bootloader is not the one the run's sources build
-  # (#303), and `--bootloader update` installs it over that programmer first.
-  # Read the line by hand either side as well: `ubertooth-util -U <serial> -B`.
+  # Read the bootloader by hand either side: `ubertooth-util -U <serial> -B`.
+  # `--bootloader check` is in the command above for the rest of the run, but
+  # it does not cover this board: preflight reads the bootloader of a board
+  # whose firmware the run requires, and this test establishes its own, so the
+  # read is skipped for it (#303, #327). `--bootloader update` is how a board
+  # that needs a bootloader gets one, over that programmer.
   #
   # Requires: --allow-destructive (a person passes it; the runner service
   # never does, so no dispatched run and no GUI click can start this test),

@@ -635,10 +635,13 @@ this tree the test is a test; on a board with the factory bootloader it is a
 way to brick that board, which then needs its P4 entry pin bridged. So the
 plan names the board the registry pairs with a `Debug programmer` — the board
 that has a recovery path — and the run holds the programmer with it. Read the
-bootloader before and after with `ubertooth-util -U <serial> -B`, and run it
-with `--bootloader check`, which reads it in preflight and refuses a board
-whose bootloader is not the one the run's sources build
-([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303)).
+bootloader before and after with `ubertooth-util -U <serial> -B` yourself.
+`--bootloader check` does not cover this board: preflight reads the bootloader
+of a board whose firmware the run requires, and this test establishes its own,
+so the read is skipped for it
+([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
+[#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+Passing the option costs nothing and still covers any other board in the run.
 
 **Run it by hand, with someone who can reach the bench.** It is destructive:
 if the bootloader does start the unstartable image, the board faults on every
