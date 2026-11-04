@@ -2932,15 +2932,21 @@ section of a run's report before believing an `hci` run proved anything.
 **What it does.** Runs `ubertooth-follow`, which pages a target from a host
 Bluetooth adapter to learn that target's clock offset and then follows its
 piconet with the Ubertooth. The target is the ESP32 peer that leads the
-piconet. With `-a` the tool also reads the channel map of the link it made
-and follows with Adaptive Frequency Hopping on.
+piconet. With `-a` the tool additionally asks that link for its channel map,
+so that it can follow with Adaptive Frequency Hopping on — which on this
+bench it is told there is no map to have, since the peer runs the paged link
+with AFH off. So what the `-a` case measures is the tool reaching the read
+and following without a map; the branch that applies one has no fixture here,
+and the expected outcome below and the known limits say so.
 
 **Theory of operation.** `ubertooth-follow` is the one host path that gets a
 piconet's clock from somewhere other than the air: it reads the local
 adapter's clock over HCI, pages the target, reads the target's clock offset,
 and adds the two. That is why it needs an adapter and why an Ubertooth cannot
-stand in for one. `-a` is likewise the only path that puts the board into
-AFH-enabled following, by reading the map over HCI from a link the tool holds.
+stand in for one. `-a` is likewise the only path that could put the board
+into AFH-enabled following, by reading the map over HCI from a link the tool
+holds; whether it does depends on the answer, and on this bench the answer is
+that the link is not using AFH.
 
 The target is the **initiator**, not the acceptor: the initiator pages the
 acceptor, so it leads the piconet and its LAP is the access code on the air.
