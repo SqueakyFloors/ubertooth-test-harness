@@ -47,6 +47,13 @@ FIRMWARE_VERSION_RE = re.compile(
 # identity did not match.
 APPLICATION_IMAGE = "bluetooth_rxtx"
 BTBR_IMAGE = "btbr"
+# The receive-only build of the application image, which the release ships as
+# `bluetooth_rx_only.*` and which reports the image name below. It is the same
+# sources with the transmit half left out, and libubertooth accepts it
+# wherever it accepts the application image (ubertooth.c,
+# UBERTOOTH_TOOLS_IMAGE_RX_ONLY); the requests it leaves out are the transmit
+# ones, the transmit power level among them.
+RX_ONLY_IMAGE = "bluetooth_rx"
 # The preflight identity check is stricter than the reads above: the run's
 # tests need the application image, so a board on another image (btbr, a
 # bench image) is a mismatch even when it was built from the same commit.

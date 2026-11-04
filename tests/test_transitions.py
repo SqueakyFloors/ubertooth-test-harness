@@ -13,6 +13,7 @@ from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.catalog import CatalogError, builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.plan import load_plan
+from ubertooth_harness.patterns import APPLICATION_IMAGE, RX_ONLY_IMAGE
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.sequencer import NamedTestSequencer
 from ubertooth_harness.stateful import (
@@ -341,6 +342,9 @@ class FakeUbertooth:
                 command, 1, "", "Ubertooth API version found, libubertooth requires\n",
                 on_output,
             )
+        refused = self._refused_image(command, on_output)
+        if refused is not None:
+            return refused
         if sum(item in ("-f", "-n", "-p") for item in options) > 1:
             if self.reject_btle_conflicts:
                 return self._result(
@@ -349,12 +353,6 @@ class FakeUbertooth:
                     on_output,
                 )
             options = tuple(item for item in options if item != "-p")
-        if crc == "q":
-            # apply_crc_options(): the read goes to the board before any mode
-            # starts, so an image without the request stalls it there.
-            stalled = self._stalled_read(command, pairs, on_output, read_options=["k"])
-            if stalled is not None:
-                return stalled
         capture_lines = self._open_captures(options)
         if "-n" in options or "-f" in options:
             output = capture_lines
@@ -432,8 +430,31 @@ class FakeUbertooth:
         "a": ("read the transmit power level", "PA level"),
         "d": ("read the user LED", "USR LED"),
         "l": ("read the user LED", "USR LED"),
-        "k": ("read the CRC check setting", "CRC verify"),
     }
+
+    # The images libubertooth's ubertooth_check_image() lets a tool work on:
+    # the application image and the receive-only build of it. Every tool but
+    # ubertooth-util and ubertooth-dfu makes that check, right after it opens
+    # the board and before it sends anything of its own.
+    TOOLS_IMAGES = (APPLICATION_IMAGE, RX_ONLY_IMAGE)
+
+    def _refused_image(self, command, on_output):
+        """The refusal a tool prints for another of this tree's images, or None.
+
+        The board is closed without a STOP, so nothing on it changes, and the
+        command exits 1 having sent no request of its own.
+        """
+        image = self.firmware.split()[0] if " " in self.firmware else None
+        if image is None or image in self.TOOLS_IMAGES:
+            return None
+        return self._result(
+            command, 1, "",
+            f"error: the Ubertooth is running {image}; this tool needs "
+            f"{APPLICATION_IMAGE}\n"
+            f"note: flash it with ubertooth-dfu -U {self.serial} -d "
+            f"firmware/{APPLICATION_IMAGE}/{APPLICATION_IMAGE}.dfu -r\n",
+            on_output,
+        )
 
     def _stalled_read(self, command, pairs, on_output, read_options=None):
         """The answer to a read this image has not got, or None.

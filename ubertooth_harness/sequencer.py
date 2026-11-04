@@ -966,19 +966,21 @@ class NamedTestSequencer:
         boards,
         context: dict,
         after: str | None = None,
-        destructive: bool = False,
     ) -> tuple[str, str]:
         """Read every guard board with queries only; return (failure, status).
 
         Without ``after`` this records the baseline; otherwise every read must
         equal it. Every read runs (they change nothing), so the record shows
-        each difference, not only the first.
+        each difference, not only the first. The one read that may not reach
+        the board is the CRC one, which ``ubertooth-btle`` would stop firmware
+        older than the host tools to make: that is refused, and the refusal
+        fails the check rather than counting as a reading.
 
-        Every guard is read whatever image it carries, and a board that says
-        it cannot answer a request has that recorded as its reading and
-        compared like any other. The baseline is then judged: it has to hold
-        the settings of a guard whose own image implements them, and, for a
-        ``destructive`` test, something comparable about every guard.
+        Every guard is read whatever image it carries, and a read this host
+        cannot make of that image is recorded as such and compared like any
+        other. The baseline is then judged (``guard_baseline_problems``): it
+        has to hold the settings of a guard whose own image implements them,
+        and something comparable about every guard.
         """
         label = (
             "baseline" if after is None
@@ -1032,12 +1034,10 @@ class NamedTestSequencer:
         if after is None and not canceled:
             # Reads that all succeeded can still leave a baseline the run
             # cannot rely on; judged here, where no case has run yet. Judged
-            # after a failed read as well, so a destructive test that is
-            # blocked says so in as many words rather than only naming the
-            # read that came back empty.
-            failures.extend(transitions.guard_baseline_problems(
-                boards, context, destructive=destructive
-            ))
+            # after a failed read as well, so a run turned away for a guard it
+            # cannot observe says that in as many words rather than only
+            # naming the read that came back empty.
+            failures.extend(transitions.guard_baseline_problems(boards, context))
         failure = ""
         if failures:
             if after is None:
@@ -1595,7 +1595,6 @@ class NamedTestSequencer:
                             guard_failure, guard_status = self._run_guard_check(
                                 publisher, token, output_dir, invocation, guards,
                                 guard_context,
-                                destructive=definition.destructive,
                             )
                             if guard_failure:
                                 # Without a baseline nothing can be compared;

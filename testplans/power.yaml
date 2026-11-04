@@ -4,6 +4,7 @@ suites:
   #
   #   run-suite --hardware <registry> --plan testplans/power.yaml \
   #       --suite power --host Host_Linux \
+  #       --bootloader check \
   #       --allow-power-changes --allow-destructive \
   #       --build --with-firmware
   #
@@ -32,10 +33,10 @@ suites:
   # registry before the run -- it is `UT_Linux1` in hardware.example.yaml,
   # paired with `Prog_Linux0`.
   #
-  # Once #303 is in, run this with `--bootloader check` and the run itself
-  # refuses a board whose bootloader is not the one the run's sources build;
-  # `--bootloader update` installs it over that programmer first. Until then
-  # read it by hand: `ubertooth-util -U <serial> -B`, before and after.
+  # Run it with `--bootloader check`, as the command above does: the run then
+  # refuses a board whose bootloader is not the one the run's sources build
+  # (#303), and `--bootloader update` installs it over that programmer first.
+  # Read the line by hand either side as well: `ubertooth-util -U <serial> -B`.
   #
   # Requires: --allow-destructive (a person passes it; the runner service
   # never does, so no dispatched run and no GUI click can start this test),

@@ -165,22 +165,31 @@ and after every case, with queries only and one command per read:
 others anyway). Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
-is left out unless that board's firmware API is at least the host tools' API,
-because `ubertooth-btle` stops older firmware as part of its own API check.
+is refused, which fails the check, unless that board's firmware API is at
+least the host tools' API, because `ubertooth-btle` stops older firmware as
+part of its own API check.
 
-Every guard gets every read, whatever firmware image it carries. A board
-refuses a request its image has not got by stalling it, which the tools report
-in one wording; that answer is recorded as the reading (`unsupported`) and
-compared with the rest, so a board that starts answering a request it refused
-before, or refuses one it answered, fails the check. The alternate `btbr`
-image, for instance, has no channel, squelch, or BLE CRC request, and still
-guards its identity, image and revision, bootloader, LEDs, and transmit power
-level. Two things the readings themselves have to satisfy: a guard running
-`bluetooth_rxtx` must answer the radio settings that image implements, since a
-board that cannot is not holding them; and a destructive test (below) is
-refused outright when a guard answered none of `-v`, `-V`, `-s`, or `-B`,
-because nothing about it could be compared afterwards. A guard is never
-written to and never reflashed to make it readable.
+Every guard gets every read, whatever firmware image it carries, and the CRC
+read is the one that may not reach the board: `ubertooth-btle` would stop
+firmware older than the host tools to make it, so it is refused, and that
+refusal fails the check rather than counting as a reading.
+
+Two answers count as a reading this host could not make: a request the
+board's image has not got, which it refuses by stalling, and a board carrying
+another of this tree's images, which `ubertooth-btle` refuses as it opens it.
+Either is recorded as the reading (`unsupported`) and compared with the rest,
+so a board that starts answering a read it refused before, or refuses one it
+answered, fails the check. The alternate `btbr` image, for instance, has no
+channel or squelch request and no tool will read its CRC setting, and it is
+still guarded by its identity, image and revision, build, bootloader, LEDs,
+and transmit power level. Two things the readings themselves have to satisfy:
+a guard running `bluetooth_rxtx`, or the receive-only `bluetooth_rx` build of
+it, must answer the radio settings that build implements, since a board that
+cannot is not holding them; and any guarded test is turned away when a guard
+answered none of `-v`, `-V`, `-s`, or `-B`, because nothing about that board
+could be compared afterwards — a wedged board stalls every request, which
+reads the same way. A guard is never written to and never reflashed to make it
+readable.
 
 **Files.** Files a case writes (captures, dumps, images, FIFOs) go in a
 per-case directory under the run's `captures/`. Checker scripts read them and
@@ -3002,7 +3011,8 @@ holds the programmer with it. Read the bootloader before and after
 `--bootloader check`, which refuses a board whose bootloader is not the one
 the run's sources build
 ([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303));
-`--bootloader update` installs it over that programmer first. Required: `platforms:`, because the verdict is a USB
+`--bootloader update` installs it over that programmer first. Required:
+`platforms:`, because the verdict is a USB
 enumeration check and that is fail-closed on Linux only, and
 `USB power controller:`, the hub the board must be on. A plan pointed at the
 wrong hub fails planning rather than switching whatever is on that hub's
@@ -3022,12 +3032,13 @@ it on, so a dispatched run, or a click in the GUI, cannot start this test. It wr
 establishes it, so preflight checks only the board's serial and the test must
 be the last one on that board.
 
-Because it is destructive, its guard Ubertooths are held to the extra rule in
-"Guard Ubertooths" above: a guard that answered none of `-v`, `-V`, `-s`, or
-`-B` blocks the run by name before any case, since nothing about that board
-could be compared after the write. A guard carrying the alternate `btbr`
-image is not in that position — it answers all four — and it is guarded by
-what it answers, not reflashed to make it answer more.
+Its guard Ubertooths matter more here than in a test that writes nothing, and
+they are read under the rules in "Guard Ubertooths" above: a guard that
+answered none of `-v`, `-V`, `-s`, or `-B` turns the run away by name before
+any case, since nothing about that board could be compared after the write. A
+guard carrying the alternate `btbr` image is not in that position — it answers
+all four — and it is guarded by what it answers, not reflashed to make it
+answer more.
 
 **Expected outcome.** One case. The write must reach the flash and must not
 report a verified revision afterwards: the board stays in its bootloader, so
