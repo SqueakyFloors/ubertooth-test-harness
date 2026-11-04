@@ -50,9 +50,16 @@ Harness-wide checks that use the CLIs:
   line carries), and `-s`, one command each.
 - **Guards** (stateful tests): every other registered board on the host is read
   before and after the test, with queries only, one command per read:
-  `ubertooth-util -v`, `-V`, `-C`, `-a`, `-z`, `-d`, and then
+  `ubertooth-util -v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, and then
   `ubertooth-btle -k`. The `ubertooth-btle -k` read is skipped unless
-  the board's firmware API is at least the host API.
+  the board's firmware API is at least the host API. Every other read goes to
+  every guard whatever image it carries: a request the image has not got is
+  stalled, and that answer is the reading, compared before and after like any
+  value. So the alternate `btbr` image is guarded by its identity, image and
+  revision, build, bootloader, LEDs, and transmit power level, with no read
+  skipped and nothing written to the board. A guard on `bluetooth_rxtx` must
+  answer the radio settings that image implements, and a destructive test is
+  refused when a guard answered none of `-v`, `-V`, `-s`, or `-B`.
 - **Board state between runs** (`slow` plan): the only test that kills a
   capture instead of stopping it. `killedcapture.py` SIGKILLs `ubertooth-dump`
   or `ubertooth-specan` while it is streaming, so no STOP reaches the board,

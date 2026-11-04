@@ -75,12 +75,14 @@ from typing import Callable, Iterable, Mapping
 from ubertooth_harness import capturefile
 from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, CommandCase, guard_roles
 from ubertooth_harness.patterns import (
+    APPLICATION_IMAGE,
     BOARD_ID_PATTERN,
     FIRMWARE_PATTERN,
     HOST_VERSION_TIMEOUT_S,
     IMAGE_NAME_PATTERN,
     PART_ID_PATTERN,
     VERSION_ANSWER,
+    matched_image,
     serial_pattern,
 )
 from ubertooth_harness.stateful import (
@@ -1719,14 +1721,164 @@ API_PATTERN = r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)"
 _GUARD_API_RE = re.compile(API_PATTERN)
 # Same shape the preflight compile-info check requires.
 GUARD_COMPILE_INFO_PATTERN = r"(?P<value>\bubertooth\s+\S+\s+\([^\n]*\S)"
-GUARD_READBACK = (
+GUARD_IDENTITY_KEY = "identity"
+GUARD_IDENTITY_PATTERN = r"Serial No:\s+(?P<value>[0-9a-fA-F]+)"
+GUARD_BOOTLOADER_KEY = "bootloader"
+# The one line `-B` prints, whatever bootloader a board has (bootloader.py,
+# which renders the same line; tests/test_guards.py keeps the two in step).
+GUARD_BOOTLOADER_PATTERN = (
+    r"(?P<value>Bootloader: .+, CRC32:0x[0-9a-fA-F]{8})"
+)
+
+# What a board says when it cannot answer a request at all.
+#
+# A request the firmware has not got is refused in one wording everywhere
+# (ubertooth(7); fork #636 replaced three older lines with it, one of which
+# said only "control message unsupported"). The alternate btbr image answers
+# this way for the radio settings, and firmware older than a request does the
+# same. Either way it is a fact about the image on the board, not a board
+# that changed, so it is recorded as the reading and compared like any other.
+# What it is worth is decided by guard_baseline_problems(): it pins nothing.
+GUARD_UNSUPPORTED = "unsupported"
+# Only this line is read as "cannot answer". A board refuses a request it
+# does not implement by stalling it, and libubertooth prints this for the
+# stall (ubertooth_report_unsupported_request()); a board that has left the
+# bus stalls requests too, and says so in its own line, which this does not
+# match -- that read fails the guard as it always did. ubertooth-util's own
+# "error: <what> read failed" is not matched either: it follows every failed
+# read, whatever the cause.
+GUARD_UNANSWERED_PATTERN = (
+    r"(?P<guard_unsupported>error: [^\n]*: the board's firmware does not "
+    r"support it \(stalled(?:, libusb -9)?\))"
+)
+# The image whose radio settings the settings reads below are, which is the
+# image every test but the ubertooth-btbr one needs. A guard running it has
+# to answer those reads; any other image may refuse them.
+GUARD_SETTINGS_IMAGE = APPLICATION_IMAGE
+
+
+def _tolerant(pattern, convert, values=None):
+    """A guard read's pattern and convert, accepting "cannot answer" as well.
+
+    The reading is the value the board reported, or GUARD_UNSUPPORTED when it
+    said it cannot answer that request. Nothing else is accepted: a read that
+    failed any other way matches nothing and fails the guard, as it always
+    did.
+    """
+    combined = rf"(?:{pattern})|{GUARD_UNANSWERED_PATTERN}"
+
+    def tolerant(match):
+        if match.groupdict().get("guard_unsupported"):
+            return GUARD_UNSUPPORTED
+        if convert is not None:
+            return convert(match)
+        value = match.group("value")
+        return values.get(value, value) if values else value
+
+    return combined, tolerant
+
+
+# What every guard is read for, whatever image it carries: who it is, which
+# image and revision it runs, what built it, and which bootloader is under
+# that. These are the requests any image from this tree answers.
+GUARD_STABLE_READBACK = (
     (GUARD_FIRMWARE_KEY, "-v", GUARD_FIRMWARE_PATTERN, None),
     ("compile-info", "-V", GUARD_COMPILE_INFO_PATTERN, None),
-) + tuple(
+    (GUARD_IDENTITY_KEY, "-s", GUARD_IDENTITY_PATTERN, None),
+    (GUARD_BOOTLOADER_KEY, "-B", GUARD_BOOTLOADER_PATTERN, None),
+)
+# The radio settings, which belong to GUARD_SETTINGS_IMAGE. They are read of
+# every guard too -- a guard is never skipped -- and a board on another image
+# refuses them in the wording above, which is then its reading.
+GUARD_SETTING_READBACK = tuple(
     (setting.key, setting.query, setting.pattern, setting.convert)
     for setting in (CHANNEL, PA_LEVEL, SQUELCH, LEDS)
 )
+GUARD_READBACK = GUARD_STABLE_READBACK + GUARD_SETTING_READBACK
 GUARD_CRC_KEY = "crc"
+# The readings that say something about the board itself. A guard answering
+# none of them has a baseline that pins nothing, which is what blocks a
+# destructive test (guard_baseline_problems).
+GUARD_PINNING_KEYS = tuple(key for key, *_rest in GUARD_STABLE_READBACK)
+# The readings GUARD_SETTINGS_IMAGE implements and so has to answer. The
+# stable reads above are not on this list: a request is only as old as the
+# build that carries it, and an older bluetooth_rxtx guard refusing one of
+# them is firmware history, not a board that cannot hold its own settings.
+GUARD_REQUIRED_OF_SETTINGS_IMAGE = tuple(
+    key for key, *_rest in GUARD_SETTING_READBACK
+) + (GUARD_CRC_KEY,)
+# A recorded firmware reading is the part of the `-v` line after the label,
+# so the image name is read off its front, the same optional name
+# FIRMWARE_VERSION_RE reads off the whole line.
+_GUARD_IMAGE_RE = re.compile(rf"\A(?:(?P<image>\S+)\s+)?\S+\s+\(API:")
+
+
+def guard_image(firmware: str | None) -> str | None:
+    """The image name in a recorded guard firmware reading, or None.
+
+    The reading is what `ubertooth-util -v` reported ("<image> <revision>
+    (API:x.yy)"). None covers a guard whose firmware was not read, one that
+    could not answer, and firmware older than the info block, which prints
+    the revision with no image name.
+    """
+    if not firmware or firmware == GUARD_UNSUPPORTED:
+        return None
+    return matched_image(_GUARD_IMAGE_RE.search(firmware))
+
+
+def guard_baseline_problems(boards, context, *, destructive: bool) -> list[str]:
+    """Why this guard baseline is not one the run can rely on ([] when it is).
+
+    Every guard is read and every reading is compared, whatever image the
+    board carries; these are the two things the readings themselves have to
+    satisfy before the test runs (the maintainer's decision on #275).
+
+    First: a board running GUARD_SETTINGS_IMAGE has to answer the radio
+    settings its own image implements. One it says it cannot answer is a
+    board that is not holding those settings, not an image difference, so it
+    fails the baseline exactly as it did before.
+
+    Then, for a destructive test only: every guard needs at least one reading
+    that pins something about it. A guard that answered none -- an image this
+    host can read nothing of -- blocks the test by name, rather than letting
+    it run against a guarantee that has quietly narrowed to nothing.
+    """
+    problems = []
+    for board in boards:
+        image = guard_image(context.get(board.key(GUARD_FIRMWARE_KEY)))
+        readings = {
+            key: context.get(board.key(key))
+            for key in [key for key, *_rest in GUARD_READBACK] + [GUARD_CRC_KEY]
+        }
+        if image == GUARD_SETTINGS_IMAGE:
+            refused = [
+                key for key in GUARD_REQUIRED_OF_SETTINGS_IMAGE
+                if readings.get(key) == GUARD_UNSUPPORTED
+            ]
+            if refused:
+                problems.append(
+                    f"{board.role} (serial {board.serial}) runs {image}, which"
+                    " implements " + ", ".join(refused)
+                    + ", and the board says it cannot answer "
+                    + ("them" if len(refused) > 1 else "it")
+                    + "; its settings cannot be guarded"
+                )
+        if not destructive:
+            continue
+        pinned = [
+            key for key in GUARD_PINNING_KEYS
+            if readings.get(key) not in (None, GUARD_UNSUPPORTED)
+        ]
+        if not pinned:
+            problems.append(
+                f"{board.role} (serial {board.serial}) answered none of "
+                + ", ".join(GUARD_PINNING_KEYS)
+                + ", so nothing about it can be compared afterwards; it runs "
+                + (image if image else "an image it did not name")
+                + ". A destructive test is not run against a guard it cannot "
+                "observe"
+            )
+    return problems
 
 
 class _AfterTest:
@@ -1832,11 +1984,15 @@ def guard_boards(
 
 
 def _guard_step(board: GuardBoard, setting, option, pattern, convert, key, expected):
+    tolerant, value = _tolerant(pattern, convert)
     return Step(
         f"{board.slug}-{setting}",
         f"{board.role} {setting}",
         _util(board.serial, option),
-        observe=Observation(key, pattern, expected, convert=convert),
+        # A board that cannot answer the request says so and exits 1; that
+        # reading is recorded and compared like any other.
+        expected_returncodes=(0, 1),
+        observe=Observation(key, tolerant, expected, convert=value),
     )
 
 
@@ -1880,11 +2036,13 @@ def _btle_api_refusal(board: GuardBoard, firmware_key: str):
 
 
 def _guard_crc_step(board: GuardBoard, key, expected, firmware_key):
+    tolerant, value = _tolerant(CRC_PATTERN, None, CRC_VALUES)
     return Step(
         f"{board.slug}-{GUARD_CRC_KEY}",
         f"{board.role} {GUARD_CRC_KEY}",
         _btle(board.serial, "-k"),
-        observe=Observation(key, CRC_PATTERN, expected, CRC_VALUES),
+        expected_returncodes=(0, 1),
+        observe=Observation(key, tolerant, expected, convert=value),
         refuse=_btle_api_refusal(board, firmware_key),
     )
 

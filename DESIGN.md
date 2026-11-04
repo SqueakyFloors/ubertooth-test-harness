@@ -900,12 +900,21 @@ descriptive literals and generation is deterministic.
 
 Transition and composition tests also bind every other registered Ubertooth
 on the host as a `guard Ubertooth N` resource (planner `_guarded`, mirroring
-`alternated Ubertooth N`). The sequencer records each guard's firmware
-revision and API, firmware compile info, channel, PA level, squelch, LEDs, and
+`alternated Ubertooth N`). The sequencer records each guard's firmware image,
+revision and API, firmware compile info, serial, bootloader identity, channel,
+PA level, squelch, LEDs, and
 CRC with query-only commands before the first case, re-reads them after every
 state-changing case and, if read-only cases ran since the last check, once
 after the test, and fails and stops the test on any difference (even with
-`continue_on_case_failure`). Differences are counted as `failed_guard_checks`,
+`continue_on_case_failure`). Every read is sent to every guard whatever image
+it carries: a request the image has not got is stalled, and that answer is
+recorded as the reading (`transitions.GUARD_UNSUPPORTED`) and compared like
+any other, so the alternate `btbr` image is guarded by what it does answer
+instead of being skipped or reflashed. `guard_baseline_problems` then judges
+the baseline: a guard on `bluetooth_rxtx` must answer the radio settings that
+image implements, and a destructive test is refused when a guard answered
+none of the reads that pin it (`-v`, `-V`, `-s`, `-B`).
+Differences are counted as `failed_guard_checks`,
 apart from `failed_cases`, and the reason names the guard to check and
 restore by hand; guards are never restored automatically. The CRC read uses
 `ubertooth-btle`, whose `ubertooth_check_api` stops firmware older than the

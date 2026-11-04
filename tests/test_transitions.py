@@ -48,7 +48,7 @@ def setUpModule():
 # ---------------------------------------------------------------------------
 # The host tools' getopt and value parsing (fork opt_parse.c), for the fakes.
 
-UTIL_OPTIONS = "U:hnmefiIprsStvbl::a::C::c::d::q::z::9VNx"
+UTIL_OPTIONS = "U:hnmefiIprsStvbBl::a::C::c::d::q::z::9VNx"
 BTLE_OPTIONS = "a::r:hfnpU:k::A:s:t:x:c:q:jJiI"
 UTIL_VALUES = {
     "l": ("USR LED state", 0, 1, ""),
@@ -159,6 +159,9 @@ class FakeUbertooth:
         firmware="git-test",
         api=HOST_API,
         compile_info="ubertooth git-test (builder@host) timestamp",
+        reported_serial=None,
+        bootloader="2.00 git-test, CRC32:0x11112222",
+        unsupported=(),
         next_word=True,
         reject_strays=True,
         pa_zero_sets=True,
@@ -185,6 +188,17 @@ class FakeUbertooth:
         self.firmware = firmware
         self.api = api
         self.compile_info = compile_info
+        # What `-s` answers. Apart in the fake so a test can change the
+        # number the board reports without moving the board the commands
+        # select; a real board's two are the same number.
+        self.reported_serial = reported_serial or serial
+        self.bootloader = bootloader
+        # The requests this image has not got, as the option letters that ask
+        # for them ("k" for the ubertooth-btle CRC read). The board stalls
+        # them, which libubertooth reports in the shared wording and the tool
+        # follows with its own read-failed line, exit 1. Modeled for the
+        # one-read commands the guard check sends.
+        self.unsupported = frozenset(unsupported)
         # Commands that reached the firmware as cmd_stop (ubertooth_stop()).
         self.stops = 0
         self.state = {
@@ -335,6 +349,12 @@ class FakeUbertooth:
                     on_output,
                 )
             options = tuple(item for item in options if item != "-p")
+        if crc == "q":
+            # apply_crc_options(): the read goes to the board before any mode
+            # starts, so an image without the request stalls it there.
+            stalled = self._stalled_read(command, pairs, on_output, read_options=["k"])
+            if stalled is not None:
+                return stalled
         capture_lines = self._open_captures(options)
         if "-n" in options or "-f" in options:
             output = capture_lines
@@ -397,6 +417,55 @@ class FakeUbertooth:
         "channel": "2441", "pa": "7", "squelch": "-120",
         "usr": "0", "rx": "0", "tx": "0", "crc": "0",
     }
+
+    # The reads the guard check asks for, as the request libubertooth names in
+    # its stall line (request_name() in ubertooth_control.c) and the query the
+    # tool names in its own read-failed line, None where it adds no line.
+    STALLED_READS = {
+        "v": ("read the firmware information", None),
+        "V": ("read the compile information", None),
+        "s": ("read the serial number", "serial number"),
+        "B": ("read the bootloader information", "bootloader information"),
+        "C": ("read the channel", "channel"),
+        "c": ("read the channel", "channel"),
+        "z": ("read the squelch level", "squelch"),
+        "a": ("read the transmit power level", "PA level"),
+        "d": ("read the user LED", "USR LED"),
+        "l": ("read the user LED", "USR LED"),
+        "k": ("read the CRC check setting", "CRC verify"),
+    }
+
+    def _stalled_read(self, command, pairs, on_output, read_options=None):
+        """The answer to a read this image has not got, or None.
+
+        A board refuses such a request by stalling it: libubertooth prints the
+        shared unsupported line with the API note, the tool adds its own
+        read-failed line where it has one, no value is printed, and the
+        command exits 1.
+        """
+        asked = read_options if read_options is not None else [
+            option for option, value in pairs if value is None
+        ]
+        for option in asked:
+            if option not in self.unsupported:
+                continue
+            request, query = self.STALLED_READS[option]
+            lines = [
+                f"error: could not {request}: the board's firmware does not "
+                "support it (stalled, libusb -9)",
+                "note: the board reports firmware API version "
+                f"{transitions.format_api(self.api)}, libubertooth 1.1 "
+                f"requires {transitions.format_api(self.api)}",
+                "note: a board that stalls every request is wedged rather "
+                "than short of this one; reset it with ubertooth-util -r on "
+                "the same board",
+            ]
+            if query is not None:
+                lines.append(f"error: {query} read failed")
+            return self._result(
+                command, 1, "", "".join(line + "\n" for line in lines), on_output
+            )
+        return None
 
     def _util(self, command, options, on_output):
         """ubertooth-util main() at fork main 3b22c95: getopt with the
@@ -471,6 +540,13 @@ class FakeUbertooth:
                 flags.add(option)
         if leftover and self.reject_strays:
             return fail(f"error: unexpected argument '{leftover[0]}'")
+        stalled = self._stalled_read(
+            command, pairs, on_output,
+            read_options=sorted(o for o in flags if o in self.STALLED_READS)
+            + [o for o, value in pairs if value is None and o in "ldacCz"],
+        )
+        if stalled is not None:
+            return stalled
         # -V is the version command: since fork f898fe5 it prints the whole
         # answer and ends the command, before the mode checks and before
         # anything else on the command line runs. ``version_ends`` False
@@ -515,6 +591,8 @@ class FakeUbertooth:
                       f"TX LED status : {self.state['tx']}"]
         if "b" in flags:
             lines.append("Board ID Number: 1 (Ubertooth One)")
+        if "B" in flags:
+            lines.append(f"Bootloader: {self.bootloader}")
         if channel == "q" or "c" in gets:
             mhz = self.state["channel"]
             lines.append(f"Current frequency: {mhz} MHz (Bluetooth channel {int(mhz) - 2402})")
@@ -529,7 +607,7 @@ class FakeUbertooth:
         if "p" in flags:
             lines.append("Part ID: 1234ABCD")
         if "s" in flags:
-            lines.append(f"Serial No: {self.serial}")
+            lines.append(f"Serial No: {self.reported_serial}")
         if set_squelch is not None:
             # Silent since fork fcadf34.
             self.state["squelch"] = set_squelch
