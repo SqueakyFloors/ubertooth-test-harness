@@ -122,7 +122,12 @@ that beside the figures.
 
 A **runnable** plan may only ask for a link a figure has been taken over:
 either no attenuation at all, or exactly one attenuation the bench has been
-measured at, today 20 dB and 40 dB (`weaklink.MEASURED_ATTENUATIONS_DB`). A test's
+measured at, today 20 dB and 40 dB (`weaklink.MEASURED_ATTENUATIONS_DB`).
+A figure can also be refused for a third reason: the bench has been taken to
+it and it settled nothing, which `weaklink.CHARACTERIZED_UNUSABLE_DB` records
+with why, so the refusal quotes the reason rather than calling the figure
+unmeasured to somebody about to fit an attenuator a previous session already
+tried. 50 dB is the one such point today. A test's
 floors were set over whatever link it last ran, so running it behind an
 uncharacterized attenuator would judge it against figures taken elsewhere. A
 bare `min_attenuation_db`, which only `rf:` can write, is refused there as
@@ -168,7 +173,17 @@ The points, and what each buys:
 | 20 dB | marginal but comfortable: the point most weak-link entries use | the range test's reply level, a DK advertiser capture, a targeted Classic follow, exact AFH map recovery |
 | 40 dB | 20 dB more attenuation, still with margin: the attenuated-device sweep read it about 14 dB below the 20 dB board from the Classic peer (`weaklink.py`) | a DK advertiser capture, Classic decode with the clock acquired, `-e 2` honored; AFH recovery starts losing edge channels |
 | 30 dB | asked for, uncharacterized | nothing yet: it is the point that would turn 20 against 40 into a curve (`weaklink.PLANNED_ATTENUATIONS_DB`) |
-| above 40 dB | where the regime can stop being marginal and start being absent | more attenuation is not automatically better, and a point can be characterized and still be unusable. `weaklink.py` holds what the bench has measured and what a runnable plan may ask for, per test and per role; read it rather than assuming a figure further down is available |
+| 50 dB | past the end of the useful range | measured and found unusable: 62 records across six windows with no clock recovered in any, so it removes packets instead of damaging them. It is in `weaklink.CHARACTERIZED_UNUSABLE_DB` rather than the measured list, and a plan that asks for it is refused with that reason |
+
+So more attenuation is not automatically better, and a point can be
+characterized and still be unusable. `weaklink.py` holds both lists —
+what the bench has measured, per test and per role, and what it has found
+unusable — and a runnable plan may only ask for the first; read it rather
+than assuming a figure further down the scale is available. The clearest
+case of that is the error flags of `Classic capture record fields`, which a
+weaker link looked like the way to earn and was not: the unattenuated board
+had the highest rate of HEC failures of four receivers, 20 dB failed none,
+and 50 dB recovered no clock at all.
 
 The limits of all of this are worth saying plainly. Only the attenuation is
 pinned, never the distance, because a placement requirement has no distance
@@ -2372,21 +2387,19 @@ encrypted, which this pair's are not — they pair with nobody. A capture of an
 encrypted piconet would decode neither, and `--no-payload-checks` is there for
 one; no catalog case uses it.
 
-**A weak link is what the HEC and CRC flags want.** This is the test whose
-flag-to-field agreements mean most over a marginal link, because on a clear
-bench the error flags largely do not fire and the agreement is then checked
-over records that all passed. Two separate things decide whether a weak-link
-entry here is worth running: whether a capture over that link puts damaged
-records in a file at all, and whether any case requires a flag to have fired
-— today's cases pass over a capture with no errors in it, so they measure the
-agreement rather than the detection. `weaklink.CHECKS` and the measurements
-recorded in this section are the live record of both. See "What attenuating a
-receiver is for" above for what the attenuation is and is not.
+**What a weak link is for here.** See "What attenuating a receiver is
+for" above: the flag-to-field agreements of this test are what a
+marginal link would exercise, and the measurements below are what the
+bench found when it was tried.
 
-**The payload checks do not fire on the bench's own traffic.** Measured over
+**The payload checks barely fire on the bench's own traffic.** Measured over
 four 25-second captures, no record carried a payload at all: `ubertooth-rx`
-kept re-seeding its CLK1-27 candidates and never entered follow mode, so it
-decoded headers but no payloads. So no case puts a floor on records with a
+kept re-seeding its CLK1-27 candidates and never entered follow mode. A
+larger sweep of 19 windows found a handful rather than none — 11
+payload-bearing records in all, between 0 and 4 per window — and corrected
+the explanation: 7 of the 11 came from windows that recovered no clock, so a
+payload-bearing record is not something follow mode is needed for. They are
+simply rare, 11 records in 2620. So no case puts a floor on records with a
 payload, and the payload length and CRC checks are there for the capture that
 does settle a clock — they are exercised deterministically by the unit tests
 and by replaying the synthetic fixture, where a DH1 payload's length field and
@@ -2401,6 +2414,37 @@ rejections are covered where they can be made deterministic: in the unit tests
 here, which build records field by field and check each failure is named, and
 in the forks' own tests, which drive libbtbb and the callbacks with crafted
 input.
+
+**The header flag fires; a failed CRC here is not yet a damaged packet.**
+This is the entry `testplans/weak-link.yaml` still holds back, and the sweep
+of 2026-11-04 gave it most of its answer — 19 windows of dense Serial Port
+Profile traffic, 12 interleaved across four receivers at 15 seconds and 7 in
+a repeat session at 15 and 25
+([#306](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/306)).
+A capture file over the weak link exists now, which is what this entry was
+first waiting on, and the header's HEC flag does fire: checks failed in 4 of
+the 19 windows, at 4.9% (26 of 534), 8.5% (4 of 47), and 0.2% (3 of 1395) in
+the three 40 dB windows that saw any, and at 3.6% (6 of 167) on the clear
+board.
+
+**Attenuation does not order that**, which is the part worth not
+re-learning: the unattenuated board had the highest rate of the four
+receivers, 20 dB failed none of 195 checks, and 50 dB none of 49. Pointing
+this test at a weaker link is not what would earn it, and 50 dB is unusable
+outright — 62 records across six windows, no clock recovered in any.
+
+The CRC half is the real blocker, and it is not a question of how often the
+flag fires. Every CRC check made in any window failed, 11 of 11, which reads
+as evidence until the records themselves are read: all 11 are DM1 carrying a
+**valid HEC** and a payload length field that decoded **exactly**, at every
+receiver including the unattenuated one, in windows with and without a
+recovered clock. A BR/EDR payload is dewhitened with the clock, so that is
+the signature of a payload decoded against a clock that never settled rather
+than of a packet damaged on the air — the same open question as the clock
+note above. A case that required the CRC flag to have fired would enshrine
+that artifact rather than test the link. What this check waits on is a
+capture whose CRC failures can be shown to come from the air, and a case that
+requires a flag to have fired rather than only that the fields agree.
 
 The survey case cannot assert whose records it reads. A survey is given no
 address, so it records every piconet in range, and the bench hears ambient

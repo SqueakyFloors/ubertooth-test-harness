@@ -1585,11 +1585,12 @@ Classic capture record fields:
     here asserts a clock: a BR/EDR record has no clock field and the two
     figures the tool prints are already masked into range. The survey case
     cannot assert whose records it reads. The flag rules assume the libbtbb
-    this harness pins. A weak link is what the error flags want, since a clear
-    bench checks the agreement over records that all passed; whether any case
-    requires a flag to have fired is a separate question, and today's do not.
-    weaklink.CHECKS and docs/tests.md are the live record of what each
-    attenuation measured here.
+    this harness pins. The error flags do fire, on a clear board as well as an
+    attenuated one, and attenuation does not order the rate: a weaker link is
+    not the way to earn a case for them, and 50 dB recovers no clock at all.
+    What is open is whether a failed CRC here comes from the air rather than
+    from a clock that never settled, and no case requires a flag to have
+    fired. weaklink.CHECKS and docs/tests.md carry the measurements.
   related:
     - ubertooth-test-harness#264
     - ubertooth-test-harness#168
