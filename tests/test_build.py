@@ -10,6 +10,7 @@ from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.build import (
     APPLICATION_IMAGE,
     BUILT_TOOLS,
+    FIRMWARE_IMAGES,
     BuildError,
     Builder,
     missing_tools,
@@ -38,11 +39,14 @@ LIBBTBB = SourceRevision(
 )
 
 
-def make_plan(work, platform="linux", with_firmware=False, include=None):
+def make_plan(work, platform="linux", with_firmware=False, include=None,
+              firmware_images=FIRMWARE_IMAGES):
+    # Both images unless a test says otherwise: which ones a real run builds
+    # is the run's own decision (cli.py), and these tests are about the build.
     return plan_build(
         ubertooth=UBERTOOTH, libbtbb=LIBBTBB, work_dir=Path(work),
         platform=platform, with_firmware=with_firmware,
-        extra_include_dir=include, jobs=4,
+        extra_include_dir=include, jobs=4, firmware_images=firmware_images,
     )
 
 

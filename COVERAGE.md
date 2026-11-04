@@ -366,7 +366,9 @@ release runs alongside the `release` plan) writes that image to the board,
 drives one console session against a registered ESP32 Classic peer, and
 writes `bluetooth_rxtx` back in its cleanup. Linux only, and the run must
 carry both images and the Python tools
-(`--build --with-firmware --with-python`).
+(`--build --with-firmware --with-python`; the test names the alternate image
+itself, so a run that selected it builds that image too, and `--with-btbr`
+asks for it outright).
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|

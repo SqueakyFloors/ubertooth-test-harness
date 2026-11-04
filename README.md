@@ -891,7 +891,8 @@ The other tests that need a peer device are not in the plan: run the `ble`,
 `connection`, `classic`, and `btbr` suites as well, wherever those devices
 are registered. The `btbr` suite is the only coverage of `ubertooth-btbr` and
 of the `btbr` firmware image, and it needs `--build --with-firmware
---with-python`. The `classic` suite repeats the gate's two AFH captures;
+--with-python` (the test names the alternate image itself, so that run builds
+it too; `--with-btbr` asks for it outright). The `classic` suite repeats the gate's two AFH captures;
 `classic-comprehensive` runs them with the third, `-t` detection case as
 well, so it is the one to run after the gate.
 
@@ -926,7 +927,7 @@ well, so it is the one to run after the gate.
 | `Capture known Classic device` | `classic` plan; an Ubertooth and two ESP32 Classic peers with the `acceptor` and `initiator` roles on one host (see [Classic test devices](#classic-test-devices-esp32-classic-peers)): both peers must already run `firmware/esp32-classic-peer`, which mandatory preflight checks by asking each one to identify itself; `esp32peer.py stream` then brings a Serial Port Profile link up between them, streams 200 bytes every 20 ms, and runs `ubertooth-rx` for `duration` while it holds. `ubertooth-rx -z` must list the piconet central's LAP in its survey results on stdout, with the heading on stderr, and a run with no target must report at least ten packet lines carrying that LAP; the central is whichever peer pages, so its LAP is the initiator's. Afterwards the pair must report a link that never went down and at least fifty writes, both peers are reset to the firmware's boot state, the Ubertooth's channel, squelch and LEDs are restored, and other registered boards are guarded | adds `-z -r` (PCAPNG with link type 255) and the same survey with the peers' roles swapped, which must list the other board's LAP and not the first one's |
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `Classic capture record fields` | `classic` plan; the same two peers and the same bring-up, but the check is inside the capture files: `bredrrecord.py` decodes every `LINKTYPE_BLUETOOTH_BREDR_BB` record of a `-l <central LAP> -u <central UAP> -q -r` capture, and each must carry the central's LAP and that LAP and UAP as its reference address, with every flag that describes a field in the record agreeing with that field, its access-code errors inside the limit the run allowed, and, where it holds a payload, that payload's length field agreeing with the bytes it holds and its CRC, recomputed with the reference UAP, agreeing with the one it carries (the bench's own traffic records no payload, so what fires live is the headers, addresses and flags), and the PCAPNG naming the central's LAP and UAP as the address it was following; the same with the peers' roles swapped must carry the other board's LAP instead | adds an EV3 audio link (`sco type ev3`, so the voice payload is on the air at the basic rate), whose records must include an `HV3/EV3/3-EV3` packet, and a survey, whose records must include one carrying a UAP the survey recovered for itself |
-| `Classic btbr console` | writes the selected board's firmware and transmits (`allow RF transmission: true`); `classic` plan, `btbr` suite, which a release runs alongside the release plan; an Ubertooth and one ESP32 Classic peer with the `acceptor` role on one host, and a run carrying both firmware images and the Python tools (`--build --with-firmware --with-python`). The run's `btbr` image is written and the board must report `btbr` and that revision by name (`bluetooth_rxtx` is a mismatch, and so is the revision alone), the peer is reset to its discoverable boot state and must report the device name its own address gives, and one `ubertooth-btbr` session then comes up — the startup the `btbr` image answers, and the prompt — and decides eleven checks down that prompt: `?` and `? inquiry`, a word that is no command, `?` on one, three addresses that are not ones and `page` with no address (each one `error:` line with the prompt up), `bdaddr` taking an address, an inquiry hearing the peer by BD_ADDR and by the name in its Extended Inquiry Response, a page reaching `LMP setup complete` with the peer's `LMP_NAME_RES` on the air, `idle` inside each of those two, an LMP request with no handler named once per opcode, and the capture on standard output with the progress on standard error. The cleanup always writes `bluetooth_rxtx` back, reads it, and resets the peer. The capture never leaves the driver: an inquiry hears every discoverable device in range, so only the records matched for the registered peer are reported and the rest are counted | adds paging an address nothing answers: `paging timeout` after the firmware's whole attempt, with no connection. `sessions: <n>` repeats the whole flash-and-session cycle (the `btbr-long` suite runs five) |
+| `Classic btbr console` | writes the selected board's firmware and transmits (`allow RF transmission: true`); `classic` plan, `btbr` suite, which a release runs alongside the release plan; an Ubertooth and one ESP32 Classic peer with the `acceptor` role on one host, and a run carrying both firmware images and the Python tools (`--build --with-firmware --with-python`; the test names the alternate image itself, and `--with-btbr` asks for it outright). The run's `btbr` image is written and the board must report `btbr` and that revision by name (`bluetooth_rxtx` is a mismatch, and so is the revision alone), the peer is reset to its discoverable boot state and must report the device name its own address gives, and one `ubertooth-btbr` session then comes up — the startup the `btbr` image answers, and the prompt — and decides eleven checks down that prompt: `?` and `? inquiry`, a word that is no command, `?` on one, three addresses that are not ones and `page` with no address (each one `error:` line with the prompt up), `bdaddr` taking an address, an inquiry hearing the peer by BD_ADDR and by the name in its Extended Inquiry Response, a page reaching `LMP setup complete` with the peer's `LMP_NAME_RES` on the air, `idle` inside each of those two, an LMP request with no handler named once per opcode, and the capture on standard output with the progress on standard error. The cleanup always writes `bluetooth_rxtx` back, reads it, and resets the peer. The capture never leaves the driver: an inquiry hears every discoverable device in range, so only the records matched for the registered peer are reported and the rest are counted | adds paging an address nothing answers: `paging timeout` after the firmware's whole attempt, with no connection. `sessions: <n>` repeats the whole flash-and-session cycle (the `btbr-long` suite runs five) |
 | `Recover AFH map` | `release` plan (smoke, `required hardware: true`) and `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
 | `Bluetooth inquiry scan` | `hci` plan, measured on a bench with a USB adapter: an Ubertooth, a `Bluetooth adapter`, and the two ESP32 Classic peers on one host. The adapter is read with `hciconfig` (up, and at the registered address: `hciN` is attach order) and `hcitool con` (no link at all), before the tool and first thing in the cleanup. `esp32peer.py stream` then holds the pair's link while `ubertooth-scan -b <device> -t <duration>` runs. `-s` must make the adapter's inquiry report both peers at their registered addresses and one of them under the name the peer firmware derives from its LAP -- one, because a name is read over a page and a run showed one land on the wrong line ([fork #1172](https://github.com/SqueakyFloors/ubertooth/issues/1172)); without `-s` the Ubertooth's sweep must report the piconet by the central's LAP with the `AFH map:` line that follows each result. `-t` bounds the sweep only -- the tool arms that alarm after the inquiry -- so the deadline allows for a whole inquiry and a name page per device | the same two cases. `-s -x` is deliberately not exercised: the bench measured that `-x` reaches each device over a connection it makes, and the acceptor is in the pair's link throughout, so it wants a third idle Classic device ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)) |
 | `Follow Classic piconet over HCI` | `hci` plan, measured on the same bench: `ubertooth-follow -t <central address> -b <device>` pages the piconet's leader from the adapter, reads its clock offset, and follows it; at least ten packet lines, all with the central's LAP (a 25 s capture measured 248 and 368 of them). `-a` must report that the remote is not using AFH and follow without it, with no failed map read: the peer runs the paged link with AFH off, so the branch that reads a map is not exercised. The tool has no capture timeout (its `-t` is the target address), so the driver interrupts it, and the window it is given is the `duration` plus an allowance for everything the tool does before its capture starts: the page (25 s), the two clock reads, dropping the link it made again (10 s), and opening and setting up the board. The `duration` is therefore a floor on the capture, and a case costs about three times it -- measured at 83 s of command for a 25 s duration. `-l`/`-u` without `-t` is deliberately not exercised | adds `-q`, whose file must be a BR/EDR PCAP holding at least ten packets. The records are not decoded: the bench measured 258 of them carrying the central's LAP, none passing a header HEC and 35 carrying `transport 3`, which is [fork #518](https://github.com/SqueakyFloors/ubertooth/issues/518)'s business |
@@ -1238,8 +1239,8 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
   --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
-  --build [--no-flash-build] [--with-firmware] [--with-python[=PYTHON]] \
-  [--bootloader record|check|update] \
+  --build [--no-flash-build] [--with-firmware] [--with-btbr] \
+  [--with-python[=PYTHON]] [--bootloader record|check|update] \
   --output runs
 ```
 
@@ -1310,14 +1311,21 @@ its packages are used). The installed `ubertooth-specan-ui` and
 `ubertooth-btbr` must name that interpreter on their first line, and the
 manifest records its path and version. specan-ui itself needs numpy, qtpy, and
 a Qt binding (PyQt5/6 or PySide2/6) in that interpreter. `--with-firmware`
-also builds two firmware images with the built `ubertooth-dfu`:
-`bluetooth_rxtx.dfu`, the application image every other test needs on its
-board, and `btbr.dfu`, the alternate image `ubertooth-btbr` needs and nothing
-else runs. Both are hashed into the manifest, as the artifacts `test build`
-and `btbr build`, so `Classic btbr console` writes the alternate image and
-puts the application image back from the same commit (a run that flashes its
-boards builds them even without the option). The built `ubertooth-util -V` must report both resolved
-revisions on its `Host tools version:` line, without a modified-source `*`.
+also builds `bluetooth_rxtx.dfu` with the built `ubertooth-dfu`, the
+application image every other test needs on its board, and hashes it into the
+manifest as the artifact `test build` (a run that flashes its boards builds it
+even without the option). `--with-btbr` adds `btbr.dfu`, the alternate image
+`ubertooth-btbr` needs and nothing else runs, as the artifact `btbr build`,
+and asks for the firmware build itself. It is its own option because a run can
+carry one image without the other: `Classic btbr console` writes the alternate
+image and puts the application image back from the same commit, so it needs
+both, and it says so in the catalog, which is how a run that selected it gets
+the alternate image without `--with-btbr` being given
+([#279](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/279)).
+A suite that never runs it builds the application image alone, so nothing
+waits for an image it does not flash. The built `ubertooth-util -V` must report
+both resolved revisions on its `Host tools version:` line, without a
+modified-source `*`.
 
 The manifest records the toolchain (CMake, C compiler, pkg-config, libusb,
 BlueZ on Linux, the ARM compiler when building firmware, and the Python with
@@ -2752,10 +2760,11 @@ the boards with that build first (`flash_build`; false passes
 `--no-flash-build`, see [Flashing the boards with the run's
 build](#flashing-the-boards-with-the-runs-build)) and whether that build also
 builds and records the firmware image (`with_firmware`, which passes
-`--with-firmware`) or the Python tools (`with_python`, which passes
-`--with-python`). `run-suite` takes neither of those two without `--build`,
+`--with-firmware`), the alternate btbr image (`with_btbr`, which passes
+`--with-btbr`), or the Python tools (`with_python`, which passes
+`--with-python`). `run-suite` takes none of those three without `--build`,
 so a request that asks for one without `build` is refused rather than sent.
-Both are booleans: `with_python` always builds against `python3` on the
+All three are booleans: `with_python` always builds against `python3` on the
 target's PATH, since the request has no way to name another interpreter the
 way `--with-python=PYTHON` does on the command line.
 A run that needs an image a build cannot produce (the published KGV image of
@@ -2797,10 +2806,11 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 6` and a `type` (version 2 added
+Messages are JSON objects with `"version": 7` and a `type` (version 2 added
 the run's `commit`, version 3 its `flash_build`, version 4 the `run_file`
 request and its answers, version 5 the run's `with_firmware` and
-`with_python`, and version 6 its `bootloader`; a runner or controller of
+`with_python`, version 6 its `bootloader`, version 7 its `with_btbr`; a
+runner or controller of
 another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
 extra field, a wrong value, or a combination the receiver could not act on,
@@ -2914,24 +2924,30 @@ word and symbol (colour only reinforces it).
   `backlog` are named as not runnable), target, whether to build the ref first,
   "Flash the firmware to the boards first" (ticked by default; disabled,
   with a note, while Build is unticked; see [Flashing the boards with the
-  run's build](#flashing-the-boards-with-the-runs-build)), and the two
-  further build options, "Build the firmware image too" (`--with-firmware`)
-  and "Build the Python tools too" (`--with-python`); Run starts the whole suite.
-  Each of those two carries a note saying what it costs and follows what the
+  run's build](#flashing-the-boards-with-the-runs-build)), and the three
+  further build options, "Build the firmware image too" (`--with-firmware`),
+  "Build the alternate btbr image too" (`--with-btbr`) and "Build the Python
+  tools too" (`--with-python`); Run starts the whole suite.
+  Each of those three carries a note saying what it costs and follows what the
   chosen suite needs. A suite with a test that cannot run without the option
   (`DFU images`, and `Flash reliability` where its plan entry's `image
-  sequence:` names the run's own image) has it ticked and held there. A suite that would only leave cases out without it
+  sequence:` names the run's own image; `Classic btbr console` for all three)
+  has it ticked and held there. A suite that would only leave cases out without it
   (`DFU image checks` without the image, `Python tools` without the Python
   build) is named in the note, which invites the tick but does not tick it:
   a build nobody asked for costs time, and the firmware build needs
   arm-none-eabi-gcc, which a target may not have. Otherwise the box is yours
-  to set, and keeps what you set. Both need Build, and are disabled with a
+  to set, and keeps what you set. All three need Build, and are disabled with a
   note while Build is unticked. `/api/plans` is where those needs come from:
-  every test and suite carries `needs_firmware_build` and
+  every test and suite carries `needs_firmware_build`, `needs_btbr_build` and
   `needs_python_tools` (cases left out without it) and
-  `requires_firmware_build` and `requires_python_tools` (the test cannot run
+  `requires_firmware_build`, `requires_btbr_build` and
+  `requires_python_tools` (the test cannot run
   without it), from what the catalog declares and, for a test whose plan
-  entry names its images, from that entry. A suite that also needs an image
+  entry names its images, from that entry. The alternate btbr image is one of
+  them in its own right: a firmware build makes the application image, so a
+  run carrying that one alone would otherwise look able to run the btbr test
+  ([#279](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/279)). A suite that also needs an image
   no build makes (`Flash reliability`'s published KGV image) says so under
   the suite list, with the `--artifact` line to run it with, because a run
   started from the GUI cannot carry one and would be refused before its
@@ -3103,7 +3119,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
 | `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all) and `needs_artifacts` (image labels the step names that no build produces, so only `run-suite --artifact` can pass them), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` also decides which steps the suite's own fields count: a step whose `hosts:` names other hosts is compiled for those hosts and not for this target, and, when that target has registered, a step its `platform` could not run (the response names the platform too) is left out as the planner leaves it out. Each test therefore carries `runs_on_target` (and `omitted_reason` when false), and the suite total, `unestimated_tests`, `per_board_tests`, the four build-option flags and `needs_artifacts` cover only the steps that target runs. The steps left out are listed in `omitted_tests` (`name`, `reason`, `estimated_s`) with their time together in `omitted_estimated_s` when every one of them has an estimate, so a smaller total is accounted for; a suite with no step for the target has a null total. An omitted step that names exactly one host is timed on that host, so its whole estimate group in `tests[]` (`estimated_s`, `estimate_source`, `estimate_samples`, `estimate_scaled`) is what that host learned rather than the target's; one that names several, or none, carries the catalog estimate. Hardware this bench has not got is not answered here: the controller has no copy of the target's resource registry, so those steps are counted and the run itself reports them. A suite a run on that target could not measure also carries `runnable_on_target: false` with `not_runnable_reason` (the one sentence `POST .../runs` refuses with) and `blocked_tests`: the required steps such a run would not run, each with `name`, the `hosts` it is required on, the `hardware` it binds there, and the `reason` it is not run here. Without a `target` nothing is left out, nothing is refused, and the fields are the whole suite's, whichever host runs a part of it. A `target` whose name is not a host name is refused with 422; a name no target has registered is answered with whatever has been learned under it, which is normally nothing, with no platform, and with every step its `hosts:` names it |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, `platform` (the registry platform its OS is, `linux` or `macos`, else null), Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
-| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware` and `with_python` add `--with-firmware` and `--with-python` to the run's build, and either one without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer. A run the plan says this target could not measure is refused with 422 before the ref is resolved: a suite no step of which runs there, and a step whose own hardware is what it measures (`required hardware:`) whose `hosts:` names no host of the run (see [Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)); the detail names the step, where it is required and the hardware it needs there. The order is the request's own faults before the target's state: an unknown target (404), then a suite this run could not measure (422), then the ref and the build options (422), then a target that is offline or busy (409) — a refusal the suite earns does not go away when the target comes back, so it is the more useful answer. Hardware the bench has not got is the run's to report, not this check's. |
+| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_btbr": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware`, `with_btbr` and `with_python` add `--with-firmware`, `--with-btbr` and `--with-python` to the run's build, and any of them without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer. A run the plan says this target could not measure is refused with 422 before the ref is resolved: a suite no step of which runs there, and a step whose own hardware is what it measures (`required hardware:`) whose `hosts:` names no host of the run (see [Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)); the detail names the step, where it is required and the hardware it needs there. The order is the request's own faults before the target's state: an unknown target (404), then a suite this run could not measure (422), then the ref and the build options (422), then a target that is offline or busy (409) — a refusal the suite earns does not go away when the target comes back, so it is the more useful answer. Hardware the bench has not got is the run's to report, not this check's. |
 | `POST /api/run-groups` | start a [run group](#run-groups-one-plan-on-several-hosts): the same body as a run plus `{"hosts": ["Host_Linux", "Host_Mac"]}` (at least one, each named once, at most 16). 201 with the group, each member carrying its `run_id` or the `error` that host's start gave; 422 for an unusable request, a ref not in `/api/refs`, an option that needs `build` without it, or a suite the group's hosts together could not measure (the same check as a single run, judged over every host it names, so a release plan across the bench measures a host-named gate once, and answered before the hosts are asked, so a group whose hosts are all unknown or offline is told about the suite rather than about them); when no host started, the one status every host gave (404 an unknown target, 409 busy, 503 a runner away, 504 no answer in time) or 409 where they differ |
 | `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |
 | `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, stage estimates and planned invocations (at most 600 of them, since this answer carries one list per host; the whole list stays at `GET /api/runs/{run_id}`), `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one, which a run that flashes its boards has not got: flashing the run's build is not a learned stage) |
@@ -3115,7 +3131,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID\|?group_id=ID]` | browser stream: a `snapshot`, then `target`, `run` and `group` updates. With `run_id`, that one run's `event` records too (and its group in the snapshot); with `group_id`, every member run's updates and `event` records, one stream for the whole group. Name one or the other, not both. A `group` update carries `"removed": true` when that group is forgotten (it started no run and no request can still be accepted), so a page does not keep a group the history no longer lists. A browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot); a group stream carries every member's traffic, so it reaches that mark sooner than one run's does |
-| `WS /ws/runner` | target runner protocol v6 |
+| `WS /ws/runner` | target runner protocol v7 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
 `localhost:PORT` and, if it has an `Origin`, that same origin (runner
@@ -3154,7 +3170,10 @@ from its own `build_started` record when that record names it, and otherwise
 from what the run asked for: the image (or flashing its boards with it), and
 the Python tools. The two profiles without the Python tools are named as they
 always were, so the samples already learned stay where they are and the two
-new profiles fill from the runs that follow.
+new profiles fill from the runs that follow. The alternate btbr image is a
+second firmware image and is not a profile of its own: a run that builds it
+is learned as a firmware build like any other, which widens that key's spread
+by one image's worth of compiling rather than mis-keying it.
 For a test the profile is its coverage profile and the value of the argument
 the duration scales with (`duration`, `capture duration`,
 `flashes`, or preflight's number of checks), so a 5 s capture and a 30 s
@@ -3192,7 +3211,7 @@ manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
 without a valid message, and runs cannot be started on it: only a message that
-decodes as protocol v6 resets the offline timer, and malformed messages do
+decodes as protocol v7 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
@@ -3299,7 +3318,8 @@ The runner protocol has no version negotiation: the controller and runner
 must speak the same version: protocol v2 (which added the listed commit to
 `run`), v3 (which added `flash_build`), v4 (which added the `run_file`
 request and its answers), v5 (which added the run's `with_firmware` and
-`with_python`) and v6 (which added its `bootloader`) are each a hard break
+`with_python`), v6 (which added its `bootloader`) and v7 (which added its
+`with_btbr`) are each a hard break
 from the version before. An older runner is refused at `register` (the
 controller closes the connection, code 1008), and since it did register it
 reconnects after the shortest backoff (0.5 s) and is refused again,

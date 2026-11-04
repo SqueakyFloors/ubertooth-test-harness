@@ -39,6 +39,8 @@ from tests.test_cli import make_source
 
 SERIAL_A = "aaaa0000aaaa0000aaaa0000aaaa0000"
 SERIAL_B = "bbbb1111bbbb1111bbbb1111bbbb1111"
+# The CP2102N bridge of the ESP32 Classic peer the btbr plan binds.
+PEER_SERIAL = "cccc2222cccc2222cccc2222cccc2222"
 OLD = "git-a8e65d9"
 
 
@@ -386,13 +388,27 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.source, short = make_source(self.root)
         self.revision = f"git-{short}"
         self.platform = "macos" if sys.platform == "darwin" else "linux"
-        self.hardware = self.root / "hardware.yaml"
-        self.hardware.write_text(f"""resources:
+        self.hardware = self.write_hardware("hardware.yaml", self.platform)
+        self.lease_dir = self.root / "leases"
+        self.output = self.root / "runs"
+        self.builds = []
+        self.built_images = []
+
+    def write_hardware(self, name, platform):
+        """The fixture registry, for a host of this platform.
+
+        `Classic btbr console` runs only on Linux, so the two tests about
+        which images its plan builds name a Linux host whatever this machine
+        is. Nothing in those runs reaches a real tool: the build is faked and
+        the cases never run.
+        """
+        path = self.root / name
+        path.write_text(f"""resources:
   Host_Local:
     type: Host
-    platform: {self.platform}
+    platform: {platform}
     roles: [test target]
-    defaults: {{Ubertooth: UT_0}}
+    defaults: {{Ubertooth: UT_0, acceptor: ESP32_0}}
   UT_0:
     type: Ubertooth
     attached to: Host_Local
@@ -401,14 +417,33 @@ class RunSuiteFlashTests(unittest.TestCase):
     type: Ubertooth
     attached to: Host_Local
     identity: {{serial: {SERIAL_B}}}
+  ESP32_0:
+    type: ESP32 Classic peer
+    attached to: Host_Local
+    roles: [acceptor, initiator]
+    identity: {{bridge serial: "{PEER_SERIAL}", BD_ADDR: "C8:00:00:00:00:01"}}
 """)
-        self.lease_dir = self.root / "leases"
-        self.output = self.root / "runs"
-        self.builds = []
-        self.built_images = []
+        return path
 
     def tearDown(self):
         self.directory.cleanup()
+
+    def btbr_plan(self):
+        """A plan whose one test declares that it needs the alternate image.
+
+        Which images the run then builds is the derivation #279 added: the
+        catalog says this test needs the btbr image, so a firmware build
+        makes it without the operator naming it.
+        """
+        path = self.root / "btbr-plan.yaml"
+        path.write_text(
+            "plan: p\nsuites:\n  fast:\n    - Classic btbr console:\n"
+            "        hosts: each\n        Ubertooth: default\n"
+            "        acceptor: default\n"
+            "        allow RF transmission: true\n"
+            "        coverage: smoke\n"
+        )
+        return path
 
     def plan(self, ubertooth="default"):
         path = self.root / "plan.yaml"
@@ -437,9 +472,12 @@ class RunSuiteFlashTests(unittest.TestCase):
         publisher.emit("build_finished", "passed", {"reason": ""})
         return BuildResult(plan, {}, f"libubertooth 1.1 ({self.revision})", ())
 
-    def run_suite(self, executor, *extra, plan=None, missing=()):
+    def run_suite(self, executor, *extra, plan=None, missing=(), hardware=None,
+                  platform=None):
         stderr = io.StringIO()
         with (
+            patch("ubertooth_harness.cli._detected_platform",
+                  return_value=platform or self.platform),
             patch("ubertooth_harness.cli.SubprocessCommandExecutor", return_value=executor),
             patch("ubertooth_harness.cli._build", side_effect=self.fake_build),
             patch("ubertooth_harness.cli.missing_tools", return_value=list(missing)),
@@ -448,7 +486,7 @@ class RunSuiteFlashTests(unittest.TestCase):
         ):
             code = main([
                 "run-suite", "--plan", str(plan or self.plan()), "--suite", "fast",
-                "--hardware", str(self.hardware), "--host", "Host_Local",
+                "--hardware", str(hardware or self.hardware), "--host", "Host_Local",
                 "--ubertooth-source", str(self.source), "--ubertooth-ref", "HEAD",
                 "--libbtbb-source", str(self.source), "--libbtbb-ref", "HEAD",
                 "--build", "--lease-dir", str(self.lease_dir),
@@ -485,20 +523,91 @@ class RunSuiteFlashTests(unittest.TestCase):
         types = [e["event_type"] for e in self.events()]
         self.assertLess(types.index("build_finished"), types.index("build_flash_started"))
         # Only the image it writes. The alternate `btbr` image is built when a
-        # run asks for --with-firmware, so a plan that never runs it does not
-        # fail because that image did not build.
+        # run asks for it (--with-btbr) or runs a test that needs it, so a
+        # plan that never runs it does not fail because it did not build.
         self.assertEqual([(APPLICATION_IMAGE,)], self.built_images)
         self.assertNotIn(BTBR_BUILD_ARTIFACT, self.artifact_names())
 
-    def test_with_firmware_builds_and_records_both_images(self):
+    def test_with_firmware_alone_builds_the_application_image_only(self):
+        # The firmware build is the application image: this plan runs no test
+        # that needs the alternate one, so nothing waits for it to build and
+        # the run does not fail because it did not (#279).
         executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD},
                               lease_dir=self.lease_dir)
         self.assertEqual(0, self.run_suite(executor, "--with-firmware"),
                          self.stderr)
+        self.assertEqual([(APPLICATION_IMAGE,)], self.built_images)
+        names = self.artifact_names()
+        self.assertIn(TEST_BUILD_ARTIFACT, names)
+        self.assertNotIn(BTBR_BUILD_ARTIFACT, names)
+
+    def test_with_btbr_builds_and_records_both_images(self):
+        executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD},
+                              lease_dir=self.lease_dir)
+        self.assertEqual(0, self.run_suite(executor, "--with-btbr"), self.stderr)
         self.assertEqual([FIRMWARE_IMAGES], self.built_images)
         names = self.artifact_names()
         self.assertIn(TEST_BUILD_ARTIFACT, names)
         self.assertIn(BTBR_BUILD_ARTIFACT, names)
+
+    def test_a_selected_test_that_needs_the_alternate_image_gets_it(self):
+        # The derivation #279 added, end to end: nobody names the second
+        # image, the catalog says this test needs it, and the firmware build
+        # makes it. The test itself needs Linux and a peer, so its cases may
+        # be left out here; what this checks is which images were built.
+        executor = FakeBoards(self.revision, {SERIAL_A: self.revision,
+                                              SERIAL_B: self.revision},
+                              lease_dir=self.lease_dir)
+        self.run_suite(executor, "--with-firmware", plan=self.btbr_plan(),
+                       hardware=self.write_hardware("linux.yaml", "linux"),
+                       platform="linux")
+        self.assertEqual([True], self.builds)
+        self.assertEqual([FIRMWARE_IMAGES], self.built_images)
+
+    def test_a_selected_test_does_not_turn_the_firmware_build_on(self):
+        # The same plan with no firmware option: the second image is only
+        # ever added to a firmware build that is already happening, because
+        # turning that build on needs arm-none-eabi-gcc and would make a run
+        # that passed with the case left out start failing for a toolchain
+        # nobody asked it to use. Without the guard in cli.py this names the
+        # btbr image while nothing is built at all.
+        executor = FakeBoards(self.revision, {SERIAL_A: self.revision,
+                                              SERIAL_B: self.revision},
+                              lease_dir=self.lease_dir)
+        self.run_suite(executor, "--no-flash-build", plan=self.btbr_plan(),
+                       hardware=self.write_hardware("linux.yaml", "linux"),
+                       platform="linux")
+        self.assertEqual([False], self.builds)
+        self.assertEqual([(APPLICATION_IMAGE,)], self.built_images)
+
+    def test_a_run_that_builds_no_firmware_names_no_alternate_image(self):
+        # --build --no-flash-build and no build option: no firmware is built
+        # at all, so the images the plan would make must not claim the
+        # alternate one. A selected test that needs it does not turn the
+        # firmware build on by itself, because that needs a toolchain the
+        # host may not have; without it the case is left out as not
+        # applicable, which is what it was before (#279).
+        executor = FakeBoards(self.revision, {SERIAL_A: self.revision,
+                                              SERIAL_B: self.revision},
+                              lease_dir=self.lease_dir)
+        self.assertEqual(0, self.run_suite(executor, "--no-flash-build"),
+                         self.stderr)
+        self.assertEqual([False], self.builds)
+        self.assertEqual([(APPLICATION_IMAGE,)], self.built_images)
+        self.assertNotIn(BTBR_BUILD_ARTIFACT, self.artifact_names())
+
+    def test_with_btbr_without_build_is_refused(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+            code = main([
+                "run-suite", "--plan", str(self.plan()), "--suite", "fast",
+                "--hardware", str(self.hardware), "--host", "Host_Local",
+                "--ubertooth-source", str(self.source), "--ubertooth-ref", "HEAD",
+                "--lease-dir", str(self.lease_dir),
+                "--output", str(self.output), "--with-btbr",
+            ])
+        self.assertEqual(2, code)
+        self.assertIn("--with-btbr requires --build", stderr.getvalue())
 
     def test_the_flash_finishes_before_the_manifest_and_preflight(self):
         executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD}, lease_dir=self.lease_dir)

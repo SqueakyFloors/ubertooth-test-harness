@@ -586,9 +586,11 @@ not flashed either.
 
 One tool, `ubertooth-btbr`, needs a different firmware image, and nothing else
 runs it: a board is set up for that image or for every other tool, and
-switching means reflashing it. A `--build --with-firmware` run therefore builds
-both images from the same commit and records both in its manifest, as
-`test build` (the application image) and `btbr build`. `Classic btbr console`
+switching means reflashing it. A firmware build makes the application image;
+`--with-btbr` adds the alternate one, and a run whose selected tests say they
+need it gets it without being asked. Such a run builds both images from the
+same commit and records both in its manifest, as `test build` (the application
+image) and `btbr build`. `Classic btbr console`
 is the only test that writes the alternate one; it writes the application image
 back in its cleanup, which runs after a failure or a cancellation too.
 

@@ -7,18 +7,23 @@
 (function () {
   const LOG_LINES = 200;
   const LOG_LINE_CHARS = 500;
-  // The two build options beyond Build itself: the run's firmware image and
-  // the Python tools. `need` and `require` are the flags /api/plans sets on
-  // a test that leaves cases out without the option, and on one that cannot
-  // run without it at all. `cost` is the page's own note for the option,
-  // read once at start and kept as the first sentence of the note; `chosen`
-  // is the operator's own tick, which a suite's need never sets.
+  // The three build options beyond Build itself: the run's firmware image,
+  // the alternate btbr image, and the Python tools. `need` and `require` are
+  // the flags /api/plans sets on a test that leaves cases out without the
+  // option, and on one that cannot run without it at all. `cost` is the
+  // page's own note for the option, read once at start and kept as the first
+  // sentence of the note; `chosen` is the operator's own tick, which a
+  // suite's need never sets.
   const BUILD_OPTIONS = [
     {
       id: "with-firmware", what: "the run's firmware image",
       need: "needs_firmware_build", require: "requires_firmware_build",
       // run-suite builds this anyway when the run flashes a board.
       builtByFlash: true,
+    },
+    {
+      id: "with-btbr", what: "the alternate btbr image",
+      need: "needs_btbr_build", require: "requires_btbr_build",
     },
     {
       id: "with-python", what: "the Python tools build",
@@ -460,10 +465,11 @@
       suite: $("suite").value,
       tests: [],
       build: $("build").checked,
-      // Flashing and the two extra build options apply only to a run that
-      // builds; the controller refuses either extra without Build.
+      // Flashing and the three extra build options apply only to a run that
+      // builds; the controller refuses any extra without Build.
       flash_build: $("build").checked && $("flash-build").checked,
       with_firmware: $("build").checked && $("with-firmware").checked,
+      with_btbr: $("build").checked && $("with-btbr").checked,
       with_python: $("build").checked && $("with-python").checked,
       // Check and Update compare the board against a bootloader built from
       // the ref, which run-suite refuses without a build; the controller
@@ -1277,7 +1283,7 @@
       .map((test) => test.name);
   }
 
-  // Flash and the two build options need Build: each is disabled, with a
+  // Flash and the three build options need Build: each is disabled, with a
   // note, while Build is unticked. Then, for each build option and the
   // chosen suite:
   //

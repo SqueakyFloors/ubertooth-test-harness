@@ -195,7 +195,7 @@ def _label(value) -> str:
 # no state machine has to be kept in step with them.
 _GROUP_FIELDS = (
     "group_id", "hosts", "ref", "commit", "plan", "suite", "tests", "build",
-    "flash_build", "with_firmware", "with_python", "created_at",
+    "flash_build", "with_firmware", "with_btbr", "with_python", "created_at",
     "dispatched_at", "members", "cancel_requested", "cancel_reason",
 )
 
@@ -214,6 +214,7 @@ class RunGroup:
     build: bool = False
     flash_build: bool = False
     with_firmware: bool = False
+    with_btbr: bool = False
     with_python: bool = False
     created_at: str = dataclasses.field(default_factory=_now)
     # When the last start request had been answered (or had failed).
@@ -297,7 +298,8 @@ def group_from_record(data: Mapping) -> RunGroup:
         if not isinstance(getattr(group, name), (str, type(None))):
             raise ValueError(f"{name} must be a string or null")
     for name in (
-        "build", "flash_build", "with_firmware", "with_python", "cancel_requested"
+        "build", "flash_build", "with_firmware", "with_btbr", "with_python",
+        "cancel_requested",
     ):
         if not isinstance(getattr(group, name), bool):
             raise ValueError(f"{name} must be true or false")
@@ -326,6 +328,7 @@ def new_group(hosts: Sequence[str], fields: Mapping) -> RunGroup:
         build=bool(fields.get("build")),
         flash_build=bool(fields.get("flash_build")),
         with_firmware=bool(fields.get("with_firmware")),
+        with_btbr=bool(fields.get("with_btbr")),
         with_python=bool(fields.get("with_python")),
         members=[{"host": host, "run_id": None, "error": None} for host in hosts],
     )
@@ -351,6 +354,7 @@ def implicit_group(run: Mapping) -> RunGroup:
         build=bool(run.get("build")),
         flash_build=bool(run.get("flash_build")),
         with_firmware=bool(run.get("with_firmware")),
+        with_btbr=bool(run.get("with_btbr")),
         with_python=bool(run.get("with_python")),
         created_at=run.get("created_at") or _now(),
         dispatched_at=run.get("created_at"),

@@ -4,8 +4,17 @@ from pathlib import Path
 
 from types import MappingProxyType
 
+from types import SimpleNamespace
+
+from ubertooth_harness.build import APPLICATION_IMAGE, FIRMWARE_IMAGES
 from ubertooth_harness.catalog import CatalogError, TestDefinition, builtin_catalog
-from ubertooth_harness.hostneeds import NO_NEEDS, TEST_BUILD_LABEL, Needs
+from ubertooth_harness.cli import _firmware_images, _tests_need_btbr
+from ubertooth_harness.hostneeds import (
+    BTBR_BUILD_LABEL,
+    NO_NEEDS,
+    TEST_BUILD_LABEL,
+    Needs,
+)
 from ubertooth_harness.planner import PlanCompiler, PlanningError
 from ubertooth_harness.plan import PlanError, load_plan
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
@@ -251,6 +260,41 @@ class BuildNeedsTests(unittest.TestCase):
             {"Classic btbr console"},
             {name for name, need in required.items() if need.python_tools},
         )
+        # The alternate btbr image is carried in its own right, so a client
+        # with no registry can ask for it: it is not read off the firmware
+        # build, which makes the application image (#279).
+        self.assertEqual(
+            {"Classic btbr console"},
+            {name for name, need in needed.items() if need.btbr_build},
+        )
+        self.assertEqual(
+            {"Classic btbr console"},
+            {name for name, need in required.items() if need.btbr_build},
+        )
+
+    def test_a_declared_btbr_image_is_carried_through_both_methods(self):
+        for field in ("build_needs", "build_required"):
+            with self.subTest(field=field):
+                definition = TestDefinition(
+                    "Elsewhere", "", MappingProxyType({}), MappingProxyType({}),
+                    **{field: Needs(btbr_build=True)},
+                )
+                self.assertTrue(definition.build_options().btbr_build)
+                self.assertEqual(
+                    field == "build_required",
+                    definition.required_build_options().btbr_build,
+                )
+                # Naming the alternate image never claims the application one.
+                self.assertFalse(definition.build_options().firmware_build)
+
+    def test_the_build_option_refusal_names_every_build_field(self):
+        with self.assertRaisesRegex(
+            ValueError, r"python_tools, firmware_build, btbr_build"
+        ):
+            TestDefinition(
+                "Elsewhere", "", MappingProxyType({}), MappingProxyType({}),
+                build_needs=Needs(platforms=("linux",)),
+            )
 
     def test_the_images_a_step_names_come_from_the_plan_entry(self):
         # Flash reliability flashes the images its plan entry lists, so what
@@ -327,10 +371,18 @@ class BuildNeedsTests(unittest.TestCase):
                         # A case that names the run's image among its
                         # artifacts without declaring it as a need is refused
                         # without one, so its test cannot run without it.
+                        if needs.btbr_build and not declared.btbr_build:
+                            undeclared.append(f"{where}: build_needs btbr image")
                         if (TEST_BUILD_LABEL in artifacts and not needs.firmware_build
                                 and not required.firmware_build):
                             undeclared.append(
                                 f"{where}: build_required firmware build")
+                        # The same for the alternate image: a case that
+                        # flashes it is refused without it, not left out.
+                        if (BTBR_BUILD_LABEL in artifacts and not needs.btbr_build
+                                and not required.btbr_build):
+                            undeclared.append(
+                                f"{where}: build_required btbr image")
         self.assertEqual(
             [], sorted(set(undeclared)),
             "declare these on the test as build_needs or build_required; "
@@ -839,3 +891,35 @@ suites:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirmwareImageChoiceTests(unittest.TestCase):
+    """Which firmware images a run builds, from what its tests declare (#279).
+
+    The run's option is explicit (``--with-btbr``), and a run that selected
+    the test which needs the alternate image gets it without the operator
+    having to know which test that is.
+    """
+
+    def invocation(self, test_name):
+        return SimpleNamespace(test_name=test_name)
+
+    def test_only_a_test_that_declares_the_image_asks_for_it(self):
+        catalog = builtin_catalog()
+        self.assertTrue(_tests_need_btbr(
+            catalog, [self.invocation("Classic btbr console")]
+        ))
+        self.assertTrue(_tests_need_btbr(catalog, [
+            self.invocation("Host version"),
+            self.invocation("Classic btbr console"),
+        ]))
+        for name in ("Host version", "DFU images", "Python tools"):
+            with self.subTest(name):
+                self.assertFalse(
+                    _tests_need_btbr(catalog, [self.invocation(name)])
+                )
+        self.assertFalse(_tests_need_btbr(catalog, []))
+
+    def test_the_images_a_firmware_build_makes(self):
+        self.assertEqual((APPLICATION_IMAGE,), _firmware_images(with_btbr=False))
+        self.assertEqual(FIRMWARE_IMAGES, _firmware_images(with_btbr=True))
