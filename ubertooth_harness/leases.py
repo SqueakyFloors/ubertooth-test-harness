@@ -1738,14 +1738,14 @@ def _recorded_holder(holder: Mapping) -> dict:
     a plain value is written as text.
     """
     record = {}
-    for field in _RECORDED_HOLDER_FIELDS:
-        if field not in holder:
+    for name in _RECORDED_HOLDER_FIELDS:
+        if name not in holder:
             continue
-        value = holder[field]
+        value = holder[name]
         # A number in such a file can be as long as the file: one that reads
         # like a number is carried as itself, a longer one as its text.
         plain = value is None or _plain_number(value)
-        record[field] = (
+        record[name] = (
             value if plain and len(str(value)) <= _RECORDED_HOLDER_CHARS
             else _printable(value, _RECORDED_HOLDER_CHARS)
         )
