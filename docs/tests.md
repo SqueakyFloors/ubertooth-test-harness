@@ -18,6 +18,13 @@ option, and tells you which option still has no test;
 [`hardware.md`](hardware.md) describes the devices these tests bind, and the
 firmware they run; [`DESIGN.md`](../DESIGN.md) describes the harness itself.
 
+[`ubertooth_harness/test_info.yaml`](../ubertooth_harness/test_info.yaml) is
+the short form of this file, one entry per test under the same name, with the
+same five parts as its fields. It is what the GUI shows beside a test name, so
+a reader does not have to open this document to learn why a test exists, and
+`/api/plans` serves it. The two are kept in step together: a change to what a
+test checks updates both, in the same change (AGENTS.md).
+
 ## How to read a section
 
 **What it does** is the one- or two-sentence summary.
@@ -136,6 +143,57 @@ each is the committed test pointed at a weak-link receiver.
 [`testplans/weak-link.yaml`](../testplans/weak-link.yaml) holds what is still
 waiting, split into what needs a second nRF52840 DK and what needs a
 measurement or an implementation.
+
+**What attenuating a receiver is for.** On an ordinary bench every board is a
+few tens of centimeters from every transmitter, so each one hears a signal far
+stronger than anything in use: packets arrive clean, error flags never fire,
+and a receiver reading 20 dB too hot can still pass every check. Putting one
+receiver behind an inline attenuator makes its link marginal but still
+decodable, which is the only regime where several of these tests measure
+anything. What it exercises is the behavior under a weaker signal:
+access-code error tolerance (`ubertooth-rx -e`), the HEC and CRC flags in a
+capture record, UAP and clock recovery from fewer good packets, whether a
+follow keeps up, how sharp an AFH map recovery is, and whether the board stays
+reliable when it is not being overloaded.
+
+What it is **not** is RF calibration or a receiver-sensitivity
+certification. The attenuation is a number a person wrote in the registry,
+the path loss at a meter is not measured at all, and nothing here is
+traceable to a dBm figure; the attenuator is a way to move a test into a
+different regime, not an instrument. A figure from such a run says what the
+tool did over *that* link on *this* bench, which is why a plan pins one
+attenuation rather than a range and why `measured()` refuses an attenuation
+nobody has characterized.
+
+The points, and what each buys:
+
+| link | what it is for | what is measured there |
+|---|---|---|
+| clear | the baseline every test already runs over | everything, with the margin a short bench link gives |
+| 20 dB | marginal but comfortable: the point most weak-link entries use | the range test's reply level, a DK advertiser capture, a targeted Classic follow, exact AFH map recovery |
+| 40 dB | 20 dB more attenuation, still with margin: the attenuated-device sweep read it about 14 dB below the 20 dB board from the Classic peer (`weaklink.py`) | a DK advertiser capture, Classic decode with the clock acquired, `-e 2` honored; AFH recovery starts losing edge channels |
+| 30 dB | asked for, uncharacterized | nothing yet: it is the point that would turn 20 against 40 into a curve (`weaklink.PLANNED_ATTENUATIONS_DB`) |
+| 50 dB | past the end of the useful range | measured and found unusable: 62 records across six windows with no clock recovered in any, so it removes packets instead of damaging them. It is in `weaklink.CHARACTERIZED_UNUSABLE_DB` rather than the measured list, and a plan that asks for it is refused with that reason |
+
+So more attenuation is not automatically better, and a point can be
+characterized and still be unusable. `weaklink.py` holds both lists —
+what the bench has measured, per test and per role, and what it has found
+unusable — and a runnable plan may only ask for the first; read it rather
+than assuming a figure further down the scale is available. The clearest
+case of that is the error flags of `Classic capture record fields`, which a
+weaker link looked like the way to earn and was not: the unattenuated board
+had the highest rate of HEC failures of four receivers, 20 dB failed none,
+and 50 dB recovered no clock at all.
+
+The limits of all of this are worth saying plainly. Only the attenuation is
+pinned, never the distance, because a placement requirement has no distance
+key: a board at 20 dB much further away is still selected and may behave
+differently. The figures belong to a source as well as a link — the
+attenuated-device sweep separated the two receivers by about 14 dB with a
+Classic peer and by 1 dB with a DK — so a figure taken with one transmitter
+does not carry to another. And a weak-link entry is the committed test
+pointed at the attenuated board: none of them changed a threshold, so what a
+run there adds is which board received, not a tighter bound.
 
 **Coverage profiles.** A test with a `coverage:` argument takes `smoke` or
 `comprehensive`. Smoke keeps one case per behavior; comprehensive adds the
@@ -1161,6 +1219,18 @@ distinguish a deaf board from a quiet room; survey results, when they appear,
 carry a guessed UAP. The AFH cases assert the absence of a piconet, so they
 fail if one is actually in range.
 
+A weak-link entry for the access-code error threshold (`-e`) is the one piece
+of this test attenuation would be good for, and it is still waiting in
+[`weak-link.yaml`](../testplans/weak-link.yaml) rather than running. The
+attenuated-device sweep compared what `-e 0`, `-e 2`, and `-e 4` find by hand
+and the answer was clean at 20 and 40 dB; what the test cannot do is make that
+comparison, because its cases only require that no packet exceeded the limit,
+which zero packets satisfy, and this entry binds no peer to produce any. One
+measured oddity sits behind that: at 20 dB, `-e 4` collapsed to single-digit
+packet counts twice, minutes after the same board returned 2692 packets at
+`-e 2`, which is unexplained and fork-side, so no entry asks for `-e 4` at
+20 dB. See "What attenuating a receiver is for" above.
+
 ## Raw receive
 
 **What it does.** Streams symbols with `ubertooth-dump`, receives with
@@ -1837,6 +1907,21 @@ attached, no attenuation). The test writes DK firmware: the first case flashes
 the DK when it runs anything but the version the harness pins, so the run
 holds the host lock.
 
+**Weak-link receiver, measured 2026-11-02.** `ble.yaml`'s `ble-weak-link`
+suite points the Ubertooth at the attenuated board with
+`weak link: {Ubertooth: 20}` and again at 40 dB, which are the two
+attenuations this test has figures for. One `-n -q` leg per attenuation
+captured about 1175 advertisements at 20 dB and 1228 at 40 dB, every one with
+a valid CRC and none failing, against a floor of a fifth of the DK's events;
+`tshark` agreed with the tool's own count exactly. So the link is nowhere near
+marginal for this capture at either point, and what the entry adds is that the
+capture works from the attenuated board rather than a tighter bound: the
+thresholds are the committed ones. The smoke profile is broader than the one
+leg that was measured — it also captures on 38 and 39, checks their absence
+elsewhere, and follows with `-f` — so what carries those cases is the margin
+above the floor rather than a like-for-like figure. See "What attenuating a
+receiver is for" above for what the attenuation is and is not.
+
 **Expected outcome.** Smoke runs 6 cases: the DK is confirmed to run the
 pinned firmware at its registered address; `ubertooth-btle -n -q` sees it on
 each of channels 37, 38, and 39; listening on 37 while it advertises on 38
@@ -1909,6 +1994,15 @@ capture window is all a second try costs. Each attempt writes its own file
 (`capture-1.pcapng`, `capture-2.pcapng`) and is checked on its own, so the run
 directory keeps the capture every attempt looked at; the report says which
 attempt a step ran on and how many attempts the case took.
+
+**What a weak link adds here.** The HEC and CRC error flags in an LE capture
+are what a marginal link exercises in this test: on a clear bench the floors
+are cleared with room and no error flag fires, so a weaker link is where the
+counts and the flags say something. Attenuating the receiver needs the DK pair
+to be bound distinctly, which is the hardware question rather than an RF one.
+`weaklink.CHECKS` and the plan files are the live record of which attenuation
+this test has figures for and what any remaining entry waits on; see "What
+attenuating a receiver is for" above for what the attenuation is and is not.
 
 **Known limits.** The packet counts are floors a working follow clears, not
 expected counts: of 18 packets in one followed connection measured on the
@@ -2007,6 +2101,14 @@ records span all but 5 s of its window, the central reports at least three
 connects and two disconnects, and the board reads back idle with an unchanged
 self-reset count. Cleanup leaves both DKs idle in the advertiser
 role and restores the Ubertooth's channel, squelch, and LEDs.
+
+**What a weak link adds here.** A follow that has to reacquire the pair's next
+connection over a marginal link is the thing worth measuring, since a clear
+bench clears the floors with room. It needs the same DK pair bound distinctly
+as the single-connection test does. `weaklink.CHECKS` and the plan files are
+the live record of which attenuation this test has figures for; see "What
+attenuating a receiver is for" above for what an attenuated receiver is and is
+not.
 
 **Known limits.** Like the single-connection cases, the counts are floors a
 working follow clears, not expected counts, and a capture that misses them is
@@ -2284,6 +2386,11 @@ The payload length and CRC checks need a link whose payloads are not
 encrypted, which this pair's are not — they pair with nobody. A capture of an
 encrypted piconet would decode neither, and `--no-payload-checks` is there for
 one; no catalog case uses it.
+
+**What a weak link is for here.** See "What attenuating a receiver is
+for" above: the flag-to-field agreements of this test are what a
+marginal link would exercise, and the measurements below are what the
+bench found when it was tried.
 
 **The payload checks barely fire on the bench's own traffic.** Measured over
 four 25-second captures, no record carried a payload at all: `ubertooth-rx`
