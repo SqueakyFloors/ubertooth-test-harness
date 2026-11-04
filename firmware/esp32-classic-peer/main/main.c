@@ -7,7 +7,14 @@
  * sends by itself (the boot banner, a link coming up or going down) and are
  * not part of any answer, so a driver reading a response skips them. The
  * protocol matches the nRF52840 DK role firmware in this repository, which
- * lets the harness keep one shell driver for both kinds of board. */
+ * lets the harness keep one shell driver for both kinds of board.
+ *
+ * "frame on" puts a length and a CRC in front of every line this file
+ * writes. The bridge to the host loses runs of bytes when the host is busy,
+ * and a line that lost some from its middle still arrives with its newline,
+ * so nothing about the line itself says it is broken: a status line that
+ * lost a digit is still a status line. With the frame, the host knows
+ * (harness #310). */
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -30,31 +37,68 @@
                              * whose longest possible form is 1124 bytes:
                              * every number at its widest, the longest name,
                              * and the longest channel map reason */
+#define SHELL_FRAME_MAX 16  /* room for "#<len>,<crc>:", which at its widest
+                             * is "#1199,ffff:", eleven bytes */
 #define SHELL_WORDS    8
 
 static SemaphoreHandle_t out_lock;
+/* Whether every line this file writes carries its own length and CRC. Off
+ * at boot, and a reset puts it back: a driver asks for it once it has read
+ * the boot notice, which is how it knows the image has the command at all. */
+static bool framing;
+
+/* CRC-16/CCITT-FALSE, bit by bit. It runs on at most 1200 bytes per line at
+ * 115200 baud, where one line takes 85 milliseconds to send, so the few
+ * microseconds this costs are free; a table would be 512 bytes of RAM for
+ * nothing. The harness computes the same thing in esp32peer.crc16(). */
+static uint16_t shell_crc16(const char *data, int len)
+{
+    uint16_t crc = 0xffff;
+
+    for (int i = 0; i < len; i++) {
+        crc ^= (uint16_t)((uint8_t)data[i]) << 8;
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+                                 : (uint16_t)(crc << 1);
+        }
+    }
+    return crc;
+}
 
 void shell_line(const char *fmt, ...)
 {
     /* One buffer, held by out_lock, rather than 770 bytes on the caller's
      * stack: the notices below come from the Bluetooth task, whose stack is
-     * small. */
-    static char buf[SHELL_OUT_MAX + 2];
+     * small. The line is built SHELL_FRAME_MAX bytes in, so a frame can be
+     * written in front of it without a second buffer or a copy. */
+    static char buf[SHELL_FRAME_MAX + SHELL_OUT_MAX + 2];
+    char *line = buf + SHELL_FRAME_MAX;
+    char *start = line;
+    char head[SHELL_FRAME_MAX + 1];
     va_list ap;
-    int n;
+    int n, head_len;
 
     if (out_lock) {
         xSemaphoreTake(out_lock, portMAX_DELAY);
     }
     va_start(ap, fmt);
-    n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    n = vsnprintf(line, SHELL_OUT_MAX, fmt, ap);
     va_end(ap);
     if (n >= 0) {
-        if (n > (int)sizeof(buf) - 2) {
-            n = (int)sizeof(buf) - 2;
+        if (n > SHELL_OUT_MAX - 1) {
+            n = SHELL_OUT_MAX - 1; /* vsnprintf's count is what it wanted */
         }
-        buf[n++] = '\n';
-        uart_write_bytes(SHELL_UART, buf, n);
+        if (framing) {
+            head_len = snprintf(head, sizeof(head), "#%d,%04x:", n,
+                                shell_crc16(line, n));
+            if (head_len > 0 && head_len <= SHELL_FRAME_MAX) {
+                start = line - head_len;
+                memcpy(start, head, (size_t)head_len);
+                n += head_len;
+            }
+        }
+        start[n++] = '\n';
+        uart_write_bytes(SHELL_UART, start, n);
     }
     if (out_lock) {
         xSemaphoreGive(out_lock);
@@ -136,6 +180,7 @@ static void cmd_help(void)
         "clock                         the native and piconet clocks",
         "afh <20 hex digits>           hop over this channel map",
         "afh off                       hop over every channel again",
+        "frame <on|off>                length and CRC on every line out",
         "defaults                      restore every boot setting",
         "reset                         restart the board",
     };
@@ -259,6 +304,25 @@ static void run(int argc, char **argv)
         answer(err);
         return;
     }
+    if (argc == 2 && strcmp(c, "frame") == 0) {
+        bool on;
+        if (!parse_onoff(a1, &on)) {
+            answer("frame takes on or off");
+            return;
+        }
+        /* The answer comes first, so it is in the form that was in force
+         * when the command arrived and the new form starts with the line
+         * after it. Either way round there is no line whose form the host
+         * cannot predict, which there would be if the switch happened in
+         * the middle of answering.
+         *
+         * Nothing else touches this: it is about the wire, not the board,
+         * so "defaults" leaves it alone. A reset clears it, because the
+         * board that comes back has not been asked. */
+        answer(NULL);
+        framing = on;
+        return;
+    }
     if (argc == 1 && strcmp(c, "defaults") == 0) {
         answer(bt_defaults());
         return;
@@ -320,6 +384,31 @@ static void shell_task(void *arg)
     }
 }
 
+/* Why the chip restarted, in words.
+ *
+ * The ROM prints its own "rst:0x..." line before any of this runs, which is
+ * the only evidence from a board that crashed before its code started. This
+ * is the same news read the other way, through esp_reset_reason(), which
+ * names a panic, a watchdog and a brownout apart where the ROM's number
+ * lumps the first two together. A board that restarted under a capture is
+ * harness #311, and a run that cannot say why cannot chase it. */
+static const char *reset_reason(void)
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "power on";
+    case ESP_RST_EXT:      return "the reset pin";
+    case ESP_RST_SW:       return "software, which is what \"reset\" does";
+    case ESP_RST_PANIC:    return "a panic or an abort in the firmware";
+    case ESP_RST_INT_WDT:  return "the interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "the task watchdog";
+    case ESP_RST_WDT:      return "another watchdog";
+    case ESP_RST_DEEPSLEEP: return "waking from deep sleep";
+    case ESP_RST_BROWNOUT: return "the brownout detector, so the supply dipped";
+    case ESP_RST_SDIO:     return "SDIO";
+    default:               return "a reason the chip does not report";
+    }
+}
+
 void app_main(void)
 {
     const uart_config_t cfg = {
@@ -335,6 +424,12 @@ void app_main(void)
     out_lock = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(uart_driver_install(SHELL_UART, SHELL_RX_BUF, SHELL_TX_BUF, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(SHELL_UART, &cfg));
+
+    /* Before Bluetooth, because bringing it up takes over a second and a
+     * host reading the port wants to know a restart happened as early as it
+     * can. It comes before the ready notice, which is the line that ends
+     * the boot, so a driver reads the reason and then the version. */
+    shell_line("utesp: boot reason %s", reset_reason());
 
     err = bt_start();
     if (err) {

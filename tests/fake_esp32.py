@@ -23,13 +23,28 @@ SCO_USAGE = "sco takes start, stop, stats, or type <ev3|2ev3|default>"
 SCO_TYPE_USAGE = "sco type takes ev3, 2ev3, or default"
 
 # What the ROM prints after every reset, which opening the bridge causes.
+# The second line names the reason, so it is the one a restart is read from.
+POWER_ON_RST = "rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)"
+# What the ROM says after the chip panicked, which is the reset a firmware
+# crash leaves behind.
+PANIC_RST = "rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)"
 BOOT_LOG = (
     "ets Jul 29 2019 12:21:46",
-    "rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)",
+    POWER_ON_RST,
     "configsip: 0, SPIWP:0xee",
     "load:0x3fff0030,len:5220",
     "entry 0x400805c8",
 )
+# The two lines a panic prints on its way down, before the ROM's.
+PANIC_LINES = (
+    "Guru Meditation Error: Core 0 panic'ed (LoadProhibited). Exception was "
+    "unhandled.",
+    "Backtrace: 0x400d1f3c:0x3ffbc1b0 0x400d20a1:0x3ffbc1d0",
+)
+# What the firmware's own boot notice says the chip restarted for, in the
+# wording main.c's reset_reason() gives each case.
+POWER_ON_REASON = "power on"
+PANIC_REASON = "a panic or an abort in the firmware"
 
 
 class FakePeerFirmware:
@@ -74,6 +89,11 @@ class FakePeerFirmware:
         self.stats_reads = 0
         self._hook = None
         self.peer_firmware = None
+        # Whether the board is putting a length and a CRC around every line
+        # its own writer sends. Off at boot, and `reset` puts it back; it is
+        # about the wire, not the board, so `defaults` leaves it alone
+        # (firmware README, `frame`).
+        self.framing = False
         self.defaults()
 
     def defaults(self):
@@ -128,14 +148,25 @@ class FakePeerFirmware:
 
     # -- the board's own output ---------------------------------------------
 
-    def boot(self) -> list[str]:
-        """The lines a reset produces: the ROM's log, then the boot notice."""
+    def boot(self, rst: str = POWER_ON_RST,
+             reason: str = POWER_ON_REASON) -> list[str]:
+        """The lines a reset produces: the ROM's log, then the boot notices.
+
+        ``rst`` and ``reason`` are the two places the chip says why it
+        restarted, the ROM's own line and the firmware's reading of it. A
+        restart nothing asked for is the pair of them with other values,
+        which is what :meth:`FakePeerPort.crash` sends.
+
+        Framing goes with the old image: the board that comes back has not
+        been asked for it, so nothing of a boot is framed.
+        """
         self.resets += 1
+        self.framing = False
         self.defaults()
-        if self.start_failure:
-            return [*BOOT_LOG, f"utesp: {self.version} start failed: "
-                               f"{self.start_failure}"]
-        return [*BOOT_LOG, f"utesp: {self.version} ready"]
+        log = [line if line != POWER_ON_RST else rst for line in BOOT_LOG]
+        ending = (f"utesp: {self.version} start failed: {self.start_failure}"
+                  if self.start_failure else f"utesp: {self.version} ready")
+        return [*log, f"utesp: boot reason {reason}", ending]
 
     def link_map(self) -> str | None:
         """The map the controller reports for the live link, or None.
@@ -196,12 +227,32 @@ class FakePeerFirmware:
     # -- the shell ----------------------------------------------------------
 
     def handle(self, line: str) -> list[str]:
+        """One command line in, the lines the board writes back out.
+
+        The frame, where it is on, goes on here rather than in the port:
+        it is the firmware's line writer that adds it, and its state when
+        the command arrived is what the whole answer carries, including the
+        answer to `frame` itself (main.c).
+        """
+        framing = self.framing
+        return [self._frame(answer, framing) for answer in self._answer(line)]
+
+    @staticmethod
+    def _frame(line: str, framing: bool) -> str:
+        if not framing:
+            return line
+        payload = line.encode()
+        return f"#{len(payload)},{esp32peer.crc16(payload):04x}:{line}"
+
+    def _answer(self, line: str) -> list[str]:
         self.commands.append(line)
         if self.silent:
             return []
         if line in self.refuse:
             return [f"ERR {self.refuse[line]}"]
         words = line.split()
+        if words[:1] == ["frame"]:
+            return self._frame_command(words[1:])
         if words == ["status"]:
             self._tick()
             return [json.dumps(self.status(), separators=(",", ":")), "OK"]
@@ -221,6 +272,24 @@ class FakePeerFirmware:
             self.defaults()
             return ["OK"]
         return [f"ERR unknown command '{words[0] if words else ''}'"]
+
+    def _frame_command(self, words):
+        """`frame <on|off>`, which an image older than utesp-1.6.0 refuses.
+
+        The version decides, because that is what the real images do: the
+        command arrived in utesp-1.6.0, and an older one answers it as the
+        unknown command it is.
+        """
+        if esp32peer.version_parts(self.version) < esp32peer.version_parts(
+                esp32peer.FRAME_MINIMUM_FIRMWARE):
+            return ["ERR unknown command, try \"help\""]
+        if len(words) != 1 or words[0] not in ("on", "off"):
+            return ["ERR frame takes on or off"]
+        # handle() read the old setting before calling this, so this answer
+        # is in the form that was in force and the new one starts with the
+        # line after it, as it does in the firmware.
+        self.framing = words[0] == "on"
+        return ["OK"]
 
     def _role(self, wanted):
         if wanted not in esp32peer.ROLES:
@@ -498,11 +567,46 @@ class FakePeerFirmware:
                 board.sco_type = wanted
 
 
-class FakePeerPort:
-    """pyserial-like: the open and the reset pulse both reboot the board."""
+class LossyBridge:
+    """A bridge that loses a run of bytes out of chosen lines.
 
-    def __init__(self, firmware: FakePeerFirmware):
+    What the bench measured: a contiguous run of bytes gone, with the
+    newline either side of it intact, so the line arrives looking whole and
+    nothing about it says otherwise - `OK` as `K`, and a status line with a
+    hole in the middle (#310). Each loss fires once, on the first line that
+    holds its needle, so a test can take bytes out of one `status` answer
+    and leave the retry alone.
+    """
+
+    def __init__(self, *losses):
+        # (needle, where the run starts in the line, how many bytes go)
+        self.losses = list(losses)
+        self.damaged: list[str] = []
+
+    def __call__(self, line: str) -> str:
+        for index, (needle, start, count) in enumerate(self.losses):
+            if needle not in line:
+                continue
+            del self.losses[index]
+            self.damaged.append(line)
+            return line[:start] + line[start + count:]
+        return line
+
+
+class FakePeerPort:
+    """pyserial-like: the open and the reset pulse both reboot the board.
+
+    ``bridge`` stands for the wire between the board and this process: with
+    one, every line the board writes goes through it on the way out, which
+    is how a test loses bytes the way the bench does. ``chunk`` caps how
+    much one read returns, so a test can have a line arrive a few bytes at
+    a time.
+    """
+
+    def __init__(self, firmware: FakePeerFirmware, bridge=None, chunk=None):
         self.firmware = firmware
+        self.bridge = bridge
+        self.chunk = chunk
         self.pending = bytearray()
         self.closed = False
         self.dtr = False
@@ -510,9 +614,26 @@ class FakePeerPort:
         self._line = b""
         self._boot()
 
-    def _boot(self):
-        for line in self.firmware.boot():
-            self.pending += line.encode() + b"\r\n"
+    def _send(self, line: str) -> None:
+        if self.bridge is not None:
+            line = self.bridge(line)
+        self.pending += line.encode() + b"\r\n"
+
+    def _boot(self, rst=POWER_ON_RST, reason=POWER_ON_REASON):
+        for line in self.firmware.boot(rst, reason):
+            self._send(line)
+
+    def crash(self):
+        """The board goes down by itself and comes back (#311).
+
+        Nothing asked it to, so the host hears a panic, the ROM's log with
+        its own reason, and the boot notices - and the board is back in its
+        boot state with every counter at zero, which is the reading the
+        driver used to report as a pair that never streamed.
+        """
+        for line in PANIC_LINES:
+            self._send(line)
+        self._boot(PANIC_RST, PANIC_REASON)
 
     @property
     def rts(self):
@@ -536,13 +657,15 @@ class FakePeerPort:
         while b"\n" in self._line:
             raw, self._line = self._line.split(b"\n", 1)
             for answer in self.firmware.handle(raw.decode().strip()):
-                self.pending += answer.encode() + b"\r\n"
+                self._send(answer)
         return len(data)
 
     def flush(self):
         pass
 
     def read(self, size: int) -> bytes:
+        if self.chunk is not None:
+            size = min(size, self.chunk)
         chunk = bytes(self.pending[:size])
         del self.pending[:size]
         return chunk
@@ -563,16 +686,31 @@ class FakeClock:
         return self.now
 
 
-def shell(firmware: FakePeerFirmware, label="peer") -> esp32peer.Shell:
-    return esp32peer.Shell(FakePeerPort(firmware), label, FakeClock())
+def shell(firmware: FakePeerFirmware, label="peer", bridge=None,
+          chunk=None, step=0.05) -> esp32peer.Shell:
+    """A shell on a fake board.
+
+    ``step`` is how far the clock moves per reading. The default stands for
+    one read of a port with nothing on it, so a deadline is reached in the
+    number of empty reads a real one would take; a test that has a line
+    arrive a few bytes at a time wants a smaller step, because there the
+    reads are not empty and a real clock would barely move.
+    """
+    return esp32peer.Shell(FakePeerPort(firmware, bridge, chunk), label,
+                           FakeClock(step))
 
 
-def opener(devices):
-    """An esp32peer.Peer.opener: a shell per registered device path."""
+def opener(devices, bridges=None, chunk=None, step=0.05):
+    """An esp32peer.Peer.opener: a shell per registered device path.
+
+    ``bridges`` gives one device's wire a :class:`LossyBridge` of its own,
+    keyed by the same path, so a pair session can lose bytes on one board
+    and not the other.
+    """
     def open_one(device, label):
         try:
             firmware = devices[device]
         except KeyError:
             raise esp32peer.PeerError(f"{device} does not exist") from None
-        return shell(firmware, label)
+        return shell(firmware, label, (bridges or {}).get(device), chunk, step)
     return open_one

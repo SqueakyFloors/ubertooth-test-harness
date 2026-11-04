@@ -65,6 +65,24 @@ not the registered one, a link that did not come up or did not stay up, or a
 pair that sent nothing prints ``error: <why>`` on stderr and exits 1. Exit
 status 2 is a usage error. Otherwise ``stream`` and ``audio`` exit with the
 status of the command they ran.
+
+**The bridge is not reliable, and the board can go away.** Two things the
+bench measured are handled here rather than left to the cases:
+
+* a loaded host loses runs of bytes on the CP2102N at 115200, so a line can
+  arrive complete-looking with a hole in the middle of it. An image from
+  ``utesp-1.6.0`` on is asked to put a length and a CRC around every line
+  it writes, which makes such a line known to be broken; a read, or a setter
+  whose second application sets the same value, is then sent again rather
+  than failing the run. A status line that is not readable is still refused,
+  framed or not: a half-read status would be worse than none
+  (`#310 <https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310>`_).
+* a peer can restart under the capture, and did, when a second link was
+  paged to it. What the board says on its way down and on its way back is
+  read and reported as a restart, with the reason the chip gave and the
+  version it came back on, rather than leaving a board full of zeroed
+  counters to be reported as a pair that never streamed
+  (`#311 <https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311>`_).
 """
 
 from __future__ import annotations
@@ -78,7 +96,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -105,6 +123,12 @@ MINIMUM_FIRMWARE = "utesp-1.0.0"
 # only a session given --map asks for it; everything else still runs on
 # MINIMUM_FIRMWARE.
 AFH_MINIMUM_FIRMWARE = "utesp-1.3.0"
+# The oldest image whose shell can check-sum the lines it sends, which is
+# what makes a line that lost bytes on the bridge known to have lost them
+# rather than taken at face value (#310). A board on an older 1.x image is
+# driven exactly as before: the framing is asked for where it exists and
+# nothing depends on it.
+FRAME_MINIMUM_FIRMWARE = "utesp-1.6.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
@@ -241,17 +265,70 @@ POLL_S = 0.05
 SETTLE_S = 1.0
 # Time an overrunning command gets to stop itself after SIGINT.
 INTERRUPT_TIMEOUT_S = 10.0
+# How often a session reads its boards' bridges while the command under test
+# runs. Nothing is asking them anything then, so a board that reboots says
+# so to a port nobody is reading, and the operating system's buffer is all
+# that holds the evidence until the next command. Two seconds keeps it well
+# inside that buffer and costs one non-blocking read per board (#311).
+DRAIN_S = 2.0
+# How many times a command whose answer did not arrive, or did not survive
+# the bridge, is sent again. Only the commands in REPEATABLE are, and the
+# bench's loss rate is a few lines in several thousand, so one spare attempt
+# would do; two makes a run that hits the rare second loss slower rather
+# than failed (#310).
+COMMAND_RETRIES = 2
+# A moment between a lost answer and asking again, so a board part way
+# through writing a line is not interrupted by the next command.
+RETRY_PAUSE_S = 0.2
+# A bound on one drain, so a board stuck in a reboot loop cannot hold the
+# session reading it. 256 bytes a read, so this is 64 KB, which is far more
+# than the operating system's own buffer holds.
+DRAIN_READS_MAX = 256
 
 _ADDRESS = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
 # What the board says by itself: its own notices, ESP-IDF's warnings and
 # errors, and the ROM's boot log, which appears after every reset.
 _NOTICE = re.compile(r"^(?:utesp: |[WE] \(\d+\))")
+# ESP-IDF's own log lines. They do not come from the firmware's line writer,
+# so they carry no frame even on an image that frames everything else.
+_IDF_LOG = re.compile(r"^[WE] \(\d+\)")
 _BOOT_NOISE = re.compile(
     r"^(?:ets |rst:0x|configsip:|clk_drv:|mode:|load:|entry |"
     r"[\x00-\x08\x0b-\x1f]|$)")
 _READY = re.compile(r"^utesp: (?P<version>utesp-\S+) ready$")
 _VERSION = re.compile(r"^utesp-(\d+)\.(\d+)\.(\d+)$")
-_START_FAILED = re.compile(r"^utesp: \S+ start failed: (?P<reason>.+)$")
+_START_FAILED = re.compile(r"^utesp: (?P<version>\S+) start failed: "
+                           r"(?P<reason>.+)$")
+# The ROM's own first line after a restart, which names the reason the chip
+# restarted. The ROM writes it whatever the firmware does, so it arrives even
+# from a board that crashed before its own code ran (#311).
+_ROM_RESET = re.compile(r"^rst:0x[0-9a-f]+ \(.*")
+# The firmware's reading of the same thing, which names the reason rather
+# than numbering it (utesp-1.6.0 and later).
+_BOOT_REASON = re.compile(r"^utesp: boot reason (?P<reason>.+)$")
+# What a crash prints on its way down, before the ROM line. Any of these is
+# a restart in progress and says more about why than the ROM's number does.
+_CRASH = re.compile(
+    r"Guru Meditation Error|Backtrace:|abort\(\) was called|assert failed|"
+    r"Brownout detector was triggered|Stack canary watchpoint|"
+    r"Interrupt wdt timeout|Task watchdog got triggered|CORRUPT HEAP")
+# The frame an image from FRAME_MINIMUM_FIRMWARE on puts around every line
+# its own writer sends: the payload's length in bytes and its CRC-16, so a
+# line that lost a run of bytes fails one or both (#310).
+_FRAMED = re.compile(r"^#(?P<len>\d{1,5}),(?P<crc>[0-9a-f]{4}):(?P<payload>.*)$",
+                     re.DOTALL)
+# The command that turns that framing on, and what the shell calls it.
+FRAME_ON = "frame on"
+
+# Commands that may be sent again when their answer did not arrive or did
+# not survive the bridge. Each is either a read, which reports state and
+# changes none, or a setter whose second application sets the same value, so
+# a repeat cannot move a board or a link on. Everything else - `spp start`,
+# `spp stop`, `role`, `sco start`, `sco stop`, `defaults`, `reset` - does
+# move one on, and a lost answer there is reported rather than guessed at.
+REPEATABLE = ("status", "version", "help", "clock", "sco stats", FRAME_ON,
+              "frame off", "spp peer ", "stream period ", "stream payload ",
+              "stream on", "stream off", "disc ", "sco type ", "afh ")
 
 # The status fields this driver reads, reports, or checks after a reset,
 # with the type each must have. A later image of the same major may add
@@ -269,6 +346,62 @@ _STATUS_KEYS = {
 
 class PeerError(RuntimeError):
     """The peer, its bridge, or the pair did not do what was asked."""
+
+
+class SerialLoss(PeerError):
+    """What the board sent did not reach this process whole.
+
+    A loaded host loses runs of bytes on a CP2102N bridge at 115200, which
+    is how a complete-looking line arrives with a hole in the middle of it
+    (#310). This is the one failure a command may be sent again for, so it
+    is a kind of its own; it is still a PeerError, because to everything
+    that only reports a failure it is one.
+    """
+
+
+def crc16(data: bytes) -> int:
+    """CRC-16/CCITT-FALSE of ``data``, the check the firmware's frames carry.
+
+    The same bit-by-bit polynomial the firmware computes, which is short
+    enough to write twice and avoids a dependency on either side. The CRC
+    catches a line whose bytes were replaced; the length beside it in the
+    frame catches the far commoner case, a run of them simply gone.
+    """
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+@dataclass
+class Restart:
+    """One restart of a board that nothing asked for (#311).
+
+    The driver resets a board on purpose twice in a session, when it opens
+    the bridge and when it releases the board, and those are not this. This
+    is a board that went away under a command or under the capture: the
+    reason the chip gives, the version it came back on, and the lines it
+    said on the way, so a run says what happened instead of reporting the
+    zeroed counters of a board that is back at boot.
+    """
+
+    at: str
+    reason: str = ""
+    version: str = ""
+    # Why Bluetooth did not come up on this boot, if it did not. The board's
+    # shell answers either way, so this is the boot's own news rather than a
+    # failure to boot.
+    failed: str = ""
+    lines: list[str] = field(default_factory=list)
+
+    def describe(self) -> str:
+        parts = [f"at {self.at}"]
+        parts.append(self.reason if self.reason else "no reason line arrived")
+        parts.append(f"back on {self.version}" if self.version
+                     else "and had not finished booting")
+        return ", ".join(parts)
 
 
 def version_parts(version: str, label: str = "peer") -> tuple[int, int, int]:
@@ -399,6 +532,24 @@ class Shell:
     The board also sends notices of its own at any time (``utesp: ...``), and
     the ROM prints a boot log after every reset. Both are skipped here, so a
     caller sees only the answer to what it asked.
+
+    Two things about the bridge between here and the board are this class's
+    business, because nothing above it can see them:
+
+    **Bytes go missing.** On a host that is also capturing over USB, a run
+    of bytes is lost on the CP2102N now and then, and a line that lost some
+    from the middle still arrives with its newline (#310). Holding a partial
+    line until the newline, which :meth:`_lines` does, cannot catch that.
+    So an image that can is asked to check-sum what it sends
+    (:meth:`ask_for_framing`), a line that fails the check is a
+    :class:`SerialLoss` rather than data, and a command that may be sent
+    again is.
+
+    **The board can go away.** It talks when nothing is asking it anything,
+    and it reboots without being told to. What it says then used to be
+    dropped, so a peer that restarted under a capture read as a pair that
+    never streamed (#311). :meth:`drain` keeps that evidence, and
+    :attr:`restarts` is what a session reports it from.
     """
 
     def __init__(self, port, label: str = "peer", clock=time.monotonic,
@@ -411,6 +562,28 @@ class Shell:
         self.log = log
         self.notices: list[str] = []
         self._buffer = b""
+        # The version of the last boot notice this shell read, which is the
+        # image now running on the board.
+        self.version = ""
+        # Restarts nothing asked for, oldest first, and the boot now being
+        # read, if one is. last_boot is the most recent complete boot of
+        # either kind, which is how wait_ready reads the notice that ended
+        # the boot it was waiting for.
+        self.restarts: list[Restart] = []
+        self.last_boot: Restart | None = None
+        self._booting: Restart | None = None
+        # True while a boot is this driver's own doing: opening the bridge
+        # resets the board, and so does `reset`. Everything else is #311.
+        self._expect_boot = True
+        # Lines that did not survive the bridge, and commands sent again
+        # because of one. A session reports both, so a run that was saved by
+        # a retry is visible rather than silently slower (#310).
+        self.lost = 0
+        self.retried = 0
+        # Whether the board is check-summing its lines. It is not after a
+        # restart, whatever it was before, because the board that came back
+        # has not been asked.
+        self.framed = False
 
     @classmethod
     def open(cls, path: str, label: str = "peer", log=None) -> "Shell":
@@ -441,7 +614,7 @@ class Shell:
         while True:
             while b"\n" in self._buffer:
                 raw, self._buffer = self._buffer.split(b"\n", 1)
-                yield raw.decode("utf-8", "replace").strip("\r \t\x00")
+                yield self._decode(raw)
             if self.clock() >= deadline:
                 return
             chunk = self.port.read(256)
@@ -451,22 +624,172 @@ class Shell:
     def _note(self, line: str) -> None:
         self.notices.append(line)
 
-    def command(self, text: str, timeout: float = COMMAND_TIMEOUT_S) -> list[str]:
-        """Send one command; return its data lines. ERR or silence raises."""
-        self.port.reset_input_buffer()
+    # -- what the board says by itself -------------------------------------
+
+    def _unframe(self, line: str) -> tuple[str, bool]:
+        """The payload of ``line``, and whether it reached us whole.
+
+        A framed line carries its own length and CRC, so a run of bytes lost
+        anywhere in it fails the check. An unframed line is taken as it
+        stands, except on a board that has been asked to frame everything it
+        writes: there the only lines that may arrive bare are the ones the
+        firmware's own line writer never touched - the ROM's boot log,
+        ESP-IDF's log lines, and what a panic prints on its way down - and
+        anything else bare has lost its frame.
+        """
+        found = _FRAMED.match(line)
+        if found is None:
+            if self.framed and not (_BOOT_NOISE.match(line)
+                                    or _IDF_LOG.match(line)
+                                    or _CRASH.search(line)):
+                return line, False
+            return line, True
+        payload = found["payload"]
+        if (len(payload.encode("utf-8", "replace")) != int(found["len"])
+                or crc16(payload.encode("utf-8", "replace")) != int(found["crc"], 16)):
+            return payload, False
+        return payload, True
+
+    def _boot_evidence(self, line: str) -> bool:
+        """Record ``line`` if it belongs to a boot; say whether it did.
+
+        A boot is the ROM's log, anything a crash printed before it, and the
+        firmware's own notice at the end of it. They are gathered into one
+        :class:`Restart` so a session can report the reason and the version
+        together rather than a scatter of lines.
+        """
+        crash = _CRASH.search(line)
+        rom = _ROM_RESET.match(line)
+        reason = _BOOT_REASON.match(line)
+        ready = _READY.match(line) or _START_FAILED.match(line)
+        noise = _BOOT_NOISE.match(line)
+        if not (crash or rom or reason or ready or noise):
+            return False
+        if noise and not rom and self._booting is None:
+            # The ROM's quieter lines on their own say nothing: a stray
+            # control character or a blank line is not a boot.
+            return True
+        if self._booting is None:
+            self._booting = Restart(at=time.strftime("%H:%M:%SZ", time.gmtime()))
+            # Whatever it was framing, the board that came back has not been
+            # asked to frame anything.
+            self.framed = False
+        self._booting.lines.append(line)
+        if rom or (crash and not self._booting.reason):
+            self._booting.reason = line
+        if reason:
+            self._booting.reason = reason["reason"]
+        if ready:
+            failed = _START_FAILED.match(line)
+            self._booting.version = ready["version"]
+            self._booting.failed = failed["reason"] if failed else ""
+            self.version = ready["version"]
+            if not self._expect_boot:
+                self.restarts.append(self._booting)
+            self.last_boot = self._booting
+            self._booting = None
+            self._expect_boot = False
+        return True
+
+    def _read(self, line: str) -> str | None:
+        """One line from the board: log it, and give back a protocol line.
+
+        None for a line that was the board talking by itself rather than an
+        answer. Raises :class:`SerialLoss` for one that did not arrive whole.
+        """
+        if line and self.log is not None:
+            self.log(targets.RECEIVED, line)
+        payload, whole = self._unframe(line)
+        if not whole:
+            self.lost += 1
+            raise SerialLoss(
+                f"{self.label}: a line from the board lost bytes on its "
+                f"bridge: {payload[:80]!r}")
+        if self._boot_evidence(payload):
+            return None
+        if _NOTICE.match(payload):
+            self._note(payload)
+            return None
+        return payload
+
+    def drain(self) -> None:
+        """Read what is waiting on the bridge, keeping what the board said.
+
+        Nothing is asking the board anything while the command under test
+        runs, so a link dropping or a restart is written to a port no one is
+        reading. This is how that reaches :attr:`restarts` and
+        :attr:`notices` instead of being thrown away by the next command
+        (#311). A partial line is kept for the next call, so a boot log that
+        spans two drains is still read as one.
+
+        Nothing here raises: a drained line that lost bytes is counted and
+        dropped, because no command is waiting on it.
+        """
+        for _ in range(DRAIN_READS_MAX):
+            chunk = self.port.read(256)
+            if not chunk:
+                break
+            self._buffer += chunk
+        while b"\n" in self._buffer:
+            raw, self._buffer = self._buffer.split(b"\n", 1)
+            try:
+                self._read(self._decode(raw))
+            except SerialLoss:
+                pass
+
+    @staticmethod
+    def _decode(raw: bytes) -> str:
+        return raw.decode("utf-8", "replace").strip("\r \t\x00")
+
+    # -- commands ----------------------------------------------------------
+
+    @staticmethod
+    def repeatable(text: str) -> bool:
+        """Whether sending ``text`` a second time can change nothing."""
+        return any(text == safe or text.startswith(safe) for safe in REPEATABLE)
+
+    def command(self, text: str, timeout: float = COMMAND_TIMEOUT_S,
+                parse: Callable[[list[str]], object] | None = None):
+        """Send one command and read its answer. ERR or silence raises.
+
+        Returns the data lines, or what ``parse`` makes of them. The parse
+        belongs inside the attempt because a status line that lost bytes is
+        caught by reading it, not by receiving it: a command whose answer
+        can be checked is sent again on an answer that failed the check, the
+        same as on one that never came (#310).
+        """
+        attempts = 1 + (COMMAND_RETRIES if self.repeatable(text) else 0)
+        for attempt in range(1, attempts + 1):
+            try:
+                lines = self._send(text, timeout)
+                return lines if parse is None else parse(lines)
+            except SerialLoss as error:
+                if attempt == attempts:
+                    raise SerialLoss(
+                        f"{error} (sent '{text}' {attempts} times)" if attempts > 1
+                        else str(error)) from error
+                self.retried += 1
+                if self.log is not None:
+                    self.log(targets.SENT, f"# retrying '{text}': {error}")
+                time.sleep(RETRY_PAUSE_S)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _send(self, text: str, timeout: float) -> list[str]:
+        """One attempt at one command."""
+        # Read what the board has said since the last command before the
+        # port is cleared, so a restart under the capture is not thrown away
+        # with it (#311); then the leftovers go, because a part of an answer
+        # to an earlier command must not be read as this one's.
+        self.drain()
         self._buffer = b""
         self.port.write(text.encode("ascii") + b"\n")
         self.port.flush()
         if self.log is not None:
             self.log(targets.SENT, text)
-        data = []
-        for line in self._lines(self.clock() + timeout):
-            if line and self.log is not None:
-                self.log(targets.RECEIVED, line)
-            if _NOTICE.match(line):
-                self._note(line)
-                continue
-            if _BOOT_NOISE.match(line):
+        data: list[str] = []
+        for raw in self._lines(self.clock() + timeout):
+            line = self._read(raw)
+            if line is None:
                 continue
             if line == "OK":
                 return data
@@ -474,33 +797,67 @@ class Shell:
                 raise PeerError(
                     f"{self.label}: '{text}' refused: {line[3:].strip() or 'ERR'}")
             data.append(line)
-        raise PeerError(f"{self.label}: no answer to '{text}' within {timeout:g}s"
-                        + (f" (last line {data[-1]!r})" if data else ""))
+        # Silence and a lost ending look the same from here, and both mean
+        # the answer cannot be trusted, so both are the one failure a
+        # repeatable command is sent again for.
+        raise SerialLoss(
+            f"{self.label}: no answer to '{text}' within {timeout:g}s"
+            + (f" (last line {data[-1]!r})" if data else ""))
 
     def status(self, timeout: float = COMMAND_TIMEOUT_S) -> dict:
-        lines = self.command("status", timeout)
+        return self.command("status", timeout, parse=self._pick_status)
+
+    def _pick_status(self, lines: list[str]) -> dict:
         for line in reversed(lines):
             if line.startswith("{"):
                 return parse_status(line, self.label)
-        raise PeerError(f"{self.label}: status printed no JSON line")
+        raise SerialLoss(f"{self.label}: status printed no JSON line")
+
+    def ask_for_framing(self, version: str) -> bool:
+        """Have the board check-sum every line it writes, if its image can.
+
+        Older images have no such command, so nothing here depends on it:
+        the loss is then caught where it always was, by a line that stopped
+        being readable, and the retry is what saves the run. A board that
+        refuses the command, or whose version did not arrive readably, is
+        driven that older way too rather than failing the session over a
+        check it does not have. Returns whether the board is framing.
+        """
+        try:
+            check_firmware(version, self.label, FRAME_MINIMUM_FIRMWARE)
+            self.command(FRAME_ON)
+        except PeerError:
+            self.framed = False
+            return False
+        self.framed = True
+        return True
 
     def wait_ready(self, timeout: float = BOOT_TIMEOUT_S) -> None:
-        """Wait for the boot notice the firmware sends once Bluetooth is up."""
+        """Wait for the boot notice the firmware sends once Bluetooth is up.
+
+        This boot is the driver's own doing, so it is not one of
+        :attr:`restarts`: opening the bridge resets the board, and so does
+        :meth:`reset`.
+        """
+        self.last_boot = None
+        self._expect_boot = True
         for line in self._lines(self.clock() + timeout):
-            if line and self.log is not None:
-                self.log(targets.RECEIVED, line)
-            if _BOOT_NOISE.match(line):
+            try:
+                self._read(line)
+            except SerialLoss:
+                # A boot log is not an answer to anything, so a line of it
+                # that lost bytes costs nothing: the notice at the end of it
+                # is what this is waiting for.
                 continue
-            if _NOTICE.match(line):
-                self._note(line)
-                failed = _START_FAILED.match(line)
-                if failed:
-                    raise PeerError(
-                        f"{self.label}: Bluetooth did not start: {failed['reason']}")
-                if _READY.match(line):
-                    # Which version it is, is checked with its status, where
-                    # the whole state is read at once.
-                    return
+            if self.last_boot is None:
+                continue
+            if self.last_boot.failed:
+                raise PeerError(f"{self.label}: Bluetooth did not start: "
+                                f"{self.last_boot.failed}")
+            # Which version it is, is checked with the status, where the
+            # whole state is read at once.
+            return
+        self._expect_boot = False
         raise PeerError(f"{self.label}: no 'ready' notice within {timeout:g}s of "
                         "opening the bridge")
 
@@ -514,24 +871,42 @@ class Shell:
         """
         self.port.reset_input_buffer()
         self._buffer = b""
+        self._booting = None
+        self.framed = False
         self.port.dtr = False
         self.port.rts = True
         time.sleep(RESET_PULSE_S)
         self.port.rts = False
         self.wait_ready()
 
+    def serial_report(self) -> str:
+        """What the bridge cost this session, or "" when it cost nothing."""
+        if not (self.lost or self.retried):
+            return ""
+        return (f"{self.label} bridge: {self.lost} line(s) lost, "
+                f"{self.retried} command(s) sent again")
+
 
 def parse_status(line: str, label: str = "peer") -> dict:
+    """The board's status line, or a refusal.
+
+    A line that is not JSON, or is JSON missing a field or carrying one of
+    the wrong type, is refused: a status read is how a session learns what
+    the pair did, and a half-read one would be worse than none. The refusal
+    is a :class:`SerialLoss` because a line that lost bytes on the bridge is
+    what it looks like in practice, so the read is worth one more try (#310);
+    it is still refused if it comes back the same.
+    """
     try:
         status = json.loads(line)
     except ValueError as error:
-        raise PeerError(f"{label}: status is not JSON: {line[:80]!r}") from error
+        raise SerialLoss(f"{label}: status is not JSON: {line[:80]!r}") from error
     if not isinstance(status, dict):
-        raise PeerError(f"{label}: status is not a JSON object")
+        raise SerialLoss(f"{label}: status is not a JSON object")
     for key, kind in _STATUS_KEYS.items():
         value = status.get(key)
         if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
-            raise PeerError(f"{label}: status has no valid '{key}'")
+            raise SerialLoss(f"{label}: status has no valid '{key}'")
     return status
 
 
@@ -679,6 +1054,11 @@ def identify(peer: Peer, out=None) -> dict:
     shell = peer.open()
     try:
         shell.wait_ready()
+        # Before the status read, because a status line is what loses bytes
+        # (#310). These one-board commands say nothing about it: the shell
+        # does the asking and the retrying, and their own report is what a
+        # case reads.
+        shell.ask_for_framing(shell.version)
         status = check_status(shell.status(), peer.label, peer.address)
     finally:
         shell.close()
@@ -692,6 +1072,7 @@ def status_command(peer: Peer, out=None) -> dict:
     shell = peer.open()
     try:
         shell.wait_ready()
+        shell.ask_for_framing(shell.version)
         status = check_status(shell.status(), peer.label, peer.address)
     finally:
         shell.close()
@@ -712,6 +1093,7 @@ def reset(peer: Peer, out=None) -> dict:
     shell = peer.open()
     try:
         shell.reset()
+        shell.ask_for_framing(shell.version)
         status = check_status(shell.status(), peer.label, peer.address)
     finally:
         shell.close()
@@ -767,6 +1149,7 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
                          output_path: str | None = None,
                          sample_at: float | None = None,
                          sample: Callable[[float], None] | None = None,
+                         drain: Callable[[], None] | None = None,
                          out, pass_through=None) -> tuple[int, float]:
     """Run the thing under test, saving its output and stopping it on time.
 
@@ -814,7 +1197,7 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
         try:
             overran = _watch(child, out, started=started, timeout=timeout,
                              interrupt_after=interrupt_after,
-                             sample_at=sample_at, sample=sample)
+                             sample_at=sample_at, sample=sample, drain=drain)
         except BaseException:
             # A sample that raised, or a cancellation: the command goes
             # first, so nothing is left holding the board.
@@ -840,17 +1223,27 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
 
 def _watch(child, out, *, started: float, timeout: float,
            interrupt_after: float | None, sample_at: float | None,
-           sample: Callable[[float], None] | None) -> bool:
-    """Wait for the command, sampling and interrupting on time.
+           sample: Callable[[float], None] | None,
+           drain: Callable[[], None] | None = None) -> bool:
+    """Wait for the command, sampling, draining, and interrupting on time.
 
     True when it was still running at its deadline, which is the caller's to
     report; False when it ended by itself or at the interrupt.
+
+    ``drain`` reads whatever the boards have said since the last time it
+    ran. Nothing is asking them anything while the command is running, so
+    this is the only moment a restart under the capture can be seen (#311).
     """
     deadline = started + timeout
     stop_at = None if interrupt_after is None else started + interrupt_after
     due = None if sample_at is None or sample is None else started + sample_at
+    drain_at = None if drain is None else started + DRAIN_S
     while child.poll() is None:
         now = time.monotonic()
+        if drain_at is not None and now >= drain_at:
+            drain_at = now + DRAIN_S
+            drain()
+            continue
         if due is not None and now >= due:
             due = None
             sample(now - started)
@@ -874,12 +1267,18 @@ def _watch(child, out, *, started: float, timeout: float,
     return False
 
 
-def _run_command(command: Sequence[str], timeout: float) -> tuple[int, float]:
+def _run_command(command: Sequence[str], timeout: float,
+                 drain: Callable[[], None] | None = None) -> tuple[int, float]:
     """Run the thing under test, inheriting our streams, with a deadline.
 
     The child stays in this process's group, so the harness's own deadline
     reaches it; this deadline is the backstop for a command with none of its
     own.
+
+    ``drain`` reads the boards' bridges while the command runs, for the
+    reason :func:`_watch` gives: it is the only moment a restart under the
+    capture can be seen (#311). Waiting in short steps rather than one long
+    one is what makes room for it.
     """
     started = time.monotonic()
     try:
@@ -887,7 +1286,19 @@ def _run_command(command: Sequence[str], timeout: float) -> tuple[int, float]:
     except OSError as error:
         raise PeerError(f"cannot run {command[0]}: {error}") from error
     try:
-        return child.wait(timeout=timeout), time.monotonic() - started
+        if drain is None:
+            return child.wait(timeout=timeout), time.monotonic() - started
+        deadline = started + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise subprocess.TimeoutExpired(command[0], timeout)
+            try:
+                status = child.wait(timeout=min(DRAIN_S, left))
+            except subprocess.TimeoutExpired:
+                drain()
+                continue
+            return status, time.monotonic() - started
     except subprocess.TimeoutExpired:
         # Interrupt first: a capture tool stops its board and closes its
         # files on SIGINT, which a kill would skip.
@@ -950,6 +1361,9 @@ def _release(shell: Shell, peer: Peer, expected: dict) -> str:
     """
     try:
         shell.reset()
+        # The board that came back has not been asked to check-sum
+        # anything, so the release's own status read asks again (#310).
+        shell.ask_for_framing(shell.version)
         status = shell.status()
     except Exception as error:
         # Any failure, not only a PeerError: a bridge that went away raises
@@ -992,16 +1406,110 @@ def _write_map_report(path: str, requested: str, samples: Sequence[dict],
         raise PeerError(f"cannot write the map report {path}: {error}") from error
 
 
+def _restart_problems(out, boards) -> list[str]:
+    """Report every restart the boards' bridges showed, and name each one.
+
+    A board that went away and came back under a capture has counters that
+    all read zero, which used to be reported as a pair that never streamed
+    (#311). This is what the session says instead, with the reason the chip
+    gave and the lines it said on the way, so the run names its own failure.
+    """
+    problems = []
+    for peer, shell in boards:
+        for event in shell.restarts:
+            print(f"{peer.label} restarted: {event.describe()}", file=out)
+            for line in event.lines:
+                print(f"{peer.label} restart line: {line}", file=out)
+            problems.append(f"the {peer.label} restarted while the session ran, "
+                            f"{event.describe()}, so its counters below are a "
+                            "board that has just booted and this run measured "
+                            "nothing")
+    return problems
+
+
+def _back_at_boot(label: str, status: dict, role: str) -> str:
+    """Why this status says the board restarted, or "".
+
+    The session set the board's role, and a board is only in the boot role
+    with its SPP server listening when it has just booted. So a status that
+    reports both is a restart even when nothing of the board's own account
+    of it reached the host, which is the case where the bridge's buffer
+    overflowed while the capture ran (#311).
+    """
+    if status["role"] == role:
+        return ""
+    return (f"the {label} reports role {status['role']} with its SPP server "
+            f"{'on' if status['spp_server'] else 'off'}, where this session "
+            f"set {role}: the board is back in its boot state, so it "
+            "restarted while the session ran")
+
+
+def _settings_taken(label: str, status: dict, address: str, period: int,
+                    payload: int) -> list[str]:
+    """What the board made of the settings the session sent it.
+
+    Bytes go missing in both directions on a loaded host. The firmware
+    refuses most command lines that lost some, but not all of them:
+    ``stream payload 200`` that arrives as ``stream payload 20`` is another
+    valid command, and nothing in the answer says so. So every setting that
+    decides what goes on the air is read back (#310).
+    """
+    wrong = []
+    for key, wanted in (("peer", address), ("period_ms", period),
+                        ("payload_len", payload)):
+        if status[key] != wanted:
+            wrong.append(f"the {label} reports {key} {status[key]!r} where this "
+                         f"session set {wanted!r}")
+    return wrong
+
+
+def _why(restarted: bool) -> str:
+    """How a failed stream session names itself.
+
+    A session whose peer went away did not fail to stream: it lost a board,
+    and every zero it read afterwards follows from that. Saying so is the
+    whole of #311's first half.
+    """
+    return ("a peer restarted while the session ran: " if restarted
+            else "the pair did not stream: ")
+
+
+def _report_serial(out, boards) -> None:
+    """What the bridges cost, for a board that lost any lines at all."""
+    for _peer, shell in boards:
+        line = shell.serial_report()
+        if line:
+            print(line, file=out)
+
+
+def _ask_for_framing(out, boards) -> None:
+    """Have each board check-sum its lines, where its image can (#310).
+
+    The version comes from the boot notice rather than from a status line,
+    so the framing is on before the session's first status read, which is
+    one of the reads #310 was reported from.
+    """
+    for peer, shell in boards:
+        if shell.ask_for_framing(shell.version):
+            print(f"{peer.label} bridge: framed", file=out)
+            continue
+        image = shell.version or "that image"
+        print(f"{peer.label} bridge: not framed, {image} is older than "
+              f"{FRAME_MINIMUM_FIRMWARE}", file=out)
+
+
 def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             period, payload, min_writes, min_seconds, timeout, out,
             settle_s, wanted_map=None, map_report=None, command_output=None,
             interrupt_after=None) -> int:
+    boards = ((initiator, initiator_shell), (acceptor, acceptor_shell))
     acceptor_shell.wait_ready()
     initiator_shell.wait_ready()
+    _ask_for_framing(out, boards)
     acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
-                                  acceptor.address)
+                                   acceptor.address)
     initiator_status = check_status(initiator_shell.status(), initiator.label,
-                                   initiator.address)
+                                    initiator.address)
     if acceptor_status["address"] == initiator_status["address"]:
         raise PeerError("both bridges lead to one board: they report the same "
                         f"BD_ADDR {acceptor_status['address']}")
@@ -1012,6 +1520,14 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     print(f"central UAP: {initiator_status['uap']}", file=out)
     print(f"stream: {payload} bytes every {period} ms", file=out)
     samples: list[dict] = []
+    problems: list[str] = []
+    after_initiator = after_acceptor = None
+    seconds = 0.0
+
+    def drain() -> None:
+        for _peer, shell in boards:
+            shell.drain()
+
     try:
         initiator_shell.command(ROLE_INITIATOR, ROLE_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
@@ -1029,6 +1545,11 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             raise PeerError(
                 f"the link is not up to {acceptor_status['address']} after 'spp "
                 f"start' (remote {linked['remote'] or 'none'})")
+        wrong = _settings_taken(initiator.label, linked,
+                                acceptor_status["address"], period, payload)
+        if wrong:
+            raise PeerError("the initiator did not take this session's stream "
+                            "settings: " + "; ".join(wrong))
         print(f"link: up to {linked['remote']} at "
               f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
         time.sleep(settle_s)
@@ -1038,7 +1559,7 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         print("command: " + " ".join(command), file=out)
         out.flush()
         if wanted_map is None and command_output is None and interrupt_after is None:
-            status, seconds = _run_command(command, timeout)
+            status, seconds = _run_command(command, timeout, drain)
         else:
             def middle(elapsed: float) -> None:
                 samples.append(read_link_map(initiator_shell, initiator.label,
@@ -1048,28 +1569,57 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 output_path=command_output,
                 sample_at=None if wanted_map is None else _middle_of(
                     interrupt_after, timeout),
-                sample=None if wanted_map is None else middle, out=out)
+                sample=None if wanted_map is None else middle, out=out,
+                drain=drain)
         print(f"command exit: {status} after {seconds:.1f} s", file=out)
-        if wanted_map is not None:
-            samples.append(read_link_map(initiator_shell, initiator.label,
-                                         SAMPLE_POINTS[2], seconds))
-        initiator_shell.command("stream off")
-        after_initiator = initiator_shell.status()
-        after_acceptor = acceptor_shell.status()
+        # The last of the command's own window: whatever the boards said in
+        # it that the drains inside the command have not read yet.
+        drain()
+        # Before anything else can fail: a restart is the one failure that
+        # explains every other reading, and the reads below are the ones a
+        # restarted board is least likely to answer as the session expects.
+        problems += _restart_problems(out, boards)
+        try:
+            if wanted_map is not None:
+                samples.append(read_link_map(initiator_shell, initiator.label,
+                                             SAMPLE_POINTS[2], seconds))
+            initiator_shell.command("stream off")
+            after_initiator = initiator_shell.status()
+            after_acceptor = acceptor_shell.status()
+        except PeerError as error:
+            # A board that went away cannot answer for the capture, and
+            # saying why it could not beats replacing the restart above
+            # with a read that failed because of it.
+            problems.append(str(error))
     finally:
         # On the way out of a session that failed, the failure is the whole
         # report and the case's own cleanup resets both boards again, so
         # these reasons are only collected for a session that got this far.
         released = [_release(initiator_shell, initiator, BOOT_STATE),
                     _release(acceptor_shell, acceptor, BOOT_STATE)]
-    if wanted_map is not None:
+    # Everything collected so far is a restart or the fallout of one, which
+    # decides how the failure reads: a run that lost a board did not fail to
+    # stream, it lost a board (#311).
+    restarted = bool(problems)
+    _report_serial(out, boards)
+    if wanted_map is not None and len(samples) == len(SAMPLE_POINTS):
         requested = requested_map(wanted_map)
         _report_map(out, requested, samples)
         if map_report:
             _write_map_report(map_report, requested, samples, command, seconds)
+    problems += [reason for reason in released if reason]
+    if after_initiator is None or after_acceptor is None:
+        raise PeerError(_why(restarted) + "; ".join(problems))
     _report_traffic(out, initiator.label, after_initiator)
     _report_traffic(out, acceptor.label, after_acceptor)
-    problems = [reason for reason in released if reason]
+    if not restarted:
+        # Only where the bridge showed nothing. A restart the bridge did
+        # report has already been named with its reason, which is more than
+        # this can say, so saying it twice would only lengthen the failure.
+        boot_state = _back_at_boot(initiator.label, after_initiator, "initiator")
+        if boot_state:
+            problems.append(boot_state)
+            restarted = True
     if after_initiator["disconnects"]:
         problems.append(f"the link went down {after_initiator['disconnects']} "
                         "time(s) while the command ran")
@@ -1090,7 +1640,7 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                         + "; ".join(f"{sample['at']} {sample['link']}"
                                     for sample in samples))
     if problems:
-        raise PeerError("the pair did not stream: " + "; ".join(problems))
+        raise PeerError(_why(restarted) + "; ".join(problems))
     print("pair streamed: yes", file=out)
     return status
 
@@ -1393,6 +1943,7 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     # through that loop still releases the board it had not reached.
     acceptor_shell.wait_ready()
     initiator_shell.wait_ready()
+    _ask_for_framing(out, boards)
     acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
                                   acceptor.address)
     initiator_status = check_status(initiator_shell.status(), initiator.label,
@@ -1405,6 +1956,10 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         check_firmware(peer_status["fw"], peer.label, AUDIO_FIRMWARE)
     _report(out, acceptor.label, acceptor_status)
     _report(out, initiator.label, initiator_status)
+
+    def drain() -> None:
+        for _peer, shell in boards:
+            shell.drain()
     # The initiator pages, so it is the central and its LAP is on the air.
     print(f"central LAP: {initiator_status['lap']}", file=out)
     print(f"central UAP: {initiator_status['uap']}", file=out)
@@ -1475,8 +2030,16 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 raise PeerError(missing)
         print("command: " + " ".join(command), file=out)
         out.flush()
-        status, seconds = _run_command(command, timeout)
+        status, seconds = _run_command(command, timeout, drain)
         print(f"command exit: {status} after {seconds:.1f} s", file=out)
+
+        # A board that went away under the capture explains every figure
+        # below it, so it is named before them (#311). The drain first, for
+        # whatever the boards said that the ones inside the command have
+        # not read yet.
+        drain()
+        restarts = _restart_problems(out, boards)
+        problems += restarts
 
         # Nothing below raises until the end. A session that measured
         # something reports all of it, and a stop or a release that fails
@@ -1546,8 +2109,10 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
                             f"{min_seconds:g} s this test needs: it stopped "
                             "early")
+        _report_serial(out, boards)
         if problems:
-            raise PeerError("the pair did not carry audio: "
+            raise PeerError(("a peer restarted while the session ran: "
+                             if restarts else "the pair did not carry audio: ")
                             + "; ".join(problems))
         print("pair carried audio: " + _audio_field(
             after[initiator.label]["status"], "sco_pkt_type", str,
