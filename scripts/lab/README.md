@@ -141,8 +141,10 @@ that same file. Until
 [#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317) a
 run asked for its lease key alone and `hold` made up the difference itself, so
 a bench script and a run could drive one DK or one peer at the same moment.
-On a peer that restarts the board, because opening its USB bridge pulls the
-chip's reset line, which is how a capture lost its traffic mid-run.
+On a peer that costs the run its board. The bridge's RTS and DTR are wired to
+the chip's reset and boot pins, so whichever session goes second restarts the
+board when it opens a port the other had closed, or when it pulses those
+lines to release the board, which is how a capture lost its traffic mid-run.
 
 ## `peer`
 
