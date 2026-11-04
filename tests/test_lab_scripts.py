@@ -1466,30 +1466,31 @@ class CheckoutEnvironment(Bench):
         # would turn the command into devices to hold.
         self.assertEqual(given, argv[3:])
 
-    def test_the_loop_guard_is_the_interpreter_itself(self):
-        """Nothing in the environment, so nothing a caller can arrange.
+    def test_the_interpreter_is_asked_before_it_is_run(self):
+        """The same predicate, put to the candidate: a `True` means the
+        re-run returns at `in_checkout_environment` and does nothing more,
+        which is what makes one attempt the only attempt."""
+        self.assertTrue(_checkout.venv_python_would_arrive())
+        saying_no = self.root / "says-no" / "python"
+        saying_no.parent.mkdir(parents=True)
+        saying_no.write_text("#!/bin/sh\necho False\n", encoding="utf-8")
+        saying_no.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", saying_no):
+            self.assertFalse(_checkout.venv_python_would_arrive())
 
-        After the re-run `sys.executable` is the file that was run, which
-        no other interpreter's is -- and the comparison is of paths, not of
-        what they resolve to, or every system python3 sharing a venv's
-        target binary would look like this one.
-        """
-        with unittest.mock.patch.object(
-            sys, "executable", str(_checkout.VENV_PYTHON)
-        ):
-            self.assertTrue(_checkout.running_checkout_interpreter())
-        with unittest.mock.patch.object(
-            sys, "executable", str(Path(sys.base_prefix) / "bin" / "python3")
-        ):
-            self.assertFalse(_checkout.running_checkout_interpreter())
-
-    def test_a_venv_that_is_not_a_virtual_environment_does_not_loop(self):
-        """A `bin/python` with no `pyvenv.cfg` beside it reports the base
-        prefix, so the environment check alone would re-run for ever. The
-        interpreter check answers where that one cannot."""
-        with unittest.mock.patch.object(
-            sys, "executable", str(_checkout.VENV_PYTHON)
-        ):
+    def test_an_interpreter_that_cannot_answer_is_not_run(self):
+        """A `#!` wrapper passes every test a file can pass and reports the
+        interpreter behind it, so a guard that looked at the answer
+        afterwards would re-run for ever. This asks first."""
+        wrapper = self.root / "wrapper" / "python"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text(
+            f"#!{sys.executable}\n# a wrapper, not an interpreter\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", wrapper):
+            self.assertFalse(_checkout.venv_python_would_arrive())
             with unittest.mock.patch.object(
                 _checkout, "in_checkout_environment", return_value=False
             ):
@@ -1503,6 +1504,36 @@ class CheckoutEnvironment(Bench):
                             _checkout.run_in_checkout_environment(str(HOLD), "hold")
         execv.assert_not_called()
         self.assertIn("bootstrap.py", str(caught.exception))
+
+    def test_an_interpreter_that_never_answers_is_not_waited_on(self):
+        """A bench gets an answer or a refusal, not a helper that hangs."""
+        slow = self.root / "slow" / "python"
+        slow.parent.mkdir(parents=True)
+        slow.write_text("#!/bin/sh\nsleep 600\n", encoding="utf-8")
+        slow.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", slow):
+            with unittest.mock.patch.object(_checkout, "PROBE_TIMEOUT_S", 2):
+                self.assertFalse(_checkout.venv_python_would_arrive())
+
+    def test_a_forged_interpreter_name_ends_in_a_refusal_not_a_loop(self):
+        """On a macOS framework build `PYTHONEXECUTABLE` decides what an
+        interpreter calls itself, and app-bundle launchers set it, so this
+        reaches a bench by accident as well as on purpose. Either way it
+        has to end."""
+        outside = self.outside_interpreter()
+        environment = self.plain_environment()
+        environment["PYTHONEXECUTABLE"] = "/usr/bin/not-this-interpreter"
+        result = subprocess.run(
+            [str(outside), str(HOLD), "--help"],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.root), timeout=120,
+        )
+        # Whichever way it goes, it goes: the usage text if the interpreter
+        # still arrives, the advice if it cannot.
+        self.assertIn(
+            "usage:" if result.returncode == 0 else "bootstrap.py",
+            result.stdout + result.stderr,
+        )
 
     def test_no_environment_a_caller_arranges_changes_the_outcome(self):
         """A wrapper cannot keep a helper out of its checkout's environment

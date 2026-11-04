@@ -21,7 +21,10 @@ never has to name an interpreter and cannot impose the wrong one. Plain
 ``python3 scripts/lab/hold ...``, or the script's own path, is enough. An
 interpreter nobody bootstrapped is turned down rather than run with: the
 harness has an environment of its own for a reason, and a helper that drives
-devices is no place to go without it.
+devices is no place to go without it. The re-run happens only once that
+interpreter has confirmed it would arrive, so there is no second attempt to
+guard against and nothing a bench can arrange, deliberately or by accident,
+that leaves a helper trying for ever instead of answering.
 
 ``CHILD_PYTHON_OPTIONS`` is for an interpreter a helper starts to run
 ``-m ubertooth_harness``, which ``hold`` does for ``ubertooth-harness
@@ -46,7 +49,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-# scripts/lab/_checkout.py, so the checkout that owns these helpers.
+# scripts/lab/_checkout.py, so the directory of the helpers and the checkout
+# that owns them.
+_HERE = Path(__file__).resolve().parent
 CHECKOUT = Path(__file__).resolve().parents[2]
 VENV = CHECKOUT / ".venv"
 VENV_PYTHON = VENV / "bin" / "python"
@@ -63,6 +68,11 @@ CHILD_PYTHON_OPTIONS = ("-P",)
 # Reading the checkout's commit is for a message, so it never delays a
 # command for long and never fails one.
 REVISION_TIMEOUT_S = 5
+
+# Asking the checkout's interpreter what it is. Generous, because a cold
+# interpreter on a loaded host is slow, and bounded, because a helper that
+# cannot get an answer must refuse rather than wait for a bench.
+PROBE_TIMEOUT_S = 30
 
 
 def in_checkout_environment() -> bool:
@@ -124,11 +134,11 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
     - Already in this checkout's own environment, or in another bootstrapped
       one with no environment here to prefer: carry on.
     - This checkout has an environment and we are not in it: re-run the
-      script under that interpreter, unless this interpreter already is it,
-      which is what keeps an environment that does not report itself from
-      looping. Nothing is written to the environment, so nothing a caller
-      arranges there changes the outcome and the command run under `hold`
-      inherits nothing of this.
+      script under that interpreter, once that interpreter has said it
+      would arrive, which is what makes the re-run the last thing that
+      happens rather than something to guard against happening twice.
+      Nothing is written to the environment, so the command run under
+      `hold` inherits nothing of this.
     - No environment anywhere: stop, and say which checkout to bootstrap.
       Carrying on would run the harness with whichever versions of its
       dependencies this interpreter happens to have.
@@ -144,7 +154,7 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
     if in_checkout_environment():
         return
     if (VENV_PYTHON.is_file() and os.access(VENV_PYTHON, os.X_OK)
-            and not running_checkout_interpreter()):
+            and venv_python_would_arrive()):
         # Nothing to clean up if this raises: a file that is executable and
         # not an executable image leaves the process as it was, with both
         # outcomes below still open.
@@ -157,23 +167,42 @@ def run_in_checkout_environment(script: str, name: str | None = None) -> None:
     raise SystemExit(bootstrap_advice(label))
 
 
-def running_checkout_interpreter() -> bool:
-    """Is this interpreter the file at `CHECKOUT/.venv/bin/python`?
+def venv_python_would_arrive() -> bool:
+    """Would running `VENV_PYTHON` land a helper in this checkout's environment?
 
-    This is the whole loop guard, and it needs nothing in the environment
-    and so nothing a caller can arrange: after the re-run, `sys.executable`
-    *is* the path that was run, which no other interpreter's is. It answers
-    where `in_checkout_environment` cannot, for a `.venv` that is not a
-    virtual environment at all -- a `bin/python` with no `pyvenv.cfg` beside
-    it reports the base prefix, so the environment check alone would re-run
-    for ever.
+    This is the whole loop guard, and it is the reason there is no second
+    attempt to prevent: the re-run happens only once it is known to be the
+    last one. The question is put to that interpreter, as the same
+    predicate in this same file, so the answer is what the re-run process
+    will decide for itself a moment later: `True` means it returns at
+    `in_checkout_environment` and does nothing further.
 
-    The path, not what it resolves to: a virtual environment's `python` is
-    usually a symlink to the interpreter it was built from, and so is the
-    one on `PATH`, so resolving would make any system `python3` look like
-    this one and the re-run would never happen.
+    Asked rather than assumed, and asked before the `os.execv` rather than
+    after, because afterwards there is no process left to notice a wrong
+    answer. Nothing a caller arranges and nothing that file turns out to be
+    can make this spin: a `bin/python` with no `pyvenv.cfg`, a `#!` wrapper,
+    a `PYTHONEXECUTABLE` in the environment that makes an interpreter report
+    a name that is not its own -- each of those simply answers `False`, and
+    a helper that cannot reach its own environment says so instead of
+    trying again.
     """
-    return Path(sys.executable) == VENV_PYTHON
+    try:
+        asked = subprocess.run(
+            [
+                str(VENV_PYTHON), "-P", "-c",
+                # -P and an explicit directory: the answer must come from
+                # this file, never from one in the caller's working
+                # directory, which is the whole subject of #312.
+                f"import sys; sys.path.insert(0, {str(_HERE)!r});"
+                " import _checkout;"
+                " print(_checkout.in_checkout_environment())",
+            ],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT_S,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return asked.returncode == 0 and asked.stdout.strip() == "True"
 
 
 def reexec_argv(script: str) -> list[str]:

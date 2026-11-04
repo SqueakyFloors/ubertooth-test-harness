@@ -272,14 +272,15 @@ is their own checkout's, both the interpreter and the package. Its docstring
 has the whole of it. Two things are worth knowing from outside:
 
 - A helper started with another interpreter re-runs itself under the one its
-  checkout bootstrapped. It knows not to do that twice because the second
-  time it *is* that interpreter, so nothing is written to the environment,
-  nothing a caller sets there changes the outcome, and the command run under
-  `hold` inherits none of it. With no environment in its own checkout a
-  helper carries on in any environment `bootstrap.py` built, since the
-  harness code still comes from beside the script; an interpreter nobody
-  bootstrapped is turned down, naming the checkout to bootstrap, because a
-  bench runs helpers from more than one path.
+  checkout bootstrapped, and only after that interpreter has confirmed it
+  would arrive. So there is no second attempt to guard against, nothing is
+  written to the environment, and the command run under `hold` inherits none
+  of it. With no environment in its own checkout a helper carries on in any
+  environment `bootstrap.py` built, since the harness code still comes from
+  beside the script; an interpreter nobody bootstrapped is turned down,
+  naming the checkout to bootstrap, because a bench runs helpers from more
+  than one path. A helper always answers: an interpreter that cannot be
+  reached or cannot say where it would land gets a refusal, not another try.
 - `hold` hands the locks to `ubertooth-harness lease` in a child process, and
   that child is given `-P`, which leaves the working directory off its import
   path. Without it, a helper run from inside another checkout would validate
