@@ -326,9 +326,14 @@ FRAME_ON = "frame on"
 # a repeat cannot move a board or a link on. Everything else - `spp start`,
 # `spp stop`, `role`, `sco start`, `sco stop`, `defaults`, `reset` - does
 # move one on, and a lost answer there is reported rather than guessed at.
+#
+# An entry ending in a space is the start of a command and its operands;
+# every other entry is the whole command line. Nothing is matched loosely,
+# so a command this list has not named cannot be repeated by accident.
 REPEATABLE = ("status", "version", "help", "clock", "sco stats", FRAME_ON,
-              "frame off", "spp peer ", "stream period ", "stream payload ",
-              "stream on", "stream off", "disc ", "sco type ", "afh ")
+              "frame off", "stream on", "stream off", "spp peer ",
+              "stream period ", "stream payload ", "disc ", "sco type ",
+              "afh ")
 
 # The status fields this driver reads, reports, or checks after a reset,
 # with the type each must have. A later image of the same major may add
@@ -399,8 +404,13 @@ class Restart:
     def describe(self) -> str:
         parts = [f"at {self.at}"]
         parts.append(self.reason if self.reason else "no reason line arrived")
-        parts.append(f"back on {self.version}" if self.version
-                     else "and had not finished booting")
+        if not self.version:
+            parts.append("and had not finished booting")
+        elif self.failed:
+            parts.append(f"back on {self.version} with Bluetooth not started: "
+                         f"{self.failed}")
+        else:
+            parts.append(f"back on {self.version}")
         return ", ".join(parts)
 
 
@@ -696,21 +706,27 @@ class Shell:
 
         None for a line that was the board talking by itself rather than an
         answer. Raises :class:`SerialLoss` for one that did not arrive whole.
+
+        The frame is checked against the payload exactly as it arrived, and
+        the surrounding blanks are taken off afterwards: the length in the
+        frame counts the bytes the board wrote, so a line that ever ends in
+        one must not be measured with it already gone.
         """
         if line and self.log is not None:
             self.log(targets.RECEIVED, line)
         payload, whole = self._unframe(line)
+        text = payload.strip(" \t")
         if not whole:
             self.lost += 1
             raise SerialLoss(
                 f"{self.label}: a line from the board lost bytes on its "
-                f"bridge: {payload[:80]!r}")
-        if self._boot_evidence(payload):
+                f"bridge: {text[:80]!r}")
+        if self._boot_evidence(text):
             return None
-        if _NOTICE.match(payload):
-            self._note(payload)
+        if _NOTICE.match(text):
+            self._note(text)
             return None
-        return payload
+        return text
 
     def drain(self) -> None:
         """Read what is waiting on the bridge, keeping what the board said.
@@ -739,14 +755,21 @@ class Shell:
 
     @staticmethod
     def _decode(raw: bytes) -> str:
-        return raw.decode("utf-8", "replace").strip("\r \t\x00")
+        """One line's bytes as text, with the line ending taken off.
+
+        Only the ending: a space or a tab at either end belongs to the line
+        the board wrote, and the frame's length counts it. _read takes those
+        off once the frame has been checked.
+        """
+        return raw.decode("utf-8", "replace").strip("\r\x00")
 
     # -- commands ----------------------------------------------------------
 
     @staticmethod
     def repeatable(text: str) -> bool:
         """Whether sending ``text`` a second time can change nothing."""
-        return any(text == safe or text.startswith(safe) for safe in REPEATABLE)
+        return any(text.startswith(safe) if safe.endswith(" ") else text == safe
+                   for safe in REPEATABLE)
 
     def command(self, text: str, timeout: float = COMMAND_TIMEOUT_S,
                 parse: Callable[[list[str]], object] | None = None):
@@ -1609,7 +1632,10 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             _write_map_report(map_report, requested, samples, command, seconds)
     problems += [reason for reason in released if reason]
     if after_initiator is None or after_acceptor is None:
-        raise PeerError(_why(restarted) + "; ".join(problems))
+        # One of the reads after the command failed, and said why; the
+        # fallback is there so this can never raise an empty reason.
+        raise PeerError(_why(restarted) + "; ".join(
+            problems or ["neither board could be read after the command"]))
     _report_traffic(out, initiator.label, after_initiator)
     _report_traffic(out, acceptor.label, after_acceptor)
     if not restarted:

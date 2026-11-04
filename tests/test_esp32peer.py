@@ -1470,6 +1470,21 @@ class BridgeLossTests(unittest.TestCase):
         self.assertEqual(0xFFFF, esp32peer.crc16(b""))
         self.assertEqual(0xF952, esp32peer.crc16(b"OK"))
 
+    def test_the_frame_measures_the_line_the_board_wrote(self):
+        """Blanks at the end of a line belong to it, and the length counts them.
+
+        Nothing the firmware writes ends in one today. Taking the blanks off
+        before the check would make the first line that does fail every read,
+        so they come off after it.
+        """
+        board, firmware, _bridge = self._shell()
+        firmware.refuse["status"] = "no  "
+
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    r"'status' refused: no"):
+            board.status()
+        self.assertEqual(0, board.lost)
+
     def test_a_line_that_arrives_a_few_bytes_at_a_time_is_read_whole(self):
         # The status line is longer than one read either way, and under
         # three bytes a read it takes hundreds. A chunk boundary mid-line
