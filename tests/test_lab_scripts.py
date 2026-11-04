@@ -1326,9 +1326,13 @@ class CheckoutEnvironment(Bench):
     def test_another_interpreter_starting_a_helper_re_runs_it_under_this_one(self):
         """Any interpreter may start a helper; only one may finish it.
 
-        An interpreter nobody bootstrapped is turned down, so a hold that
-        completes under one is proof that the re-run happened. Remove the
-        re-run and leave the child's `-P`, and this fails.
+        A hold that completes when an interpreter nobody bootstrapped
+        started it is a hold the re-run carried, since that interpreter is
+        turned down. What this does not prove on its own is that the call
+        is there at all: on a host whose base interpreter happens to carry
+        the harness's dependencies, deleting it lets the import succeed
+        instead of being refused. `test_what_a_caller_can_arrange_is_a_
+        refusal_at_most` is the one that fails then.
         """
         outside = self.outside_interpreter()
         result = subprocess.run(
@@ -1346,7 +1350,12 @@ class CheckoutEnvironment(Bench):
         self.assertIn("held", result.stdout)
 
     def test_every_helper_re_runs_itself_not_only_hold(self):
-        """`peer` and `hub-port` carry the same locks and the same risk."""
+        """`peer` and `hub-port` carry the same locks and the same risk.
+
+        Read with the note in the test above: this says each of the three
+        completes when started from outside, not by itself that each still
+        asks to be re-run.
+        """
         outside = self.outside_interpreter()
         for path in (HOLD, HUB_PORT, PEER):
             with self.subTest(script=path.name):
