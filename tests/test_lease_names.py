@@ -373,7 +373,8 @@ class BenchLockFileNames(NamesTestCase):
 
         It holds `board-<serial>.lock` and must be met on that same file.
         That is harness #317: a run that asked only for its lease key left
-        such a script free to open the peer's bridge, which resets the chip.
+        such a script free to drive the same peer, and taking turns with a
+        peer restarts it.
         """
         board = self.peer_board("ESP_A", BRIDGE)
         external = self.locks / f"board-{BRIDGE}.lock"
@@ -416,8 +417,8 @@ class BenchLockFileNames(NamesTestCase):
         """The path that matters: what a run holds while a case drives a peer.
 
         This is where #317 was: a run asked for its lease key alone, so the
-        file a lab wrapper locks was free and a second process could open
-        the peer's bridge and reset the chip under a capture.
+        file a lab wrapper locks was free, and a second session driving the
+        same peer restarts it under a capture.
         """
         registry = self.load(
             ubertooth("UT_A", BOARD), peer("ESP_A", BRIDGE), dk("DK_A", "000123456789")

@@ -1927,12 +1927,14 @@ class LabFiles(unittest.TestCase):
         self.assertNotIn("ATTRS{", rule)
 
     def test_every_helper_is_a_program_a_bench_can_exec(self):
-        """A wrapper on a bench names a path, nothing else (#312).
+        """A wrapper on a bench names its bench and a path (#312).
 
-        No interpreter, no working directory, no environment: anything a
-        wrapper has to supply is something it can supply wrongly, and one
-        wrapper naming another checkout's interpreter is what took every
-        device command on a host down.
+        What it must not have to name is anything about which harness runs:
+        no interpreter and no working directory, because anything a wrapper
+        supplies is something it can supply wrongly, and one wrapper naming
+        another checkout's interpreter is what took every device command on
+        a host down. Its own registry it does name, since a helper refuses
+        rather than guessing which bench it is for.
         """
         for path in (HOLD, HUB_PORT, PEER):
             with self.subTest(script=path.name):
