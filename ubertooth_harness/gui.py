@@ -713,7 +713,6 @@ def list_plans(
     estimates: EstimateStore | None = None,
     target: str | None = None,
     platform: str | None = None,
-    information: TestInformation | None = None,
 ) -> list[dict]:
     """Every ``<name>.yaml`` plan with its suites, tests and estimates.
 
@@ -742,16 +741,12 @@ def list_plans(
     whichever hosts it names. Without a target every step counts, which is
     the suite's whole time whichever host runs a part of it.
 
-    Each test also carries what a reader needs to understand it (#315):
-    ``info``, the prose from ``ubertooth_harness/test_info.yaml`` -- purpose,
-    theory, hardware, expected, limitations, related references, and a link to
-    its ``docs/tests.md`` section -- beside ``hardware_roles``,
-    ``arguments``, and ``estimate_profile``, which come from the catalog
-    (``_catalog_contract``). Nothing here can stop a run: a test with no
-    entry, or a file that is missing or malformed, is reported as
-    ``info.available`` false with the reason in
-    ``info.unavailable_reason``, and the rest of the listing is unaffected.
-    The prose is data, not markup; whoever renders it escapes it.
+    Each test also carries ``hardware_roles``, ``arguments``, and
+    ``estimate_profile``: what the catalog says this step binds, takes, and
+    is timed at (``_catalog_contract``). The prose a reader needs to
+    understand the test is not on the row, because a test appears in several
+    plans and the prose is the same every time; it is sent once per response
+    instead, by ``test_information_view`` (#315).
     """
     plans = []
     try:
@@ -759,10 +754,6 @@ def list_plans(
     except OSError:
         return []
     catalog = builtin_catalog()
-    # Read once per listing, as the plans themselves are: always the file as
-    # it now stands, and never a path a client chose.
-    if information is None:
-        information = test_information(catalog=catalog)
     for path in paths:
         if not _name(path.stem) or not path.is_file():
             continue
@@ -799,7 +790,6 @@ def list_plans(
                     "omitted_reason": reason,
                     **_build_needs(catalog, step.test_name, step.arguments),
                     **_catalog_contract(catalog, step.test_name, step.arguments),
-                    "info": information.view(step.test_name),
                 })
             check = run_plan_check(
                 catalog, steps, (target,) if target else (),
@@ -809,6 +799,43 @@ def list_plans(
         plans.append({"name": path.stem, "title": plan.name, "error": None,
                       "runnable": plan.runnable, "suites": suites})
     return plans
+
+
+def test_information_view(
+    plans: Sequence[Mapping],
+    information: TestInformation | None = None,
+) -> dict[str, dict]:
+    """What each test listed in ``plans`` is for, keyed by its catalog name.
+
+    One entry per distinct test name in the listing, read from
+    ``ubertooth_harness/test_info.yaml``: purpose, theory of operation,
+    hardware and traffic, expected outcome, what a pass does not prove,
+    related references, and a link to the test's ``docs/tests.md`` section
+    (#315). Keyed by name rather than carried on each test row because a
+    test appears in several plans and suites -- the repository's own plans
+    list 122 steps of 43 distinct tests -- and the prose is the same every
+    time, so putting it on the row tripled the response.
+
+    Every name on any listed row has an entry here, so a client never has to
+    handle a row it cannot look up. Nothing here can stop a run: a test with
+    no entry, and a file that is missing or malformed, give an entry with
+    ``available`` false and the reason in ``unavailable_reason``.
+
+    The prose is data, not markup. Whoever renders it escapes it: the
+    entries quote the shapes the tools print, so they carry angle brackets
+    and quotation marks on purpose.
+    """
+    if information is None:
+        # Read once per response, as the plans themselves are: always the
+        # file as it now stands, and never a path a client chose.
+        information = test_information()
+    names = {
+        test["name"]
+        for plan in plans
+        for suite in plan.get("suites", ())
+        for test in suite.get("tests", ())
+    }
+    return {name: information.view(name) for name in sorted(names)}
 
 
 def suite_refusal(

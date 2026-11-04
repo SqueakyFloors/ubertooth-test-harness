@@ -1112,25 +1112,33 @@ step.
   started/finished, a `report.md` link, and the failure summary from
   `GET /api/runs/{id}` (per failed phase or test: reason and last output
   lines; then the run's reason). Soak graphs remain.
-- **What each test is for:** every test row in `/api/plans` carries an
-  `info` block — purpose, theory of operation, hardware and traffic, expected
-  outcome, what a pass does not prove, related issues, and a link to the
-  test's `docs/tests.md` section — read from
+- **What each test is for:** `GET /api/plans` carries a `test_information`
+  map beside the plans — one entry per distinct test name in the listing,
+  with purpose, theory of operation, hardware and traffic, expected outcome,
+  what a pass does not prove, related issues, and a link to the test's
+  `docs/tests.md` section. It is read from
   `ubertooth_harness/test_info.yaml` by `testinfo.py` and keyed by the exact
-  catalog name. The catalog stays authoritative for what the test binds and
-  takes, which the same row reports beside the prose (`hardware_roles`,
-  `arguments`, `estimate_profile`, and the estimate fields), so nothing has
-  two sources. Nothing about it can stop a run: a test with no entry, or a
-  file that is missing or malformed, is reported `available: false` with the
+  catalog name, which is the name every test row carries, so a row is looked
+  up rather than carrying its own copy: the repository's own plans list 122
+  steps of 53 distinct tests, and a row-level copy took the response from
+  121 KB to 394 KB where the map takes it to 232 KB. The catalog stays
+  authoritative for what the test binds and takes, which the row reports
+  because it belongs to that step (`hardware_roles`, `arguments`,
+  `estimate_profile`, and the estimate fields), so nothing has two sources.
+  Nothing about it can stop a run: a test with no entry, or a file that is
+  missing or malformed, gives an entry with `available: false` and the
   reason, and the listing is otherwise unchanged. The answer is held between
-  requests while the file on disk is unchanged (its modification time, size
-  and inode), because reading and validating every entry takes about 70 ms
-  and the listing is asked for on every page load and change of target. The
-  prose is data, never markup, and whoever renders it escapes it: entries
-  carry angle brackets and quotation marks on purpose, because they quote the
-  shapes the tools print (`libubertooth <v> (<id>)`), so a renderer that
-  interpolates rather than escapes would drop text silently as well as being
-  a hole. The info button and dialog that show it are the GUI half of
+  requests while the file on disk is the same one (its modification time,
+  size and inode, and the catalog it was checked against), because reading
+  and validating every entry takes about 70 ms and the listing is asked for
+  on every page load and change of target; the key is taken again after the
+  read, so a file replaced while it was being read is not held under the
+  identity of the one before it. The prose is data, never markup, and
+  whoever renders it escapes it: entries carry angle brackets and quotation
+  marks on purpose, because they quote the shapes the tools print
+  (`libubertooth <v> (<id>)`), so a renderer that interpolates rather than
+  escapes would drop text silently as well as being a hole. The info button
+  and dialog that show it are the GUI half of
   [#315](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/315),
   waiting on the layout review in
   [#133](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/133).

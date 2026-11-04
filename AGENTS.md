@@ -78,9 +78,11 @@
   says: the hardware roles, the accepted arguments and which are required,
   the coverage profiles, and the estimates come from `catalog.py`, and
   `/api/plans` reports them from there beside the prose, so an entry carries
-  no argument default, no required flag, no role list, and no number of
-  seconds. What each profile decides, how many cases and which, is this
-  file's to say. The unit tests require an entry for every catalog test and
+  no argument default, no required flag, no role list, and no wall-time
+  estimate. Two things that look like those are the file's own: what a
+  coverage profile decides, how many cases and which, and a figure a case
+  itself runs for, such as a command's timeout, which comes from the case
+  code. The unit tests require an entry for every catalog test and
   refuse an entry that restates a catalog estimate, so drift fails rather
   than quietly misleading a reader. Reviewers check for it.
 - Run the unit suite with `python scripts/test.py` (one process per module,

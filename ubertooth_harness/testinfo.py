@@ -319,38 +319,50 @@ def test_information(
     Held between calls while the file on disk is the same one: reading and
     validating 62 entries takes about 70 ms, and ``/api/plans`` is asked for
     on every page load and every change of target, so re-reading it per
-    request would be the slowest thing in that response. The file is still
-    checked on every call -- the key is its path, modification time and
-    size -- so an edited file is read again and a reader never sees an
-    answer from the file as it was.
+    request would be the slowest thing in that response.
+
+    What makes a held answer still this file's own is `_cache_key`: the
+    file's modification time, size and inode, plus the catalog the entries
+    were checked against, since a different catalog would accept or refuse
+    different names. The key is taken again after the read and the answer is
+    held only if it has not moved, so a file replaced while it was being
+    read is not stored under the identity of the one before it. A file that
+    cannot be asked about at all (it is gone, or its directory refuses) is
+    never held, so the answer for it is worked out again every time.
     """
     info_path = Path(path) if path is not None else TEST_INFO_PATH
-    key = _cache_key(info_path)
-    with _CACHE_LOCK:
-        cached = _CACHE.get(info_path)
-    if cached is not None and cached[0] == key:
-        return cached[1]
-    information = _read(info_path, catalog)
-    with _CACHE_LOCK:
-        _CACHE.clear()  # one file in practice; never a growing map
-        _CACHE[info_path] = (key, information)
+    resolved = catalog or builtin_catalog()
+    before = _cache_key(info_path, resolved)
+    if before is not None:
+        with _CACHE_LOCK:
+            cached = _CACHE.get(info_path)
+        if cached is not None and cached[0] == before:
+            return cached[1]
+    information = _read(info_path, resolved)
+    after = _cache_key(info_path, resolved)
+    if after is not None and after == before:
+        with _CACHE_LOCK:
+            _CACHE.clear()  # one file in practice; never a growing map
+            _CACHE[info_path] = (after, information)
     return information
 
 
-def _cache_key(path: Path):
-    """What makes a held answer still the file's own: its identity on disk.
-    None when it cannot be asked, which never matches, so an unreadable file
-    is read again rather than answered from a held copy."""
+def _cache_key(path: Path, catalog: TestCatalog):
+    """The file's identity on disk, and the catalog it was read against.
+
+    None when the file cannot be asked about, which is never held and never
+    matches a held key, so a missing file is not answered from a copy taken
+    when it was still missing: the moment it appears it is read.
+    """
     try:
         stat = path.stat()
     except OSError:
         return None
-    return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+    return (stat.st_mtime_ns, stat.st_size, stat.st_ino,
+            tuple(catalog.names))
 
 
-def _read(
-    info_path: Path, catalog: TestCatalog | None = None
-) -> "TestInformation":
+def _read(info_path: Path, catalog: TestCatalog) -> "TestInformation":
     try:
         return TestInformation(load_test_info(info_path, catalog), "")
     # Nothing about this file may reach the caller as an exception: the
@@ -390,7 +402,13 @@ def _one_line(error: Exception, path: Path) -> str:
     """
     text = " ".join(str(error).split()) or type(error).__name__
     directory = str(Path(path).parent)
-    found = [str(path), str(Path(path).resolve())]
+    found = [str(path)]
+    try:
+        # A symbolic link loop makes this raise, and this is the handler for
+        # a file that could not be read, so it may not raise in turn.
+        found.append(str(Path(path).resolve()))
+    except (OSError, RuntimeError):
+        pass
     if len(directory) > 2:
         found.append(directory)
     for item in found:

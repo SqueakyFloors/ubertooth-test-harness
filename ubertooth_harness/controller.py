@@ -76,6 +76,7 @@ from ubertooth_harness.gui import (
     run_stage_estimates,
     security_headers,
     suite_refusal,
+    test_information_view,
 )
 from ubertooth_harness.learned import STORE_FILE, EstimateStore
 from ubertooth_harness.report import write_report
@@ -2457,6 +2458,11 @@ def create_app(controller: Controller):
         return {
             "plans": plans, "target": target, "platform": platform,
             "stages": learned_stages(estimates, target),
+            # What each listed test is for, once per response and keyed by
+            # the catalog name the rows carry (#315).
+            "test_information": await asyncio.to_thread(
+                test_information_view, plans
+            ),
         }
 
     @app.get("/api/targets")
