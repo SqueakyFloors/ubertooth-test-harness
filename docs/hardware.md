@@ -260,8 +260,8 @@ holds the other.
   required: it names the lease, as `programmer-<serial>`, taken verbatim as
   registered (a `serial device`, where one is recorded, must be the stable
   `/dev/serial/by-id` path, not `/dev/ttyUSB<n>`, which is assignment order).
-  It has to leave room for that prefix and for the bench's own `bench-`
-  prefix, so 53 characters at most; a longer one is refused when the registry
+  It has to leave room for that prefix and for every other lock name built
+  from it, so 53 characters at most; a longer one is refused when the registry
   loads, naming the field and the limit.
 - `programs:` is the one board it is wired to. A registry is refused when that
   board is not registered, is not a device the harness leases (a host, a hub:
@@ -447,6 +447,44 @@ so they stay off an attenuated board with no plan saying so.
 **Keep the numbers current.** Swapping the attenuator or moving the board
 without editing `rf:` makes every later report quote the wrong conditions, and
 nothing in the harness can catch it.
+
+**How much attenuation is useful, measured.** Stacking attenuators to force
+decode errors has a ceiling, and on this bench it is below 50 dB. A receiver
+taken to 50 dB about a meter from the Classic peers, against a dense Serial
+Port Profile link, recorded 62 packets across six 15-second windows where
+three 20 dB windows recorded 237; four of the six heard nothing at all, at
+`-e 0` it recorded nothing against 20 dB's 190, and no window recovered a
+piconet clock
+([#306](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/306)).
+Past a point, more attenuation stops producing damaged packets and starts
+producing no packets, and a test cannot be judged on what a board did not
+hear. `weaklink.CHARACTERIZED_UNUSABLE_DB` records such a point with its
+reason, and a plan that asks for one is refused with that reason instead of
+being told the figure is simply unmeasured. The worked receiver above is the
+20 dB one, which is what the bench layout table at the end of this file
+describes; 50 dB was a measurement taken, not a placement to keep.
+
+Three things that mislead when reading those runs:
+
+- **A reported signal power only covers what was decoded**, because a packet
+  the receiver never detected reports no power at all. Between 20 and 50 dB
+  the mean reported signal moved far less than the attenuation did while the
+  `-e 0` yield fell from 190 records a window to none, so a signal power that
+  barely moves is not evidence that the attenuator did nothing: the packets
+  it would have shown are missing from the mean rather than weak within it.
+- **Error flags are not ordered by attenuation.** Across 19 windows the
+  highest rate of failed header checks was on the *unattenuated* board, 3.6%
+  against 1.6% at 40 dB, with none at all in 195 checks at 20 dB and 49 at
+  50 dB. If a test wants a damaged packet, a bigger attenuator is not the
+  lever. Treat a failed CRC with more care still: every CRC check in that
+  sweep failed, and all of those records carried a valid HEC and a payload
+  length that decoded exactly, which is what a payload dewhitened against an
+  unsettled clock looks like rather than a damaged one.
+- **A clear board is only a baseline if it was placed like one.** At `-e 0`
+  an unattenuated board elsewhere on the bench recorded 39 packets where a
+  20 dB board deliberately set about a meter from the peers recorded 190.
+  Give a baseline board its own `rf:` with its distance, or do not read it as
+  the best case.
 
 ## Firmware
 
@@ -711,7 +749,12 @@ A device permanently wired to another one -- a board and its debug programmer
 -- is held together with it, whichever of the two a command names (see [A
 debug programmer and the board it programs](#a-debug-programmer-and-the-board-it-programs)).
 Where the bench's own scripts lock devices with their own per-device files, a
-lease takes those too (`--external-board-lock`). See
+lease takes those too (`--external-board-lock`), under the plain serial those
+scripts were written against, for a run and for a manual command alike
+([#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)).
+That matters most on the ESP32 peers: opening a peer's USB bridge pulls the
+chip's reset line, so a second session that opens one restarts the board in
+the middle of whatever the first was measuring. See
 [Sharing boards: leases](../README.md#sharing-boards-leases).
 
 **One lock file is one device.** No two devices may be registered with one
@@ -728,6 +771,22 @@ be registered with one.
 For a command you run by hand, [`scripts/lab/hold`](../scripts/lab/README.md)
 takes the leases and names devices the way a bench note does, by serial or by
 an unambiguous prefix of one.
+
+**One checkout reads the registry and takes the leases.** A bench helper runs
+the harness of the checkout it lives in: it re-runs itself under that
+checkout's bootstrapped interpreter, and the `ubertooth-harness lease` it
+delegates to is given that checkout first on its import path with the working
+directory left off it. So a wrapper on the
+bench names a path and nothing more, and the registry and the code that reads
+it cannot come from two different versions. They did once: a wrapper naming a
+deployed checkout's interpreter left every device command on the host
+refusing a registry that had just gained a role-named default, because the
+deployed half predated them
+(harness [#312](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/312)).
+Point the bench's wrappers at a checkout that tracks `main`, the one the
+harness is deployed from, and `scripts/deploy.sh` reads the registry with the
+code it installs so a pair that cannot work together is refused at the deploy
+rather than at the next hold.
 
 ## Host setup
 

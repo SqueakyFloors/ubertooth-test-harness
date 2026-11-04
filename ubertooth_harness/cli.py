@@ -180,9 +180,11 @@ def _add_lease_options(parser: argparse.ArgumentParser) -> None:
 def _add_external_lock_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--external-board-lock", metavar="TEMPLATE",
-        help="also hold each board's own lock file from another tool on this "
-        "host: an absolute path with {serial} (the board's lock key: an "
-        "Ubertooth's full 32-hex serial), e.g. "
+        help="also hold each device's own lock file from another tool on this "
+        "host: an absolute path with {serial} (the device's plain serial, "
+        "which is what such a tool locks: an Ubertooth's full 32-hex serial "
+        "in lowercase, or a DK's J-Link serial, a peer's bridge serial or a "
+        "programmer's serial as the registry spells it), e.g. "
         "'/var/lock/board-{serial}.lock'; default "
         f"${board_leases.EXTERNAL_LOCK_ENV}; '' turns it off",
     )
@@ -1503,11 +1505,11 @@ def _registered_boards(registry, host: str | None = None):
         if host and resource.attached_to != host:
             continue
         try:
-            key = board_leases.resource_key(resource)
+            board = board_leases.board_for_resource(resource)
         except board_leases.LeaseError as error:
             boards.append((resource.alias, str(error)))
             continue
-        boards.append((board_leases.Board(resource.alias, key), None))
+        boards.append((board, None))
     return boards
 
 
@@ -1711,7 +1713,7 @@ def _lease_command(args: argparse.Namespace) -> int:
                 f"resource {alias} is not leasable; leasable types are "
                 + ", ".join(board_leases.LEASED_TYPES)
             )
-        boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
+        boards.append(board_leases.board_for_resource(resource))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.
     host_lock = args.host_lock

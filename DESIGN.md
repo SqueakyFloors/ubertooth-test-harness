@@ -375,10 +375,17 @@ registry in which two leasable resources would take one lease key
 (`leases.resource_key`, which comes from one identity field where the
 duplicate-identity check compares whole mappings), or in which two devices
 are registered with one plain serial, since that is the name the bench's own
-lock files use (`scripts/lab/hold`). That second name takes a lease file of
-its own under a `bench-` prefix, so a 32-hex-digit serial cannot name the
-lease file of an Ubertooth with that serial, while the bench's own file keeps
-the plain serial it was written against.
+lock files use.
+
+A device therefore has two lock names, and `leases.board_for_resource` is the
+one place both are built, so no path can ask for a file another path does
+not. The lease file carries its type's prefix for everything but an
+Ubertooth, which keeps a 32-hex-digit serial off the lease file of an
+Ubertooth with that serial; the external file keeps the plain serial the
+lab's own scripts were written against. A run that asked for its lease key
+alone left those scripts free to drive the same device, which on an ESP32
+peer restarts the board, because opening its USB bridge pulls the chip's
+reset line (#317).
 
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
@@ -432,17 +439,22 @@ was required to be (`placement_requirements`).
 
 `weaklink.unjudgeable` is what a run has to pass: a requirement may leave no
 attenuated link possible (an ordinary board) or pin exactly one attenuation,
-which must be in `weaklink.MEASURED_ATTENUATIONS_DB`. A requirement that
+which must be in `weaklink.MEASURED_ATTENUATIONS_DB` and must be recorded in
+`weaklink.CHECKS` for that test in that role. A requirement that
 leaves a band open above 0 dB, which `rf:` can write and `weak link:` cannot,
 is refused too, because which board it binds depends on what the bench
-happens to hold. `plan.check_runnable` applies that to a whole plan for
+happens to hold. A fourth reason is a figure the bench was taken to where
+nothing could be measured: `weaklink.CHARACTERIZED_UNUSABLE_DB` holds those
+with why, so the refusal gives the reason rather than calling the figure
+unmeasured to somebody about to fit an attenuator a previous session tried. `plan.check_runnable` applies that to a whole plan for
 `validate-plan`, honoring `runnable: false`; `plan.check_suite_runnable`
 applies it to the one suite a `run-suite` is about to run and does not
 consult the flag, since `runnable: false` says a plan may name those entries,
 not that a run may judge them. Both also refuse a test with no
 implementation. `weaklink.CHECKS` is the list of weak-link checks and what
-each one still needs; none is in a runnable plan, and
-`testplans/weak-link.yaml` is where they wait. The requirement
+each one still needs; the ones with nothing left to need sit in the runnable
+plans their test belongs to (`ble.yaml`, `classic.yaml`, `range.yaml`), and
+`testplans/weak-link.yaml` is where the rest wait. The requirement
 narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
 is filtered by the role as well, so a unit that could never take the role is
 not offered as the one that satisfies the placement: `default` prefers the
@@ -1067,8 +1079,9 @@ Both speak the same line shell over a serial port — one command line in,
 data lines out, then one `OK` or `ERR <reason>`, with `status` on a single
 JSON line — so a reader of one driver can read the other. Both are leased
 like an Ubertooth, under a prefixed key (`nrf52840dk-<J-Link serial>`,
-`esp32-<bridge serial>`), and both are checked in preflight by asking the
-board to identify itself.
+`esp32-<bridge serial>`) and, where a lab locks its devices with its own
+files, under the plain serial as well, and both are checked in preflight by
+asking the board to identify itself.
 
 They differ in one way that shapes how a case is written. **A DK keeps its
 state when its serial port is closed; an ESP32 does not.** On an ESP32 dev
@@ -1087,6 +1100,13 @@ which keeps the case's checks on the tool's real output
 (`classic_cases.py`). The same wiring gives a reliable release: a reset pulse
 on RTS leaves the board in the firmware's boot state, which is what every
 Classic case's cleanup does.
+
+That wiring is also why a peer's lock has to be the one a lab's own scripts
+take. Holding the bridge for the session protects it from the harness; it
+protects it from nothing else, and a second process that merely **opens** the
+port restarts the board, mid-capture, with the session reading the counters of
+a board that has just booted. So a peer is leased under both of its names, by
+a run as well as by a manual command (#317, `leases.board_for_resource`).
 
 One consequence is worth stating because it decides what a case can assert:
 in a Classic piconet the LAP on the air is the **central's**, and the central
@@ -1166,6 +1186,36 @@ step.
   started/finished, a `report.md` link, and the failure summary from
   `GET /api/runs/{id}` (per failed phase or test: reason and last output
   lines; then the run's reason). Soak graphs remain.
+- **What each test is for:** `GET /api/plans` carries a `test_information`
+  map beside the plans — one entry per distinct test name in the listing,
+  with purpose, theory of operation, hardware and traffic, expected outcome,
+  what a pass does not prove, related issues, and a link to the test's
+  `docs/tests.md` section. It is read from
+  `ubertooth_harness/test_info.yaml` by `testinfo.py` and keyed by the exact
+  catalog name, which is the name every test row carries, so a row is looked
+  up rather than carrying its own copy: the repository's own plans list 122
+  steps of 53 distinct tests, and a row-level copy took the response from
+  121 KB to 394 KB where the map takes it to 232 KB. The catalog stays
+  authoritative for what the test binds and takes, which the row reports
+  because it belongs to that step (`hardware_roles`, `arguments`,
+  `estimate_profile`, and the estimate fields), so nothing has two sources.
+  Nothing about it can stop a run: a test with no entry, or a file that is
+  missing or malformed, gives an entry with `available: false` and the
+  reason, and the listing is otherwise unchanged. The answer is held between
+  requests while the file on disk is the same one (its modification time,
+  size and inode, and the catalog it was checked against), because reading
+  and validating every entry takes about 70 ms and the listing is asked for
+  on every page load and change of target; the key is taken again after the
+  read, so a file replaced while it was being read is not held under the
+  identity of the one before it. The prose is data, never markup, and
+  whoever renders it escapes it: entries carry angle brackets and quotation
+  marks on purpose, because they quote the shapes the tools print
+  (`libubertooth <v> (<id>)`), so a renderer that interpolates rather than
+  escapes would drop text silently as well as being a hole. The info button
+  and dialog that show it are the GUI half of
+  [#315](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/315),
+  waiting on the layout review in
+  [#133](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/133).
 
 Security: the GUI is served by the loopback-only controller behind the same
 Host/Origin/Sec-Fetch guard as the API, `POST`s stay JSON-only, every

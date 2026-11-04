@@ -64,10 +64,14 @@ test):
   `err=0` records and nothing else, and `-e 2` tops out at 2 at both
   attenuations. `-e 4` topping out at 4 is established at 40 dB and on a
   clear board, not at 20 dB, where it collapsed (below);
-* **40 dB is not an error regime.** Its error profile sits close to 20 dB's
-  (74% against 77% `err=0` at `-e 2`) on a comparable packet count while
-  reading about 14 dB lower, so the link still has margin there. Damaged
-  packets in quantity would need more attenuation than the bench now has;
+* **40 dB is not an error regime**, and nor is anything beyond it that this
+  bench can reach. Its error profile sits close to 20 dB's (74% against 77%
+  `err=0` at `-e 2`) on a comparable packet count while reading about 14 dB
+  lower, so the link still has margin there. 50 dB, fitted and measured
+  2026-11-04, does not add errors but removes packets: 62 records over six
+  windows against 237 over three at 20 dB, and no clock recovered at all
+  (`CHARACTERIZED_UNUSABLE_DB`). Header-check failures are not ordered by
+  attenuation either — the unattenuated board had the highest rate measured;
 * a known BLE advertiser is captured completely at both, about 1175 and 1228
   advertisements with **no** CRC failure, and `tshark` agrees with the tool's
   own count exactly;
@@ -115,6 +119,26 @@ MEASURED_ATTENUATIONS_DB: tuple[float, ...] = (20.0, 40.0)
 # Asked for and still uncharacterized: the second point that would turn the
 # 20-against-40 figures into a curve.
 PLANNED_ATTENUATIONS_DB: tuple[float, ...] = (30.0,)
+
+# Points the bench has been taken to and found useless, with why. These are
+# deliberately *not* in MEASURED_ATTENUATIONS_DB: a plan may not point a test
+# at one. They are kept because "not measured" is the wrong thing to tell
+# somebody who is about to fit the attenuator a previous session already
+# tried, and because the reason says which direction is worth trying next.
+CHARACTERIZED_UNUSABLE_DB: Mapping[float, str] = MappingProxyType({
+    50.0: (
+        "taken to 2026-11-04 for the Classic damaged-packet checks (#306) "
+        "and the yield collapses there. Six 15 s windows of dense SPP "
+        "traffic gave 0, 0, 1, 0, 61, and 0 records, 62 in all, where three "
+        "20 dB windows gave 237; at -e 0 it recorded nothing at all against "
+        "20 dB's 190. Four of the six windows heard nothing, and no window "
+        "recovered a piconet clock, so there is nothing at this attenuation "
+        "for a test to be judged on. Raising the attenuation further is not "
+        "the way to a damaged-packet regime either: header checks failed at "
+        "the highest rate on the UNattenuated board (3.6%, against 1.6% at "
+        "40 dB and none in 195 checks at 20 dB)"
+    ),
+})
 
 
 def measured(attenuation_db: float) -> bool:
@@ -171,6 +195,11 @@ def unjudgeable(
             return (
                 f"needs {low:g} dB, which is measured on this bench but not "
                 f"for this test in this role; weaklink.CHECKS records what is"
+            )
+        if float(low) in CHARACTERIZED_UNUSABLE_DB:
+            return (
+                f"needs {low:g} dB, which this bench has been taken to and "
+                f"found unusable: {CHARACTERIZED_UNUSABLE_DB[float(low)]}"
             )
         return f"needs {low:g} dB, which is not measured"
     bound = []
@@ -388,12 +417,27 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "HEC and CRC error flags, Classic",
         "Classic capture record fields", "Ubertooth", 40.0,
-        "a capture whose records a flag actually fired on. The sweep decoded "
-        "packets at 40 dB but wrote no capture file, and 40 dB is not an "
-        "error regime on this bench anyway (74% against 77% err=0), so the "
-        "flags may simply not fire; more attenuation than the bench has may "
-        "be needed, and a case that requires a flag to have fired does not "
-        "exist yet",
+        "a CRC failure that means a damaged packet, which this bench has not "
+        "been shown to produce. The capture files the older wording asked "
+        "for were taken 2026-11-04 (#306), 19 windows of 15 s and 25 s, and "
+        "they answer two thirds of it. A capture file over the weak link "
+        "exists now, and the header flag does fire: checks failed in 4 of "
+        "the 19 windows, at 4.9%, 8.5% and 0.2% in the three 40 dB windows "
+        "that saw any and at 3.6% on the clear board. But attenuation is not "
+        "what drives that -- the clear board had the highest rate of all, "
+        "20 dB failed none of 195, and 50 dB none of 49 -- so pointing this "
+        "test at a weaker link is not what would earn it. The CRC half is "
+        "worse than unmeasured. Every CRC check made in any window failed, "
+        "11 of 11, which looks like evidence until the records are read: all "
+        "11 are DM1 with a VALID HEC and a payload length field that decoded "
+        "exactly, at every receiver including the unattenuated one, with and "
+        "without a recovered clock. A payload is dewhitened with the clock, "
+        "so that is the signature of a payload decoded against a clock that "
+        "never settled, not of a damaged packet. A case requiring the CRC "
+        "flag to have fired would enshrine that artifact. What is needed is "
+        "a capture whose CRC failures can be shown to come from the air: "
+        "payload-bearing records were 11 of 2620, so the rate is no basis "
+        "for a floor either way",
     ),
     Check(
         "HEC and CRC error flags, BLE",

@@ -165,7 +165,12 @@ bench, or to judge what a result was measured on. The by-hand helpers that go
 with it are in [`scripts/lab/`](scripts/lab/README.md): `hold` holds devices
 by serial for one command, `peer` drives the Classic Bluetooth peers by
 registry alias, and `hub-port` switches a hub port to recover a device that has
-stopped answering.
+stopped answering. Each runs the harness of the checkout it lives in,
+whichever interpreter starts it and from whatever directory: it re-runs
+itself under that checkout's own bootstrapped environment, carries on in any
+other the harness bootstrapped if its own checkout has none, and refuses an
+interpreter nobody bootstrapped. So a wrapper on a bench is one `exec` of a
+path.
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
@@ -411,7 +416,10 @@ that is judged **per test** rather than per bench: the requirement must pin
 exactly one attenuation, and `weaklink.CHECKS` must record a measurement of
 that test, in that role, there. 40 dB is measured for a BLE advertiser
 capture and not for a Classic capture file, so a bench-wide list would have
-admitted the second on the first's evidence. A bare `min_attenuation_db` is
+admitted the second on the first's evidence. An attenuation the bench has
+been taken to and found to settle nothing is refused with that as the reason
+(`weaklink.CHARACTERIZED_UNUSABLE_DB`), rather than being reported as merely
+unmeasured. A bare `min_attenuation_db` is
 refused as well, because which board it binds depends on what the bench
 happens to hold. `validate-plan` applies this to a whole plan and `run-suite`
 to the suite it is about to run, so a suite is refused before a board is
@@ -1843,10 +1851,13 @@ by, and one image holds both roles anyway.
 
 A peer is leased like an Ubertooth (`ubertooth-harness boards` and `lease`
 list it), keyed by its bridge serial (`esp32-<serial>.lock` in the lease
-directory). As with the DKs, a lab that guards boards with its own per-board
-lock files must hold both bridges' lock files around the run until the
-harness takes external board locks
-([#123](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/123)).
+directory). A lab that guards devices with its own per-device `flock` files is
+met on those too, under the plain bridge serial, once the run is given the
+template ([External board locks](#external-board-locks)). Hold the pair that
+way for anything that drives it: opening a peer's bridge pulls the chip's
+reset line, so a second session that opens one restarts the board in the
+middle of the first session's capture
+([#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)).
 
 The peers have no switchable power on this bench, so nothing power-cycles
 one: a board that stops answering needs someone at it.
@@ -1877,10 +1888,9 @@ serial — and the duplicate-identity check compares whole identity mappings,
 so two resources whose other fields differ could otherwise take one file
 while everything that read the registry treated them as two devices (a run
 binding both ends of a connection to one DK, with the lease saying nothing).
-The serials themselves are compared the same way, because
-[`scripts/lab/hold`](scripts/lab/README.md) also names a lock after a
-device's plain serial: one serial is one device, whichever way it is written,
-and on whatever type it is registered.
+The serials themselves are compared the same way, because a device's external
+lock is named after its plain serial: one serial is one device, whichever way
+it is written, and on whatever type it is registered.
 
 If a board is held, the run fails before any build or device command and names
 the holder. `--wait-for-boards MINUTES` waits instead; `--owner LABEL` (or
@@ -2176,16 +2186,29 @@ ubertooth-harness lease --external-board-lock '/var/lock/board-{serial}.lock' \
 ```
 
 The template is an absolute path (or starts with `~/`) with exactly one
-`{serial}`, replaced by the board's lock key, the same key its lease file
-uses: an Ubertooth's full 32-hex-digit serial in lowercase, or
-`nrf52840dk-<J-Link serial without leading zeros>` for a DK,
-`esp32-<bridge serial>` for a Classic peer, `programmer-<serial>` for a debug
-programmer. ([`scripts/lab/hold`](scripts/lab/README.md) takes one more file
-per DK, peer and programmer, the bench's own older name for it: that one is
-the plain serial.) No other brace;
+`{serial}`, replaced by the device's plain serial, which is what a lab's own
+script was written against: an Ubertooth's full 32-hex-digit serial in
+lowercase, a DK's J-Link serial as registered, a Classic peer's bridge
+serial, a debug programmer's serial. That is not always the device's lease
+key, which carries its type's prefix for everything but an Ubertooth
+(`nrf52840dk-<J-Link serial without leading zeros>`, `esp32-<bridge serial>`,
+`programmer-<serial>`); the external file keeps the plain serial so that a
+lab wrapper and a harness run meet on one file
+([#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)).
+Every path that leases a device asks for both names — a run, `lease`,
+`boards`, `runner`, and the helpers in `scripts/lab`. No other brace;
 `--external-board-lock` overrides the variable and
 `--external-board-lock ''` turns it off for one command. Unset, nothing
-changes. Each external lock is an exclusive `flock` on that file, taken in
+changes. A bench set up before
+[#317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)
+may have `board-esp32-<serial>.lock`, `board-nrf52840dk-<serial>.lock` or
+`board-programmer-<serial>.lock` files left over from when a run asked for
+the lease key: nothing takes those now, so delete them and make sure the
+lab's own wrappers lock the plain-serial file, which is the one every harness
+command takes. One spelling matters: the file is named after the serial as the
+registry spells it, so a DK's is the padded J-Link serial if that is what the
+registry carries, not `nrfutil`'s zero-stripped form
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)). Each external lock is an exclusive `flock` on that file, taken in
 the same all-or-nothing attempt as the leases and dropped by the kernel when
 the holder exits, like a lease. A missing file is created (mode 0644, an
 existing file keeps its mode and content; the harness opens it read-only and
@@ -3295,7 +3318,7 @@ runner (`After=`/`Wants=` the controller) dials
 |---|---|
 | `--runner-host NAME` | registry Host resource of this machine (required) |
 | `--ubertooth-source DIR` | Ubertooth checkout the runner runs the listed commit from (required; a commit missing there is fetched from its `origin` at run time) |
-| `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout) |
+| `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout); it is loaded with this checkout's own code, and one this code cannot read ends the deploy rather than the next run or hold (`--dry-run` says it would and carries on) |
 | `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
 | `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
 | `--libbtbb-source DIR` | libbtbb checkout the runner builds from (default: deploy's own clone of the [libbtbb fork](https://github.com/SqueakyFloors/libbtbb), see below) |
