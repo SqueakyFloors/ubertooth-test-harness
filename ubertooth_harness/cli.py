@@ -181,10 +181,10 @@ def _add_external_lock_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--external-board-lock", metavar="TEMPLATE",
         help="also hold each device's own lock file from another tool on this "
-        "host: an absolute path with {serial} (the device's plain serial as "
-        "registered, which is what such a tool locks: an Ubertooth's full "
-        "32-hex serial, a DK's J-Link serial, a peer's bridge serial, a "
-        "programmer's serial), e.g. "
+        "host: an absolute path with {serial} (the device's plain serial, "
+        "which is what such a tool locks: an Ubertooth's full 32-hex serial "
+        "in lowercase, or a DK's J-Link serial, a peer's bridge serial or a "
+        "programmer's serial as the registry spells it), e.g. "
         "'/var/lock/board-{serial}.lock'; default "
         f"${board_leases.EXTERNAL_LOCK_ENV}; '' turns it off",
     )

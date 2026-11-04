@@ -451,11 +451,7 @@ PEER_TYPE = "ESP32 Classic peer"
 # expand_pairs).
 PROGRAMMER_TYPE = "Debug programmer"
 LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE)
-# The shortest prefix any lease key carries (`esp32-`). Kept as a floor on
-# the serial-length budget so that a registry a bench has already written
-# cannot become invalid if a shorter prefix is ever added: the limit a serial
-# was accepted under never loosens.
-LOCK_PREFIX_FLOOR = 6
+
 
 
 def plain_serial(resource) -> str:
@@ -540,14 +536,15 @@ def board_for_resource(resource) -> Board:
 
 
 def max_serial_chars(prefix: str) -> int:
-    """How long a serial may be for every lock name built from it to fit.
+    """How long a serial may be for the lease file built from it to fit.
 
     A lease key carries its type's prefix and is a file name
-    (``LOCK_NAME_CHARS``). The registry refuses a longer serial where it
-    loads, so a bench learns the limit from the field it wrote rather than
-    from the name the harness built.
+    (``LOCK_NAME_CHARS``). The device's other lock name is a path from the
+    lab's own template, which this says nothing about. The registry refuses a
+    longer serial where it loads, so a bench learns the limit from the field
+    it wrote rather than from the name the harness built.
     """
-    return LOCK_NAME_CHARS - max(len(prefix), LOCK_PREFIX_FLOOR)
+    return LOCK_NAME_CHARS - len(prefix)
 
 
 def _keyed(resource, field: str, prefix: str, serial: str) -> str:
@@ -1930,10 +1927,11 @@ def acquire(
     if external_template:
         for board in by_serial:
             path = external_lock_path(external_template, board)
-            # Both of this device's own lease names, which differ only for
-            # the bench's second lock name (Board.external_key): a template
-            # pointing at the lease directory would otherwise take the lease
-            # file of the device that name belongs to as an external lock.
+            # Both of this device's own lock names. A template pointing at
+            # the lease directory would otherwise take a lease file as an
+            # external lock: its own, or -- since a peer's 32-hex bridge
+            # serial could be the lease key of an Ubertooth in another
+            # registry sharing this directory -- that board's.
             own = {root / f"{board.key}.lock", root / f"{board.lock_name}.lock"}
             # realpath, so a symlink to the lease file is caught too: the
             # second flock of one file in one process conflicts with itself.

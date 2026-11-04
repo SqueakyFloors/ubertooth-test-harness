@@ -475,12 +475,12 @@ class BenchLockFileNames(NamesTestCase):
         self.assertEqual([f"esp32-{BRIDGE}"], [item.key for item in read_back])
 
     def test_a_serial_too_long_for_a_lock_file_is_refused(self):
-        """Every name built from it has to be one a file can carry.
+        """The lease file built from it has to be one a file can carry.
 
-        A key carries its type's prefix and the bench's second name carries
-        its own, so a serial that is a file name on its own may still build
-        one that is not. Such a name would be dropped where a ticket is read
-        back, so the set that ticket's command waits for would read short.
+        A key carries its type's prefix, so a serial that is a file name on
+        its own may still build one that is not. Such a name would be dropped
+        where a ticket is read back, so the set that ticket's command waits
+        for would read short.
         """
         for block, field, limit in (
             (programmer("Prog_A", "p" * 54, "UT_A"), "serial", 53),

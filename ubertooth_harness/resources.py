@@ -250,9 +250,8 @@ def _refuse_a_long_serial(resource, field: str, prefix: str) -> None:
     if len(serial) > limit:
         raise RegistryError(
             f"{resource.type} {resource.alias} '{field}' may be at most {limit} "
-            f"characters, so that its lease file ('{prefix}<{field}>') and the "
-            f"bench's own lock file both have names a file can carry; "
-            f"registered {len(serial)}"
+            f"characters, so that its lease file ('{prefix}<{field}>') has a "
+            f"name a file can carry; registered {len(serial)}"
         )
 
 

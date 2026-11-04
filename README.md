@@ -2110,7 +2110,10 @@ may have `board-esp32-<serial>.lock`, `board-nrf52840dk-<serial>.lock` or
 `board-programmer-<serial>.lock` files left over from when a run asked for
 the lease key: nothing takes those now, so delete them and make sure the
 lab's own wrappers lock the plain-serial file, which is the one every harness
-command takes. Each external lock is an exclusive `flock` on that file, taken in
+command takes. One spelling matters: the file is named after the serial as the
+registry spells it, so a DK's is the padded J-Link serial if that is what the
+registry carries, not `nrfutil`'s zero-stripped form
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)). Each external lock is an exclusive `flock` on that file, taken in
 the same all-or-nothing attempt as the leases and dropped by the kernel when
 the holder exits, like a lease. A missing file is created (mode 0644, an
 existing file keeps its mode and content; the harness opens it read-only and
