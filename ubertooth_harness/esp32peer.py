@@ -349,6 +349,30 @@ _STATUS_KEYS = {
 }
 
 
+def _unframable(line: str) -> bool:
+    """Whether a line may arrive without a frame from a framing board.
+
+    Two kinds may. The first never went through the firmware's own line
+    writer, so it was never framed at all: the ROM's boot log, ESP-IDF's log
+    lines, and what a panic prints on its way down.
+
+    The second is the board's own boot notices, and they are here because a
+    board that has restarted is not framing any more - the setting is the
+    wire's and a reset clears it. So a bare boot notice is not a line that
+    lost its frame; it is the board saying it went away, which is the one
+    thing the session most needs to hear (#311). Without this, a restart
+    whose ROM line was damaged or lost would take every notice after it down
+    with it and leave nothing to report.
+
+    A damaged line that happened to read as a boot notice would be taken for
+    one. That costs a reported restart, which is a loud failure rather than a
+    quiet pass, and it needs a hole to fall exactly inside a notice.
+    """
+    return bool(_BOOT_NOISE.match(line) or _IDF_LOG.match(line)
+                or _CRASH.search(line) or _READY.match(line)
+                or _START_FAILED.match(line) or _BOOT_REASON.match(line))
+
+
 class PeerError(RuntimeError):
     """The peer, its bridge, or the pair did not do what was asked."""
 
@@ -642,16 +666,12 @@ class Shell:
         A framed line carries its own length and CRC, so a run of bytes lost
         anywhere in it fails the check. An unframed line is taken as it
         stands, except on a board that has been asked to frame everything it
-        writes: there the only lines that may arrive bare are the ones the
-        firmware's own line writer never touched - the ROM's boot log,
-        ESP-IDF's log lines, and what a panic prints on its way down - and
-        anything else bare has lost its frame.
+        writes: there anything bare that :func:`_unframable` does not account
+        for has lost its frame.
         """
         found = _FRAMED.match(line)
         if found is None:
-            if self.framed and not (_BOOT_NOISE.match(line)
-                                    or _IDF_LOG.match(line)
-                                    or _CRASH.search(line)):
+            if self.framed and not _unframable(line):
                 return line, False
             return line, True
         payload = found["payload"]
@@ -1576,6 +1596,7 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     print(f"stream: {payload} bytes every {period} ms", file=out)
     samples: list[dict] = []
     problems: list[str] = []
+    restarts: list[str] = []
     after_initiator = after_acceptor = None
     seconds = 0.0
 
@@ -1633,7 +1654,8 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # Before anything else can fail: a restart is the one failure that
         # explains every other reading, and the reads below are the ones a
         # restarted board is least likely to answer as the session expects.
-        problems += _restart_problems(out, boards)
+        restarts = _restart_problems(out, boards)
+        problems += restarts
         try:
             if wanted_map is not None:
                 samples.append(read_link_map(initiator_shell, initiator.label,
@@ -1652,10 +1674,12 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # these reasons are only collected for a session that got this far.
         released = [_release(initiator_shell, initiator, BOOT_STATE),
                     _release(acceptor_shell, acceptor, BOOT_STATE)]
-    # Everything collected so far is a restart or the fallout of one, which
-    # decides how the failure reads: a run that lost a board did not fail to
-    # stream, it lost a board (#311).
-    restarted = bool(problems)
+    # How the failure reads: a run that lost a board did not fail to stream,
+    # it lost a board (#311). Only the restarts themselves decide that. The
+    # reads after the command can fail for their own reasons - a bridge that
+    # went away, a line lost for the last time - and none of those is a
+    # board that restarted.
+    restarted = bool(restarts)
     _report_serial(out, boards)
     if wanted_map is not None and len(samples) == len(SAMPLE_POINTS):
         requested = requested_map(wanted_map)
@@ -1746,14 +1770,15 @@ def _audio_field(status: dict, key: str, kind, label: str,
     A status field that is missing or of the wrong type is usually an image
     older than the one these fields arrived in, so that is what the reason
     says. A counter missing from the `sco stats` line is not: that command
-    answers all seven or refuses, so there the reason is only what is
-    missing.
+    answers all seven or refuses, so a line short of one is a line that lost
+    bytes, and saying so is what lets the read be tried again (#310).
     """
     value = status.get(key)
     if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
-        advice = (f"; the audio link needs {AUDIO_FIRMWARE} or a later 1.x "
-                  "image" if where == "status" else "")
-        raise PeerError(f"{label}: {where} has no valid '{key}'{advice}")
+        if where != "status":
+            raise SerialLoss(f"{label}: {where} has no valid '{key}'")
+        raise PeerError(f"{label}: status has no valid '{key}'; the audio link "
+                        f"needs {AUDIO_FIRMWARE} or a later 1.x image")
     return value
 
 
@@ -1768,8 +1793,11 @@ def _audio_count(values: dict, key: str, label: str,
     """
     value = _audio_field(values, key, int, label, where)
     if value < 0:
-        raise PeerError(f"{label}: {where} reports {key} {value}, and a counter "
-                        "cannot be negative")
+        # A negative counter from `sco stats` is corruption for the same
+        # reason a missing one is, so it is worth reading again.
+        kind = SerialLoss if where != "status" else PeerError
+        raise kind(f"{label}: {where} reports {key} {value}, and a counter "
+                   "cannot be negative")
     return value
 
 
@@ -1790,21 +1818,30 @@ def _pkt_counters(shell: Shell, peer: Peer) -> dict:
 
     The command needs a live link, so it belongs inside the session; a
     board that refuses it says why, and that reason is the session's.
+
+    The reading is done inside the command, through ``parse``, so a line
+    that did not survive the bridge is read again rather than reported: this
+    command is one of the repeatable ones, and an answer that cannot be
+    parsed is what a lost run of bytes looks like on an image with no
+    framing (#310).
     """
-    lines = shell.command(SCO_STATS)
-    for line in reversed(lines):
-        if line.startswith("{"):
-            try:
-                counters = json.loads(line)
-            except ValueError as error:
-                raise PeerError(f"{peer.label}: '{SCO_STATS}' answered "
-                                f"{line[:80]!r}, which is not JSON") from error
-            if not isinstance(counters, dict):
-                raise PeerError(f"{peer.label}: '{SCO_STATS}' did not answer a "
-                                "JSON object")
-            return {key: _audio_count(counters, key, peer.label, SCO_STATS)
-                    for key in AUDIO_PKT_COUNTERS}
-    raise PeerError(f"{peer.label}: '{SCO_STATS}' printed no JSON line")
+    def read(lines: list[str]) -> dict:
+        for line in reversed(lines):
+            if line.startswith("{"):
+                try:
+                    counters = json.loads(line)
+                except ValueError as error:
+                    raise SerialLoss(
+                        f"{peer.label}: '{SCO_STATS}' answered {line[:80]!r}, "
+                        "which is not JSON") from error
+                if not isinstance(counters, dict):
+                    raise SerialLoss(f"{peer.label}: '{SCO_STATS}' did not "
+                                     "answer a JSON object")
+                return {key: _audio_count(counters, key, peer.label, SCO_STATS)
+                        for key in AUDIO_PKT_COUNTERS}
+        raise SerialLoss(f"{peer.label}: '{SCO_STATS}' printed no JSON line")
+
+    return shell.command(SCO_STATS, parse=read)
 
 
 def _reading(shell: Shell, peer: Peer) -> tuple[dict, str]:

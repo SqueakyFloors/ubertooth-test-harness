@@ -1962,6 +1962,90 @@ class RestartTests(unittest.TestCase):
                             min_frames=1)
 
 
+    def test_a_restart_is_seen_when_its_rom_line_lost_bytes(self):
+        """The hole the second review round found.
+
+        A board that has restarted is not framing, so its boot notices
+        arrive bare. The ROM's reset line is what normally tells the shell
+        the board rebooted; damage that line and, before the fix, every
+        notice after it was refused as a line that had lost its frame, so
+        the restart left nothing at all behind.
+        """
+        bridge = fake_esp32.LossyBridge((fake_esp32.PANIC_RST, 4, 12))
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.FRAME_MINIMUM_FIRMWARE)
+        board = shell(firmware, "acceptor", bridge)
+        board.wait_ready()
+        board.ask_for_framing(board.version)
+        board.port.crash()
+
+        board.drain()
+
+        self.assertEqual(1, len(board.restarts))
+        self.assertEqual(fake_esp32.PANIC_REASON, board.restarts[0].reason)
+        self.assertEqual(esp32peer.FRAME_MINIMUM_FIRMWARE,
+                         board.restarts[0].version)
+        self.assertFalse(board.framed)
+        # And the board is readable again afterwards, because the boot
+        # notice cleared the framing the board no longer has.
+        self.assertEqual(ACCEPTOR_ADDRESS, board.status()["address"])
+
+    def test_a_read_that_failed_after_the_command_is_not_called_a_restart(self):
+        """Only a restart makes a session report one.
+
+        The reads after the command can fail for their own reasons - a
+        bridge that went away, a line lost for the last time - and a session
+        that called those a restart would send a reader looking for a board
+        that never left.
+        """
+        acceptor, initiator = _pair()
+        plain = initiator.handle
+
+        def handle(line):
+            if line == "status" and "stream off" in initiator.commands:
+                initiator.commands.append(line)
+                return []  # silent, so the read runs out of attempts
+            return plain(line)
+        initiator.handle = handle
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            r"the pair did not stream: initiator: no answer to 'status'"
+        ):
+            esp32peer.stream(*_peers(acceptor, initiator), TRUE,
+                             out=io.StringIO(), settle_s=0.0, min_writes=1)
+
+    def test_an_audio_counter_line_that_lost_bytes_is_read_again(self):
+        """`sco stats` is repeatable, so its answer has to be parsed inside it.
+
+        On an image with no framing a damaged counter line is caught by
+        failing to parse, and that has to happen where the retry can see
+        it: parsing after the command returned made the one command whose
+        answer is JSON the one command that was never sent twice.
+        """
+        bridge = fake_esp32.LossyBridge(('"rx_total"', 8, 12))
+        acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.AUDIO_FIRMWARE)
+        initiator = FakePeerFirmware(INITIATOR_ADDRESS,
+                                     version=esp32peer.AUDIO_FIRMWARE)
+        acceptor.link(initiator)
+        open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator},
+                          {INITIATOR: bridge})
+        peers = (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                                opener=open_one),
+                 esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                                opener=open_one))
+        report = io.StringIO()
+
+        status = esp32peer.audio(*peers, TRUE, out=report, settle_s=0.0,
+                                 min_frames=1)
+
+        self.assertEqual(0, status)
+        self.assertIn("pair carried audio", report.getvalue())
+        self.assertEqual(1, len(bridge.damaged))
+        self.assertIn("initiator bridge: 0 line(s) lost, 1 command(s) sent "
+                      "again", report.getvalue())
+
 class DrainTests(unittest.TestCase):
     """The boards are read while the command under test runs (#311).
 
