@@ -2066,6 +2066,30 @@ as a child while the pair streams, and stops the pair afterwards. The tool
 keeps standard output to itself, so the case checks its real output; the
 pair's report goes to standard error and into the run record.
 
+**What the session says about the bridges and the boards.** Every test that
+drives the pair, here and below, gets three things from that one command, so
+they are described once:
+
+- a line per board saying whether its bridge is **framed**. A loaded host
+  loses runs of bytes on a peer's bridge, and a line that lost some from its
+  middle arrives looking whole, so an image from `utesp-1.6.0` on is asked to
+  put a length and a CRC around every line it writes and a line that fails
+  the check is read again rather than believed. A board on an older 1.x image
+  is driven as before and says so. Either way the session reports how many
+  lines were lost and how many commands it had to send twice, so a run that
+  was saved by a retry is visible rather than silently slower
+  ([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310));
+- a **restart** named as one, when a board goes away under the capture. The
+  reason the chip gives, the version it came back on, and the lines it said
+  on the way are reported, and the case fails saying the peer restarted
+  rather than saying the pair never streamed - which is what a board full of
+  zeroed counters used to read as
+  ([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311));
+- the **settings read back** off the initiator. A command line can lose bytes
+  too, and `stream payload 200` arriving as `stream payload 20` is another
+  valid setting, so the peer address, the period, and the payload are read
+  from the board rather than taken from its `OK`.
+
 **Hardware and arguments.** One `Ubertooth` and two ESP32 Classic peers as
 `acceptor` and `initiator`, each with a registered bridge serial and BD_ADDR,
 and both declaring both roles, because the comprehensive coverage exchanges
@@ -2076,7 +2100,9 @@ them. `coverage:` and a required `duration:`; the pair streams 200 bytes every
 Ubertooth defaults to needing an ordinary link, so a plan has to say
 `weak link:` to point it at the attenuated board, as `classic-weak-link`
 does at 40 dB: measured there, the clock was acquired and every decoded
-packet carried the target LAP with none carrying another.
+packet carried the target LAP with none carrying another. A peer on
+`utesp-1.6.0` or later also has its bridge framed, which no case requires:
+an older image is driven without it.
 
 **Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
 central's LAP in its survey results, and a run with no target reports at least
@@ -2084,7 +2110,8 @@ ten packet lines carrying it. Comprehensive runs 4, adding the survey into
 PCAPNG (where the file must hold packets, not just a header) and the same
 survey with the peers' roles exchanged, which must list the other board's LAP
 and not the first one's. Every case also requires that the link never went
-down, that the initiator reported at least fifty writes, and that the capture
+down, that neither peer restarted, that the initiator took the stream
+settings it was sent and reported at least fifty writes, and that the capture
 ran for its whole duration; it then resets both peers to the firmware's boot
 state and restores the Ubertooth's channel, squelch, and LEDs. About 40 s per
 case on the bench, most of it the two board resets and the page.

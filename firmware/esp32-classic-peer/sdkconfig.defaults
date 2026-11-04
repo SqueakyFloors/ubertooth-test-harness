@@ -32,8 +32,14 @@ CONFIG_BT_HFP_WBS_ENABLE=n
 # a follow test uses both of them at once: the pair's own link, and the one
 # the host's Bluetooth adapter pages the leader with to read its clock. That
 # leaves no headroom at all, and these boards are connectable, so anything
-# else in the room that pages one is asking for a link the controller has
-# no slot for. A third slot costs 1.2 KB of DRAM.
+# else in the room that pages one is asking for a link the controller has no
+# slot for. A third slot costs 1.2 KB of DRAM.
+#
+# This is headroom, not a fix for anything measured. It was tried because a
+# peer restarting under exactly that second link is harness #311, but the
+# bench then put 113 second links through a streaming initiator, on this
+# image and on the one before it, with no restart either way: the link
+# budget is not what makes a peer restart.
 CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=3
 
 # Bluedroid with Classic does not fit the default 1 MB app partition.

@@ -166,6 +166,18 @@ packet-type choice and the fields reporting what a link settled on came with
 `utesp-1.5.0`, which is what an audio session asks for (below). Every other
 command works on any 1.x image.
 
+`utesp-1.6.0` added two things for the bridge and the board rather than for
+the air: `frame <on|off>`, which puts a length and a CRC around every line
+the firmware writes, and a `utesp: boot reason <why>` notice on every boot.
+See [The serial shell](#the-serial-shell-shared-by-the-dk-and-the-esp32-peer)
+below for what each is for. It also gives the controller a third baseband
+link slot (`CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=3`), so a follow test, which
+uses two at once, has one spare for anything else in the room that pages a
+peer; that is headroom rather than a fix for anything measured, as the
+section on a restarting peer below says. The driver asks for `frame on` where
+the image has it and drives an older one exactly as before, so nothing needs
+reflashing for these.
+
 Because the boot role is discoverable and connectable, one peer on its own is
 also a device an Ubertooth can discover and connect to, which is what
 `Classic btbr console` pages. That test binds one peer as `acceptor` and resets
@@ -455,7 +467,7 @@ nothing in the harness can catch it.
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
 | Ubertooth One, alternate | the fork's `firmware/btbr` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
 | nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.4.0`, and `utdk-1.4.0-chansel1` for the algorithm 1 image | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
-| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.5.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
+| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.6.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
@@ -544,7 +556,7 @@ so each is recorded with where its sources come from and its SHA-256.
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
 | `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.4.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/242)) | `f98bb7b7a08eca4ab9999be6b00bface5e441e3de7592ebb7959ad64205f55c0` |
 | `zephyr.hex` (algorithm 1) | the same roles on a controller without channel selection algorithm 2, built with `chan-sel-1.conf` and `chan-sel-1.overlay` | `utdk-1.4.0-chansel1` | the same sources and the same change | `9fac198b2bdb7a46cb63219070f220cbb82fd0507fc369bae79b69fe3451f21b` |
-| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.5.0` | this repository, `firmware/esp32-classic-peer` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/268)) | `dc4d1c545d151e9e4aedd00375745a04c1fc9a7ba028da225c22b688c5d3dbad` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.6.0` | this repository, `firmware/esp32-classic-peer` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/312)) | `f7d71dff152731630aa356c3e5a396a34ad7e2d4b5f82003add40585ee520de4` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
 hash ([`testplans/slow.yaml`](../testplans/slow.yaml),
@@ -592,6 +604,8 @@ and then exactly one line, `OK` or `ERR <reason>`.
 | Line ending in | CR | LF or CR |
 | Notices, not answers | `utdk: ...`, and Zephyr's `*** Booting nRF Connect SDK ...` banner | `utesp: ...`, and ESP-IDF's `W (` and `E (` log lines |
 | A malformed command | Zephyr's own `<command>: wrong parameter count` or `: command not found`, which the driver treats as a refusal | `ERR` |
+| A line that lost bytes | nothing says so | a length and a CRC per line, with `frame on` (`utesp-1.6.0` and later) |
+| Why the board restarted | `nrfutil device reset` is the only reset the harness causes | `utesp: boot reason <why>`, on every boot (`utesp-1.6.0` and later) |
 
 `status` answers with one JSON line and then `OK`, which is how a test reads
 an address, the live connection parameters, and the counters without parsing
@@ -608,6 +622,49 @@ Stable device paths on Linux, derived from the registry identity:
 
 **Always use the by-id path.** A `/dev/ttyUSB0` or `/dev/ttyACM0` number is
 assignment order, and two bridges of the same type swap between boots.
+
+#### A peer's bridge loses bytes, and the frame that catches it
+
+Measured on the bench: on a host that is also capturing from an Ubertooth
+over USB, which is what the peers are there for, a contiguous run of bytes
+goes missing between a peer's UART and the reading process, and the newlines
+either side of the hole arrive. So a line can turn up looking whole when it
+is not — `OK` read as `K`, and a status line arriving as valid JSON with a
+shorter channel map than the controller has. Four of about seventy pair
+sessions over one evening hit it. There is no flow control to fall back on:
+the bridge's RTS and CTS lines are wired to the module's EN and IO0 for the
+auto-program circuit.
+
+`frame on` (`utesp-1.6.0` and later) answers it. Every line the firmware's
+own writer sends then carries the payload's length and its
+CRC-16/CCITT-FALSE, `#<len>,<crc>:<payload>`, so a reader knows a line that
+lost bytes anywhere in it. Three kinds of line never carry a frame, because
+they do not come from that writer: the ROM's boot log, ESP-IDF's `W (` and
+`E (` lines, and whatever a panic prints on its way down.
+[`esp32peer.py`](../ubertooth_harness/esp32peer.py) asks for it as soon as it
+has read the boot notice, sends a read or an idempotent setter again when a
+line fails the check, reports what the bridge cost the session, and drives an
+older image exactly as before
+([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310)).
+
+#### A peer that restarts, and the evidence for it
+
+A peer restarted under a capture on the bench and the driver reported it as a
+pair that never streamed: a board back at boot has every counter at zero, and
+nothing was reading the bridge while the capture ran, so what the board said
+on its way down was thrown away. The driver now reads both bridges while the
+command under test runs, keeps the boot evidence, and fails the case saying a
+peer restarted. `utesp: boot reason <why>` from `esp_reset_reason()` names a
+panic, a watchdog, a brownout, and a software reset apart; the ROM's own
+`rst:0x...` line, which arrives whatever the firmware does, is reported
+beside it
+([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)).
+
+What makes a peer restart under a `ubertooth-follow` case is not settled.
+Pressing the measured condition on the bench — 113 second links paged to the
+initiator from the host's adapter while it held its own link, with a clock
+read on each, across both the current image and the one before it — produced
+no restart, so the controller's baseband link budget is not the cause.
 
 ### Reset behavior
 

@@ -296,6 +296,13 @@ room that pages one is asking for a link there is no slot for.
 `sdkconfig.defaults` therefore sets
 `CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=3`, which costs 1.2 KB of DRAM.
 
+That is headroom and nothing more. It was tried because a peer restarting
+under that second link is
+[harness #311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311),
+but 113 second links paged to a streaming initiator on the bench, on this
+image and on `utesp-1.5.0`, gave no restart either way, so the link budget
+is not what makes a peer restart.
+
 A board with more than one link is in no one piconet, so `clock` and the
 link half of `status` report none rather than guessing which link to answer
 about; see [The clocks](#the-clocks) and
