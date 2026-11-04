@@ -32,6 +32,12 @@ is as short as the bench's own wrapper was:
     export UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK=~/bench/board-{serial}.lock
     scripts/lab/hold UT_Linux0 -- ubertooth-util -U <serial> -v
 
+The harness this uses is its own checkout's, start to finish: it re-runs
+itself under that checkout's bootstrapped interpreter, and the delegate it
+hands the locks to can take ``ubertooth_harness`` from nowhere else. So any
+interpreter may start it, the working directory does not matter, and a
+wrapper on a bench is one ``exec`` of this path. See ``_checkout.py``.
+
 Exit status is the command's, or 2 if a device could not be held, which is
 what the harness CLI exits on an error of its own.
 """
@@ -51,20 +57,26 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
 
+import _checkout  # noqa: E402  (nothing but the standard library)
+
+# Before the harness is imported, and only when this file is the program:
+# loaded as a module, by this project's own tests, it must not re-run
+# anything. Whichever interpreter started it, what runs from here on is the
+# environment this checkout bootstrapped.
+if __name__ == "__main__":
+    _checkout.run_in_checkout_environment(__file__)
+
 try:
     from ubertooth_harness import leases
     # The rule for "this command line writes firmware", so the host lock is
     # asked for on exactly the command lines `ubertooth-harness lease` asks
     # for it on, rather than by a second copy of the rule here.
     from ubertooth_harness.cli import _writes_firmware as writes_firmware
-    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+    from ubertooth_harness.resources import RegistryError
 
-    from _bench import bench_lock_board, lock_key, resolve
-except ImportError:  # run from outside the harness environment
-    sys.exit(
-        "hold: run this from the harness environment "
-        "(python3 bootstrap.py, then .venv/bin/python scripts/lab/hold ...)"
-    )
+    from _bench import bench_lock_board, load_registry, lock_key, resolve
+except ImportError:  # this checkout has no environment of its own yet
+    sys.exit(_checkout.bootstrap_advice("hold"))
 
 HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 
@@ -146,7 +158,8 @@ def child_environment(environ=None) -> dict:
 
     This process put the checkout on its own `sys.path`; a child does not
     inherit that, so `python -m ubertooth_harness` in the delegate would not
-    find the package unless the checkout happens to be the working directory.
+    find the package. This names it, and `-P` in the command line below is
+    what makes it the only candidate: see `_checkout.CHILD_PYTHON_OPTIONS`.
     """
     environment = dict(os.environ if environ is None else environ)
     root = str(_HERE.parents[1])
@@ -158,9 +171,17 @@ def child_environment(environ=None) -> dict:
 
 
 def harness_lease_argv(args, aliases, command) -> list[str]:
-    """The `ubertooth-harness lease` command line this delegates to."""
+    """The `ubertooth-harness lease` command line this delegates to.
+
+    The interpreter's own options come first, and they matter: without `-P`
+    the delegate would take `ubertooth_harness` from the working directory
+    ahead of the checkout this script belongs to, so a hold run from inside
+    another checkout would validate the registry with one harness and lease
+    with the other (#312).
+    """
     argv = [
-        sys.executable, "-m", "ubertooth_harness", "lease",
+        sys.executable, *_checkout.CHILD_PYTHON_OPTIONS,
+        "-m", "ubertooth_harness", "lease",
         "--hardware", str(args.hardware),
         "--wait-for-boards", str(args.wait_for_boards),
     ]
@@ -192,7 +213,7 @@ def extra_boards(resources) -> list[leases.Board]:
 def main(argv: list[str] | None = None) -> int:
     args, command = parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
-        registry = FileResourceRegistry.load(args.hardware)
+        registry = load_registry(args.hardware)
         named = [resolve(registry, name) for name in args.devices.split(",")]
         # A device permanently wired to a debug programmer is held with it,
         # whichever of the two was named, and naming both is harmless: the

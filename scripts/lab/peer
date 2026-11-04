@@ -62,16 +62,20 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
 
+import _checkout  # noqa: E402  (nothing but the standard library)
+
+# This checkout's own environment, whichever interpreter started the script;
+# see the note in `hold` and `_checkout.py`.
+if __name__ == "__main__":
+    _checkout.run_in_checkout_environment(__file__)
+
 try:
     from ubertooth_harness import esp32peer, leases
-    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+    from ubertooth_harness.resources import RegistryError
 
-    from _bench import PEER_TYPE, resolve
-except ImportError:  # run from outside the harness environment
-    sys.exit(
-        "peer: run this from the harness environment "
-        "(python3 bootstrap.py, then .venv/bin/python scripts/lab/peer ...)"
-    )
+    from _bench import PEER_TYPE, load_registry, resolve
+except ImportError:  # this checkout has no environment of its own yet
+    sys.exit(_checkout.bootstrap_advice("peer"))
 
 HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 HOLD = _HERE / "hold"
@@ -262,7 +266,7 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
 def main(argv: list[str] | None = None) -> int:
     args, command = parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
-        registry = FileResourceRegistry.load(args.hardware)
+        registry = load_registry(args.hardware)
         if args.command in ONE_PEER:
             peers = {"peer": require_peer(resolve(registry, args.peer))}
             extra = []

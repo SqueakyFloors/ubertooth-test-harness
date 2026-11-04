@@ -127,6 +127,31 @@ FAKES = {
 # the pin from the Ubertooth commit it builds (scripts/deploy.sh, #139).
 FORK_PIN = "fork-pin"
 
+# The interpreter deploy.sh bootstraps in the checkout. It runs two scripts on
+# standard input: the registry load, which deploy.sh gives -P, and the active
+# run query, which it does not. Both succeed silently -- no active runs, a
+# registry that loads -- unless a test sets $FAKE_REGISTRY_ERROR, which is the
+# registry this code cannot read (#312).
+VENV_PYTHON_FAKE = textwrap.dedent("""\
+    #!/bin/sh
+    case " $* " in
+        *" -P "*)
+            [ -z "${FAKE_REGISTRY_ERROR:-}" ] || {
+                printf '%s\\n' "$FAKE_REGISTRY_ERROR" >&2
+                exit 1
+            } ;;
+    esac
+    exit 0
+    """)
+# A controller fake replaces that interpreter to answer the active-run query.
+# The registry read goes through the same binary and is not that query, so it
+# passes without being logged or answered, and a test asking what the
+# controller was asked still sees only the query.
+REGISTRY_READ_PASSES = (
+    "#!/bin/sh\n"
+    'case " $* " in *" -P "*) exit 0 ;; esac\n'
+)
+
 
 def _write_exe(path: Path, text: str) -> None:
     write_executable(path, text)
@@ -165,7 +190,7 @@ class FakeLab:
         for script in SHELL_FILES:
             shutil.copy2(script, self.checkout / "scripts" / script.name)
         (self.checkout / "bootstrap.py").write_text("# fake\n", encoding="utf-8")
-        _write_exe(self.checkout / ".venv" / "bin" / "python", "#!/bin/sh\n")
+        _write_exe(self.checkout / ".venv" / "bin" / "python", VENV_PYTHON_FAKE)
         (self.checkout / "testplans").mkdir()
         (self.checkout / "hardware.yaml").write_text("{}\n", encoding="utf-8")
         self.ubertooth = self.root / "ubertooth"
@@ -304,7 +329,7 @@ class DeployTest(unittest.TestCase):
         """Make the venv python report an active run, as the controller would."""
         _write_exe(
             self.lab.checkout / ".venv" / "bin" / "python",
-            "#!/bin/sh\ncat >/dev/null\n"
+            REGISTRY_READ_PASSES + "cat >/dev/null\n"
             'printf "python %s\\n" "$*" >> "$FAKE_LOG"\n'
             "echo Host_Linux:run-7\n",
         )
@@ -666,6 +691,36 @@ class DeployTest(unittest.TestCase):
         self.assertIn("does not exist", result.stderr)
         self.assertEqual(_tree(self.lab.home), {})
 
+    def test_reads_the_registry_with_the_code_it_installs(self):
+        """Existence is not enough: this code has to make sense of it (#312).
+
+        A registry an older harness cannot read takes down every run and
+        every by-hand device command on the host, so a deploy is where that
+        is found out.
+        """
+        result = self.lab.deploy()
+        self.assertOk(result)
+        self.assertIn("loads with this checkout", result.stdout)
+
+    def test_refuses_a_registry_this_checkout_cannot_read(self):
+        reason = "default DK1 is neither a central nor declares the central role"
+        result = self.lab.deploy(FAKE_REGISTRY_ERROR=reason)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not load with this checkout", result.stderr)
+        self.assertIn(reason, result.stderr)
+        # Named, because a registry newer than the code is the likely cause
+        # and updating the checkout is the fix.
+        self.assertIn("newer than this code", result.stderr)
+        # Nothing installed, so a working runner is not replaced by one that
+        # could not read its own registry.
+        self.assertEqual(_tree(self.lab.home), {})
+
+    def test_a_dry_run_reports_an_unreadable_registry_without_refusing(self):
+        result = self.lab.deploy("--dry-run", FAKE_REGISTRY_ERROR="bad default")
+        self.assertOk(result)
+        self.assertIn("would refuse", result.stdout)
+        self.assertEqual(_tree(self.lab.home), {})
+
     def test_rejects_bad_port_and_unquotable_values(self):
         for port in ("0", "65536", "80a", "-1"):
             result = self.lab.deploy("--port", port)
@@ -1003,7 +1058,7 @@ class MacDeployTest(unittest.TestCase):
         """Make the venv python answer as the controller would, logging argv."""
         _write_exe(
             self.lab.checkout / ".venv" / "bin" / "python",
-            "#!/bin/sh\ncat >/dev/null\n"
+            REGISTRY_READ_PASSES + "cat >/dev/null\n"
             'printf "python %s\\n" "$*" >> "$FAKE_LOG"\n'
             + "".join(f"echo {run}\n" for run in runs),
         )

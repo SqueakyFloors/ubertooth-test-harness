@@ -11,14 +11,42 @@ any bench. See [`docs/hardware.md`](../../docs/hardware.md) for what a bench
 is made of and [`hardware.example.yaml`](../../hardware.example.yaml) for the
 registry.
 
-Run them with the harness environment's interpreter. The path to the script is
-all they need, from any working directory:
+The path to the script is all they need, from any working directory and with
+any interpreter. Each one re-runs itself under its own checkout's
+bootstrapped environment, so the harness it uses is always the one it belongs
+to:
 
 ```sh
 python3 bootstrap.py                      # once, in the checkout
-.venv/bin/python scripts/lab/hold --help
-~/checkout/.venv/bin/python ~/checkout/scripts/lab/hub-port --help
+scripts/lab/hold --help                   # or python3 scripts/lab/hold --help
+~/checkout/scripts/lab/hub-port --help
 ```
+
+A wrapper on a bench is therefore one line, and there is nothing in it to get
+wrong:
+
+```sh
+#!/bin/sh
+exec ~/checkout/scripts/lab/hold "$@"
+```
+
+Naming the environment's interpreter yourself still works and is what the
+harness's own commands take:
+
+```sh
+.venv/bin/python scripts/lab/hold --help
+```
+
+**Nothing a caller supplies may decide which harness runs.** A wrapper that
+named one checkout's interpreter while the script came from another is how a
+`hold` came to read the registry with one version of the harness and take its
+leases with a much older one, which refused a registry that was perfectly
+good and stopped every device command on that host
+([#312](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/312)).
+A helper now pins both halves to its own checkout, and
+[`_checkout.py`](_checkout.py) says how. Point a wrapper at a checkout that
+tracks `main`, the same one the harness is deployed from, so a registry
+change and the code that reads it move together.
 
 Set the two paths once and the commands stay short:
 
@@ -235,6 +263,25 @@ ubertooth-harness power --hardware hardware.yaml Hub_Linux1
 The udev rule that lets a normal account drive an Acroname USBHub3+. Install
 it, change the group to one the harness account is in, then reload and replug
 the hub; the file's own comments give the commands.
+
+## `_checkout.py`
+
+Not a command: what the three scripts use to make sure the harness they run
+is their own checkout's, both the interpreter and the package. Its docstring
+has the whole of it. Two things are worth knowing from outside:
+
+- A helper started with another interpreter re-runs itself under the one its
+  checkout bootstrapped. It does that once; a checkout with no environment of
+  its own is told to create one, and named, since a bench runs helpers from
+  more than one path.
+- `hold` hands the locks to `ubertooth-harness lease` in a child process, and
+  that child is given `-P`, which leaves the working directory off its import
+  path. Without it, a helper run from inside another checkout would validate
+  the registry with one harness and lease with the other.
+
+An error from loading a registry says which harness read the file. A registry
+a newer harness wrote can be turned down by an older one, and the message it
+gives otherwise reads as though the file were at fault.
 
 ## What stays off the bench's scripts
 

@@ -137,6 +137,9 @@ hold = load(HOLD)
 hub_port = load(HUB_PORT)
 peer = load(PEER)
 
+import _bench  # noqa: E402  (beside the scripts, reachable from the line above)
+import _checkout  # noqa: E402
+
 
 @dataclass
 class FakeState:
@@ -360,7 +363,9 @@ class HoldArguments(Bench):
             "UT0,DK0", "--", "true",
         ])
         argv = hold.harness_lease_argv(args, ["UT0", "DK0"], command)
-        self.assertEqual([sys.executable, "-m", "ubertooth_harness", "lease"], argv[:4])
+        self.assertEqual(
+            [sys.executable, "-P", "-m", "ubertooth_harness", "lease"], argv[:5]
+        )
         self.assertIn("--host-lock", argv)
         self.assertIn(self.template, argv)
         self.assertIn(str(self.leases), argv)
@@ -1242,6 +1247,157 @@ class PeerArguments(Bench):
         self.assertEqual(Path(module.__file__).resolve(), peer.ESP32PEER)
 
 
+class CheckoutEnvironment(Bench):
+    """The harness a helper uses is its own checkout's (harness #312).
+
+    A wrapper that named another checkout's interpreter, and ran from inside
+    that checkout, is how one `hold` came to read the registry with one
+    version of the harness and lease with a much older one. Each test here
+    closes one of the ways that happened.
+    """
+
+    def decoy_checkout(self) -> Path:
+        """A directory holding a harness that must never be imported.
+
+        Importing it raises, so a test fails with the decoy's own words
+        rather than with whatever an old harness would have done.
+        """
+        decoy = self.root / "decoy"
+        (decoy / "ubertooth_harness").mkdir(parents=True)
+        (decoy / "ubertooth_harness" / "__init__.py").write_text(
+            "raise SystemExit('decoy harness imported')\n", encoding="utf-8"
+        )
+        return decoy
+
+    def test_the_delegate_ignores_a_harness_in_the_working_directory(self):
+        """The regression: `-m` puts the working directory first (#312).
+
+        A bench wrapper that ran `hold` from inside another checkout handed
+        its locks to that checkout's harness, whatever PYTHONPATH said. Run
+        from a directory holding a harness of its own, the hold must still
+        be this checkout's, start to finish.
+        """
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        environment.pop("UBERTOOTH_HARNESS_HARDWARE", None)
+        result = subprocess.run(
+            [
+                sys.executable, str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", sys.executable, "-c", "print('held')",
+            ],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.decoy_checkout()), timeout=120,
+        )
+        self.assertNotIn("decoy harness imported", result.stdout + result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("held", result.stdout)
+
+    def test_another_interpreter_starting_a_helper_re_runs_it_under_this_one(self):
+        """Any interpreter may start a helper; only one may finish it.
+
+        The interpreter that started this one came from outside the
+        checkout's environment, which is what a bench wrapper, a shebang, or
+        a plain `python3` gives.
+        """
+        outside = Path(sys.base_prefix) / "bin" / "python3"
+        if not outside.is_file():
+            self.skipTest(f"no interpreter outside the environment at {outside}")
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        environment.pop("UBERTOOTH_HARNESS_HARDWARE", None)
+        environment.pop(_checkout.REEXEC_ENV, None)
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c", "echo held",
+            ],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.decoy_checkout()), timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("held", result.stdout)
+
+    def test_the_re_run_names_this_checkouts_interpreter_and_the_script(self):
+        argv = _checkout.reexec_argv(str(HOLD))
+        self.assertEqual(str(_checkout.VENV_PYTHON), argv[0])
+        self.assertIn("-P", argv[1:argv.index(str(HOLD))])
+        self.assertEqual(sys.argv[1:], argv[argv.index(str(HOLD)) + 1:])
+
+    def test_it_does_not_re_run_when_it_is_already_this_environment(self):
+        with unittest.mock.patch.object(_checkout.os, "execv") as execv:
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=True
+            ):
+                _checkout.run_in_checkout_environment(str(HOLD))
+        execv.assert_not_called()
+
+    def test_a_second_attempt_is_not_made(self):
+        """An environment that does not report itself must not loop."""
+        with unittest.mock.patch.dict(
+            _checkout.os.environ, {_checkout.REEXEC_ENV: "1"}
+        ):
+            with unittest.mock.patch.object(_checkout.os, "execv") as execv:
+                with unittest.mock.patch.object(
+                    _checkout, "in_checkout_environment", return_value=False
+                ):
+                    _checkout.run_in_checkout_environment(str(HOLD))
+        execv.assert_not_called()
+
+    def test_without_an_environment_of_its_own_nothing_is_re_run(self):
+        """A checkout nobody bootstrapped: the helper's advice says so."""
+        missing = self.root / "nothing" / "bin" / "python"
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", missing):
+            with unittest.mock.patch.object(_checkout.os, "execv") as execv:
+                with unittest.mock.patch.object(
+                    _checkout, "in_checkout_environment", return_value=False
+                ):
+                    _checkout.run_in_checkout_environment(str(HOLD))
+        execv.assert_not_called()
+
+    def test_the_advice_names_the_checkout_to_bootstrap(self):
+        """A bench runs helpers by path, so "run bootstrap.py" is not enough."""
+        advice = _checkout.bootstrap_advice("hold")
+        self.assertIn(str(REPO), advice)
+        self.assertIn("bootstrap.py", advice)
+        self.assertTrue(advice.startswith("hold: "))
+
+    def test_a_refused_registry_names_the_harness_that_refused_it(self):
+        """#312's error read as a mistake in a file that was perfectly good.
+
+        What it was missing is which harness turned it down, since an older
+        one turns down a registry a newer one wrote.
+        """
+        self.registry.write_text(
+            REGISTRY.replace("Ubertooth: UT0", "Ubertooth: UT_Absent"),
+            encoding="utf-8",
+        )
+        from ubertooth_harness.resources import RegistryError
+
+        with self.assertRaises(RegistryError) as caught:
+            _bench.load_registry(self.registry)
+        self.assertIn(str(_checkout.CHECKOUT), str(caught.exception))
+        self.assertIn("read by the harness in", str(caught.exception))
+
+    def test_a_registry_that_loads_is_returned_unchanged(self):
+        registry = _bench.load_registry(self.registry)
+        self.assertEqual("UT0", registry.get("Host_Linux").defaults["Ubertooth"])
+
+    def test_a_name_error_is_not_blamed_on_the_harness(self):
+        """A device nobody registered is the caller's mistake, not a version."""
+        from ubertooth_harness.resources import RegistryError
+
+        registry = self.load_registry()
+        with self.assertRaises(RegistryError) as caught:
+            hold.resolve(registry, "UT_Absent")
+        self.assertNotIn("read by the harness in", str(caught.exception))
+
+
 class LabFiles(unittest.TestCase):
     def test_both_scripts_are_executable_and_compile(self):
         for path in (HOLD, HUB_PORT, PEER):  # _bench.py is imported, not run
@@ -1334,6 +1490,21 @@ class LabFiles(unittest.TestCase):
         )
         self.assertNotIn("ATTRS{", rule)
 
+    def test_every_helper_is_a_program_a_bench_can_exec(self):
+        """A wrapper on a bench names a path, nothing else (#312).
+
+        No interpreter, no working directory, no environment: anything a
+        wrapper has to supply is something it can supply wrongly, and one
+        wrapper naming another checkout's interpreter is what took every
+        device command on a host down.
+        """
+        for path in (HOLD, HUB_PORT, PEER):
+            with self.subTest(script=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("#!/usr/bin/env python3\n"))
+                self.assertTrue(os.access(path, os.X_OK))
+                self.assertIn("run_in_checkout_environment", text)
+
     def test_no_script_names_a_host_serial_or_home_path(self):
         """These are public: a bench's own identities stay in its registry."""
         banned = re.compile(
@@ -1344,7 +1515,7 @@ class LabFiles(unittest.TestCase):
             re.IGNORECASE,
         )
         for path in (HOLD, HUB_PORT, PEER, RULES, LAB / "_bench.py",
-                     LAB / "README.md"):
+                     LAB / "_checkout.py", LAB / "README.md"):
             with self.subTest(file=path.name):
                 for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                     self.assertIsNone(

@@ -36,7 +36,10 @@
 #   --runner-host NAME        registry Host resource for the runner (required)
 #   --ubertooth-source DIR    Ubertooth checkout the runner resolves refs in
 #                             (required)
-#   --hardware FILE           resource registry (default CHECKOUT/hardware.yaml)
+#   --hardware FILE           resource registry (default CHECKOUT/hardware.yaml);
+#                             it is loaded with this checkout's own code, and
+#                             a registry this code cannot read is refused here
+#                             rather than at the next run or hold
 #   --plans-dir DIR           plans for the GUI and runner (default
 #                             CHECKOUT/testplans)
 #   --ubertooth-repo URL      repository whose refs the GUI offers (default:
@@ -486,6 +489,41 @@ if [ ! -x "$python" ]; then
         die "$python is missing after bootstrap"
     fi
 fi
+
+# The registry, read by the code this deploy installs. Existence was checked
+# above; this is whether this checkout can make sense of the file, which is
+# not the same question. A registry a newer harness wrote can be turned down
+# by an older one, and the refusal then reaches every run and every by-hand
+# device command on the host. A deploy is where that belongs, not the next
+# hold (#312). PYTHONPATH and -P together: the checkout is the only place the
+# package may come from.
+check_registry() {
+    local reason
+    if [ ! -x "$python" ]; then
+        say "warning: cannot read $hardware without $python"
+        return
+    fi
+    if reason=$(PYTHONPATH=$ROOT "$python" -P - "$hardware" 2>&1 <<'PY'
+import sys
+from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+try:
+    FileResourceRegistry.load(sys.argv[1])
+except (RegistryError, OSError) as error:
+    sys.exit(str(error))
+PY
+    ); then
+        say "registry $hardware loads with this checkout"
+        return
+    fi
+    reason=${reason:-no reason given}
+    if [ "$dry_run" = 1 ]; then
+        say "warning: would refuse: $hardware does not load with this checkout: $reason"
+    else
+        die "$hardware does not load with this checkout (commit $commit): $reason
+  The registry may be newer than this code. Update the checkout and deploy again, or pass --hardware FILE for the registry this code reads."
+    fi
+}
+check_registry
 
 # git for a clone or fetch: bounded, never prompting for credentials.
 net_git() {
