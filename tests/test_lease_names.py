@@ -79,6 +79,17 @@ def peer(alias: str, bridge: str, last: str = "01") -> str:
     )
 
 
+def adapter(alias: str, address: str) -> str:
+    return (
+        f"  {alias}:\n"
+        "    type: Bluetooth adapter\n"
+        "    attached to: Host_Linux\n"
+        "    identity:\n"
+        "      hci device: hci0\n"
+        f'      BD_ADDR: "{address}"\n'
+    )
+
+
 def programmer(alias: str, serial: str, target: str) -> str:
     return (
         f"  {alias}:\n"
@@ -530,6 +541,36 @@ class BenchLockFileNames(NamesTestCase):
             self.locks / f"board-{upper}.lock",
             leases.external_lock_path(self.template, board),
         )
+
+    def test_an_adapter_has_no_bench_lock_file_at_all(self):
+        """Not every leased device has a second name to meet.
+
+        The bench's own lock files are named after serials, and a host
+        Bluetooth adapter has no serial: no lab script locks a controller,
+        so there is no file to exclude. Without this the name would fall
+        back to the lease key and a run would create
+        ``board-bluez-<address>.lock`` in the lab's directory -- a file no
+        other command ever takes, among files named after serials, implying
+        a coordination that is not happening.
+        """
+        registry = self.load(adapter("BT_A", "AC:00:00:00:00:01"))
+        board = leases.board_for_resource(registry.get("BT_A"))
+        self.assertEqual("bluez-ac0000000001", board.key)
+        self.assertFalse(board.external)
+        self.assertIsNone(leases.external_lock_path(self.template, board))
+
+    def test_every_other_leased_type_does_have_one(self):
+        """So the exception above is the adapter and nothing else."""
+        registry = self.load(
+            ubertooth("UT_A", BOARD), peer("ESP_A", BRIDGE),
+            dk("DK_A", "000123456789"), programmer("Prog_A", "Z9999ZZ0", "UT_A"),
+        )
+        for alias in ("UT_A", "ESP_A", "DK_A", "Prog_A"):
+            board = leases.board_for_resource(registry.get(alias))
+            with self.subTest(alias):
+                self.assertTrue(board.external)
+                self.assertIsNotNone(
+                    leases.external_lock_path(self.template, board))
 
     def test_every_leased_type_s_two_names(self):
         """One rule for all four, so no path can name a file no other does."""
