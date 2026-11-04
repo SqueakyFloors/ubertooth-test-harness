@@ -1713,6 +1713,134 @@ Recover AFH map:
     - ubertooth-test-harness#168
     - ubertooth-test-harness#282
 
+Bluetooth inquiry scan:
+  purpose: >-
+    Catches a regression in ubertooth-scan, one of the two host tools the
+    fork builds only when libbluetooth is found and one of the only two that
+    drive a Bluetooth controller of the host's as well as an Ubertooth. Its
+    two halves are checked apart: the adapter's own inquiry must find the two
+    Classic peers, and the Ubertooth's sweep must report the piconet they
+    hold with the channel map the scan built for it.
+  theory: >-
+    The tool has two halves and -s decides whether the adapter's runs, so the
+    cases differ in what they require rather than only in what they run. With
+    -s a BlueZ inquiry reports each device that answers and the tool pages
+    each one for its name; both peers are discoverable and connectable from
+    boot and stay so for a whole session, since switching a board's role does
+    not touch its scan mode, so both must appear, and their names follow from
+    their addresses because the peer firmware builds a name as UT-ESP32- and
+    the LAP, which the driver repeats and a unit test keeps in step with that
+    source. Without -s only the Ubertooth sweeps, and libbtbb keeps a piconet
+    per access code it hears; the initiator pages, so it leads the piconet and
+    its LAP is the access code on the air, which is what the results must
+    name, each result followed by an AFH map line the scan built for it.
+    The adapter is read before the tool and again in the cleanup: hciconfig
+    says it is up and carries the address the registry records, since the hciN
+    number is the order the kernel attached controllers in rather than a
+    property of the adapter, and hcitool con says it holds no established
+    link. Every command names the bound controller, because none of these
+    programs fails when the device is left out and the two reads would still
+    match their own patterns.
+  hardware: >-
+    Linux only, since both BlueZ tools are built with libbluetooth. One
+    Ubertooth, which only receives; a host Bluetooth adapter of any make
+    BlueZ drives, up and holding no link of its own; and the two ESP32
+    Classic peers, which hold a Serial Port Profile link and stream over it
+    for the whole of one session, giving the adapter discoverable devices to
+    find and the Ubertooth a piconet to sweep for. hciconfig and hcitool must
+    be installed, and they are declared as host tools rather than installed,
+    so a bench without them leaves the cases out instead of failing them.
+    Nothing here opens a connection, so no capability is needed: a name read
+    is inside the subset an unprivileged opener of a raw HCI socket may send,
+    where Create Connection is not. ubertooth-scan makes a connection only
+    with -x, which has no case. The scan does transmit to other people's
+    devices in range when it reads their names.
+  expected: >-
+    Two cases in both coverage profiles, each pinning exit 0. The -s case
+    passes when the inquiry reports both peers at their registered addresses
+    and at least one comes back under the name its firmware derives; the
+    survey case passes when the results list the central's LAP with an AFH
+    map line after it. Both cases have passed on a bench adapter, and both
+    coverage profiles run the same two.
+  limitations: >-
+    A pass does not prove -x works: that case was removed after the bench
+    showed the acceptor stays in the pair's link, so the connection -x needs
+    does not happen, and about twenty of its reads failed against devices the
+    bench does not own. It wants a third idle, connectable Classic device.
+    The inquiry asks that one of the two peers came back under its own name
+    rather than both, because a run showed a name reported against the wrong
+    address inside the library, below anything the harness can see; both wrong
+    still fails, but a regression that misattributes exactly one name would
+    pass. A pending page is not held against a run, only an established link,
+    since the tool's own name reads leave pages behind. The window allowed for
+    the name reads is the one guessed number here, measured at 78 s and 55 s
+    against 111 s, and two more silent neighbors would use it up.
+  related:
+    - ubertooth-test-harness#88
+    - ubertooth-test-harness#274
+    - ubertooth#1172
+    - ubertooth#1091
+
+Follow Classic piconet over HCI:
+  purpose: >-
+    Catches a regression in ubertooth-follow, the other host tool built only
+    with libbluetooth. It pages a target from the host's controller, reads
+    that link's clock offset, and follows the piconet with the Ubertooth, so
+    the test is the only one that exercises a capture steered by a clock read
+    over HCI rather than recovered from the air.
+  theory: >-
+    The tool needs a controller joined to the link because the piconet clock
+    and the channel map come over HCI; an Ubertooth cannot stand in, having no
+    HCI interface. It pages the target for its clock offset, zeroes the
+    board's clock against it, and then receives. With -a it also asks that
+    link for its channel map. The peers run the paged link with AFH off, so
+    the tool reports that the remote is not using AFH, clears -a and follows
+    without it, which is its documented behavior; that is the outcome the case
+    requires, and a failed map read or an error fails it. Almost nothing in
+    the run is inside the tool's own timing: there is no capture timeout at
+    all, so the driver ends the command, and the page, the clock reads, the
+    teardown of the link the tool made, and the board setup all happen inside
+    the window it is given. The adapter is read before each case and checked
+    for a leftover link afterwards, since the tool drops its own link before
+    the capture starts.
+  hardware: >-
+    Linux only. One Ubertooth, receive only; a host Bluetooth adapter; and the
+    two ESP32 Classic peers holding their streaming link, as Bluetooth inquiry
+    scan needs. Unlike that test this one pages, so ubertooth-follow needs
+    CAP_NET_ADMIN: opening a raw HCI socket is unprivileged, but the kernel's
+    own filter on such a socket keeps HCI Create Connection outside the subset
+    an unprivileged opener may send, where Remote Name Request is inside it.
+    Without it the tool stops early with its own message about connecting
+    failing. Nothing checks for the capability before a run.
+  expected: >-
+    Smoke runs two cases and comprehensive three, each pinning exit 0. -t
+    against the central must report following that piconet, say it is not
+    using AFH, and print at least ten packet lines all carrying the central's
+    LAP, which it prints without attempting a map read at all; the -a case
+    must instead reach the read, be told the remote is not using AFH, say it
+    is following without it, and claim no map, with no error; comprehensive
+    adds -q, whose file must be a BR/EDR PCAP holding the piconet's packets. All three have passed on a bench adapter, where the
+    tool ran about 83 s for a 25 s capture.
+  limitations: >-
+    A pass says nothing about the headers of what was captured. The bench
+    wrote 258 records all carrying the central's LAP and reference address,
+    and none of them passed a header HEC where ubertooth-rx on the same pair
+    passes a fifth to a third, with 35 carrying a transport a receive-only
+    capture records as zero; both are header-derived and both belong to fork
+    #518, so the HEC floor here is zero and the transport nibble is let be.
+    -a's map-reading branch is untested for want of a peer that runs a paged
+    link with AFH on. -l and -u without -t are deliberately not exercised:
+    the page then goes to a guessed address and whether it arrives is not
+    knowable in advance. The capture floor measures the whole command rather
+    than the receive interval, because the tool prints no mark for the moment
+    its capture begins, so a short receive inside a full-length command would
+    pass.
+  related:
+    - ubertooth-test-harness#88
+    - ubertooth-test-harness#274
+    - ubertooth#518
+    - ubertooth#316
+
 CLI usage smoke:
   purpose: >-
     A catalog entry for exercising host tool usage paths. No implementation
@@ -1983,22 +2111,6 @@ Recover a BLE connection promiscuously:
     longer run, another squelch or a change in the fork reaches the interval
     and the increment is open, so the case is not written to a result nobody
     has seen.
-  related:
-    - ubertooth-test-harness#88
-
-Bluetooth inquiry scan:
-  purpose: >-
-    A catalog entry for running inquiry with a host Bluetooth adapter
-    alongside an Ubertooth. No implementation yet.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth and a host Bluetooth adapter, which the bench has not got.
-    Would be Linux-only, since the tools involved are built with BlueZ.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Needs a host Bluetooth adapter as a fixture.
   related:
     - ubertooth-test-harness#88
 

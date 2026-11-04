@@ -25,10 +25,10 @@ from ubertooth_harness.patterns import (
     serial_pattern,
 )
 from ubertooth_harness.outputfiles import output_of
-from ubertooth_harness.resources import ESP32_CLASSIC_PEER
+from ubertooth_harness.resources import BLUETOOTH_ADAPTER, ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, afh_cases, boardstate_cases, btbr_cases,
+    advertiser_cases, afh_cases, bluez_cases, boardstate_cases, btbr_cases,
     capture_failure_cases, classic_cases, connection_cases, dfu_cases,
     dfu_host_cases, interrupt_cases, invalidapp_cases, python_cases,
     receive_cases,
@@ -1100,6 +1100,31 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Recover AFH map": _profiles(
         Estimate(40.0, per_duration=4), Estimate(60.0, per_duration=6)
     ),
+    # Measured on the bench at `duration: 25s`: the whole test took 112 s in
+    # one run and 155 s in another, the difference being how many of other
+    # people's devices answered the inquiry and had to be paged for a name.
+    # The estimate carries the slower of the two, so 105 s besides the
+    # durations. That is the pair's own
+    # bring-up and two adapter reads a case, plus what the tool spends
+    # outside the window `-t` names -- for `-s` a whole BlueZ inquiry, since
+    # the alarm is armed only after it, and a name read per device either
+    # half found. The measured commands ran 78 s (`-s`) and 61 s against
+    # windows of 111 s and 100 s: the tool ends its own sweep, so a healthy
+    # run finishes well inside the deadlines it is allowed. The same two
+    # cases in both profiles.
+    "Bluetooth inquiry scan": _profiles(
+        Estimate(105.0, per_duration=2), Estimate(105.0, per_duration=2)
+    ),
+    # Unlike the scan, this tool bounds nothing itself: the driver ends the
+    # command, so a case costs its whole window whatever the page really
+    # took. The window is the duration plus FOLLOW_SETUP_S (52 s), and 3.4 s
+    # more for -a, so the fixed part is the allowance plus the pair's
+    # bring-up. Measured at `duration: 25s`: 189 s for the two smoke cases,
+    # so 139 s besides the durations, with the commands themselves running
+    # 83 s and 87 s. The third case, `-q`, costs what the first does.
+    "Follow Classic piconet over HCI": _profiles(
+        Estimate(140.0, per_duration=2), Estimate(210.0, per_duration=3)
+    ),
     # Measured on the bench: 49 s for the whole invocation, of which the case
     # itself was 36 s -- the write, the cycle, the recovery write and the
     # revision read that confirms it, and the cleanup's checks -- and the
@@ -1125,16 +1150,19 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "Capture known BLE connection",
         "Classic btbr console",
         "Follow a BLE connection across its end",
-        # The three Classic peer tests: each one follows a piconet the ESP32
-        # pair holds, and wants an ordinary link for the same reason as the
-        # rest. On a bench whose default board is the attenuated one they
-        # would otherwise select it silently. This list is still not every
-        # test that takes a capture (`Interrupting a capture` and the soaks
-        # carry no default), so it is a list of the tests that declare the
-        # need, not a rule derived from what a test does.
+        # The Classic peer tests: each one captures a piconet the ESP32 pair
+        # holds, and wants an ordinary link for the same reason as the rest.
+        # On a bench whose default board is the attenuated one they would
+        # otherwise select it silently. This list is still not every test
+        # that takes a capture (`Interrupting a capture` and the soaks carry
+        # no default), so it is a list of the tests that declare the need,
+        # not a rule derived from what a test does.
         "Capture known Classic device",
         "Follow Classic Bluetooth piconet",
         "Recover AFH map",
+        # The two that add a host Bluetooth adapter to the same pair.
+        "Bluetooth inquiry scan",
+        "Follow Classic piconet over HCI",
     )
 })
 
@@ -1747,6 +1775,52 @@ def builtin_catalog() -> TestCatalog:
             guards_other_ubertooths=True,
         ),
         TestDefinition(
+            "Bluetooth inquiry scan",
+            "ubertooth-scan drives a host Bluetooth adapter and an Ubertooth "
+            "at once: the adapter's inquiry reports both registered ESP32 "
+            "Classic peers by address and one of them by name, and the "
+            "Ubertooth's sweep reports the piconet the pair holds with the "
+            "channel map it built for it",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                BLUETOOTH_ADAPTER: ArgumentRule(_selector, default="default"),
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                BLUETOOTH_ADAPTER: BLUETOOTH_ADAPTER,
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=bluez_cases.inquiry_scan_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Follow Classic piconet over HCI",
+            "ubertooth-follow pages the piconet's central from a host "
+            "Bluetooth adapter and follows it on the clock it read over HCI; "
+            "with -a it asks that link for its channel map, which this peer "
+            "runs with Adaptive Frequency Hopping off, so the tool says so "
+            "and follows without it",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                BLUETOOTH_ADAPTER: ArgumentRule(_selector, default="default"),
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                BLUETOOTH_ADAPTER: BLUETOOTH_ADAPTER,
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=bluez_cases.follow_over_hci_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
             "CLI usage smoke",
             "Exercise host tool usage paths",
             MappingProxyType({"hosts": HOSTS}),
@@ -1874,15 +1948,6 @@ def builtin_catalog() -> TestCatalog:
                     "central": "nRF52840 DK",
                     "peripheral": "nRF52840 DK",
                 }),
-            ),
-            TestDefinition(
-                "Bluetooth inquiry scan", "Run inquiry with a Bluetooth adapter",
-                MappingProxyType({
-                    "hosts": HOSTS,
-                    "Bluetooth adapter": ArgumentRule(_required_text, required=True),
-                    "Ubertooth": UBERTOOTH,
-                }),
-                MappingProxyType({"Ubertooth": "Ubertooth"}),
             ),
             stateful_test(
                 invalidapp_cases.TEST_NAME,

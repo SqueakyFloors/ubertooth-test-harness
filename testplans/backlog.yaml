@@ -23,9 +23,10 @@ suites:
         coverage: smoke
         duration: 90s
 
-    - Bluetooth inquiry scan:
-        Bluetooth adapter: required
-        Ubertooth: default
+    # `Bluetooth inquiry scan` has left this plan: it is implemented, with
+    # `Follow Classic piconet over HCI`, in testplans/hci.yaml, and both have
+    # run on the one bench with a `Bluetooth adapter`. A bench without one
+    # leaves them out of a run as not applicable.
 
     # `Reset into invalid application` is implemented (#141) and lives in
     # testplans/power.yaml, which is run by hand: it leaves a board outside

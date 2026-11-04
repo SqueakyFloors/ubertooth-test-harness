@@ -8,7 +8,7 @@
 
 /* The harness pins this string and reflashes a board that reports anything
  * else, so it changes whenever the shell protocol or the air behavior does. */
-#define UTESP_FW_VERSION "utesp-1.5.0"
+#define UTESP_FW_VERSION "utesp-1.6.0"
 
 /* The packet types "sco type" takes, and the two lines the shell refuses a
  * malformed "sco" line with. One definition of each, so the help text, the

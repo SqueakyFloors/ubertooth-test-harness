@@ -155,6 +155,49 @@ def _validate_peer(resource) -> None:
         )
 
 
+BLUETOOTH_ADAPTER = "Bluetooth adapter"
+# A host Bluetooth controller BlueZ drives. The two tools the fork builds only
+# with libbluetooth, ubertooth-scan and ubertooth-follow, name it with -b: the
+# first runs its inquiry, the second reads its clock and the channel map of a
+# link it makes. An Ubertooth cannot stand in for either, which is why the
+# adapter is a resource of its own.
+_ADAPTER_IDENTITY_KEYS = ("hci device", "BD_ADDR", "description")
+# hciN, as BlueZ numbers its controllers and as -b takes it. The number is the
+# order the kernel attached them, not a property of the adapter, so a case
+# checks the address the device reports against the one registered here
+# (bluez_cases.py): an adapter that came back as another hciN then fails with
+# what it found rather than driving whatever took the name.
+_HCI_DEVICE = re.compile(r"^hci[0-9]{1,3}$")
+
+
+def _validate_adapter(resource) -> None:
+    """A host Bluetooth adapter: its HCI device name and its own address."""
+    alias = resource.alias
+    unknown = sorted(set(resource.identity) - set(_ADAPTER_IDENTITY_KEYS))
+    if unknown:
+        raise RegistryError(
+            f"{BLUETOOTH_ADAPTER} {alias} identity has unknown key(s) "
+            f"{', '.join(unknown)}; use {', '.join(_ADAPTER_IDENTITY_KEYS)}"
+        )
+    if not _HCI_DEVICE.fullmatch(resource.identity.get("hci device", "")):
+        raise RegistryError(
+            f"{BLUETOOTH_ADAPTER} {alias} requires an 'hci device' identity "
+            "like hci0 (the name BlueZ gave it, which -b takes)"
+        )
+    if not _ADDRESS_48.fullmatch(resource.identity.get("BD_ADDR", "")):
+        raise RegistryError(
+            f"{BLUETOOTH_ADAPTER} {alias} requires a 'BD_ADDR' identity (the "
+            "address hciconfig reports for it), like 00:1A:7D:DA:71:13"
+        )
+    if resource.roles:
+        # Nothing binds an adapter by role: one host has one controller for
+        # these tools, and a declared role would only keep the test from
+        # finding it.
+        raise RegistryError(
+            f"{BLUETOOTH_ADAPTER} {alias} takes no roles; it is bound by type"
+        )
+
+
 # A debug programmer: a USB serial adapter, SWD probe, or anything else wired
 # to one device's debug or in-system programming header and left there. It is
 # not a radio and no test binds it; it exists in the registry so that it and
@@ -576,11 +619,46 @@ class FileResourceRegistry:
                     raise RegistryError(
                         f"default {alias} is not attached to {host.alias}"
                     )
+        adapter_devices: dict[tuple, str] = {}
+        adapter_addresses: dict[tuple, str] = {}
         for resource in self.resources.values():
             if resource.type == NRF52840_DK:
                 _validate_dk(resource)
             if resource.type == ESP32_CLASSIC_PEER:
                 _validate_peer(resource)
+            if resource.type == BLUETOOTH_ADAPTER:
+                _validate_adapter(resource)
+                # One hciN names one controller on one host. Two adapters
+                # registered under the same name would take two leases and
+                # drive the same device; the duplicate-identity check above
+                # does not catch it, because it compares whole identities and
+                # the two addresses differ.
+                key = (resource.attached_to, resource.identity["hci device"])
+                if key in adapter_devices:
+                    raise RegistryError(
+                        f"{BLUETOOTH_ADAPTER} {adapter_devices[key]} and "
+                        f"{resource.alias} are both "
+                        f"{resource.identity['hci device']} on "
+                        f"{resource.attached_to}"
+                    )
+                adapter_devices[key] = resource.alias
+                # And one address names one radio. The reverse of the check
+                # above: a bench that registered the same adapter again
+                # after it came back under another hciN has two aliases for
+                # one controller, whose identities differ in the name, so
+                # the duplicate-identity check does not catch it either.
+                # Both would then share a lease, since the lease key is
+                # built from the address, while the cases drove two devices.
+                address = (resource.attached_to,
+                           str(resource.identity["BD_ADDR"]).upper())
+                if address in adapter_addresses:
+                    raise RegistryError(
+                        f"{BLUETOOTH_ADAPTER} {adapter_addresses[address]} "
+                        f"and {resource.alias} are both registered at "
+                        f"{resource.identity['BD_ADDR']} on "
+                        f"{resource.attached_to}"
+                    )
+                adapter_addresses[address] = resource.alias
             if resource.type == DEBUG_PROGRAMMER:
                 _validate_programmer(resource)
         self._validate_lock_names()

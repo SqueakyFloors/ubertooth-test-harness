@@ -298,11 +298,23 @@ class Board:
     serial is 32 hex digits (#290), while the lab's file keeps the plain
     serial. ``board_for_resource`` builds both names, for every path that
     leases a device.
+
+    ``bench_lock`` is whether the lab's own scripts have a lock file for this
+    device at all. They do for every board, named after a serial. A host
+    Bluetooth adapter has none: it has no serial, and no lab script locks a
+    controller. Taking one anyway would put a name no other command uses
+    into the lab's directory -- ``lock_name`` falls back to the lease key,
+    so it would read ``board-bluez-<address>.lock`` among files named after
+    serials -- and suggest a coordination with the lab that is not
+    happening. The lease is the whole of it.
     """
 
     alias: str
     key: str
     external_key: str | None = None
+    # Named apart from ``Lease.external``, which says whether a lease record
+    # is an external board lock rather than which devices have one.
+    bench_lock: bool = True
 
     @property
     def lock_name(self) -> str:
@@ -374,13 +386,19 @@ def external_lock_template(
     return template
 
 
-def external_lock_path(template: str, board: Board) -> Path:
+def external_lock_path(template: str, board: Board) -> Path | None:
     """The board's external lock file: the template with its own name in it.
 
     That name is the lease key for an Ubertooth, whose key is its serial,
     and the plain serial for a DK, a peer or a programmer, whose lease key
     is prefixed (``Board.external_key``, ``board_for_resource``).
+
+    ``None`` for a device the lab has no lock file for, which is a host
+    Bluetooth adapter and nothing else (``Board.bench_lock``): every caller
+    then leaves it out rather than creating a file no other command takes.
     """
+    if not board.bench_lock:
+        return None
     return Path(template.replace(SERIAL_FIELD, board.lock_name))
 
 
@@ -433,10 +451,11 @@ def board_key(alias: str, identity: Mapping) -> str:
     return serial
 
 
-# nRF52840 DKs (BLE test devices) and ESP32 Classic peers are leased too, by
-# J-Link serial and by USB bridge serial. Both keys are prefixed, so neither
-# can clash with an Ubertooth's bare 32 hex digits, with the host lock, or
-# with `takeover`, which would name the takeover lock's own file; a CP2102N
+# nRF52840 DKs (BLE test devices), ESP32 Classic peers, and the host
+# Bluetooth adapter are leased too, by J-Link serial, by USB bridge serial,
+# and by the controller's own address. Every one of those keys is prefixed, so
+# none can clash with an Ubertooth's bare 32 hex digits, with the host lock,
+# or with `takeover`, which would name the takeover lock's own file; a CP2102N
 # bridge serial is 32 hex digits itself.
 # A key becomes a file name, so it may hold nothing that would reach
 # another directory or need quoting.
@@ -450,8 +469,15 @@ PEER_TYPE = "ESP32 Classic peer"
 # the board needing hands on it, so the two are always held together (see
 # expand_pairs).
 PROGRAMMER_TYPE = "Debug programmer"
-LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE)
-
+# The host's own Bluetooth controller, which the two BlueZ-only tools drive.
+# Leased because one controller answers one inquiry at a time and holds one
+# link to a target, so two commands using it at once would read each other's
+# results.
+ADAPTER_TYPE = "Bluetooth adapter"
+LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE, ADAPTER_TYPE)
+# A 48-bit address with its colons taken out, which is what names an adapter's
+# lock; the registry has already refused anything else (resources.py).
+_ADAPTER_ADDRESS = re.compile(r"^[0-9a-f]{12}$")
 
 
 def plain_serial(resource) -> str:
@@ -483,8 +509,24 @@ def plain_serial(resource) -> str:
 def resource_key(resource) -> str:
     """Lock-file key of a leasable resource.
 
-    An Ubertooth, a DK, an ESP32 peer, or a debug programmer.
+    An Ubertooth, a DK, an ESP32 peer, a debug programmer, or the host's
+    Bluetooth adapter.
     """
+    if resource.type == ADAPTER_TYPE:
+        # The controller's own address, not its `hci device` name: hciN is the
+        # order the kernel attached controllers in, so two hosts that share a
+        # lease directory would both key their own adapter as hci0. Every
+        # other key here is an identity for the same reason. An adapter has
+        # no serial, so the lab's own scripts have no lock file for it beside
+        # this one.
+        address = str(resource.identity.get("BD_ADDR", "") or "").strip()
+        key = address.replace(":", "").lower()
+        if not _ADAPTER_ADDRESS.fullmatch(key):
+            raise LeaseError(
+                f"{resource.alias} needs a 'BD_ADDR' in the hardware registry "
+                f"to be leased; registered '{address}'"
+            )
+        return _keyed(resource, "BD_ADDR", "bluez-", key)
     if resource.type == DK_TYPE:
         serial = str(resource.identity.get("jlink serial", "") or "").strip()
         if not serial.isdigit():
@@ -535,7 +577,8 @@ def board_for_resource(resource) -> Board:
     key = resource_key(resource)
     serial = plain_serial(resource)
     second = serial if serial and serial != key else None
-    return Board(resource.alias, key, external_key=second)
+    return Board(resource.alias, key, external_key=second,
+                 bench_lock=resource.type != ADAPTER_TYPE)
 
 
 def max_serial_chars(prefix: str) -> int:
@@ -1823,8 +1866,8 @@ def _free_now(root: Path, board: Board, external_template: str | None) -> bool:
     """
     if _held(root / f"{board.key}.lock"):
         return False
-    if board.key != HOST_LOCK.key and external_template:
-        lab = external_lock_path(external_template, board)
+    lab = external_lock_path(external_template, board) if external_template else None
+    if board.key != HOST_LOCK.key and lab is not None:
         try:
             # As every other read of a lab file: a path that is a FIFO must
             # not make this wait, and anything unreadable is not free.
@@ -1934,6 +1977,9 @@ def acquire(
     if external_template:
         for board in by_serial:
             path = external_lock_path(external_template, board)
+            if path is None:
+                # No lab file for this device; its lease is the whole lock.
+                continue
             # Both of this device's own lock names. A template pointing at
             # the lease directory would otherwise take a lease file as an
             # external lock: its own, or -- since a peer's 32-hex bridge
@@ -2112,7 +2158,7 @@ def acquire(
                         # lock file rather than on anything the harness
                         # holds, which is the file to go and look at.
                         lab = external_lock_path(external_template, board)
-                        if _held(lab):
+                        if lab is not None and _held(lab):
                             busy_now = "; it is held " + describe_external(
                                 lab, read_external_holder(lab))
                     raise LeaseError(
@@ -2338,8 +2384,9 @@ def board_states(
             if kind in ("stale", "orphan"):
                 state["stale"] = why
                 state["takeover"] = takeover_allowed(board, kind)
-        if external_template:
-            external = external_lock_path(external_template, board)
+        external = (external_lock_path(external_template, board)
+                    if external_template else None)
+        if external is not None:
             try:
                 # O_NONBLOCK, and a regular-file check: a lab path that is a
                 # FIFO must not make the listing wait forever.

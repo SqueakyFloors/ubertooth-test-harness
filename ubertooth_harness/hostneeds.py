@@ -42,8 +42,10 @@ PLATFORMS = ("linux", "macos")
 # Built by the fork only when libbluetooth is found (BlueZ, Linux only).
 BLUEZ_TOOLS = ("ubertooth-scan", "ubertooth-follow")
 # Programs a case runs that are not the fork's and that the harness does not
-# install: present or not on the host (#148).
-HOST_TOOLS = ("tshark",)
+# install: present or not on the host (#148). hciconfig and hcitool come with
+# BlueZ and are what the adapter cases read the controller's own state with,
+# before and after the tool under test drives it.
+HOST_TOOLS = ("tshark", "hciconfig", "hcitool")
 TEST_BUILD_LABEL = "test_build"
 # The alternate `btbr` firmware image, which only the ubertooth-btbr case
 # needs and only a run that asked for it builds (``--with-btbr``, or a run
