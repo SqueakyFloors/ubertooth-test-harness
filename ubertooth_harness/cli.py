@@ -17,7 +17,6 @@ from ubertooth_harness.build import (
     APPLICATION_IMAGE,
     BTBR_BUILD_ARTIFACT,
     BTBR_IMAGE,
-    FIRMWARE_IMAGES,
     TEST_BUILD_ARTIFACT,
     BuildError,
     Builder,
@@ -107,11 +106,18 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
     parser.add_argument(
         "--with-firmware",
         action="store_true",
-        help="also build both firmware images (needs arm-none-eabi-gcc) and "
-        "record them: bluetooth_rxtx, which every test but the btbr one needs "
-        "on its board, and btbr, the alternate image ubertooth-btbr needs; "
-        "run-suite --build builds them anyway when it flashes the boards, "
-        "which it does unless its --no-flash-build is given",
+        help="also build the bluetooth_rxtx firmware image (needs "
+        "arm-none-eabi-gcc) and record it: the image every test but the btbr "
+        "one needs on its board; run-suite --build builds it anyway when it "
+        "flashes the boards, which it does unless its --no-flash-build is given",
+    )
+    parser.add_argument(
+        "--with-btbr",
+        action="store_true",
+        help="also build and record btbr, the alternate firmware image "
+        "ubertooth-btbr needs and nothing else runs; implies the firmware "
+        "build, and run-suite builds it by itself for a run whose selected "
+        "tests say they need it",
     )
     parser.add_argument(
         "--with-python",
@@ -121,6 +127,31 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
         help="also build the Python tools (ENABLE_PYTHON=ON) for PYTHON "
         "(default python3 on PATH), recorded in the manifest; "
         "ubertooth-specan-ui also needs numpy, qtpy and a Qt binding there",
+    )
+
+
+def _firmware_images(*, with_btbr: bool) -> tuple[str, ...]:
+    """The images a firmware build makes.
+
+    Always the application image, which every test but the btbr one needs on
+    its board; the alternate btbr image only when it was asked for, so a run
+    that never flashes it neither waits for it to build nor fails because it
+    did not (#279).
+    """
+    return (APPLICATION_IMAGE,) + ((BTBR_IMAGE,) if with_btbr else ())
+
+
+def _tests_need_btbr(catalog, invocations) -> bool:
+    """Whether a selected test says it needs the alternate btbr image.
+
+    Read from the catalog, which is where a test declares the artifact its
+    cases name (``TestDefinition.build_options``), so the image is built for
+    the run that needs it without the operator having to know which test
+    that is.
+    """
+    return any(
+        catalog.get(invocation.test_name).build_options().btbr_build
+        for invocation in invocations
     )
 
 
@@ -182,7 +213,7 @@ def _signals_cancel(token: CancellationToken):
 
 def _build(
     sources, work_dir: Path, with_firmware: bool, publisher, with_python=None, *,
-    run_dir: Path, firmware_images=FIRMWARE_IMAGES,
+    run_dir: Path, firmware_images: tuple[str, ...],
 ):
     """Build resolved sources into work_dir, recording into the run's publisher
     (long command output goes to run_dir's output/)."""
@@ -387,7 +418,11 @@ def _build_command(args: argparse.Namespace) -> int:
     _record_dfu_part_table(publisher, sources)
     try:
         result = _build(
-            sources, output, args.with_firmware, publisher, args.with_python, run_dir=output
+            # No suite here to read the need off, so the alternate image is
+            # built when --with-btbr asks for it and not otherwise.
+            sources, output, args.with_firmware or args.with_btbr, publisher,
+            args.with_python, run_dir=output,
+            firmware_images=_firmware_images(with_btbr=args.with_btbr),
         )
     except BuildError as error:
         _finish_failed_run(publisher, output, str(error))
@@ -1049,6 +1084,8 @@ def _run_suite(args: argparse.Namespace) -> int:
     sources = _resolve_sources(args)
     if args.with_firmware and not args.build:
         raise HarnessError("--with-firmware requires --build")
+    if args.with_btbr and not args.build:
+        raise HarnessError("--with-btbr requires --build")
     if args.with_python and not args.build:
         raise HarnessError("--with-python requires --build")
     if args.build and not args.libbtbb_source:
@@ -1070,9 +1107,10 @@ def _run_suite(args: argparse.Namespace) -> int:
             "the board must be carrying this run's own firmware first; drop "
             "--no-flash-build, or use --bootloader check"
         )
+    # The alternate image is a firmware image, so asking for it asks for the
+    # firmware build.
+    args.with_firmware = args.with_firmware or args.with_btbr
     args.flash_boards = ()
-    # Both images unless the firmware build is turned on only to flash.
-    args.firmware_images = FIRMWARE_IMAGES
     needs_firmware = PreflightPolicy(registry, catalog).boards_needing_firmware(
         invocations
     )
@@ -1129,11 +1167,9 @@ def _run_suite(args: argparse.Namespace) -> int:
             "which is not installed; install it, or use --bootloader check"
         )
     if args.flash_boards and not args.with_firmware:
-        # Flashing needs the firmware build, but only the image it writes:
-        # a plan that never runs the alternate one must not fail because
-        # that one did not build.
+        # Flashing needs the firmware build; the image it writes is the
+        # application one, which is what the firmware build makes anyway.
         args.with_firmware = True
-        args.firmware_images = (APPLICATION_IMAGE,)
         if not args.dry_run and "arm-none-eabi-gcc" in missing_tools(
             _detected_platform(), True
         ):
@@ -1146,6 +1182,24 @@ def _run_suite(args: argparse.Namespace) -> int:
     # Before the dry run too, so a dry run that exits 0 means what the
     # README says it means: this host can run the suite as asked.
     _check_power_cycles_allowed(args, catalog, invocations)
+
+    # Which images the firmware build makes, when it runs at all: the
+    # application image every other test needs on its board, and the
+    # alternate btbr image when the run asked for it or a selected test says
+    # it needs it. A plan that never runs the alternate one does not wait for
+    # it to build, and does not fail because it did not (#279).
+    #
+    # The second image is only ever added to a firmware build that is already
+    # happening. A selected test is not reason enough to turn the firmware
+    # build on: that needs arm-none-eabi-gcc, which a host may not have, and
+    # a run that used to pass with the btbr case left out as not applicable
+    # must not start failing for a toolchain nobody asked it to use. So
+    # `--with-firmware` (which `--with-btbr` implies) is what decides whether
+    # firmware is built, and this decides which images it then makes.
+    args.firmware_images = _firmware_images(
+        with_btbr=args.with_firmware
+        and (args.with_btbr or _tests_need_btbr(catalog, invocations))
+    )
     # A device the registry says is permanently wired to one of the run's own
     # (a debug programmer and the board it programs) is held with it. Said
     # wherever the devices are: a dry run lists what the run would hold, and

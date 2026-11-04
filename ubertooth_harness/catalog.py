@@ -383,9 +383,10 @@ class TestDefinition:
     # plan's `platforms:` argument adds a platform need (test_needs).
     needs: Needs = NO_NEEDS
     # What SOME of the test's cases need from the run's build: the firmware
-    # image ("test build"), the Python tools, or both; without it those cases
-    # are left out as not applicable. Only those two fields of Needs belong
-    # here and in build_required.
+    # image ("test build"), the alternate btbr image ("btbr build"), the
+    # Python tools, or several of them; without it those cases are left out
+    # as not applicable. Only those three fields of Needs belong here and in
+    # build_required.
     #
     # Unlike `needs`, which leaves a whole test out where its host does not
     # meet it, these two are how a run's build options are chosen: the cases
@@ -429,20 +430,25 @@ class TestDefinition:
             if unwanted:
                 raise ValueError(
                     f"{self.name}: {field} carries build options only "
-                    f"(python_tools, firmware_build), not {unwanted.describe()}"
+                    f"(python_tools, firmware_build, btbr_build), not "
+                    f"{unwanted.describe()}"
                 )
 
     def build_options(self) -> Needs:
         """The run build options some case of this test needs.
 
         Its own test-wide needs, what its cases need, and what it cannot run
-        without at all.
+        without at all. Each artifact a case needs is named here in its own
+        right: the alternate btbr image is not read off the firmware build,
+        because a run can carry the application image without it (#279).
         """
         return Needs(
             python_tools=(self.needs.python_tools or self.build_needs.python_tools
                           or self.build_required.python_tools),
             firmware_build=(self.needs.firmware_build or self.build_needs.firmware_build
                             or self.build_required.firmware_build),
+            btbr_build=(self.needs.btbr_build or self.build_needs.btbr_build
+                        or self.build_required.btbr_build),
         )
 
     def required_build_options(self) -> Needs:
@@ -450,6 +456,7 @@ class TestDefinition:
         return Needs(
             python_tools=self.build_required.python_tools,
             firmware_build=self.build_required.firmware_build,
+            btbr_build=self.build_required.btbr_build,
         )
 
     def image_labels(self, arguments: Mapping | None = None) -> tuple[str, ...]:
@@ -1700,8 +1707,10 @@ def builtin_catalog() -> TestCatalog:
             # (`ubertooth-btbr` is installed by a --with-python build), so a
             # run that carries neither is refused rather than leaving the
             # case out: a board flashed with the alternate image needs the
-            # application image to put back.
-            build_required=Needs(firmware_build=True, python_tools=True),
+            # application image to put back. Both images are named, because a
+            # run can carry the application one without the alternate (#279).
+            build_required=Needs(firmware_build=True, python_tools=True,
+                                 btbr_build=True),
         ),
         TestDefinition(
             "Recover AFH map",

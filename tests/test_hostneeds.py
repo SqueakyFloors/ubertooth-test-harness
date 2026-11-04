@@ -76,15 +76,15 @@ class NeedsTests(unittest.TestCase):
         self.assertIn("Python tools build", unmet(Needs(python_tools=True), MAC))
         self.assertIn("firmware build", unmet(Needs(firmware_build=True), MAC))
         # A run carrying the application image alone can still not run the
-        # case that needs the alternate one.
+        # case that needs the alternate one, and a firmware build is the
+        # application image unless the alternate one was asked for (#279).
         application_only = planned_capabilities(
-            "H", "linux", build=True, with_python=True, with_firmware=True,
-            with_btbr=False)
+            "H", "linux", build=True, with_python=True, with_firmware=True)
         self.assertEqual("", unmet(Needs(firmware_build=True), application_only))
         self.assertIn("alternate btbr firmware image",
                       unmet(Needs(btbr_build=True), application_only))
         both = planned_capabilities("H", "linux", build=True, with_python=True,
-                                    with_firmware=True)
+                                    with_firmware=True, with_btbr=True)
         self.assertEqual("", unmet(Needs(btbr_build=True), both))
         by_artifact = planned_capabilities(
             "H", "linux", build=False, with_python=False, with_firmware=False,
@@ -116,6 +116,14 @@ class NeedsTests(unittest.TestCase):
                                         with_firmware=False, artifact_labels=("test_build",))
         self.assertTrue(artifact.firmware_build)
         self.assertEqual("installed tools", artifact.basis)
+        # The alternate image is its own option, never read off the firmware
+        # build: that is what lets a run carry one image and not the other.
+        self.assertFalse(linux.btbr_build)
+        self.assertTrue(
+            planned_capabilities("Host_Linux", "linux", build=True,
+                                 with_python=False, with_firmware=True,
+                                 with_btbr=True).btbr_build
+        )
 
     def test_installed_linux_tools_come_from_path(self):
         with tempfile.TemporaryDirectory() as directory:

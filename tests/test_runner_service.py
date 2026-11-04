@@ -219,7 +219,8 @@ def run_request(request_id="r1", **overrides):
     fields = dict(
         request_id=request_id, ref="HEAD", commit=None, plan="local",
         suite="fast", tests=[], build=False, flash_build=True,
-        with_firmware=False, with_python=False, bootloader="record",
+        with_firmware=False, with_btbr=False, with_python=False,
+        bootloader="record",
     )
     fields.update(overrides)
     return encode_controller_message("run", **fields)
@@ -274,21 +275,27 @@ class ProtocolTests(unittest.TestCase):
             "string build": json.dumps({**good, "build": "yes"}),
             "nan": run_request().replace('"build": false', '"build": NaN'),
             "large": json.dumps({**good, "ref": "a" * 70000}),
-            # The two build options: missing, not a boolean, or asked for
-            # without build, which run-suite itself refuses (#257).
+            # The three build options: missing, not a boolean, or asked for
+            # without build, which run-suite itself refuses (#257, #279).
             "missing with_firmware": json.dumps(
                 {k: v for k, v in good.items() if k != "with_firmware"}
+            ),
+            "missing with_btbr": json.dumps(
+                {k: v for k, v in good.items() if k != "with_btbr"}
             ),
             "missing with_python": json.dumps(
                 {k: v for k, v in good.items() if k != "with_python"}
             ),
             "string with_firmware": json.dumps({**good, "with_firmware": "yes"}),
+            "string with_btbr": json.dumps({**good, "with_btbr": "yes"}),
             "numeric with_python": json.dumps({**good, "with_python": 1}),
             "python interpreter name": json.dumps({**good, "with_python": "python3.12"}),
             "firmware without build": json.dumps({**good, "with_firmware": True}),
+            "btbr without build": json.dumps({**good, "with_btbr": True}),
             "python without build": json.dumps({**good, "with_python": True}),
-            "both without build": json.dumps(
-                {**good, "with_firmware": True, "with_python": True}
+            "all three without build": json.dumps(
+                {**good, "with_firmware": True, "with_btbr": True,
+                 "with_python": True}
             ),
             # The bootloader mode: missing, not one of the three words, or a
             # comparing mode without build, which run-suite refuses too
@@ -559,11 +566,12 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.fixture.output.exists())
         self.assertIn("builds disabled", self.logs[0])
 
-    BUILD_OPTIONS = ("--build", "--no-flash-build", "--with-firmware", "--with-python")
+    BUILD_OPTIONS = ("--build", "--no-flash-build", "--with-firmware",
+                     "--with-btbr", "--with-python")
 
     async def test_the_build_options_map_to_the_run_suite_options(self):
-        # (build, flash_build, with_firmware, with_python) -> the build
-        # options run-suite gets (#135, #257).
+        # (build, flash_build, with_firmware, with_btbr, with_python) -> the
+        # build options run-suite gets (#135, #257, #279).
         libbtbb = self.fixture.root / "libbtbb"
         libbtbb.mkdir()
         started = []
@@ -573,16 +581,18 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             raise OSError("not started in this test")
 
         cases = (
-            ((True, True, False, False), ["--build"]),
-            ((True, False, False, False), ["--build", "--no-flash-build"]),
-            ((False, True, False, False), []),
-            ((False, False, False, False), []),
-            ((True, True, True, False), ["--build", "--with-firmware"]),
-            ((True, True, False, True), ["--build", "--with-python"]),
-            ((True, True, True, True),
-             ["--build", "--with-firmware", "--with-python"]),
-            ((True, False, True, True),
-             ["--build", "--no-flash-build", "--with-firmware", "--with-python"]),
+            ((True, True, False, False, False), ["--build"]),
+            ((True, False, False, False, False), ["--build", "--no-flash-build"]),
+            ((False, True, False, False, False), []),
+            ((False, False, False, False, False), []),
+            ((True, True, True, False, False), ["--build", "--with-firmware"]),
+            ((True, True, False, True, False), ["--build", "--with-btbr"]),
+            ((True, True, False, False, True), ["--build", "--with-python"]),
+            ((True, True, True, True, True),
+             ["--build", "--with-firmware", "--with-btbr", "--with-python"]),
+            ((True, False, True, True, True),
+             ["--build", "--no-flash-build", "--with-firmware", "--with-btbr",
+              "--with-python"]),
         )
         with patch(
             "ubertooth_harness.runner_service.asyncio.create_subprocess_exec", fake_exec
@@ -592,12 +602,14 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await controller.next("register")
                 for index, (asked, expected) in enumerate(cases):
-                    build, flash, firmware, python = asked
+                    build, flash, firmware, btbr, python = asked
                     with self.subTest(build=build, flash_build=flash,
-                                      with_firmware=firmware, with_python=python):
+                                      with_firmware=firmware, with_btbr=btbr,
+                                      with_python=python):
                         await controller.send(run_request(
                             request_id=f"r{index}", build=build, flash_build=flash,
-                            with_firmware=firmware, with_python=python,
+                            with_firmware=firmware, with_btbr=btbr,
+                            with_python=python,
                         ))
                         await controller.next("run_rejected")
                         options = [
@@ -626,8 +638,8 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await controller.next("register")
                 await controller.send(run_request(
-                    build=True, with_firmware=True, with_python=True,
-                    tests=["Host version"],
+                    build=True, with_firmware=True, with_btbr=True,
+                    with_python=True, tests=["Host version"],
                 ))
                 await controller.next("run_rejected")
         argv = list(started[-1])
@@ -637,6 +649,7 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("run-suite", parsed.command)
         self.assertIs(True, parsed.build)
         self.assertIs(True, parsed.with_firmware)
+        self.assertIs(True, parsed.with_btbr)
         # Bare --with-firmware/--with-python on the command line: with_python
         # takes the parser's own default interpreter, and no later option of
         # the runner's is swallowed as its value.
