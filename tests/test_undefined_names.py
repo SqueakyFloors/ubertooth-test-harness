@@ -55,7 +55,7 @@ class UndefinedNameTests(unittest.TestCase):
             completed.returncode, (0, 1), f"pyflakes exited {completed.returncode}"
         )
         # Only undefined names. This is a correctness gate, and the tree has
-        # other pyflakes reports today (unused imports, mostly in tests, and
+        # other pyflakes reports today (unused imports in the tests, and
         # f-strings with no placeholders), which are style: asserting on all
         # of them would fail for reasons that are not this fault.
         undefined = [
