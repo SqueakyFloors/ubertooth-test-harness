@@ -232,14 +232,28 @@ class PlacementTests(unittest.TestCase):
         self.assertNotIn("is not measured", why)
 
     def test_an_attenuation_nobody_has_tried_is_still_plainly_unmeasured(self):
-        """The new branch must not swallow the ordinary case."""
-        untried = 55.0
-        self.assertNotIn(untried, weaklink.CHARACTERIZED_UNUSABLE_DB)
+        """The new branch must not swallow the ordinary case.
+
+        The figure is derived rather than written down, so characterizing
+        another point cannot turn this into a confusing failure.
+        """
+        untried = 5.0 + max((*weaklink.MEASURED_ATTENUATIONS_DB,
+                             *weaklink.PLANNED_ATTENUATIONS_DB,
+                             *weaklink.CHARACTERIZED_UNUSABLE_DB))
         self.assertEqual(
             f"needs {untried:g} dB, which is not measured",
             weaklink.unjudgeable(weaklink.weak_receiver(untried),
                                  "Classic capture record fields", "Ubertooth"),
         )
+
+    def test_an_int_attenuation_reaches_the_unusable_branch_too(self):
+        """`rf:` is hand-written, so 50 and 50.0 must behave alike."""
+        unusable = sorted(weaklink.CHARACTERIZED_UNUSABLE_DB)[0]
+        for value in (unusable, int(unusable)):
+            with self.subTest(value):
+                self.assertIn("found unusable", weaklink.unjudgeable(
+                    weaklink.weak_receiver(value),
+                    "Classic capture record fields", "Ubertooth"))
 
     def test_attenuations_are_described_for_a_refusal(self):
         self.assertEqual("20 dB", weaklink.describe_attenuations([20]))

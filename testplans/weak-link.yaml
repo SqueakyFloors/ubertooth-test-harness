@@ -88,18 +88,20 @@ suites:
         weak link: {Ubertooth: 20}
         coverage: smoke
         duration: 2m
-    # The one entry whose answer the bench may not be able to give, and
-    # 2026-11-04's capture files (#306) say why it is not an attenuation
-    # problem. Over 19 windows of dense SPP traffic the header flag did fire
-    # -- 26 of 534 checks failed at 40 dB, 6 of 90 on a clear board -- but it
-    # fires where many packets get decoded, which is follow mode, and follow
-    # was reached by only 2 of 4 windows at 40 dB. The CRC flag is the
-    # blocker: a CRC needs a payload, only 0 to 4 records a window carried
-    # one without a clock, and no record in any window reported a CRC valid.
-    # More attenuation makes it worse rather than better, which 50 dB
-    # showed directly (0 to 61 records a window, every check passing); see
-    # weaklink.CHARACTERIZED_UNUSABLE_DB. So this entry waits on a capture
-    # with payload-bearing records, not on a bigger attenuator.
+    # 2026-11-04's capture files (#306) answered what this one waits on, and
+    # it is not a bigger attenuator. Over 19 windows of dense SPP traffic
+    # both flags fired: header checks failed in 4 windows (26 of 534 and 4
+    # of 47 at 40 dB, 3 of 1395, and 6 of 90 on a clear board), and every
+    # CRC check made in any window failed, 11 of 11. What is missing is a
+    # rate to set a floor against. A CRC is only checked on a payload-bearing
+    # record, and a window held 0 to 4 of those, so 5 windows saw a CRC at
+    # all and 4 a header failure -- a case requiring a flag to have fired
+    # would fail about three runs in four. Attenuation does not raise the
+    # rate: the clear board produced 6 of the 11 CRC failures, and 50 dB
+    # produced neither kind on 62 records across six windows (see
+    # weaklink.CHARACTERIZED_UNUSABLE_DB). So this entry waits on a capture
+    # that reliably carries payload-bearing records, which is a clock
+    # question, and on a case that requires a flag to have fired.
     - Classic capture record fields:
         hosts: [Host_Linux]
         Ubertooth: default

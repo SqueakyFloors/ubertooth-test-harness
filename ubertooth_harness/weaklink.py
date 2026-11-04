@@ -66,8 +66,10 @@ test):
   clear board, not at 20 dB, where it collapsed (below);
 * **40 dB is not an error regime.** Its error profile sits close to 20 dB's
   (74% against 77% `err=0` at `-e 2`) on a comparable packet count while
-  reading about 14 dB lower, so the link still has margin there. Damaged
-  packets in quantity would need more attenuation than the bench now has;
+  reading about 14 dB lower, so the link still has margin there. This section
+  once read that damaged packets in quantity would need more attenuation than
+  the bench had; 2026-11-04 fitted 50 dB and measured the opposite, so see
+  `CHARACTERIZED_UNUSABLE_DB` below rather than reading that as advice;
 * a known BLE advertiser is captured completely at both, about 1175 and 1228
   advertisements with **no** CRC failure, and `tshark` agrees with the tool's
   own count exactly;
@@ -123,12 +125,15 @@ PLANNED_ATTENUATIONS_DB: tuple[float, ...] = (30.0,)
 # tried, and because the reason says which direction is worth trying next.
 CHARACTERIZED_UNUSABLE_DB: Mapping[float, str] = MappingProxyType({
     50.0: (
-        "measured 2026-11-04 for the Classic damaged-packet checks "
-        "(#306) and the link is past its edge there: six 15 s windows of "
-        "dense SPP traffic gave 0, 0, 1, 0, 61 and 0 records, no window "
-        "recovered a clock or followed, and the one window that heard "
-        "anything had 49 of 49 header checks pass. It removes packets "
-        "without producing errors, so it buys no error regime"
+        "taken to 2026-11-04 for the Classic damaged-packet checks (#306) "
+        "and the link is past its edge there. Six 15 s windows of dense SPP "
+        "traffic gave 0, 0, 1, 0, 61 and 0 records, 62 in all against 237 "
+        "from a single 20 dB window; no window recovered a clock, and of the "
+        "49 header checks the one substantial window made, none failed and "
+        "no record carried a payload to check a CRC over. It removes packets "
+        "without damaging them, so it buys no error regime. More attenuation "
+        "is not the direction: the clear board produced more flag failures "
+        "than any attenuated one"
     ),
 })
 
@@ -188,10 +193,10 @@ def unjudgeable(
                 f"needs {low:g} dB, which is measured on this bench but not "
                 f"for this test in this role; weaklink.CHECKS records what is"
             )
-        if low in CHARACTERIZED_UNUSABLE_DB:
+        if float(low) in CHARACTERIZED_UNUSABLE_DB:
             return (
                 f"needs {low:g} dB, which this bench has been taken to and "
-                f"found unusable: {CHARACTERIZED_UNUSABLE_DB[low]}"
+                f"found unusable: {CHARACTERIZED_UNUSABLE_DB[float(low)]}"
             )
         return f"needs {low:g} dB, which is not measured"
     bound = []
@@ -409,18 +414,20 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "HEC and CRC error flags, Classic",
         "Classic capture record fields", "Ubertooth", 40.0,
-        "a capture carrying payload-bearing records, and a case that requires "
-        "a flag to have fired. Measured over capture files 2026-11-04 (#306), "
-        "which answers the older guess that more attenuation was the way: it "
-        "is not. The header flag does fire at 40 dB (26 of 534 checks failed "
-        "in one window, 4 of 47 in another) and even on a clear board (6 of "
-        "90), but it fires where many packets get decoded, which is follow "
-        "mode, not where the link is weak: 50 dB produced 0 to 61 records a "
-        "window with every check passing. The CRC flag is the real blocker "
-        "and attenuation cannot reach it, because the CRC needs a payload "
-        "and only 0 to 4 records a window carried one; across 19 windows no "
-        "record ever reported a CRC as valid. Follow mode is also a coin "
-        "flip at this length, reached by 2 of 4 windows at 40 dB",
+        "a rate a floor can be set against, which is not what it was once "
+        "thought to need. Measured over capture files 2026-11-04 (#306), 19 "
+        "windows of dense SPP traffic: both flags DO fire, so the older "
+        "wording that no flag might ever fire here, and that more "
+        "attenuation was the answer, are both wrong. Header checks failed in "
+        "4 windows (26 of 534, 4 of 47, 6 of 90 on a clear board, 3 of "
+        "1395), and every CRC check made across all 19 windows failed -- 11 "
+        "of 11. What is missing is repeatability: CRC checks need a "
+        "payload-bearing record, of which a window held 0 to 4, so only 5 "
+        "windows saw a CRC at all and only 4 a header failure. A case "
+        "requiring a flag to have fired would fail about three runs in four. "
+        "Attenuation does not raise the rate either: the clear board "
+        "produced 6 of the 11 CRC failures and 50 dB produced none of "
+        "either, having heard 62 records in 6 windows",
     ),
     Check(
         "HEC and CRC error flags, BLE",

@@ -198,12 +198,18 @@ def _refuse_unrunnable(plan: Plan, catalog, suite: str | None, what: str) -> Non
             f"{name}: " + ", ".join(reasons)
             for name, reasons in unjudgeable.items()
         )
+        # "No figure has been taken over" is not true of every refusal here:
+        # a point in CHARACTERIZED_UNUSABLE_DB has been taken to, and the
+        # whole point of recording it is to stop telling somebody it is
+        # merely unmeasured. So the opening clause has to allow for a link
+        # that was measured and found to settle nothing.
         raise PlanError(
-            f"{what} asks for a link no figure has been taken over: {named}. "
+            f"{what} asks for a link no figure can be taken over: {named}. "
             "The bench is measured at "
             f"{weaklink.describe_attenuations(weaklink.MEASURED_ATTENUATIONS_DB)}"
             ", so a test pointed anywhere else would be judged against "
-            "figures from another link; those entries wait in a plan with "
+            "figures from another link, or against a link that settles "
+            "nothing; those entries wait in a plan with "
             "'runnable: false' (testplans/weak-link.yaml)"
         )
 
@@ -212,7 +218,9 @@ def check_runnable(plan: Plan, catalog: TestCatalog | None = None) -> None:
     """Refuse a runnable plan that cannot judge what it would run.
 
     Two ways it cannot: a test with no implementation, whose suite run-suite
-    would refuse; and a test pointed at a link no figure has been taken over.
+    would refuse; and a test pointed at a link no figure can be taken over,
+    whether because the bench has never been measured there or because it has
+    been and the link settled nothing (weaklink.CHARACTERIZED_UNUSABLE_DB).
     Both wait in a plan with ``runnable: false`` (testplans/backlog.yaml,
     testplans/weak-link.yaml), which is why a plan declaring that is left
     alone here.

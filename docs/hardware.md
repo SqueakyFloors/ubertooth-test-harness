@@ -450,27 +450,35 @@ nothing in the harness can catch it.
 
 **How much attenuation is useful, measured.** Stacking attenuators to force
 decode errors has a ceiling, and on this bench it is below 50 dB. A receiver
-taken to 50 dB a metre from the Classic peers, against a dense Serial Port
-Profile link, heard 0 to 61 packets in a 15-second window, never recovered a
-piconet clock, and reported every header check it made as passing
+taken to 50 dB about a meter from the Classic peers, against a dense Serial
+Port Profile link, heard 0 to 61 packets per 15-second window — 62 records
+over six windows, against 237 from three windows at 20 dB — never recovered a
+piconet clock, and failed none of the 49 header checks it managed
 ([#306](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/306)).
 Past a point, more attenuation stops producing damaged packets and starts
 producing no packets, so a test that wants errors gains nothing from it.
 `weaklink.CHARACTERIZED_UNUSABLE_DB` records such a point with its reason, and
 a plan that asks for one is refused with that reason instead of being told the
-figure is simply unmeasured.
+figure is simply unmeasured. The worked receiver above is the 20 dB one, which
+is what the bench layout table at the end of this file describes; 50 dB was a
+measurement taken, not a placement to keep.
 
-Two things that mislead when reading those runs:
+Three things that mislead when reading those runs:
 
 - **A reported signal power is censored**, because only a packet the receiver
-  detected reports one at all. Across 20, 40 and 50 dB the mean reported
-  signal stayed within about 10 dB while the packet yield fell from 190
-  records a window to none, so a flat RSSI is not evidence that attenuation
-  did nothing.
+  detected reports one at all. The mean reported signal moved by about 10 dB
+  between 20, 40 and 50 dB while the yield at `-e 0` fell from 190 records a
+  window to none, so a signal power that barely moves is not evidence that
+  the attenuator did nothing — the packets it would have shown are missing
+  from the mean rather than weak within it.
+- **Error flags are not a function of attenuation.** Over those 19 windows
+  the unattenuated board produced 6 of the 11 CRC failures seen and one of
+  the four windows with a header failure, while 50 dB produced neither. If a
+  test wants a damaged packet, a bigger attenuator is not the lever.
 - **A clear board is only a baseline if it was placed like one.** An
   unattenuated board elsewhere on the bench heard fewer packets than a 20 dB
-  board deliberately set a metre from the peers. Give a baseline board its own
-  `rf:` with its distance, or do not read it as the best case.
+  board deliberately set about a meter from the peers. Give a baseline board
+  its own `rf:` with its distance, or do not read it as the best case.
 
 ## Firmware
 
