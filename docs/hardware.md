@@ -267,6 +267,24 @@ adapter is leased like a board, under
 controller answers one inquiry at a time and holds one link to a target, so
 two tests using it at once would read each other's results.
 
+A host may have more than one, and the registry holds them apart in both
+directions: two adapters on one host may not share an `hci device`, and they
+may not share a `BD_ADDR` either. The second is what registering the same
+adapter again produces after it has come back under another `hciN` name — two
+aliases for one radio, which would share one lease, since the lease key is
+built from the address, while the cases drove two devices. Both are refused
+when the registry loads.
+
+Naming the device is not optional anywhere, and that is worth stating because
+nothing would complain if it were dropped: `hciconfig`, `hcitool` and both
+fork tools all fall back to the first controller they find. So every command
+a case runs against a controller names the bound one — `hciconfig <device>`,
+`hcitool -i <device>`, `-b <device>` for the two fork tools — and a unit test
+builds every case against a second adapter and fails if any command would
+reach the first. On a bench with one adapter the fallback and the choice are
+the same controller, so only a bench with two would ever have shown the
+mistake.
+
 The cases also run `hcitool -i <device> con`, before the tool and again at
 the start of the cleanup, to catch a link to a peer that a run left up.
 
@@ -316,6 +334,43 @@ One caution belongs here too:
 `-x` fetches a report from every device the inquiry answered. On a site with
 other people's Bluetooth devices in range, that transmits to them. Run it
 where that is acceptable.
+
+### Why three Bluetooth fixtures, and not one
+
+Three of the devices above are Bluetooth peers of one kind or another, and a
+reader coming to the table for the first time reasonably asks why any bench
+needs all three. They are complementary, not interchangeable: each one gives
+the harness a kind of control or a counter the other two cannot.
+
+- **The nRF52840 DKs are the deterministic LE endpoints.** Their firmware is
+  the harness's own, so a test sets the advertising address, payload, channel
+  and interval; the central and peripheral connection parameters, data length
+  extension, the channel map, channel selection algorithm 1 or 2, and
+  connection cycling. The DK also reports endpoint-side counters — packets,
+  errors, retransmissions, timeouts — so a check can compare what the
+  Ubertooth saw against what the far end says it sent.
+- **The ESP32 peers are the deterministic Classic endpoints.** Their firmware
+  is likewise the harness's own, and it supplies a known LAP and UAP and a
+  known role for each board, Serial Port Profile traffic, EV3 and 2-EV3
+  audio, the piconet clock, the AFH map the pair requests and the one in
+  force, and frame and controller counters.
+- **A USB Bluetooth adapter is a host-side BlueZ fixture.** It is not an
+  endpoint the harness programs at all. What it gives is the host's own
+  controller: inquiry, the two tools that need one (`ubertooth-scan` and
+  `ubertooth-follow`), HCI identity and device selection, and the behavior of
+  an adapter that is busy or has re-enumerated under another `hciN` name.
+
+Two BlueZ adapters can be made to connect to each other, which is why the
+substitution looks tempting. It does not hold. A pair of adapters exposes far
+fewer deterministic link controls and counters than either programmed
+endpoint, and both of them run on the same host stack, so the two ends of the
+link are no longer independent: one kernel, one BlueZ, and one driver fault
+moves both ends at once.
+
+The normal bench therefore needs two shell-capable DKs, two ESP32 peers, and
+one host Bluetooth adapter. A second adapter is useful for multi-adapter
+testing or for a second runner, and is optional: no plan here binds more than
+one adapter per test, so a bench with a single adapter runs everything.
 
 ### A debug programmer and the board it programs
 
