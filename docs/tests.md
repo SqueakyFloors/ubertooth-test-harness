@@ -1454,12 +1454,33 @@ that no live run can pin down, and to run the whole thing in CI.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
-**Expected outcome.** Smoke runs 6 cases: decode every LAP in the fixture,
+**Expected outcome.** Smoke runs 12 cases (11 where there is no `/proc`): decode every LAP in the fixture,
 derive the UAP with `-l`, replay into PCAPNG and into PCAP (link type 255, the
 fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
 and `-s` decoding the same as without it, with `-h` listing `-s` as the
-default. Comprehensive runs 19, adding the survey listing of both piconets
+default.
+
+Six of the smoke cases are about where a capture goes
+([`stdoutdest.py`](../ubertooth_harness/stdoutdest.py) puts the descriptors
+where the case needs them, since a harness step otherwise runs with the
+harness's own streams). `-q -` writes the capture to the stream the case
+redirected, which is then read back as a PCAP of the fixture's packet count,
+and the packet report appears on neither stream: the capture owns standard
+output, so the report is printed nowhere at all and nothing can land in the
+middle of a capture. `/dev/stdout` and `/dev/fd/1` mean the same stream, and so does
+`/proc/self/fd/1` on Linux, which is the one case a host without `/proc`
+leaves out -- it is in smoke so that CI's Linux build job runs it against the
+real tool. `/dev/fd/3` does not: it is whatever the caller opened there, so the capture
+goes to that file and the report stays on standard output. `-q` and `-r`
+naming one file are refused before either is opened, naming both options, and
+a `-d` that names the dump `-i` is replaying is refused as
+`error: -d would write over the dump -i is replaying (<name>)`. Each of the
+six ends by stating the whole directory, with the input's SHA-256, so a
+refusal that truncated or rewrote the file it was reading fails.
+
+Comprehensive runs 30 (29 where there is no `/proc`), adding the survey
+listing of both piconets
 (the two addresses on standard output and the `Survey Results` heading on
 standard error),
 a LAP filter, a correct and a wrong `-u`, `-e 0` dropping the packet with an
@@ -1469,9 +1490,49 @@ records), a missing file, the recorded systime on every packet line, a
 directory passed as `-i` (exit 1 with the read error), and `-u` without `-l`
 refused before any record is decoded.
 
+Comprehensive also adds five more capture-destination cases.
+One file under two spellings is refused as
+`error: -q and -d cannot both write to one file (<first> and <second>)`, while
+`/dev/null` twice is accepted and decodes, since nothing is kept there. The
+file is identified and not the name for that pair check too, so a symbolic
+link, a hard link, `-` beside the name the shell pointed that stream at, and
+`/dev/fd/3` beside the file the case opened there are each refused as one
+file under two names, each named as the user wrote it; two captures that both
+ask for that stream belong to the one-capture-on-standard-output rule instead
+and are refused by it (`error: -q and -d cannot both write to standard
+output`). `-r` refuses every
+destination that reaches standard output while the command line is read, `-`,
+`/dev/stdout`, `/dev/fd/1`, and a link to one of them alike, with
+`error: PCAPNG capture to stdout is not supported; use -q -`, because PcapNG
+seeks back over what it has written. A symbolic link and a hard link to the
+`-i` input are both refused, naming the link the user wrote, with the links
+still what they were. And with standard output pointed at the input, `-q -`
+is refused with the input untouched while the bare decode, which no option
+names and nothing can refuse by then, exits 0 with
+`warning: the decode is going to the dump -i is replaying, so the capture is
+lost` and leaves the fixture's own records at the start of the file. That
+last case reads its own standard output back as a file, so it holds while the
+tool's standard output stays buffered until it exits, which it does for the
+eleven packet lines the fixture decodes to; a report long enough to flush
+part-way through would be read as a record cut short and the run would exit 1
+instead of 0.
+
 **Known limits.** The fixture is synthetic, never an over-the-air capture, so
 this covers the decode path and not the receive path. There is no LE
-equivalent: no tool calls libbtbb's LE file replay.
+equivalent: no tool calls libbtbb's LE file replay. The capture-destination
+cases are `ubertooth-rx`'s; the same checks in `ubertooth-btle` and
+`ubertooth-follow` are not covered, and nor is a capture written to a
+terminal, which no run has. Five more things the fork's own code calls out go
+uncovered: `/dev/stdin` and `/dev/stderr`, which are not standard output but
+are still identified as the descriptors they name (so
+`-d /dev/stderr 2>>cap.bin` reaches a replay's own dump); the BSD leading-zero
+spelling `/dev/fd/01`, which is descriptor 1 there and names nothing on Linux;
+`/proc/self/fd/1` as an `-r` destination, which the `-q` cases cover and the
+`-r` case does not;
+a destination whose last element is a number, which is a file and not a
+descriptor unless the descriptor filesystem answers for it; and the backstop
+inside `take_stdout`, which no case reaches because the command-line check
+refuses such a pair first.
 
 ## Interrupting a capture
 
