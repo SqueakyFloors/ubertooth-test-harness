@@ -161,6 +161,238 @@ check_dfu_part_table() {
     export UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN
 }
 
+# What the install describes to the two things that look for a library, and
+# what a build against the installed one says about itself (#333; fork
+# ubertooth#1044 installs libubertooth.pc, ubertooth#866 builds the tools
+# against an installed libubertooth). The harness builds the whole host tree
+# into one prefix, so until now nothing here read either file, nor configured
+# the tools the way a packager does.
+#
+# Every program run here is run with UBERTOOTH_TEST_NO_DEVICES=1, so the step
+# is about the install and nothing else: without it libubertooth's version
+# report opens every attached board, and on a bench host a board another agent
+# took between two runs would make two identical installs answer differently.
+#
+# $1 is the Ubertooth source tree the build used -- the checkout it made at
+# the ref it resolved, under $WORK/build/src/ubertooth, and not the clone the
+# job was pointed at, whose HEAD may be another commit -- and $2 the prefix
+# the build installed into. It also reads $WORK/host-version.txt, the version
+# line the build's own tools printed, which every program built against this
+# install has to print too.
+# The names here all begin il_, because POSIX sh has no local variables and
+# the other functions in this file use short generic ones.
+check_installed_library() {
+    il_source=$1
+    il_prefix=$2
+    il_work=$WORK/installed
+    rm -rf "$il_work"
+    mkdir -p "$il_work"
+    # Both lib and lib64, on the pkg-config path, the loader path and the
+    # build rpath alike: host/CMakeLists.txt chooses by system, and the two
+    # libraries choose independently -- libubertooth follows
+    # CMAKE_INSTALL_LIBDIR and libbtbb its own LIB_SUFFIX -- so an install
+    # can hold one in each, and naming both costs nothing where one is empty.
+    il_libpath=$il_prefix/lib:$il_prefix/lib64
+    # Prepended, not replaced: libubertooth.pc has "Requires: libbtbb
+    # libusb-1.0", and libusb's own file is the system's. The install's
+    # directories come first, and the checks below require the answers to be
+    # this install's rather than trusting the order. Kept, so the steps after
+    # this function see the value the job had.
+    il_saved_pkg_config_path=${PKG_CONFIG_PATH:-}
+    PKG_CONFIG_PATH=$il_prefix/lib/pkgconfig:$il_prefix/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
+    export PKG_CONFIG_PATH
+    UBERTOOTH_TEST_NO_DEVICES=1
+    export UBERTOOTH_TEST_NO_DEVICES
+    # The version line the build's own tools printed, which every program
+    # built against this install must print too: it names the libubertooth
+    # revision, so a system library that answered instead is caught.
+    il_version=$(grep '^Host tools version: ' "$WORK/host-version.txt")
+    # One line, which is what both ends of the comparison below read it as:
+    # consumer-identity looks for it among a program's lines, and the grep at
+    # the end of the step is -F, which would take two lines as two patterns.
+    [ "$(printf '%s\n' "$il_version" | wc -l)" -eq 1 ] || {
+        echo "error: the build's own tools printed more than one version line" >&2
+        return 1; }
+
+    # One program for both consumers. ubertooth_print_versions() is the
+    # library call that needs no board: it prints the library's own version
+    # and the libbtbb it loaded, and with the no-devices switch set it
+    # reports that no Ubertooth is attached and exits 0, so the run proves
+    # the headers, the link, and the loader path all reach this install.
+    cat > "$il_work/consumer.c" <<'EOF'
+#include <stdio.h>
+#include <ubertooth.h>
+
+int main(void)
+{
+	ubertooth_print_versions(stdout, NULL);
+	return 0;
+}
+EOF
+
+    step "pkg-config describes the installed libubertooth"
+    pkg-config --exists libubertooth
+    il_pcversion=$(pkg-config --modversion libubertooth)
+    [ -n "$il_pcversion" ] || {
+        echo "error: libubertooth.pc answered no version, so there is none to" \
+             "ask ubertoothConfigVersion.cmake for" >&2
+        return 1; }
+    echo "libubertooth.pc: version $il_pcversion, prefix \
+$(pkg-config --variable=prefix libubertooth)"
+    pkg-config --cflags --libs libubertooth
+    # The file that answered is this install's, whatever else is on the
+    # search path: the prefix it reports, and the include directory the
+    # consumer will compile against, both have to be here. Compared as
+    # resolved paths, since the file works its prefix out from where it is
+    # (${pcfiledir}/../..) and /tmp is a link to /private/tmp on macOS.
+    .venv/bin/python -m ubertooth_harness.installedlib same-path \
+        "$(pkg-config --variable=prefix libubertooth)" "$il_prefix" \
+        --what "the prefix libubertooth.pc reports"
+    for il_variable in includedir libdir; do
+        .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
+            /dev/stdin --prefix "$il_prefix" --marker "$il_variable: " <<EOF
+$il_variable: $(pkg-config --variable=$il_variable libubertooth)
+EOF
+    done
+    # Deliberately word-split, which is how a compiler takes pkg-config's
+    # answer; a prefix holding a space would need an array and this is sh.
+    # shellcheck disable=SC2086
+    cc $(pkg-config --cflags libubertooth) "$il_work/consumer.c" \
+        -o "$il_work/pc-consumer" $(pkg-config --libs libubertooth)
+    # The .pc names no run path, as a distribution's does not: the loader is
+    # told where the library is, which is what a packaged program's own
+    # install would do.
+    DYLD_LIBRARY_PATH=$il_libpath LD_LIBRARY_PATH=$il_libpath \
+        "$il_work/pc-consumer" > "$il_work/pc-consumer.txt" 2>&1 \
+        || { cat "$il_work/pc-consumer.txt"; return 1; }
+    cat "$il_work/pc-consumer.txt"
+    .venv/bin/python -m ubertooth_harness.installedlib consumer-identity \
+        "$il_work/pc-consumer.txt" --prefix "$il_prefix" \
+        --version-line "$il_version"
+
+    step "a CMake project finds the installed ubertooth package"
+    mkdir -p "$il_work/cmake-consumer"
+    cp "$il_work/consumer.c" "$il_work/cmake-consumer/consumer.c"
+    # The version is asked for exactly, so ubertoothConfigVersion.cmake is
+    # read and has to agree with what libubertooth.pc answered: the build
+    # writes all three files, and this is what says they describe one
+    # library. The imported target's location is printed so the step can
+    # require the library that will be linked to be this install's.
+    cat > "$il_work/cmake-consumer/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(ubertooth-consumer C)
+find_package(ubertooth ${UBERTOOTH_EXPECTED_VERSION} EXACT REQUIRED)
+get_target_property(ubertooth_location ubertooth::ubertooth IMPORTED_LOCATION)
+message(STATUS "consumer links ${ubertooth_location}")
+add_executable(consumer consumer.c)
+target_link_libraries(consumer PRIVATE ubertooth::ubertooth)
+EOF
+    cmake -S "$il_work/cmake-consumer" -B "$il_work/cmake-build" \
+        -DCMAKE_PREFIX_PATH="$il_prefix" \
+        -DCMAKE_BUILD_RPATH="$il_prefix/lib;$il_prefix/lib64" \
+        -DUBERTOOTH_EXPECTED_VERSION="$il_pcversion" \
+        > "$il_work/cmake-configure.txt" 2>&1 || {
+            cat "$il_work/cmake-configure.txt"; return 1; }
+    .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
+        "$il_work/cmake-configure.txt" --prefix "$il_prefix" \
+        --marker '-- consumer links '
+    cmake --build "$il_work/cmake-build" > "$il_work/cmake-build.txt" 2>&1 || {
+            cat "$il_work/cmake-build.txt"; return 1; }
+    "$il_work/cmake-build/consumer" > "$il_work/cmake-consumer.txt" 2>&1 \
+        || { cat "$il_work/cmake-consumer.txt"; return 1; }
+    cat "$il_work/cmake-consumer.txt"
+    # The same answer as the pkg-config consumer: the two files describe one
+    # install, which is what the fork writes them side by side to do. Both
+    # runs are board-free, so the comparison is about the install.
+    cmp "$il_work/pc-consumer.txt" "$il_work/cmake-consumer.txt"
+
+    step "the host tools configure and build against the installed library"
+    # host/ubertooth-tools on its own, which is how a packager builds the
+    # tools and the one path FindUBERTOOTH.cmake is read on; a whole-tree
+    # build uses the libubertooth beside it and never reads that file.
+    cmake -S "$il_source/host/ubertooth-tools" -B "$il_work/tools-build" \
+        -DCMAKE_PREFIX_PATH="$il_prefix" -DBUILD_TESTING=OFF \
+        > "$il_work/tools-configure.txt" 2>&1 \
+        || { cat "$il_work/tools-configure.txt"; return 1; }
+    .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
+        "$il_work/tools-configure.txt" --prefix "$il_prefix" \
+        --marker '-- Found LIBUBERTOOTH: '
+    # The configure says which libbtbb it found and which one the tree pins,
+    # so a measurement taken from a build can be read back to a libbtbb
+    # (installedlib.py, which the unit tests exercise).
+    # Against the pin the fork's own FindBTBB.cmake sets, so the line is
+    # read back to the tree rather than only being well formed. The configure
+    # prints that variable, so the two agree unless the message stops
+    # reporting the tree's own pin -- which is the thing a reader of a
+    # measurement relies on.
+    il_pin=$(.venv/bin/python -m ubertooth_harness.installedlib fork-pin \
+        "$il_source/host/cmake/modules/FindBTBB.cmake")
+    .venv/bin/python -m ubertooth_harness.installedlib configure-identity \
+        "$il_work/tools-configure.txt" --prefix "$il_prefix" \
+        --expected-pin "$il_pin"
+    cmake --build "$il_work/tools-build" --target ubertooth-util \
+        > "$il_work/tools-util.txt" 2>&1 || {
+            cat "$il_work/tools-util.txt"; return 1; }
+    # Where the standalone build writes it, named rather than searched for,
+    # so a build that wrote nothing is this step's failure and not a later
+    # grep's.
+    DYLD_LIBRARY_PATH=$il_libpath LD_LIBRARY_PATH=$il_libpath \
+        "$il_work/tools-build/src/ubertooth-util" -V \
+        > "$il_work/tools-version.txt" 2>&1 \
+        || { cat "$il_work/tools-version.txt"; return 1; }
+    cat "$il_work/tools-version.txt"
+    grep -qxF "$il_version" "$il_work/tools-version.txt"
+
+    step "a libubertooth without what the tools call is refused by name"
+    # A copy of the install with one of the functions FindUBERTOOTH.cmake
+    # probes for taken out of the headers, which is what an install from an
+    # older commit of the fork looks like: the library and the header are
+    # both in place, so without the probe the configure would pass and the
+    # compiler would fail with a page of errors about missing symbols.
+    cp -R "$il_prefix" "$il_work/old-prefix"
+    .venv/bin/python -m ubertooth_harness.installedlib age-headers \
+        "$il_work/old-prefix/include"
+    # pkg-config pointed at the aged copy too, so which headers the probe
+    # reads does not rest on CMake preferring CMAKE_PREFIX_PATH to the
+    # hints pkg-config gave it. This step is also what says the headers come
+    # from the prefix at all: nothing in the step above compares the include
+    # directory FindUBERTOOTH chose, and editing one header of this copy is
+    # what changes the configure's answer.
+    if PKG_CONFIG_PATH=$il_work/old-prefix/lib/pkgconfig:$il_work/old-prefix/lib64/pkgconfig \
+        cmake -S "$il_source/host/ubertooth-tools" -B "$il_work/old-build" \
+            -DCMAKE_PREFIX_PATH="$il_work/old-prefix" -DBUILD_TESTING=OFF \
+            > "$il_work/old-configure.txt" 2>&1
+    then
+        cat "$il_work/old-configure.txt"
+        echo "error: the configure accepted a libubertooth missing a function" \
+             "the tools call" >&2
+        return 1
+    fi
+    # Both on one line: a refusal that said the install is older while
+    # naming some other function would be a different failure, and the name
+    # appearing anywhere in the log would not be the refusal at all. The
+    # message wraps, so the log is read with its line endings squeezed out.
+    # The log's line endings are squeezed out before the search, because
+    # CMake wraps a FATAL_ERROR at about 76 columns and where it wraps
+    # depends on the length of the prefix's path. grep -o prints the phrase
+    # it found, so the step shows the refusal without a second search that
+    # could disagree with this one about where the lines are.
+    tr '\n' ' ' < "$il_work/old-configure.txt" | tr -s ' ' \
+        | grep -oE 'is older than these tools: it does not have [^.]*cmd_get_bootloader_info[^.A-Za-z0-9_][^.]*' \
+        || { cat "$il_work/old-configure.txt"
+             echo "error: the configure refused the aged install for some" \
+                  "other reason than the function it is missing" >&2
+             return 1; }
+    unset UBERTOOTH_TEST_NO_DEVICES
+    # Put back what the job had, so the steps after this one see it.
+    if [ -n "$il_saved_pkg_config_path" ]; then
+        PKG_CONFIG_PATH=$il_saved_pkg_config_path
+        export PKG_CONFIG_PATH
+    else
+        unset PKG_CONFIG_PATH
+    fi
+}
+
 run_build() {
     step "build"
     [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
@@ -190,6 +422,11 @@ run_build() {
     cat "$WORK/host-version.txt"
     grep -q '^Host tools version: ' "$WORK/host-version.txt"
     test -z "$(git -C "$ut" status --porcelain)"
+
+    check_installed_library "$WORK/build/src/ubertooth" "$WORK/build/prefix"
+    # The checks above only read the checkout the build made; the job's own
+    # clone was already shown clean, and this says the same of that one.
+    test -z "$(git -C "$WORK/build/src/ubertooth" status --porcelain)"
 
     step "host-only tests with the built tools (no Ubertooth)"
     case "$(uname -s)" in
