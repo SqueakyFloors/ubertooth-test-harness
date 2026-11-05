@@ -122,65 +122,6 @@ def _collapsed(test, program_name, *options):
     )
 
 
-# `-<query>` and `-<setter or mode>`: the read-only reports and the setters
-# `ubertooth-util` composes (Ubertooth util compositions, Argument
-# validation).
-_collapsed("Ubertooth util compositions", "ubertooth-util",
-           "-v", "-s", "-p", "-b", "-a", "-C", "-z", "-l", "-d", "-V", "-U")
-_collapsed("Argument validation", "ubertooth-util",
-           "-c", "-C", "-a", "-z", "-l", "-d", "-q", "-I", "-x", "-U", "-S")
-# `-<mode>`: the six continuous modes (Ubertooth util conflicts, Util mode
-# refusals).
-_collapsed("Ubertooth util conflicts", "ubertooth-util",
-           "-q", "-n", "-e", "-t", "-x", "-I")
-_collapsed("Util mode refusals", "ubertooth-util",
-           "-q", "-n", "-e", "-t", "-x", "-I", "-i", "-z", "-N", "-U", "-V")
-# `<refusal>`: the later value, repeat or stray word each refusal case adds
-# after the file option (Refused command lines).
-_collapsed("Refused command lines", "ubertooth-btle",
-           "-A", "-a", "-f", "-n", "-r", "-q", "-c", "-h")
-_collapsed("Refused command lines", "ubertooth-rx",
-           "-e", "-l", "-u", "-z", "-r", "-q", "-d", "-h", "-i", "-s")
-_collapsed("Refused command lines", "ubertooth-dump", "-U", "-c", "-l", "-d", "-h")
-_collapsed("Refused command lines", "ubertooth-specan",
-           "-l", "-u", "-d", "-h")
-_collapsed("Refused command lines", "ubertooth-dfu", "-s", "-u", "-d", "-r", "-h")
-_collapsed("Refused command lines", "ubertooth-follow",
-           "-e", "-r", "-q", "-d", "-h", "-U")
-_collapsed("Refused command lines", "ubertooth-scan", "-h", "-U")
-# `<destination>`: the capture destinations a failed capture tries, and the
-# inputs it replays (Failed capture files).
-_collapsed("Failed capture files", "ubertooth-rx",
-           "-i", "-r", "-q", "-d")
-_collapsed("Failed capture files", "ubertooth-btle", "-n", "-r", "-q", "-c")
-# `<variant>` and the helper forms collapsed with `...` (DFU image checks,
-# DFU images).
-_collapsed("DFU image checks", "ubertooth-dfu", "-d", "-r", "-s", "-U")
-_collapsed("DFU image checks", "dfuimage.py", "--read-only", "--mode",
-           "--before", "--allow", "--to", "--reference-name")
-_collapsed("DFU images", "dfuimage.py", "--serial", "--guard", "--image",
-           "--revision", "--readback", "--reported", "--reference-name",
-           "--read-only", "--mode", "--before", "--allow")
-# `<peer options>`: the acceptor and initiator ports, addresses, aliases and
-# stream settings every peer session carries.
-for _test in ("Capture known Classic device", "Follow Classic Bluetooth piconet",
-              "Classic capture record fields", "Recover AFH map",
-              "Bluetooth inquiry scan", "Follow Classic piconet over HCI"):
-    _collapsed(_test, "esp32peer.py",
-               "--acceptor", "--acceptor-address", "--acceptor-alias",
-               "--initiator", "--initiator-address", "--initiator-alias",
-               "--min-seconds", "--timeout", "--period", "--payload",
-               "--min-writes", "--device", "--address", "--role", "--alias",
-               "--map", "--map-report", "--command-output",
-               "--interrupt-after", "--type", "--sco-channel")
-# `nrfdk.py <subcommand> ... --jlink <serial> --alias <alias> ...`: the
-# options each role command carries.
-for _test in ("Capture known BLE advertiser", "Capture known BLE connection",
-              "Follow a BLE connection across its end", "BLE extcap in tshark"):
-    _collapsed(_test, "nrfdk.py",
-               "--jlink", "--alias", "--address", "--role", "--chmap",
-               "--interval", "--payload", "--type", "--peer", "--dle",
-               "--period", "--cycle", "--autoupdate")
 # An option word, in argv or in a Commands block: a dash and a letter, so a
 # negative value (`-60`, `-120`), the `--` separator and a bare `-` are not
 # read as options. A trailing placeholder is allowed, since that is how a
@@ -188,6 +129,68 @@ for _test in ("Capture known BLE advertiser", "Capture known BLE connection",
 # whose option NAME is a placeholder (`-<mode>`, `-<query>`) is not an
 # option here, and `COLLAPSED` says what it stands for.
 OPTION = re.compile(r"^(?P<name>-{1,2}[A-Za-z][A-Za-z0-9-]*)")
+
+
+# `-<query>` and `-<setter or mode>`: the read-only reports and the setters
+# `ubertooth-util` composes.
+_collapsed("Ubertooth util compositions", "ubertooth-util",
+           "-C", "-U", "-V", "-a", "-b", "-d", "-l", "-p", "-s", "-v", "-z")
+_collapsed("Argument validation", "ubertooth-util",
+           "-C", "-I", "-S", "-U", "-a", "-c", "-d", "-l", "-q", "-x", "-z")
+# `-<mode>`: the continuous modes each of these refuses a pair of.
+_collapsed("Ubertooth util conflicts", "ubertooth-util",
+           "-I", "-e", "-n", "-q", "-t", "-x")
+_collapsed("Util mode refusals", "ubertooth-util",
+           "-I", "-N", "-U", "-V", "-e", "-i", "-n", "-q", "-t", "-x", "-z")
+# `<refusal>`: the file option, the later value, the repeat or the stray
+# word each refusal case writes after the tool.
+_collapsed("Refused command lines", "ubertooth-btle",
+           "-A", "-a", "-c", "-f", "-h", "-n", "-q", "-r")
+_collapsed("Refused command lines", "ubertooth-rx",
+           "-d", "-h", "-l", "-q", "-r", "-u", "-z")
+_collapsed("Refused command lines", "ubertooth-dump", "-U", "-c", "-d", "-h", "-l")
+_collapsed("Refused command lines", "ubertooth-specan", "-d", "-h", "-l", "-u")
+_collapsed("Refused command lines", "ubertooth-dfu", "-d", "-h", "-s", "-u")
+_collapsed("Refused command lines", "ubertooth-follow", "-d", "-e", "-h", "-q", "-r")
+_collapsed("Refused command lines", "ubertooth-scan", "-h")
+# `<destination>`: the capture destinations a failed capture tries, and the
+# inputs it replays.
+_collapsed("Failed capture files", "ubertooth-rx", "-d", "-i", "-q", "-r")
+_collapsed("Failed capture files", "ubertooth-btle", "-c", "-n", "-q", "-r")
+# `<variant>`, and the helper forms a block collapses with `...`.
+_collapsed("DFU image checks", "ubertooth-dfu", "-d", "-r", "-s")
+_collapsed("DFU image checks", "dfuimage.py",
+           "--allow", "--before", "--mode", "--read-only", "--reference-name")
+_collapsed("DFU images", "dfuimage.py",
+           "--guard", "--image", "--read-only", "--readback", "--reported",
+           "--revision", "--serial")
+# `<peer options>`: the ports, addresses, aliases and stream settings every
+# peer session carries, per test, since each one holds the link differently.
+_PEER = ("--acceptor", "--acceptor-address", "--acceptor-alias", "--address",
+         "--alias", "--device", "--initiator", "--initiator-address",
+         "--initiator-alias", "--min-seconds", "--min-writes", "--payload",
+         "--period", "--role", "--timeout")
+_collapsed("Capture known Classic device", "esp32peer.py", *_PEER)
+_collapsed("Follow Classic Bluetooth piconet", "esp32peer.py", *_PEER)
+_collapsed("Classic capture record fields", "esp32peer.py", *_PEER, "--type")
+_collapsed("Bluetooth inquiry scan", "esp32peer.py", *_PEER)
+_collapsed("Follow Classic piconet over HCI", "esp32peer.py", *_PEER,
+           "--interrupt-after")
+_collapsed("Recover AFH map", "esp32peer.py", *_PEER, "--command-output",
+           "--interrupt-after", "--map", "--map-report")
+# `nrfdk.py <subcommand> ... --jlink <serial> --alias <alias> ...`: the
+# options the role commands of each test carry.
+_collapsed("Capture known BLE advertiser", "nrfdk.py",
+           "--address", "--alias", "--chmap", "--interval", "--jlink",
+           "--payload", "--type")
+_collapsed("BLE extcap in tshark", "nrfdk.py",
+           "--address", "--alias", "--chmap", "--interval", "--jlink",
+           "--payload")
+_DK_PAIR = ("--address", "--alias", "--autoupdate", "--chmap", "--cycle",
+            "--dle", "--interval", "--jlink", "--payload", "--peer",
+            "--period", "--role")
+_collapsed("Capture known BLE connection", "nrfdk.py", *_DK_PAIR)
+_collapsed("Follow a BLE connection across its end", "nrfdk.py", *_DK_PAIR)
 
 
 def _registry(directory):
@@ -294,17 +297,23 @@ def _options(argv) -> set[tuple[str, str]]:
     """
     found = set()
     current = ""
+    previous = ""
     for word in _words(argv):
         if word in ("|", ";", "&&", "||", "&"):
             # A shell string's next command: whatever follows belongs to it,
             # not to the tool before the pipe (`... ubertooth-btle -f | tail
             # -n 20`, whose -n is tail's).
-            current = ""
+            current = previous = ""
             continue
         name = program(word)
-        if name:
+        # A program name given as an option's value is that value, not the
+        # next command: `btbrconsole.py ... --peer-reset esp32peer.py` runs
+        # one program, and its own options are its own.
+        if name and not OPTION.match(previous):
             current = name
+            previous = word
             continue
+        previous = word
         match = OPTION.match(word)
         if not current or not match:
             continue
@@ -445,16 +454,24 @@ def options_named(lines) -> set[tuple[str, str]]:
     """
     found = set()
     current = ""
-    for word in _fence_words(lines):
-        name = program(word)
-        if name:
-            current = name
-            continue
-        match = OPTION.match(word)
-        if not current or not match:
-            continue
-        name = match.group("name").split("=", 1)[0]
-        found.add((current, name if name.startswith("--") else name[:2]))
+    for line in lines:
+        # A line of its own starts a command, so what an option's value was
+        # on the line before cannot suppress the program here; `current`
+        # carries across a continued line (one ending in a backslash).
+        previous = ""
+        for word in _fence_words([line]):
+            name = program(word)
+            # A program name given as an option's value is that value, not
+            # another command: `--peer-reset esp32peer.py`.
+            if name and not OPTION.match(previous):
+                current, previous = name, word
+                continue
+            previous = word
+            match = OPTION.match(word)
+            if not current or not match:
+                continue
+            name = match.group("name").split("=", 1)[0]
+            found.add((current, name if name.startswith("--") else name[:2]))
     return found
 
 
@@ -586,6 +603,28 @@ class DocumentedCommandTests(unittest.TestCase):
                     f"{name}'s Commands block names these and it runs none of them",
                 )
 
+    def test_every_collapsed_declaration_is_load_bearing(self):
+        # COLLAPSED says what a placeholder in a block stands for, which
+        # excuses those options from the forward check. An entry for an
+        # option the test never passes would pre-excuse a case that gained
+        # it later, so an over-declaration is a failure here: every pair
+        # must be one that test really passes, and its program must be named
+        # in the block.
+        for name, declared in sorted(COLLAPSED.items()):
+            passed = self.options.get(name, set())
+            with self.subTest(name):
+                self.assertEqual(
+                    [], sorted(f"{prog} {option}"
+                               for prog, option in declared
+                               if (prog, option) not in passed),
+                    f"{name} declares collapsed options it never passes",
+                )
+                self.assertLessEqual(
+                    {prog for prog, _option in declared}, self.named[name],
+                    f"{name} declares a collapsed form for a program its "
+                    "block does not name",
+                )
+
     def test_every_section_names_at_least_one_command(self):
         # Otherwise the forward checks pass on an empty block: for a test
         # whose only programs are the shared ones, the allowance above would
@@ -660,25 +699,47 @@ class DocumentedCommandTests(unittest.TestCase):
         runner assembles per write. Their fences are compared with the code
         that builds those commands instead, which is the whole reason they
         are allowed in ``BY_A_DRIVER`` and ``UNCOLLECTED``.
-        """
-        from ubertooth_harness import bootloader
 
-        identity = bootloader.identity_argv("<serial>")
-        write = bootloader.program_argv("<bootloader.hex>", "<serial device>")
-        for argv in (identity, write):
-            named = options_named(commands_of(self.sections["Bootloader identity"]))
-            words = set(str(word) for word in argv)
-            with self.subTest(argv=argv[0]):
-                for program_name, option in _options(tuple(str(w) for w in argv)):
-                    self.assertIn((program_name, option), named)
-                # Every literal word of the write, so a wrong baud or
-                # crystal is caught and not only a wrong option.
-                if argv is write:
-                    fence = " ".join(commands_of(
-                        self.sections["Bootloader identity"]))
-                    for word in words - {str(argv[0])}:
-                        if not word.startswith("<"):
-                            self.assertIn(word, fence)
+        Both ways round, per fence: every option that code passes must be in
+        the fence, and every option the fence names must be one that code
+        passes. The programmer write is compared word for word as well, so a
+        wrong baud or crystal fails and not only a wrong option.
+        """
+        from ubertooth_harness import bootloader, flash, watchdog
+
+        serial, image = "<serial>", "<image>"
+        built = {
+            "Bootloader identity": (
+                bootloader.identity_argv(serial),
+                bootloader.program_argv("<bootloader.hex>", "<serial device>"),
+                # Preflight reads the application back after a write.
+                ("ubertooth-util", "-U", serial, "-v"),
+            ),
+            # flash.py: the write, the revision read of every board, and the
+            # watchdog read between writes (watchdog.py).
+            "Flash reliability": (
+                flash.flash_argv(serial, image),
+                flash.revision_argv(serial),
+                watchdog.record_argv(serial),
+            ),
+        }
+        for name, commands in built.items():
+            lines = commands_of(self.sections[name])
+            named = options_named(lines)
+            passes = set()
+            for argv in commands:
+                passes |= _options(tuple(str(word) for word in argv))
+            with self.subTest(name):
+                self.assertEqual([], sorted(f"{p} {o}" for p, o in passes
+                                            if (p, o) not in named),
+                                 f"{name}'s block does not name these")
+                self.assertEqual([], sorted(f"{p} {o}" for p, o in named
+                                            if (p, o) not in passes),
+                                 f"{name}'s block names these and nothing runs them")
+        fence = " ".join(commands_of(self.sections["Bootloader identity"]))
+        for word in bootloader.program_argv("<bootloader.hex>", "<serial device>")[1:]:
+            if not str(word).startswith("<"):
+                self.assertIn(str(word), fence)
 
     def test_every_option_a_commands_block_names_is_one_that_test_passes(self):
         """An option a test does not send must not sit in its Commands block.

@@ -2088,11 +2088,11 @@ refusal.py check <case dir> --absent <files> --kept <files>
 
 `<refusal>` is what the case refuses the command with: a stray word; `-h`;
 the same file option twice; a bare `-`; `--` followed by an option; and a bad
-later value, which is each tool's own (`btle -A 40`, `rx -c 79`, `rx -e 9`,
+later value, which is each tool's own (`btle -A 40`, `rx -c 79`,
 `rx -u 12`, `rx -z -l <LAP>`, `specan -l 9999`, `specan -l <high> -u <low>`,
 `dump -U` with no value, `dfu -s <other>`, `dfu -d <bad image>`,
 `follow -e 9`, `btle -f -n`, `btle -a -a<address>`, `btle -r -`). The scan
-and follow lines take the three that need no file: a stray word, `-h stray`,
+and follow lines take the four that need no file: a stray word, `-h stray`,
 a bare `-`, and `-- -x`.
 
 **Expected outcome.** On a Linux host, smoke runs 45 cases and comprehensive
@@ -2324,11 +2324,13 @@ chmod 600 <case dir>/image.dfu     # the mode a replacement must keep
 refusal.py probe ubertooth-dfu     # opens every case: can the switch be used
 ```
 
-`<variant>` is each image the check must refuse: a wrong CRC, a truncated
-file, a binary with no suffix, a text file, a suffix without `UFD`, another
-vendor, another product, and, comprehensive, an empty file, 15 bytes, a
-suffix with no firmware, an over-long suffix length, DFU 2.0, and an image
-with no firmware info block.
+`<variant>` is each image `dfuimage.py make` builds from the synthetic one.
+Those the check must refuse: a wrong CRC, a truncated file, a binary with no
+suffix, a text file, a suffix without `UFD`, another vendor, another product,
+and, comprehensive, an empty file, 15 bytes, a suffix with no firmware, an
+over-long suffix length, DFU 2.0, and an image with no firmware info block.
+Those it must accept, comprehensive: DFU 1.1 and the `ffff:ffff` wildcard,
+which reach the board lookup like the synthetic image itself.
 
 **Expected outcome.** Smoke runs 13 cases: `-d` refusing a wrong CRC, a
 truncated image, a binary with no suffix, a text file, a suffix without the
@@ -4338,13 +4340,17 @@ plan's `image sequence:` names:
 
 ```text
 ubertooth-dfu  -U <serial> -d <image> -r      # one write at a time, 25 s each
-ubertooth-util -U <serial> -v                 # the revision, after every write
-ubertooth-util -U <serial> -s                 # every other registered board, before and after
+ubertooth-util -U <serial> -v                 # the revision: the written board
+                                              # after every write, and every
+                                              # other registered board before
+                                              # the run and after each write
 ubertooth-util -U <serial> -w                 # the watchdog record, between writes
 ```
 
 The flash runner assembles these per write rather than as plan steps, so
-`<serial>` is each board in turn when `alternate Ubertooths:` is set.
+`<serial>` is each board in turn when `alternate Ubertooths:` is set. Every
+board is read with `-v`, the written one and the others alike: this test is
+not guarded, so there is no serial read of another board here.
 
 **Expected outcome.** One case, run by the flash runner rather than as a
 command line. Because it is one case however many flashes it runs, the run's
