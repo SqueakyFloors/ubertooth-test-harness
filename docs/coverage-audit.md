@@ -86,13 +86,14 @@ evidence for it.
 
 Where a pass's gap and partial rows have been consolidated into work, the
 issue lists the pull requests it came from, so a reader goes from a tracker
-back to the rows. These three came out of the pass recorded in #334; the
+back to the rows. These came out of the pass recorded in #334; the
 `candidate_key` named beside a tracker is one that belongs to it outright,
 and the rest of each entry says what the tracker gathers rather than naming
 every key:
 
 | Tracker | What it consolidates |
 |---|---|
-| [#331](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/331) | Classic capture and clock: record timestamps across a piconet-clock move (`classic-capture-record-times`), a stated or withdrawn UAP through clock loss, clock search giving up honestly, record payload transport, the `none` signal and noise representation, and multi-board receive |
+| [#331](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/331), closed by [#337](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/337) | Classic capture and clock. #337 took the record timestamps across a piconet-clock move (`classic-capture-record-times`), the two clock-outcome guards, and the record transport rules |
+| [#344](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/344) | What #337 left of #331: a level figure that means something rather than one in range, the `none` representation required rather than accepted, floors on the payload-bearing and CRC-passing records the payload checks need, the settling record checked as itself rather than behind a floor, and two one-line cases (a replay stating `-u 00`, and every registered peer required under its own name) |
 | [#332](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/332) | `ubertooth-btbr` and the `btbr` image, as assertions added to `Classic btbr console`: transmitted packet types and lengths, the DV voice/data boundary, option and address refusals, a refused or dropped transmit and the hop phase after it (`btbr-page-reliability-and-transmit-accounting`), page reliability against the known peer, a refused connection's detach, and scheduler exhaustion |
 | [#333](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/333) | Host-only capture, replay, and installed-library work that needs no bench: standard-output aliases and the streams beside them, outputs colliding with their own input, BLE dump and replay parameters, a pkg-config and a CMake consumer against an installed prefix, and the cheap CLI refusals |
