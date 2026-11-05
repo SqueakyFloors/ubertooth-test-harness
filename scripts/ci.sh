@@ -161,6 +161,118 @@ check_dfu_part_table() {
     export UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN
 }
 
+# What the install describes to the two things that look for a library, and
+# what a build against the installed one says about itself (#333; fork
+# ubertooth#1044 installs libubertooth.pc, ubertooth#866 builds the tools
+# against an installed libubertooth). The harness builds the whole host tree
+# into one prefix, so until now nothing here read either file, nor configured
+# the tools the way a packager does.
+#
+# $1 is the Ubertooth source tree, $2 the prefix the build installed into.
+check_installed_library() {
+    source=$1
+    prefix=$2
+    work=$WORK/installed
+    rm -rf "$work"
+    mkdir -p "$work"
+    PKG_CONFIG_PATH=$prefix/lib/pkgconfig:$prefix/lib64/pkgconfig
+    export PKG_CONFIG_PATH
+
+    # One program for both consumers. ubertooth_print_versions() is the
+    # library call that needs no board: it prints the library's own version
+    # and the libbtbb it loaded, and reports that no Ubertooth is attached
+    # without failing, so the run proves the headers, the link, and the
+    # loader path all reach the installed library.
+    cat > "$work/consumer.c" <<'EOF'
+#include <stdio.h>
+#include <ubertooth.h>
+
+int main(void)
+{
+	ubertooth_print_versions(stdout, NULL);
+	return 0;
+}
+EOF
+
+    step "pkg-config describes the installed libubertooth"
+    pkg-config --exists libubertooth
+    pkg-config --modversion libubertooth
+    pkg-config --cflags --libs libubertooth
+    cc $(pkg-config --cflags libubertooth) "$work/consumer.c" \
+        -o "$work/pc-consumer" $(pkg-config --libs libubertooth)
+    # The .pc names no run path, as a distribution's does not: the loader is
+    # told where the library is, which is what a packaged program's own
+    # install would do.
+    DYLD_LIBRARY_PATH=$prefix/lib LD_LIBRARY_PATH=$prefix/lib \
+        "$work/pc-consumer" > "$work/pc-consumer.txt" 2>&1
+    cat "$work/pc-consumer.txt"
+    grep -q '^Host tools version: libubertooth ' "$work/pc-consumer.txt"
+    grep -q "^libbtbb loaded from: .*$(basename "$prefix")/lib/" "$work/pc-consumer.txt"
+
+    step "a CMake project finds the installed ubertooth package"
+    mkdir -p "$work/cmake-consumer"
+    cp "$work/consumer.c" "$work/cmake-consumer/consumer.c"
+    cat > "$work/cmake-consumer/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(ubertooth-consumer C)
+find_package(ubertooth REQUIRED)
+add_executable(consumer consumer.c)
+target_link_libraries(consumer PRIVATE ubertooth::ubertooth)
+EOF
+    cmake -S "$work/cmake-consumer" -B "$work/cmake-build" \
+        -DCMAKE_PREFIX_PATH="$prefix" -DCMAKE_BUILD_RPATH="$prefix/lib" \
+        > "$work/cmake-configure.txt" 2>&1 || {
+            cat "$work/cmake-configure.txt"; return 1; }
+    cmake --build "$work/cmake-build" > "$work/cmake-build.txt" 2>&1 || {
+            cat "$work/cmake-build.txt"; return 1; }
+    "$work/cmake-build/consumer" > "$work/cmake-consumer.txt" 2>&1
+    cat "$work/cmake-consumer.txt"
+    # The same answer as the pkg-config consumer: the two files describe one
+    # install, which is what the fork writes them side by side to do.
+    cmp "$work/pc-consumer.txt" "$work/cmake-consumer.txt"
+
+    step "the host tools configure and build against the installed library"
+    # host/ubertooth-tools on its own, which is how a packager builds the
+    # tools and the one path FindUBERTOOTH.cmake is read on; a whole-tree
+    # build uses the libubertooth beside it and never reads that file.
+    cmake -S "$source/host/ubertooth-tools" -B "$work/tools-build" \
+        -DCMAKE_PREFIX_PATH="$prefix" > "$work/tools-configure.txt" 2>&1 || {
+            cat "$work/tools-configure.txt"; return 1; }
+    # The configure says which libbtbb it found and which one the tree pins,
+    # so a measurement taken from a build can be read back to a libbtbb
+    # (installedlib.py, which the unit tests exercise).
+    .venv/bin/python -m ubertooth_harness.installedlib configure-identity \
+        "$work/tools-configure.txt" --prefix "$prefix"
+    cmake --build "$work/tools-build" --target ubertooth-util \
+        > "$work/tools-util.txt" 2>&1 || { cat "$work/tools-util.txt"; return 1; }
+    util=$(find "$work/tools-build" -type f -name ubertooth-util | head -1)
+    DYLD_LIBRARY_PATH=$prefix/lib LD_LIBRARY_PATH=$prefix/lib \
+        "$util" -V > "$work/tools-version.txt" 2>&1 || true
+    cat "$work/tools-version.txt"
+    grep -q '^Host tools version: libubertooth ' "$work/tools-version.txt"
+
+    step "a libubertooth without what the tools call is refused by name"
+    # A copy of the install with one of the functions FindUBERTOOTH.cmake
+    # probes for taken out of the headers, which is what an install from an
+    # older commit of the fork looks like: the library and the header are
+    # both in place, so without the probe the configure would pass and the
+    # compiler would fail with a page of errors about missing symbols.
+    cp -R "$prefix" "$work/old-prefix"
+    .venv/bin/python -m ubertooth_harness.installedlib age-headers \
+        "$work/old-prefix/include"
+    if cmake -S "$source/host/ubertooth-tools" -B "$work/old-build" \
+            -DCMAKE_PREFIX_PATH="$work/old-prefix" > "$work/old-configure.txt" 2>&1
+    then
+        cat "$work/old-configure.txt"
+        echo "error: the configure accepted a libubertooth missing a function" \
+             "the tools call" >&2
+        return 1
+    fi
+    grep -E 'is older than these tools' "$work/old-configure.txt"
+    grep -q 'cmd_get_bootloader_info' "$work/old-configure.txt"
+    unset PKG_CONFIG_PATH
+}
+
 run_build() {
     step "build"
     [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
@@ -189,6 +301,11 @@ run_build() {
     "$WORK/build/prefix/bin/ubertooth-util" -V > "$WORK/host-version.txt" 2>&1 || true
     cat "$WORK/host-version.txt"
     grep -q '^Host tools version: ' "$WORK/host-version.txt"
+    test -z "$(git -C "$ut" status --porcelain)"
+
+    check_installed_library "$ut" "$WORK/build/prefix"
+    # The source tree is only read by the checks above; say so here rather
+    # than leave a reader to trust it.
     test -z "$(git -C "$ut" status --porcelain)"
 
     step "host-only tests with the built tools (no Ubertooth)"

@@ -3702,6 +3702,28 @@ specan-ui on both (no firmware build, installed tools). On Linux it also
 checks that the build installed `ubertooth-scan` and `ubertooth-follow` and
 that their `-h` cases passed.
 
+The build job then reads the install the way something outside the fork's own
+tree would. `pkg-config` is asked for `libubertooth` and a five-line C program
+is compiled and linked with what it answers, then run: it calls
+`ubertooth_print_versions()`, the one library call that needs no board, so the
+run proves the headers, the link, and the loader path all reach the installed
+library. A CMake project of the same program is configured with
+`find_package(ubertooth REQUIRED)` and linked against the exported
+`ubertooth::ubertooth` target, and its output must be byte for byte the
+`pkg-config` consumer's: the fork writes `libubertooth.pc` and
+`ubertoothConfig.cmake` side by side to describe one install, and this is what
+says they agree. Then `host/ubertooth-tools` is configured on its own against
+that prefix, which is how a packager builds the tools and the one path
+`FindUBERTOOTH.cmake` is read on (a whole-tree build uses the libubertooth
+beside it); the configure must name the libbtbb it found and the commit the
+tree pins, so a measurement taken from a build can be read back to a libbtbb,
+and `ubertooth-util` is built and run from that build to prove the link.
+Last, the same configure is repeated against a copy of the prefix with one of
+the functions `FindUBERTOOTH.cmake` probes for taken out of the headers --
+what an install from an older commit of the fork looks like -- and must fail
+naming that function, rather than passing and leaving the compiler to report a
+page of missing symbols.
+
 The test job also checks that the tree writes Bluetooth piconet roles as
 central and peripheral (`AGENTS.md`), with an allowlist for the external
 names this project does not own: libbtbb's and git's `master` branch and
