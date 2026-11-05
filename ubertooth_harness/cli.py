@@ -426,9 +426,11 @@ def _build_command(args: argparse.Namespace) -> int:
     output.mkdir(parents=True)
     publisher = open_run_publisher(output, generate_run_id(), _terminal_sink())
     publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
-    _record_libbtbb_pin(publisher, sources)
-    _record_dfu_part_table(publisher, sources)
     try:
+        # Inside, so a failure in either comparison closes this record and
+        # ends with the block, as _run_leased does with the same two.
+        _record_libbtbb_pin(publisher, sources)
+        _record_dfu_part_table(publisher, sources)
         result = _build(
             # No suite here to read the need off, so the alternate image is
             # built when --with-btbr asks for it and not otherwise.

@@ -2615,9 +2615,10 @@ CASE: Guard Ubertooths baseline
   step, or test says why on the same line, once, since the recorded reason
   opens with the name that line has already said; the whole reason is in its
   own record either way.
-- `[X]` stays the execution result and never a verdict, and every line of
-  output a command printed is shown as it arrives: the captures the fast plan
-  runs are brief, and the whole transcript is the evidence.
+- `[X]` stays the execution result and never a verdict, and output is shown
+  as it arrives, packet lines included, within the per-command cap above:
+  the captures the fast plan runs are brief, and the transcript is the
+  evidence.
 
 The run then closes with a block that identifies itself, so a tailed run says
 what was tested without opening `report.md`: when it started in UTC, the ref
@@ -2657,9 +2658,9 @@ still names its sources and its verdict.
 
 `report.md`'s transcript says the same words on its own `[S]` line
 (`[S] STATE FAIL: guard Ubertooth 1 channel unchanged (expected 2441,
-observed 2426): observed 2426`), where one record is one timestamped line,
-so a reader moving between the live stream and the report reads one
-vocabulary.
+observed 2426): expected channel=2441, observed 2426`), where one record is
+one timestamped line, so a reader moving between the live stream and the
+report reads one vocabulary.
 
 ### Checks read the output files
 

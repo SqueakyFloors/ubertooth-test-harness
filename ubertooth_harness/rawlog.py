@@ -540,17 +540,15 @@ def count_text(count, one: str, many: str) -> str:
 VALUE_INDENT = "    "
 
 
-def inline(value) -> str:
-    """One value or reason on one line.
+# Every character Python's own `str.splitlines` ends a line on. A value that
+# carries one would break the alignment of the value lines below and leave
+# the rest of a reason looking like output nobody tagged.
+_LINE_BREAKS = re.compile("[\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029]+")
 
-    A line ending inside it would break the alignment of the lines below and
-    leave the rest of a reason looking like output nobody tagged, so every
-    kind of line ending becomes a space.
-    """
-    text = str(value)
-    for ending in ("\r\n", "\n", "\r", "\v", "\f", "\u2028", "\u2029"):
-        text = text.replace(ending, " ")
-    return text
+
+def inline(value) -> str:
+    """One value or reason on one line: every line break becomes a space."""
+    return _LINE_BREAKS.sub(" ", str(value))
 
 
 def value_lines(expected, observed, *, indent: str = VALUE_INDENT) -> list[str]:

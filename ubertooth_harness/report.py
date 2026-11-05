@@ -2082,7 +2082,13 @@ def _host_tools_version(run: _Run) -> str:
     matched = ""
     for event in run.events:
         details = event.get("details") or {}
-        if event["event_type"] != CHECKS_EVENT:
+        if (
+            event["event_type"] != CHECKS_EVENT
+            or not check_id
+            or details.get("check_id") != check_id
+        ):
+            # The preflight check this run resolved, not a test that reads
+            # the same line.
             continue
         for check in details.get("checks") or []:
             name = str((check or {}).get("name", ""))

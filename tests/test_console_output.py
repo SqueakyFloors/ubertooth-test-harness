@@ -22,7 +22,7 @@ from ubertooth_harness import cli, rawlog, report
 from ubertooth_harness.build import BuildError
 from ubertooth_harness.events import RunEvent, TerminalEventSink
 from ubertooth_harness.executor import CommandResult
-from ubertooth_harness.flash import HarnessError
+from ubertooth_harness.flash import FlashCancelled, HarnessError
 from ubertooth_harness.rawlog import (
     RESULT_TAG,
     STAGE_BASELINE,
@@ -111,11 +111,23 @@ class SharedWordsTests(unittest.TestCase):
             self.assertEqual("", rawlog.count_text(nothing, *SKIPPED), nothing)
 
     def test_a_value_is_put_on_one_line_whatever_break_it_carries(self):
-        for break_character in ("\n", "\r\n", "\r", "\v", "\f", "\u2028"):
+        # Every character Python itself ends a line on, so nothing a record
+        # carries can break the lines this vocabulary is read in.
+        breaks = {"\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                  "\x85", "\u2028", "\u2029"}
+        for break_characters in breaks:
             self.assertEqual(
-                "one two", rawlog.inline(f"one{break_character}two"),
-                repr(break_character),
+                "one two", rawlog.inline(f"one{break_characters}two"),
+                repr(break_characters),
             )
+        # Checked the same way the harness reads lines, so this list cannot
+        # fall behind Python's: every one of them really ends a line.
+        self.assertEqual(
+            sorted(breaks),
+            sorted(c for c in breaks if len(f"a{c}b".splitlines()) == 2),
+        )
+        # A run of them is one space, and nothing is left to split a line.
+        self.assertEqual(["one two"], rawlog.inline("one\r\n\u2028two").splitlines())
 
     def test_expected_and_observed_are_separate_aligned_lines(self):
         self.assertEqual(
@@ -750,6 +762,44 @@ class WholeRunTests(unittest.TestCase):
             # checks passed` would read as a run that asked for none.
             self.assertNotIn("preflight ", printed)
             self.assertNotIn("tests ", printed)
+
+    def test_a_canceled_stage_closes_with_the_block_and_says_canceled(self):
+        # A cancellation during the flash or bootloader stage ends the run
+        # canceled rather than failed (FlashCancelled), and the block is how
+        # a tailed run says which it was.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _short = source_repo(root)
+            (root / "hardware.yaml").write_text(hardware((A, B)))
+            (root / "plan.yaml").write_text(
+                step_plan("Radio setting transitions",
+                          extra="        coverage: smoke\n")
+            )
+            live, out = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.object(cli, "_detected_platform", return_value="linux"),
+                mock.patch.object(
+                    cli, "_prepare_run",
+                    side_effect=FlashCancelled("the flash stage was canceled"),
+                ),
+                redirect_stderr(live),
+                redirect_stdout(out),
+            ):
+                code = cli.main([
+                    "run-suite", "--plan", str(root / "plan.yaml"),
+                    "--suite", "fast", "--hardware", str(root / "hardware.yaml"),
+                    "--host", "Host_Linux", "--ubertooth-source", str(source),
+                    "--ubertooth-ref", "HEAD", "--libbtbb-source", str(source),
+                    "--libbtbb-ref", "HEAD", "--build", "--no-flash-build",
+                    "--run-id", "canceled-stage", "--output", str(root / "runs"),
+                ])
+
+            printed = live.getvalue()
+            self.assertEqual(2, code)
+            self.assertEqual(1, printed.count("RUN SUMMARY"), printed)
+            self.assertIn("VERDICT: CANCELED", printed)
+            self.assertIn("reason             the flash stage was canceled",
+                          printed)
 
     def test_a_sequencer_that_raises_still_closes_with_the_block(self):
         # Nothing in the sequencer is meant to raise, but a case builder or
