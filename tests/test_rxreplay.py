@@ -449,12 +449,28 @@ class ReplayRx:
             dumped.append(record)
             if packet and packet["crc"] and got_lap not in uap_seen:
                 uap_seen[got_lap] = packet["uap"]
-                if "-z" in options or (lap is not None and uap is None):
+                survey = "-z" in options
+                if survey or (lap is not None and uap is None):
                     shown = packet["uap"] ^ (1 if "wrong-uap" in self.bugs else 0)
                     if "no-uap" not in self.bugs:
                         notes.append(f"Correct CRC! UAP = 0x{shown:x} found after "
                                      f"{len(found)} total packets.")
-                        notes.append("CLK6 = 0x0 found after 1 total packets.")
+                        # The packet whose CRC settles a UAP the library
+                        # worked out for itself settles CLK1-6 with it, so
+                        # the clock search starts from that packet and
+                        # chooses its candidates (libbtbb 7e1cdf0, #137). A
+                        # survey looks for no clock at all, so it stops at
+                        # the note, measured under both that commit and the
+                        # one before it.
+                        if not survey:
+                            if "clk6-rerun" in self.bugs:
+                                # Before #137 the address-part search ran
+                                # again on every later packet, reported
+                                # CLK1-6 over and over, and reached no
+                                # CLK1-27 candidates.
+                                notes.append("CLK6 = 0x0 found after 1 total packets.")
+                            else:
+                                notes.append("26523 initial CLK1-27 candidates")
                 elif uap is not None:
                     if int(uap, 16) == packet["uap"] or "wrong-u-confirms" in self.bugs:
                         if "u-fails" in self.bugs:
@@ -975,6 +991,37 @@ class ReplayCaseTests(unittest.TestCase):
                     self.assertTrue(path == "/run/captures/x"
                                     or path.startswith("/run/captures/x/"), path)
 
+    def test_a_discovered_uap_starts_the_clock_search(self):
+        """Which note each command line must and must not print (#341).
+
+        libbtbb reports a clock from the address-part search as a CLK6 note
+        only when it already held the UAP, which is the UAP a caller stated.
+        So the command that states one requires the CLK6 note, and the
+        command that does not requires the UAP note and the start of the
+        CLK1-27 search the settling packet leads to -- with a CLK6 note
+        forbidden there, because printing one is the behavior libbtbb #137
+        replaced.
+        """
+        _arguments, cases = replay_cases("comprehensive")
+        steps = {
+            case.case_id: next(step for step in case.steps
+                               if step.step_id == "replay")
+            for case in cases if any(step.step_id == "replay"
+                                     for step in case.steps)
+        }
+
+        discovered = steps["replay-lap-uap"]
+        self.assertEqual(
+            (r"UAP = 0x6b found after \d+ total packets",
+             r"\d+ initial CLK1-27 candidates"), discovered.output_patterns)
+        self.assertEqual((r"CLK6 = 0x[0-9a-f]+ found after",),
+                         discovered.forbidden_patterns)
+
+        stated = steps["replay-uap-given"]
+        self.assertEqual((r"CLK6 = 0x0 found after \d+ total packets",
+                          r"\d+ initial CLK1-27 candidates"),
+                         stated.output_patterns)
+
     def test_fixture_times_are_an_hour_before_the_cases(self):
         cases = receive_cases.replay_cases({"coverage": "smoke"}, {}, {}, now=1_800_000_000)
         argv = cases[0].steps[0].resolve_argv({"capture dir": "/c"})
@@ -1014,6 +1061,9 @@ class ReplayCaseTests(unittest.TestCase):
                            "/dev/null twice is not"},
             "no-uap": {"-i -l <LAP> derives the UAP"},
             "wrong-uap": {"-i -l <LAP> derives the UAP"},
+            # A revert of libbtbb #137: the UAP is still worked out, and the
+            # clock search it should start never happens (harness #341).
+            "clk6-rerun": {"-i -l <LAP> derives the UAP"},
             "ignores-l": {"-i -l <LAP> derives the UAP", "-i -l 0f1e2d: only that LAP",
                           "-i -l -u with the right UAP",
                           "-i -l -u with a wrong UAP confirms nothing",

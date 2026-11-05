@@ -645,8 +645,18 @@ _REPLAY = str(Path(rxreplay.__file__).resolve())
 _FIXTURE = "replay.bin"
 _A, _B = f"{rxreplay.LAP_A:06x}", f"{rxreplay.LAP_B:06x}"
 # libbtbb's UAP and CLK6 progress lines; with the fixture's clocks the
-# receiver clock is the central's clock, so the CLK1-6 offset is 0.
+# receiver clock is the central's clock, so the CLK1-6 offset is 0. A CLK6
+# note is the address-part search reporting a clock for a UAP it was already
+# holding, which is a UAP the caller stated with -u: a UAP the library works
+# out for itself is reported as the UAP note instead, in the same place
+# (btbb_uap_from_header).
 _CLK6_ZERO = r"CLK6 = 0x0 found after \d+ total packets"
+# Any clock that search reports, whatever its value: what replay-lap-uap
+# forbids, where the note it must print is the UAP one.
+_CLK6_FOUND = r"CLK6 = 0x[0-9a-f]+ found after"
+# The CLK1-27 search choosing its candidates, which is where a settled
+# CLK1-6 leads next.
+_CLK27_CANDIDATES = r"\d+ initial CLK1-27 candidates"
 _ANY_FOUND = r"(?:UAP|CLK6) = 0x[0-9a-f]+ found after"
 _UAP_NEEDS_LAP = r"error: -u <UAP> requires -l <LAP>"
 
@@ -1202,12 +1212,26 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
                          forbidden=(rxreplay.ANY_UAP_NOTE,)),
         ), f"exit 0; {count} packet lines with the fixture's LAPs, errors, and "
            "channels in order; decoy records skipped; no UAP without -l"),
+        # The packet whose CRC settles a UAP the library worked out for
+        # itself settles CLK1-6 with it, so the clock search starts from that
+        # same packet: the UAP note, then the candidates it chose from the
+        # hops the UAP search had already remembered (libbtbb 7e1cdf0, #137;
+        # the fork took it on in #1135). A CLK6 note on this command line is
+        # the behavior before that commit, where the address-part search ran
+        # again on every later packet, reported CLK1-6 over and over, and
+        # never reached CLK1-27 -- so it is forbidden rather than merely
+        # unexpected, and a revert fails this case in CI with no board. The
+        # CLK6 note belongs to the command that states the UAP, which
+        # replay-uap-given is.
         _replay_case("replay-lap-uap", "-i -l <LAP> derives the UAP", (
             _fixture_step(base),
             _replay_step(f"ubertooth-rx -i <fixture> -l {_A}", ("-l", _A),
                          check=rxreplay.uap_check(lap_a),
-                         patterns=(rxreplay.uap_note(rxreplay.UAP_A), _CLK6_ZERO)),
-        ), f"only LAP {_A} lines; UAP {rxreplay.UAP_A:02x} found; CLK6 offset 0"),
+                         patterns=(rxreplay.uap_note(rxreplay.UAP_A),
+                                   _CLK27_CANDIDATES),
+                         forbidden=(_CLK6_FOUND,)),
+        ), f"only LAP {_A} lines; UAP {rxreplay.UAP_A:02x} found and the "
+           "CLK1-27 search started from the packet that found it; no CLK6 note"),
         _replay_case("replay-pcapng", "-i -r replays into PCAPNG", (
             _fixture_step(base),
             _replay_step("ubertooth-rx -i <fixture> -r", (),
@@ -1286,7 +1310,7 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
             _replay_step(f"ubertooth-rx -i <fixture> -l {_A} -u {rxreplay.UAP_A:02x}",
                          ("-l", _A, "-u", f"{rxreplay.UAP_A:02x}"),
                          check=rxreplay.packets_check(lap_a),
-                         patterns=(_CLK6_ZERO, r"\d+ initial CLK1-27 candidates"),
+                         patterns=(_CLK6_ZERO, _CLK27_CANDIDATES),
                          forbidden=(r"failed to confirm UAP",)),
         ), "UAP confirmed, CLK6 offset 0, hop reversal started"),
         _replay_case("replay-uap-wrong", "-i -l -u with a wrong UAP confirms nothing", (

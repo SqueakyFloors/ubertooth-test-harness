@@ -985,7 +985,11 @@ Raw receive replay:
     -l, replay into PCAPNG and into PCAP (link type 255, the fixture's packet
     count), a -d file that cannot be opened (exit 1, one error line, no usage
     text, nothing created or changed anywhere in the directory), and -s
-    decoding the same as without it. Six smoke cases are about where a
+    decoding the same as without it. The -l case also requires the start of
+    the CLK1-27 search that follows a discovered UAP, and forbids a CLK6
+    note, which libbtbb reports only for a UAP the caller stated;
+    comprehensive's correct -u requires that note, at offset 0, with the
+    candidates after it. Six smoke cases are about where a
     capture goes: -q - writes a readable PCAP to the redirected stream with
     the packet report printed on neither stream, /dev/stdout and /dev/fd/1
     mean that stream too and so does /proc/self/fd/1 on Linux, /dev/fd/3 is
@@ -1026,6 +1030,9 @@ Raw receive replay:
     - ubertooth#782
     - ubertooth#1203
     - ubertooth-test-harness#333
+    - libbtbb#137
+    - ubertooth#1135
+    - ubertooth-test-harness#341
 
 Refused command lines:
   purpose: >-

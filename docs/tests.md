@@ -1461,6 +1461,24 @@ line, no usage text, nothing created or changed anywhere in the directory),
 and `-s` decoding the same as without it, with `-h` listing `-s` as the
 default.
 
+**Which note each command line prints.** libbtbb reports a clock out of the
+address-part search as a CLK6 note only when it already held the UAP, which is
+the UAP a caller stated; a UAP it worked out for itself is reported as the UAP
+note in the same place. So the two command lines are checked for different
+notes. `-l` alone must print the UAP note and then the start of the CLK1-27
+search (`<n> initial CLK1-27 candidates`), because the packet whose CRC
+settles a discovered UAP settles CLK1-6 with it and the clock search carries
+on from that packet; a CLK6 note there is forbidden, since printing one is the
+earlier behavior, where the address-part search ran again on every later
+packet, reported CLK1-6 over and over, and reached no clock
+([libbtbb#137](https://github.com/SqueakyFloors/libbtbb/pull/137), taken on by
+the fork in
+[ubertooth#1135](https://github.com/SqueakyFloors/ubertooth/pull/1135)).
+Comprehensive's correct `-u` is the other half: there the CLK6 note is
+required, at offset 0, with the candidates after it. Both run with no board,
+so a return to the earlier behavior fails this test in CI
+([harness#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341)).
+
 Six of the smoke cases are about where a capture goes
 ([`stdoutdest.py`](../ubertooth_harness/stdoutdest.py) puts the descriptors
 where the case needs them, since a harness step otherwise runs with the

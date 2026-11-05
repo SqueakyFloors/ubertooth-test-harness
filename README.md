@@ -726,7 +726,7 @@ python -m ubertooth_harness run-suite \
   --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
+  --libbtbb-ref 7e1cdf0336857a714da1af8c7496fe32453ac6d0 \
   --build --output runs
 ```
 
@@ -811,7 +811,7 @@ python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
   --hardware host-only.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
+  --libbtbb-ref 7e1cdf0336857a714da1af8c7496fe32453ac6d0 \
   --build --output runs
 ```
 
@@ -1345,7 +1345,7 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2 \
+  --libbtbb-ref 7e1cdf0336857a714da1af8c7496fe32453ac6d0 \
   --build [--no-flash-build] [--with-firmware] [--with-btbr] \
   [--with-python[=PYTHON]] [--bootloader record|check|update] \
   --output runs
@@ -2881,7 +2881,7 @@ python -m ubertooth_harness runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
   [--libbtbb-source /path/to/libbtbb \
-   --libbtbb-ref 52b2afcb0c4b8b03412dac759aad88debdfb18e2] \
+   --libbtbb-ref 7e1cdf0336857a714da1af8c7496fe32453ac6d0] \
   [--plans-dir testplans] [--allow-power-changes] \
   --output runs
 ```
