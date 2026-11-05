@@ -7,17 +7,42 @@ reads that install the way something outside the tree would: with
 a shell comparison, and they live here so a unit test can run them:
 
     python -m ubertooth_harness.installedlib configure-identity LOG --prefix P
+    python -m ubertooth_harness.installedlib consumer-identity OUT --prefix P
+                                             --version-line LINE
+    python -m ubertooth_harness.installedlib under-prefix LOG --prefix P
+                                             --marker TEXT
+    python -m ubertooth_harness.installedlib same-path FIRST SECOND [--what T]
     python -m ubertooth_harness.installedlib age-headers DIR [--function NAME]
+
+`consumer-identity` reads what a program built against the install printed:
+the version line has to be the one the build's own tools print, which names
+the libubertooth revision, so a system library that answered instead is
+caught; the libbtbb it loaded has to be the install's; and, the program being
+run with the no-devices switch, it has to say that no Ubertooth is attached.
+
+`under-prefix` requires the path a configure log reports after a marker to be
+inside the prefix, and `same-path` requires two paths to be one directory.
+Both compare resolved paths: an install describes itself in paths worked out
+from where its own files are, and on macOS /tmp is a symbolic link to
+/private/tmp, so comparing the text would fail for a reason that is not the
+install's.
 
 `configure-identity` reads the `-- libbtbb: ` line of a configure log and
 requires it to name the library the install holds, the commit that library was
 built from, and the commit the tree pins, so a measurement taken from a build
-can be read back to a libbtbb. Either wording passes: the two agree ("...,
-which is the commit this tree is built against (<pin>)") or they do not
-("...; this tree is built against <pin>"). The harness's own libbtbb pin may
-differ from the fork's on purpose, and `scripts/ci.sh` warns about that
-separately, so this does not judge which commit it is -- only that both ends
-are named.
+can be read back to a libbtbb. Either commit-naming wording passes: the two
+agree ("..., which is the commit this tree is built against (<pin>)") or they
+do not ("...; this tree is built against <pin>"). The harness's own libbtbb
+pin may differ from the fork's on purpose, and `scripts/ci.sh` warns about
+that separately, so this does not judge which commit it is -- only that both
+ends are named.
+
+The wordings that name no commit are a failure here. FindBTBB prints one when
+it cannot read a commit out of the library, which a libbtbb built from a
+source archive or with git's abbreviation set very short would be; CI builds
+libbtbb from a clone at a pinned commit, so there it would mean the stamp, or
+FindBTBB's reading of it, had stopped working, and the step would otherwise
+pass while saying nothing.
 
 `age-headers` makes an install look like one from an older commit of the fork:
 it renames one of the functions `FindUBERTOOTH.cmake` probes for in the
@@ -35,11 +60,22 @@ import sys
 
 # The line FindBTBB.cmake's btbb_report_pin() prints, as CMake prefixes it.
 LIBBTBB_LINE = "-- libbtbb: "
-# What the library was built from: an abbreviated commit, or the reason the
-# build could not read one.
-_BUILT_FROM = re.compile(r"built from commit [0-9a-f]{7,40}|commit unknown \(")
-# The pin, which is written in full wherever it is named.
-_PINNED = re.compile(r"built against \(?[0-9a-f]{40}\)?")
+# The commit the library was built from: git's abbreviation, which is seven
+# hex digits or more, bounded so that a longer run of them is not read as a
+# commit with something after it. libbtbb appends "*" for a tree with
+# uncommitted changes, which FindBTBB reports as its own wording and is still
+# a commit named.
+_BUILT_FROM = re.compile(r"built from commit (?![0-9a-fA-F]{41})[0-9a-fA-F]{7,40}"
+                         r"\*?(?![0-9a-fA-F])")
+# The pin, which is written in full wherever it is named, in whichever case
+# the fork writes it (FindBTBB's btbb_pin_is_commit reads either).
+_PINNED = re.compile(r"built against \(?(?<![0-9a-fA-F])[0-9a-fA-F]{40}"
+                     r"(?![0-9a-fA-F])\)?")
+# What a program built against the install prints: libubertooth's own version
+# line, the libbtbb it loaded, and, with the no-devices switch set, that there
+# is no board (ubertooth_print_versions).
+_LOADED_FROM = "libbtbb loaded from: "
+_NO_BOARD = "Firmware version: no Ubertooth attached"
 # One of LIBUBERTOOTH_REQUIRED_FUNCTIONS (FindUBERTOOTH.cmake), declared in
 # ubertooth_control.h. Any of the four would do; this one is the newest of
 # them, so an install from an older commit is missing it for real.
@@ -72,13 +108,75 @@ def configure_identity(text: str, prefix: str) -> str:
             f"the configure found a libbtbb outside {prefix}: {line}")
     if not _BUILT_FROM.search(line):
         raise InstalledLibraryError(
-            f"the configure does not say which commit the libbtbb it found was "
+            f"the configure does not name the commit the libbtbb it found was "
             f"built from: {line}")
     if not _PINNED.search(line):
         raise InstalledLibraryError(
             f"the configure does not name the commit the tree is built "
             f"against: {line}")
     return line
+
+
+def resolved(path: str) -> Path:
+    """``path`` with its links and redundant elements reduced."""
+    return Path(path).resolve()
+
+
+def same_path(first: str, second: str, what: str = "the path") -> Path:
+    """``first`` and ``second`` as one path, or raise InstalledLibraryError."""
+    one, other = resolved(first), resolved(second)
+    if one != other:
+        raise InstalledLibraryError(f"{what} is {one}, not {other}")
+    return one
+
+
+def under_prefix(text: str, prefix: str, marker: str) -> Path:
+    """The path a log reports after ``marker``, which must be in ``prefix``.
+
+    Exactly one line may carry the marker: two mean two answers and none of
+    them decides what a build will link.
+    """
+    found = [line.strip()[len(marker):].strip()
+             for line in text.splitlines() if line.strip().startswith(marker)]
+    if len(found) != 1:
+        raise InstalledLibraryError(
+            f"{len(found)} lines carry {marker!r}, expected exactly one")
+    path, root = resolved(found[0]), resolved(prefix)
+    if path != root and root not in path.parents:
+        raise InstalledLibraryError(
+            f"{marker.strip()} {path}, which is not in {root}")
+    return path
+
+
+def consumer_identity(text: str, prefix: str, version_line: str) -> str:
+    """What a program built against the install printed, or raise.
+
+    ``version_line`` is the line the build's own tools print, which names the
+    libubertooth revision: a program that printed another one was built or
+    linked against another library.
+    """
+    lines = [line.rstrip() for line in text.splitlines()]
+    if version_line.strip() not in lines:
+        raise InstalledLibraryError(
+            "the program did not print the version line the build's own tools "
+            f"print ({version_line.strip()!r}); it printed "
+            + (repr(lines[0]) if lines else "nothing"))
+    loaded = [line for line in lines if line.startswith(_LOADED_FROM)]
+    if len(loaded) != 1:
+        raise InstalledLibraryError(
+            f"the program printed {len(loaded)} '{_LOADED_FROM.strip()}' lines, "
+            "expected exactly one")
+    library = loaded[0][len(_LOADED_FROM):].strip()
+    path, root = resolved(library), resolved(prefix)
+    if root not in path.parents:
+        raise InstalledLibraryError(
+            f"the program loaded libbtbb from {path}, which is not in {root}")
+    if _NO_BOARD not in lines:
+        raise InstalledLibraryError(
+            f"the program did not print {_NO_BOARD!r}; it was to be run with "
+            "UBERTOOTH_TEST_NO_DEVICES=1, so that the step is about the "
+            "install and not about which boards are attached")
+    return version_line.strip()
 
 
 def age_headers(directory: Path, function: str = DEFAULT_FUNCTION) -> list[str]:
@@ -109,6 +207,20 @@ def main(argv: list[str] | None = None) -> int:
         "configure-identity", help="the configure names both libbtbb commits")
     identity.add_argument("log", type=Path)
     identity.add_argument("--prefix", required=True)
+    consumer = sub.add_parser(
+        "consumer-identity", help="what a program built against it printed")
+    consumer.add_argument("output", type=Path)
+    consumer.add_argument("--prefix", required=True)
+    consumer.add_argument("--version-line", required=True)
+    inside = sub.add_parser(
+        "under-prefix", help="a path a log reports is in the prefix")
+    inside.add_argument("log", type=Path)
+    inside.add_argument("--prefix", required=True)
+    inside.add_argument("--marker", required=True)
+    paths = sub.add_parser("same-path", help="two paths are one path")
+    paths.add_argument("first")
+    paths.add_argument("second")
+    paths.add_argument("--what", default="the path")
     older = sub.add_parser(
         "age-headers", help="make an install look like an older commit's")
     older.add_argument("directory", type=Path)
@@ -119,6 +231,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "configure-identity":
             print(configure_identity(args.log.read_text(errors="replace"),
                                      args.prefix))
+        elif args.command == "consumer-identity":
+            print(consumer_identity(args.output.read_text(errors="replace"),
+                                    args.prefix, args.version_line))
+        elif args.command == "under-prefix":
+            print(under_prefix(args.log.read_text(errors="replace"),
+                               args.prefix, args.marker))
+        elif args.command == "same-path":
+            print(same_path(args.first, args.second, args.what))
         else:
             print("edited: " + ", ".join(age_headers(args.directory,
                                                      args.function)))
