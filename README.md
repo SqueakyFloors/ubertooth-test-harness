@@ -783,7 +783,7 @@ python -m ubertooth_harness run-suite \
 
 The generic sequencer executes `Host version`, `Help smoke`, grouped `Host CLI
 surface`, `Ubertooth count`, and grouped `Ubertooth identity` command cases.
-The host surface runs `-h` and `-V` on every host tool the build installs,
+The host surface runs `-h` and `-V` on every C host tool the build installs,
 retaining each tool's result: the eleven always-built executables, and the
 BlueZ-only `ubertooth-scan` and `ubertooth-follow`, whose two cases are not
 applicable (left out before the run, see

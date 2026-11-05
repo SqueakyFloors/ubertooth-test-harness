@@ -582,7 +582,7 @@ Next, harness work:
 9. Add Ubertooth util conflicts to the release plan after a passing hardware run (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    Done (#72): `-i` (and, before fork `db5649b`, `-f`) rejection cases run with no Ubertooth (`Util mode refusals`, in CI), so no accepted pair can reach those modes.
 10. Done (#37): headless `ubertooth-specan-ui -h` (`--build --with-python`) and `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`; `btle-extcap --capture` (#73). Still open: specan-ui argument checks.
-11. Done (#28): `ubertooth-scan -h` and `ubertooth-follow -h` (Linux only; not applicable on macOS, #71).
+11. Done (#28, #347): `ubertooth-scan` and `ubertooth-follow` `-h` and `-V` (Linux only; not applicable on macOS, #71).
 12. Done (#63): `Refused command lines`: no file created, truncated, or left behind by a refused command line, for every file option, with no Ubertooth (in CI).
     Done (#65): `DFU image checks`: `ubertooth-dfu -d` bad-image refusals and `-s`, with no Ubertooth (in CI).
 13. Peer-based tests from the backlog (AFH map, piconet follow), once

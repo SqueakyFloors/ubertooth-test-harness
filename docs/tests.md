@@ -413,7 +413,9 @@ required in the output.
 
 ## Host CLI surface
 
-**What it does.** Runs `-h` and `-V` on every host tool the build installs.
+**What it does.** Runs `-h` and `-V` on every C host tool the fork builds.
+(A `--with-python` build installs `ubertooth-specan-ui` and `ubertooth-btbr`
+as well; those are `Python tools`' and `Classic btbr console`'s.)
 
 **Theory of operation.** Each tool's usage text names the tool, so requiring
 the tool's own name in the output distinguishes a working parser from a
@@ -1957,6 +1959,8 @@ stdoutdest.py check <case dir> --sha256 <name>=<digest> --prefix <name>=<digest>
     --hardlink <name>=<target>
 stdoutdest.py run --stdout <case dir>/<name> --append -- <command ...>
 rxreplay.py dump-check <case dir>/replay.dump <case dir>/replay.bin
+rxreplay.py files <case dir>                                # the directory as it is
+rxreplay.py only-fixture <case dir> replay.bin --base-time <epoch>
 rxdump.py      <case dir>/replay.dump full --min-records 11 --types br
 capturefile.py --packets <case dir>/replay.pcap
 ```
@@ -2080,6 +2084,9 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-scan   -- -x        # and -h stray, an
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow stray        # BlueZ builds, no file
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow -- -x        # and -h stray, and a bare -
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx     -c 79        # a bad later value
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -q - -c <case dir>/extra.pcap
+                                        # accepted: the extra file is warned
+                                        # about on stderr and never created
 refusal.py probe <tool>                   # opens every case: can the switch be used
 refusal.py seed <case dir> <names>        # the files a case must find unchanged
 refusal.py files <case dir>               # the directory before the refusal
@@ -2163,6 +2170,7 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/no-record.bin -q <d
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/input.d -r <case dir>/new.pcapng \
     -q <case dir>/new.pcap -d <case dir>/new.dump   # a directory as the input
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -q <case dir>/gone/x.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -r <case dir>/gone/x.pcapng
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -q -                     # no -i: the board lookup
 rxreplay.py fixture <case dir>/<name>.bin --variant <full|partial|skipped|truncated> \
     --base-time <epoch>
@@ -4349,8 +4357,10 @@ ubertooth-util -U <serial> -w                 # the watchdog record, between wri
 
 The flash runner assembles these per write rather than as plan steps, so
 `<serial>` is each board in turn when `alternate Ubertooths:` is set. Every
-board is read with `-v`, the written one and the others alike: this test is
-not guarded, so there is no serial read of another board here.
+board is read with `-v`, the written one and the others alike: the flash
+runner reads the other boards itself rather than through the catalog's guard
+machinery (`guards_other_ubertooths` is off here), so the revision is the
+only thing read of them.
 
 **Expected outcome.** One case, run by the flash runner rather than as a
 command line. Because it is one case however many flashes it runs, the run's

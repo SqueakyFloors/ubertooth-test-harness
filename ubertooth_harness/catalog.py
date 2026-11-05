@@ -1247,7 +1247,7 @@ def builtin_catalog() -> TestCatalog:
         ),
         TestDefinition(
             "Host CLI surface",
-            "Help and host version for every host tool the build installs",
+            "Help and host version for every C host tool the fork builds",
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
             command_builder=_host_cli_surface_cases,

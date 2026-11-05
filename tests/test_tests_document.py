@@ -19,12 +19,14 @@ cross-reference, not a command this test sends.
 Options are compared both ways too, per program, which is what catches a
 block that names the right tool with the wrong options. What that does not
 compare: option *values*, argument order, a helper's positional subcommand
-(``refusal.py probe`` written as ``refusal.py sniff`` passes), and whether a
-form a block collapses behind a placeholder covers every case it stands for
--- ``COLLAPSED`` says which options a placeholder stands for, and the prose
-beside the block says the rest. A misspelled program is caught only for a
-``ubertooth-*`` name and for the programs ``program`` knows: a fence word
-such as ``tshrk`` is not a program to it, so it is invisible.
+(``refusal.py probe`` written as ``refusal.py sniff`` passes), a cluster of
+short options, where only the first is read (``ubertooth-util -vspb`` is
+``-v``, so the ``-s -p -b`` of it are compared in neither direction), and
+whether a form a block collapses behind a placeholder covers every case it
+stands for -- ``COLLAPSED`` says which options a placeholder stands for, and
+the prose beside the block says the rest. A misspelled program is caught
+only for a ``ubertooth-*`` name and for the programs ``program`` knows: a
+fence word such as ``tshrk`` is not a program to it, so it is invisible.
 
 What it cannot see at all:
 
@@ -114,6 +116,10 @@ NOT_A_PROGRAM = re.compile(r"^<.*>$")
 # them. Written down here rather than assumed, so a block cannot hide an
 # option behind a placeholder nobody declared.
 COLLAPSED: dict[str, set[tuple[str, str]]] = {}
+# Steps whose command the stand-in context cannot build, filled in as the
+# cases are read and asserted below, so a step that starts dropping out of
+# the comparison is a failure rather than a silence.
+DROPPED: list[str] = []
 
 
 def _collapsed(test, program_name, *options):
@@ -131,66 +137,49 @@ def _collapsed(test, program_name, *options):
 OPTION = re.compile(r"^(?P<name>-{1,2}[A-Za-z][A-Za-z0-9-]*)")
 
 
-# `-<query>` and `-<setter or mode>`: the read-only reports and the setters
-# `ubertooth-util` composes.
-_collapsed("Ubertooth util compositions", "ubertooth-util",
-           "-C", "-U", "-V", "-a", "-b", "-d", "-l", "-p", "-s", "-v", "-z")
+# Only what a placeholder has to stand for: an option a block names
+# literally is not declared here, because an entry for one would excuse it
+# if somebody took it out of the block
+# (test_every_collapsed_declaration_is_load_bearing).
+#
+# `-<setter or mode>` and the values two profiles give one option
+# (Argument validation).
 _collapsed("Argument validation", "ubertooth-util",
-           "-C", "-I", "-S", "-U", "-a", "-c", "-d", "-l", "-q", "-x", "-z")
+           "-C", "-S", "-d", "-l", "-q", "-x")
 # `-<mode>`: the continuous modes each of these refuses a pair of.
 _collapsed("Ubertooth util conflicts", "ubertooth-util",
            "-I", "-e", "-n", "-q", "-t", "-x")
-_collapsed("Util mode refusals", "ubertooth-util",
-           "-I", "-N", "-U", "-V", "-e", "-i", "-n", "-q", "-t", "-x", "-z")
+_collapsed("Util mode refusals", "ubertooth-util", "-I", "-e", "-n", "-t")
 # `<refusal>`: the file option, the later value, the repeat or the stray
 # word each refusal case writes after the tool.
-_collapsed("Refused command lines", "ubertooth-btle",
-           "-A", "-a", "-c", "-f", "-h", "-n", "-q", "-r")
-_collapsed("Refused command lines", "ubertooth-rx",
-           "-d", "-h", "-l", "-q", "-r", "-u", "-z")
-_collapsed("Refused command lines", "ubertooth-dump", "-U", "-c", "-d", "-h", "-l")
-_collapsed("Refused command lines", "ubertooth-specan", "-d", "-h", "-l", "-u")
-_collapsed("Refused command lines", "ubertooth-dfu", "-d", "-h", "-s", "-u")
-_collapsed("Refused command lines", "ubertooth-follow", "-d", "-e", "-h", "-q", "-r")
+_collapsed("Refused command lines", "ubertooth-btle", "-A", "-a", "-f", "-h")
+_collapsed("Refused command lines", "ubertooth-rx", "-h", "-l", "-u", "-z")
+_collapsed("Refused command lines", "ubertooth-dump", "-U", "-c", "-h", "-l")
+_collapsed("Refused command lines", "ubertooth-specan", "-h", "-l", "-u")
+_collapsed("Refused command lines", "ubertooth-dfu", "-d", "-h")
+_collapsed("Refused command lines", "ubertooth-follow", "-e", "-h")
 _collapsed("Refused command lines", "ubertooth-scan", "-h")
-# `<destination>`: the capture destinations a failed capture tries, and the
-# inputs it replays.
-_collapsed("Failed capture files", "ubertooth-rx", "-d", "-i", "-q", "-r")
-_collapsed("Failed capture files", "ubertooth-btle", "-c", "-n", "-q", "-r")
-# `<variant>`, and the helper forms a block collapses with `...`.
-_collapsed("DFU image checks", "ubertooth-dfu", "-d", "-r", "-s")
+# The helper forms a block collapses with `...`.
 _collapsed("DFU image checks", "dfuimage.py",
-           "--allow", "--before", "--mode", "--read-only", "--reference-name")
+           "--allow", "--before", "--mode", "--read-only")
 _collapsed("DFU images", "dfuimage.py",
-           "--guard", "--image", "--read-only", "--readback", "--reported",
-           "--revision", "--serial")
+           "--guard", "--read-only", "--readback", "--revision")
 # `<peer options>`: the ports, addresses, aliases and stream settings every
 # peer session carries, per test, since each one holds the link differently.
-_PEER = ("--acceptor", "--acceptor-address", "--acceptor-alias", "--address",
-         "--alias", "--device", "--initiator", "--initiator-address",
-         "--initiator-alias", "--min-seconds", "--min-writes", "--payload",
-         "--period", "--role", "--timeout")
-_collapsed("Capture known Classic device", "esp32peer.py", *_PEER)
-_collapsed("Follow Classic Bluetooth piconet", "esp32peer.py", *_PEER)
-_collapsed("Classic capture record fields", "esp32peer.py", *_PEER, "--type")
-_collapsed("Bluetooth inquiry scan", "esp32peer.py", *_PEER)
-_collapsed("Follow Classic piconet over HCI", "esp32peer.py", *_PEER,
-           "--interrupt-after")
-_collapsed("Recover AFH map", "esp32peer.py", *_PEER, "--command-output",
-           "--interrupt-after", "--map", "--map-report")
+_PEER = ("--acceptor", "--acceptor-address", "--acceptor-alias", "--initiator",
+         "--initiator-address", "--initiator-alias", "--min-seconds",
+         "--min-writes", "--payload", "--period", "--timeout")
+for _test in ("Follow Classic Bluetooth piconet", "Classic capture record fields",
+              "Recover AFH map", "Bluetooth inquiry scan",
+              "Follow Classic piconet over HCI"):
+    _collapsed(_test, "esp32peer.py", *_PEER)
 # `nrfdk.py <subcommand> ... --jlink <serial> --alias <alias> ...`: the
-# options the role commands of each test carry.
-_collapsed("Capture known BLE advertiser", "nrfdk.py",
-           "--address", "--alias", "--chmap", "--interval", "--jlink",
-           "--payload", "--type")
+# options the role commands carry beyond the two every line names.
 _collapsed("BLE extcap in tshark", "nrfdk.py",
-           "--address", "--alias", "--chmap", "--interval", "--jlink",
-           "--payload")
-_DK_PAIR = ("--address", "--alias", "--autoupdate", "--chmap", "--cycle",
-            "--dle", "--interval", "--jlink", "--payload", "--peer",
-            "--period", "--role")
-_collapsed("Capture known BLE connection", "nrfdk.py", *_DK_PAIR)
-_collapsed("Follow a BLE connection across its end", "nrfdk.py", *_DK_PAIR)
+           "--address", "--chmap", "--interval", "--payload")
+_collapsed("Follow a BLE connection across its end", "nrfdk.py",
+           "--address", "--autoupdate", "--chmap", "--cycle", "--dle",
+           "--interval", "--payload", "--peer", "--period", "--role")
 
 
 def _registry(directory):
@@ -385,9 +374,12 @@ def _argvs(case):
     for step in tuple(case.steps) + tuple(case.cleanup):
         try:
             out.append(step.resolve_argv(_context()))
-        except Exception:  # noqa: BLE001
-            # A command built from a value only a run records.
-            continue
+        except (ValueError, LookupError) as error:
+            # A command built from a value only a run records, which the
+            # stand-in context cannot produce: `Two-device range test`'s two
+            # LED restores, which parse a per-board triple. Counted, so a
+            # step that starts dropping out is visible.
+            DROPPED.append(f"{case.case_id}/{step.step_id}: {error}")
     return out
 
 
@@ -554,6 +546,17 @@ class DocumentedCommandTests(unittest.TestCase):
             [reason for _suite, reason in self.skipped],
         )
 
+    def test_only_the_known_steps_drop_out_of_the_comparison(self):
+        # A step whose command the stand-in context cannot build is left out
+        # of both option directions, so which ones they are is asserted
+        # rather than counted silently.
+        self.assertEqual(
+            ["round-trip/restore-responder-leds",
+             "round-trip/restore-sender-leds"],
+            sorted(item.split(":")[0] for item in set(DROPPED)),
+            DROPPED,
+        )
+
     def test_every_implemented_test_has_commands_to_check(self):
         # Otherwise the check below passes by having nothing to compare: a
         # test that drops out of every plan, or whose cases stop compiling
@@ -604,14 +607,19 @@ class DocumentedCommandTests(unittest.TestCase):
                 )
 
     def test_every_collapsed_declaration_is_load_bearing(self):
-        # COLLAPSED says what a placeholder in a block stands for, which
-        # excuses those options from the forward check. An entry for an
-        # option the test never passes would pre-excuse a case that gained
-        # it later, so an over-declaration is a failure here: every pair
-        # must be one that test really passes, and its program must be named
-        # in the block.
+        """COLLAPSED says what a placeholder in a block stands for, which
+        excuses those options from the forward check, so every entry has to
+        earn its place three ways: the test really passes that option, its
+        block names that program, and the block does not already name the
+        option literally. The last one matters most: an entry for an option
+        the block spells out would excuse it if somebody deleted it from the
+        block later, which is the drift this check is for. And a block that
+        collapses anything has to write a placeholder, or there is nothing
+        for the entry to describe.
+        """
         for name, declared in sorted(COLLAPSED.items()):
             passed = self.options.get(name, set())
+            literal = self.named_options[name]
             with self.subTest(name):
                 self.assertEqual(
                     [], sorted(f"{prog} {option}"
@@ -619,10 +627,21 @@ class DocumentedCommandTests(unittest.TestCase):
                                if (prog, option) not in passed),
                     f"{name} declares collapsed options it never passes",
                 )
+                self.assertEqual(
+                    [], sorted(f"{prog} {option}"
+                               for prog, option in declared
+                               if (prog, option) in literal),
+                    f"{name} declares collapsed options its block already names",
+                )
                 self.assertLessEqual(
                     {prog for prog, _option in declared}, self.named[name],
                     f"{name} declares a collapsed form for a program its "
                     "block does not name",
+                )
+                self.assertRegex(
+                    " ".join(commands_of(self.sections[name])), r"<[^>]+>",
+                    f"{name} declares a collapsed form but its block writes "
+                    "no placeholder",
                 )
 
     def test_every_section_names_at_least_one_command(self):
@@ -712,8 +731,7 @@ class DocumentedCommandTests(unittest.TestCase):
             "Bootloader identity": (
                 bootloader.identity_argv(serial),
                 bootloader.program_argv("<bootloader.hex>", "<serial device>"),
-                # Preflight reads the application back after a write.
-                ("ubertooth-util", "-U", serial, "-v"),
+                bootloader.application_argv(serial),
             ),
             # flash.py: the write, the revision read of every board, and the
             # watchdog read between writes (watchdog.py).
