@@ -466,6 +466,39 @@ sys.exit(status)
 '''
 
 
+# A stand-in for the peer driver the session runs between pages. The real one
+# is esp32peer.py, which opens a serial bridge and so needs a board; this
+# answers the one line the session reads and exits.
+_RESET_SCRIPT = '''#!/usr/bin/env python3
+"""A fake esp32peer.py, for the session's reset between pages."""
+import os, sys
+
+if os.environ.get("FAKE_PEER_RESET_FAILS"):
+    print("error: could not open the peer's bridge: no such device",
+          file=sys.stderr)
+    sys.exit(1)
+if os.environ.get("FAKE_PEER_RESET_SILENT"):
+    sys.exit(0)
+print("acceptor role: acceptor name: %s" % os.environ.get("FAKE_PEER_NAME", "?"))
+'''
+
+
+def write_fake_peer_reset(directory, *, name=PEER_NAME, fails=False,
+                          silent=False) -> tuple[str, dict]:
+    """Put a fake peer driver in ``directory``; returns its path and
+    environment."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "fake_esp32peer.py"
+    write_executable(path, _RESET_SCRIPT)
+    environment = {"FAKE_PEER_NAME": name}
+    if fails:
+        environment["FAKE_PEER_RESET_FAILS"] = "1"
+    if silent:
+        environment["FAKE_PEER_RESET_SILENT"] = "1"
+    return str(path), environment
+
+
 def write_fake_btbr(directory, *, faults=(), peer=PEER_ADDRESS,
                     name=PEER_NAME) -> dict:
     """Put a fake ubertooth-btbr in ``directory``; returns its environment."""

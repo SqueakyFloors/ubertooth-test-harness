@@ -62,10 +62,13 @@ What the session checks, and why each answer is knowable in advance:
   records arrive, and none of the board's own "packet not sent" lines appeared
   while the runs were on the air.
 - **page-idle**: the connection is held, then `idle` ends it.
-- **page-repeat**: the peer is paged again, and the page completes and
+- **page-repeat**: the peer is reset, paged again, and the page completes and
   exchanges its name again. A pager that reported a connection its page
   response never earned carries nothing and loses the attempt to link
-  supervision, so repeating the page is what says the answer was its own.
+  supervision, so repeating the page is what says the answer was its own. The
+  reset is what lets the peer be paged as new: `idle` tells it nothing, so it
+  is left holding the last link and answers no LMP on the next one, which the
+  bench measurement at PEER_RESET_ROLE shows.
 - **inquiry**: the registered ESP32 Classic peer is discoverable and
   connectable from boot (docs/hardware.md), so an inquiry has to hear it. Its
   BD_ADDR is in the registry and its name carries its own LAP, so the address
@@ -279,6 +282,34 @@ ZERO_ADDRESS_DIGITS = "001122334455"
 # the peer's own address is inverted, which changes the LAP and so the access
 # code, and leaves an address nothing is listening on.
 _NO_DEVICE_MASK = 0xFF
+
+# ---------------------------------------------------------------------------
+# Resetting the peer between pages
+
+# The peer has to be put back in its boot state before it is paged again, and
+# this is why. `idle` stops the board's side of a connection and nothing tells
+# the peer: the tool sends a detach only when the peer declines the connection
+# (host/python/ubtbr/ubtbr/lmp.py), so the peer's host stack is left holding
+# the link it had. It then takes the next page at the baseband -- `Central
+# started` and `Connection ready` both arrive -- and answers nothing of the
+# LMP exchange on it.
+#
+# Measured on the lab bench, 2026-11-05, one board and one ESP32 Classic peer:
+#
+#   page 1, peer freshly reset:        connected in 1.6 s, LMP complete in 0.1 s
+#   page 2, two seconds later:         connected in 10.6 s, LMP NOT within 30 s
+#   page 3, peer reset in between:     connected in 11.9 s, LMP complete in 0.1 s
+#
+# So a repeat page is only a page of the peer if the peer has forgotten the
+# last one, and the reset is what does that. It costs about 1.7 s.
+PEER_RESET_ROLE = "acceptor"
+# esp32peer.py's own deadlines are the ones that matter; this is the backstop
+# for the whole command, which opens the bridge (resetting the board), waits
+# for the boot notice, and reads the status back.
+PEER_RESET_TIMEOUT_S = 90.0
+# What its report says about the board it reset, which says the board behind
+# that bridge is the one the registry named.
+PEER_RESET_REPORT = "role: " + PEER_RESET_ROLE
 
 # ---------------------------------------------------------------------------
 # Transmitting chosen packet types
@@ -832,6 +863,14 @@ class Session:
     hold_seconds: float
     no_answer_seconds: float
     report: Callable[[str], None]
+    # How to put the peer back in its boot state: the driver that does it and
+    # the bridge it talks to. See PEER_RESET_ROLE above for why a repeat page
+    # needs it.
+    peer_reset: str
+    peer_device: str
+    # The run's environment, which the peer driver is given: the same one the
+    # tool was started with, so what a case set reaches both.
+    environment: dict = field(default_factory=dict)
     comprehensive: bool = False
     opcodes: list[str] = field(default_factory=list)
     # Where the progress stream had reached when the connection came up, so
@@ -1312,6 +1351,37 @@ def _connection_lasted(session: Session) -> str:
     return ""
 
 
+def reset_peer(session: Session, label: str) -> str:
+    """Put the peer back in its boot state, so it can be paged as new.
+
+    See PEER_RESET_ROLE: the peer is left holding the link the last page made,
+    and answers no LMP on the next one until it has forgotten it.
+    """
+    argv = (sys.executable, session.peer_reset, "reset",
+            "--device", session.peer_device,
+            "--address", session.peer_address, "--role", PEER_RESET_ROLE)
+    start = _now()
+    try:
+        finished = subprocess.run(argv, capture_output=True, text=True,
+                                  env=session.environment or None,
+                                  timeout=PEER_RESET_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return (f"the peer was not reset within {PEER_RESET_TIMEOUT_S:g}s, so "
+                f"{label} would have paged a peer still holding the last link")
+    except OSError as error:
+        return f"could not run {session.peer_reset}: {error}"
+    said = (finished.stdout or "") + (finished.stderr or "")
+    if finished.returncode != 0:
+        lines = said.strip().splitlines()
+        return (f"the peer was not reset (exit {finished.returncode}): "
+                + (lines[-1][:160] if lines else "it said nothing"))
+    if PEER_RESET_REPORT not in said:
+        return (f"the peer reset did not report the {PEER_RESET_ROLE}: "
+                f"{said.strip()[:160]!r}")
+    session.report(f"  {label}: peer reset in {_now() - start:.1f} s")
+    return ""
+
+
 def check_page_repeat(session: Session) -> str:
     """The peer is paged again, and the page completes again.
 
@@ -1322,11 +1392,17 @@ def check_page_repeat(session: Session) -> str:
     produced on a healthy board, and both cost a page: repeating it is what
     says this bench's pages complete and exchange the peer's name every time,
     not once.
+
+    The peer is reset before each one, which is what lets it be paged as new;
+    PEER_RESET_ROLE above has the bench measurement that says why.
     """
     repeats = (PAGE_REPEATS_COMPREHENSIVE if session.comprehensive
                else PAGE_REPEATS)
     for number in range(1, repeats + 1):
         label = f"page-repeat-{number}" if repeats > 1 else "page-repeat"
+        reason = reset_peer(session, label)
+        if reason:
+            return reason
         reason = _page_once(session, label)
         if reason:
             return f"page {number} of {repeats} after the first: {reason}"
@@ -1517,8 +1593,10 @@ def _check_seconds(label: str, *, inquiry: float, page: float, hold: float,
         "tx-link": TX_LINK_S,
         # What is left of the hold, then idle: the stop line and the prompt.
         "page-idle": hold + idle + reply,
-        # Each page again, each followed by its own idle.
-        "page-repeat": repeats * (one_page + idle + reply),
+        # Each page again: the peer reset that lets it be paged as new, the
+        # page itself, and the idle that ends it.
+        "page-repeat": repeats * (PEER_RESET_TIMEOUT_S + one_page + idle
+                                  + reply),
         # Each mode: the start, the state, the ready line, the hold, then
         # idle.
         "scan-modes": len(SCAN_MODES) * (3 * reply + SCAN_HOLD_S + idle
@@ -1600,6 +1678,7 @@ def run_session(arguments, out, err, environment) -> int:
         console, arguments.peer, arguments.peer_name,
         arguments.inquiry_seconds, arguments.page_seconds,
         arguments.hold_seconds, arguments.no_answer_seconds, report,
+        arguments.peer_reset, arguments.peer_device, dict(environment),
         comprehensive=arguments.comprehensive,
     )
     planned = checks(arguments.comprehensive)
@@ -1618,6 +1697,13 @@ def run_session(arguments, out, err, environment) -> int:
                 failed_checks.append(label)
                 failures.append(f"{label}: {reason}")
                 report(f"check {label}: FAILED: {reason}")
+                # One command runs at a time, and a check that failed may have
+                # left one running: every check after it would then be refused
+                # with `Not idle` and fail for a reason that is not its own.
+                # Measured on the bench, where one failed page cost the three
+                # checks after it. The board is put back in standby so the
+                # rest of the session still decides.
+                _recover(session, label, report)
     except ConsoleError as error:
         if NO_LIBUSB1 in console.text():
             # Nothing here can decide the session, and nothing on the bench is
@@ -1644,6 +1730,27 @@ def run_session(arguments, out, err, environment) -> int:
         report("session failed: " + "; ".join(failures))
         return 1
     return 0 if status == 0 else 1
+
+
+def _recover(session: Session, label: str, report) -> None:
+    """Put the board back in standby after a check that failed.
+
+    Best effort, and never raises: the session is already failing, and what
+    this is for is the checks after it. `idle` with nothing running is
+    answered too, so it is sent whether or not anything was left running.
+    """
+    console = session.console
+    try:
+        mark = console.mark()
+        console.send("idle")
+        match, _ = console.wait(PROMPT, IDLE_TIMEOUT_S, since=mark)
+    except ConsoleError as error:
+        report(f"after {label}: the board could not be put back in standby "
+               f"({error})")
+        return
+    if match is None:
+        report(f"after {label}: the board did not come back to the prompt, so "
+               "the checks after it may fail for that reason")
 
 
 def _start(console: Console, report) -> None:
@@ -1802,6 +1909,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     one.add_argument("--peer", required=True, help="the peer's registered BD_ADDR")
     one.add_argument("--peer-name", required=True,
                      help="the name the peer's Extended Inquiry Response carries")
+    one.add_argument("--peer-reset", required=True,
+                     help="the driver that puts the peer back in its boot "
+                          "state, run with this interpreter")
+    one.add_argument("--peer-device", required=True,
+                     help="the peer's serial bridge, for that driver")
     one.add_argument("--inquiry-seconds", type=float, default=DEFAULT_INQUIRY_S,
                      help="how long the inquiry may take to hear the peer")
     one.add_argument("--page-seconds", type=float, default=DEFAULT_PAGE_S,

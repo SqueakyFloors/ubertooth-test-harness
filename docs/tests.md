@@ -2691,10 +2691,10 @@ command lines the host will not take, `bdaddr`, an address whose first byte is
 zero, the inquiry, the page and the LMP exchange, four transmit runs compared
 with the packets their formats give, the link still carrying packets after
 them, the hold and the `idle` that end the connection, the once-per-opcode
-report of an LMP request with no handler, the page again, the two scan modes,
-the board's own refusal lines all absent, no hang-up on a peer that took the
-connection, and the split between the capture on standard output and the
-progress on standard error (`idle` is checked inside the inquiry, the page and
+report of an LMP request with no handler, the page again with the peer reset
+before it, the two scan modes, the count of the board's own refusal lines, no
+hang-up on a peer that took the connection, and the split between the capture
+on standard output and the progress on standard error (`idle` is checked inside the inquiry, the page and
 each scan). Comprehensive decides 21: paging an address nothing answers must
 end in `paging timeout` with no connection, and it also transmits five more
 formats and pages the peer once more. The report says how many checks passed,
@@ -2743,6 +2743,10 @@ What a pass does not prove:
   request the setup leads to, so that path is unreachable with the bench's
   current fixtures. The fork's `test_ubtbr.py` covers it; this test checks
   the complement, that this end hangs up on nobody who accepted.
+- **That a page works while the peer still holds the last link.** It does
+  not, and the session resets the peer rather than pretending otherwise; the
+  measurement is above. What the repeats say is that each fresh page train
+  completes, which is the pager's own side.
 - **That the scan modes answer anything.** Nothing on the bench pages or
   inquires on demand — the ESP32 peer's shell has no `inquiry` command and
   pages only through its SPP profile, which `btbr` cannot answer — so

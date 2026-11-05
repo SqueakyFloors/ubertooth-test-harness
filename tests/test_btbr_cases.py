@@ -7,7 +7,12 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from tests.fake_btbr import PEER_ADDRESS, PEER_NAME, write_fake_btbr
+from tests.fake_btbr import (
+    PEER_ADDRESS,
+    PEER_NAME,
+    write_fake_btbr,
+    write_fake_peer_reset,
+)
 from ubertooth_harness import btbr_cases, btbrconsole, esp32peer
 from ubertooth_harness.pytools import PYTHON_TOOLS_ENV
 from ubertooth_harness.btbr_cases import btbr_console_cases
@@ -40,15 +45,18 @@ def fake_session_report(*, faults=(), comprehensive=False) -> str:
     """One console session against the fake, and the report it printed."""
     with tempfile.TemporaryDirectory() as directory:
         tools = Path(directory) / "bin"
+        reset, reset_environment = write_fake_peer_reset(tools)
         environment = {"PATH": "/usr/bin:/bin",
                        PYTHON_TOOLS_ENV: str(tools),
+                       **reset_environment,
                        **write_fake_btbr(tools, faults=faults)}
         out, err = io.StringIO(), io.StringIO()
         btbrconsole.run_session(
             SimpleNamespace(
                 serial=SERIAL, peer=PEER_ADDRESS, peer_name=PEER_NAME,
                 inquiry_seconds=2.0, page_seconds=2.0, hold_seconds=0.05,
-                no_answer_seconds=2.0, comprehensive=comprehensive),
+                no_answer_seconds=2.0, comprehensive=comprehensive,
+                peer_reset=reset, peer_device="/dev/serial/by-id/fake"),
             out, err, environment)
         return err.getvalue()
 UBERTOOTH = SourceRevision(
@@ -228,6 +236,10 @@ class CaseTests(unittest.TestCase):
         self.assertIn("btbrconsole.py session", argv)
         self.assertIn(f"--peer {PEER_ADDRESS}", argv)
         self.assertIn(f"--peer-name {PEER_NAME}", argv)
+        # The peer driver and its bridge, so the session can reset the peer
+        # between pages and the run record shows how.
+        self.assertIn("esp32peer.py", argv)
+        self.assertIn("--peer-device /dev/serial/by-id/fake", argv)
         self.assertNotIn("--comprehensive", argv)
         self.assertEqual(btbrconsole.SKIP_EXIT, step.skip_returncode)
 

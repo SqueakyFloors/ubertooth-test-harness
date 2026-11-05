@@ -48,7 +48,7 @@ from pathlib import Path
 import re
 import sys
 
-from ubertooth_harness import btbrconsole
+from ubertooth_harness import btbrconsole, esp32peer
 from ubertooth_harness.classic_cases import (
     ACCEPTOR_ROLE,
     _peer,
@@ -92,6 +92,7 @@ NEEDS = Needs(platforms=("linux",), python_tools=True, firmware_build=True,
               btbr_build=True)
 
 _CONSOLE = str(Path(btbrconsole.__file__).resolve())
+_PEER_RESET = str(Path(esp32peer.__file__).resolve())
 # A write and the board's reset. Four seconds each way on the lab bench, and
 # the DFU cases allow the same.
 FLASH_TIMEOUT_S = 45.0
@@ -141,6 +142,12 @@ def console_argv(serial: str, peer, *, comprehensive: bool) -> tuple[str, ...]:
         "--serial", serial,
         "--peer", peer["address"],
         "--peer-name", peer["name"],
+        # The session resets the peer between pages: `idle` tells the peer
+        # nothing, so it holds the link the last page made and answers no LMP
+        # on the next one (btbrconsole.py, PEER_RESET_ROLE). The driver and the
+        # bridge are passed rather than found, so the run record shows both.
+        "--peer-reset", _PEER_RESET,
+        "--peer-device", peer["device"],
         "--inquiry-seconds", f"{btbrconsole.DEFAULT_INQUIRY_S:g}",
         "--page-seconds", f"{btbrconsole.DEFAULT_PAGE_S:g}",
         "--hold-seconds", f"{btbrconsole.DEFAULT_HOLD_S:g}",

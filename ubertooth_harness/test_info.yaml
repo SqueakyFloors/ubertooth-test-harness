@@ -1645,17 +1645,21 @@ Classic btbr console:
     exchange, four transmit runs compared with the packets their formats give,
     the link still carrying packets after them, the hold and the idle that end
     the connection, the once-per-opcode report of an LMP request with no
-    handler, the page again, the two scan modes, none of the board's own
-    refusal lines, no hang-up on a peer that took the connection, and the
-    split between the capture on standard output and the progress on standard
-    error. Comprehensive decides 21: paging an address nothing answers must
+    handler, the page again with the peer reset before it, the two scan modes,
+    the count of the board's own refusal lines, no hang-up on a peer that took
+    the connection, and the split between the capture on standard output and
+    the progress on standard error. Comprehensive decides 21: paging an address nothing answers must
     end in a paging timeout with no connection, and it also transmits five
     more formats and pages the peer once more. The report says how many checks
     passed, failed, and never ran. The cleanup always writes the application
     image back, reads it, and resets the peer; a cleanup failure fails the
     case, so the board cannot be left on btbr quietly.
   limitations: >-
-    A pass says the image runs, the command line refuses what it should, the
+    A repeat page is only a page of the peer because the session resets the
+    peer first: idle tells the peer nothing, so it holds the link the last
+    page made and answers no LMP on the next one, which the bench measured
+    (docs/tests.md). A pass says the image runs, the command line refuses what
+    it should, the
     prompt answers, and the board can run an inquiry, hold a connection with
     one peer, transmit the chosen packet types on it, page that peer again,
     and enter and leave both scan modes. It does not say a transmitted packet

@@ -16,7 +16,12 @@ import unittest
 import unittest.mock
 
 from tests import fake_btbr
-from tests.fake_btbr import PEER_ADDRESS, PEER_NAME, write_fake_btbr
+from tests.fake_btbr import (
+    PEER_ADDRESS,
+    PEER_NAME,
+    write_fake_btbr,
+    write_fake_peer_reset,
+)
 from ubertooth_harness import btbrconsole
 from ubertooth_harness.pytools import PYTHON_TOOLS_ENV, SKIP_EXIT
 
@@ -33,6 +38,9 @@ def arguments(**overrides) -> SimpleNamespace:
         "hold_seconds": 0.05,
         "no_answer_seconds": 3.0,
         "comprehensive": False,
+        # Filled in per run: the session resets the peer between pages.
+        "peer_reset": "",
+        "peer_device": "/dev/serial/by-id/fake",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -54,12 +62,15 @@ class SessionTests(unittest.TestCase):
             self.addCleanup(patch.stop)
 
     def run_session(self, *, faults=(), name=PEER_NAME, peer_name=None,
-                    tools=True, **overrides):
+                    tools=True, peer_reset_fails=False, **overrides):
         """Run one session; ``name`` is what the fake board answers with and
         ``peer_name`` what the registry says, which differ only in the
         mismatch test."""
         with tempfile.TemporaryDirectory() as directory:
             environment = {"PATH": "/usr/bin:/bin"}
+            reset, reset_environment = write_fake_peer_reset(
+                Path(directory) / "bin", name=name, fails=peer_reset_fails)
+            environment.update(reset_environment)
             if tools:
                 environment.update(
                     write_fake_btbr(Path(directory) / "bin", faults=faults,
@@ -67,7 +78,8 @@ class SessionTests(unittest.TestCase):
                 environment[PYTHON_TOOLS_ENV] = str(Path(directory) / "bin")
             out, err = io.StringIO(), io.StringIO()
             status = btbrconsole.run_session(
-                arguments(peer_name=peer_name or name, **overrides),
+                arguments(peer_name=peer_name or name, peer_reset=reset,
+                          **overrides),
                 out, err, environment)
             return status, out.getvalue(), err.getvalue()
 
@@ -230,6 +242,16 @@ class SessionTests(unittest.TestCase):
                 self.assertEqual(1, status, report)
                 self.assertIn(expected, report)
                 self.assertIn("session failed: ", report)
+
+    def test_a_peer_that_cannot_be_reset_fails_the_repeat_page(self):
+        # The repeat page is only a page of the peer if the peer has forgotten
+        # the last one, so a reset that did not happen is not a page it can
+        # decide.
+        status, _captured, report = self.run_session(peer_reset_fails=True)
+        self.assertEqual(1, status)
+        self.assertIn("check page-repeat: FAILED: the peer was not reset "
+                      "(exit 1): error: could not open the peer's bridge",
+                      report)
 
     def test_a_session_that_will_not_exit_is_killed_and_reported(self):
         status, _captured, report = self.run_session(faults=("never-exits",))
@@ -503,15 +525,17 @@ class OptionValueTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
+    REST = ["--peer-reset", "reset.py", "--peer-device", "/dev/fake"]
+
     def test_a_peer_that_is_not_an_address_is_refused(self):
         self.assertEqual(2, btbrconsole.main(
             ["session", "--serial", "x", "--peer", "nonsense",
-             "--peer-name", PEER_NAME]))
+             "--peer-name", PEER_NAME] + self.REST))
 
     def test_an_empty_peer_name_is_refused(self):
         self.assertEqual(2, btbrconsole.main(
             ["session", "--serial", "x", "--peer", PEER_ADDRESS,
-             "--peer-name", ""]))
+             "--peer-name", ""] + self.REST))
 
 
 if __name__ == "__main__":
