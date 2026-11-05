@@ -85,8 +85,11 @@ candidates to implement is a maintainer decision; this file supplies the
 evidence for it.
 
 Where a pass's gap and partial rows have been consolidated into work, the
-issue says which rows it came from, so a reader goes from a row to the tracker
-through its `candidate_key`:
+issue lists the pull requests it came from, so a reader goes from a tracker
+back to the rows. These three came out of the pass recorded in #334; the
+`candidate_key` named beside a tracker is one that belongs to it outright,
+and the rest of each entry says what the tracker gathers rather than naming
+every key:
 
 | Tracker | What it consolidates |
 |---|---|
