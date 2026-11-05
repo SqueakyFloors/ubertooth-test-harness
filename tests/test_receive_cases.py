@@ -602,6 +602,27 @@ class CheckerTests(unittest.TestCase):
         mixed = absent.replace("snr=none", "snr=1")
         self.assertEqual("", receive_cases.packet_check(channel=39)(
             mixed.format(ch=5, err=2) + "\n"))
+        # A reading at the top of the radio's scale is no measurement of the
+        # packet, only "at least this loud", so the level column prints the
+        # same word (fork SqueakyFloors/ubertooth#1192). About a fifth of the
+        # packets of a close Classic link read that way, so a pattern that
+        # took a figure here would quietly stop counting them.
+        loud = ("systime=1 ch={ch:2d} LAP=9e8b33 err={err} clkn=1 "
+                "clk_offset=1 s=none n=-46 snr=none")
+        self.assertIn("channel 5", receive_cases.packet_check(channel=39)(
+            loud.format(ch=39, err=0) + "\n" + loud.format(ch=5, err=2) + "\n"))
+        # Neither figure, which is a loud packet in a mode with no estimate.
+        self.assertEqual("", receive_cases.packet_check(channel=5)(
+            loud.replace("n=-46", "n=none").format(ch=5, err=0) + "\n"))
+        # The ratio needs both levels, so it goes whenever either does.
+        # Either way round is a malformed line and counts as no packet: a
+        # ratio beside a missing level, and a missing ratio beside two
+        # figures.
+        ratio_without_a_level = loud.replace("snr=none", "snr=46")
+        level_without_a_ratio = loud.replace("s=none", "s=-4")
+        for broken in (ratio_without_a_level, level_without_a_ratio):
+            self.assertEqual("", receive_cases.packet_check(channel=39)(
+                broken.format(ch=5, err=2) + "\n"))
         # The survey's heading is on standard error, so standard output
         # carries the addresses alone: no address at all is a survey that
         # found no piconet, and the heading here is the split undone.
