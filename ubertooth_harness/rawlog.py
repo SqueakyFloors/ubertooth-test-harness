@@ -517,8 +517,12 @@ STAGE_LABELS = {
 
 
 def stage_label(stage) -> str:
-    """The plain label of one state step's stage."""
-    return STAGE_LABELS.get(str(stage), str(stage).replace("_", " ").upper())
+    """The plain label of one state step's stage.
+
+    A stage this table has not got is stated as it is written, as an
+    unrecognized status is (``verdict``).
+    """
+    return STAGE_LABELS.get(str(stage), str(stage).upper())
 
 
 def count_text(count, one: str, many: str) -> str:

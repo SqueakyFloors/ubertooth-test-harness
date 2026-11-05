@@ -1515,9 +1515,10 @@ def _transcript(run: _Run) -> list[str]:
             # reader moving between the two reads one vocabulary (#342).
             # Each piece on one line: one record is one timestamped line
             # here, and a recorded value may carry a line ending (#342).
+            name = inline(details.get("step_name") or "step")
             text = (
                 f"[S] {stage_label(details.get('stage', 'step'))} "
-                f"{verdict(status)}: {inline(details.get('step_name', ''))}"
+                f"{verdict(status)}: {name}"
             )
             if details.get("attempt"):
                 text += f" (attempt {details['attempt']})"
@@ -1527,7 +1528,10 @@ def _transcript(run: _Run) -> list[str]:
             elif details.get("observed") is not None:
                 text += f" (recorded {inline(details['observed'])})"
             if details.get("reason"):
-                text += f": {inline(details['reason'])}"
+                # A step's reason opens with its own name, which this line
+                # has said already (#342).
+                reason = inline(details["reason"]).removeprefix(f"{name}: ")
+                text += f": {reason}"
             line(event, text)
         elif kind == "flash_run_started":
             boards = details.get("serials") or [details.get("serial")]
@@ -2007,7 +2011,10 @@ def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, ti
 _SUMMARY_LABEL = 18
 # The rule the console summary is drawn with, the width of a test banner.
 _SUMMARY_RULE = "=" * BANNER_WIDTH
-_MARKUP = re.compile(r"\*\*|`")
+# The report's own emphasis, which a terminal would show as the characters
+# it is written with. A backtick is left alone: a reason that quotes a
+# command or an option carries one, and that is the reason's own text.
+_MARKUP = re.compile(r"\*\*")
 
 
 def _plain(text: str) -> str:
@@ -2053,9 +2060,11 @@ def _host_tools_version(run: _Run) -> str:
         ),
         "",
     )
-    # One string per stream: the chunks of each arrive in order, and joining
-    # the two would splice a line of one into a line of the other.
-    streams: dict[str, list[str]] = {}
+    # One string per command and stream: the chunks of each arrive in order,
+    # and joining two of them would splice a line of one onto a line of the
+    # other. The check asks a second command on an older fork commit, so
+    # there can be two.
+    streams: dict[tuple[str, str], list[str]] = {}
     for event in run.events:
         details = event.get("details") or {}
         if (
@@ -2064,11 +2073,10 @@ def _host_tools_version(run: _Run) -> str:
             or details.get("check_id") != check_id
         ):
             continue
-        streams.setdefault(str(details.get("stream", "")), []).append(
-            str(details.get("text", ""))
-        )
-    for name in ("stdout", "stderr"):
-        printed = _TOOLS_VERSION_LINE.search("".join(streams.get(name, ())))
+        key = (str(details.get("command_id", "")), str(details.get("stream", "")))
+        streams.setdefault(key, []).append(str(details.get("text", "")))
+    for pieces in streams.values():
+        printed = _TOOLS_VERSION_LINE.search("".join(pieces))
         if printed:
             return printed[0].strip()
     matched = ""
@@ -2084,7 +2092,20 @@ def _host_tools_version(run: _Run) -> str:
                     matched = found
     if matched:
         return matched
-    return str((run.manifest.get("build") or {}).get("host_version", ""))
+    built = str((run.manifest.get("build") or {}).get("host_version", ""))
+    if built:
+        return built
+    # A `build` command records no manifest, so its own record is what says
+    # which version the tools it built report (build.py).
+    return next(
+        (
+            str((e.get("details") or {}).get("host_version", ""))
+            for e in reversed(run.events)
+            if e["event_type"] == "build_finished"
+            and (e.get("details") or {}).get("host_version")
+        ),
+        "",
+    )
 
 
 def _device_roles(run: _Run) -> dict[str, str]:

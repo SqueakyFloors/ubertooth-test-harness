@@ -773,6 +773,64 @@ class WholeRunTests(unittest.TestCase):
             self.assertIn("VERDICT: INCOMPLETE (NO RUN_FINISHED RECORD)", printed)
             self.assertIn("Ubertooth          HEAD = ", printed)
 
+    def test_an_installed_tools_run_that_raises_closes_with_the_block_too(self):
+        # A run that builds nothing has no record of its own until the
+        # sequencer opens one, so this is the path where the block depends on
+        # what the sequencer had written when it raised. An error out of the
+        # executor is the realistic one: by then the run has its start and
+        # its manifest.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, short = source_repo(root)
+            (root / "hardware.yaml").write_text(hardware((A, B)))
+            (root / "plan.yaml").write_text(
+                step_plan("Radio setting transitions",
+                          extra="        coverage: smoke\n")
+            )
+            revision = f"git-{short}"
+            tools = BenchTools(
+                Bench(FakeUbertooth(serial=A, firmware=revision),
+                      FakeUbertooth(serial=B, firmware=revision)),
+                revision,
+            )
+            calls = []
+
+            def fails_once_preflight_has_begun(argv, **named):
+                calls.append(tuple(argv))
+                if len(calls) > 1:
+                    raise RuntimeError("the executor broke")
+                return tools.run(argv, **named)
+
+            live, out = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.object(cli, "_detected_platform", return_value="linux"),
+                mock.patch("ubertooth_harness.cli.SubprocessCommandExecutor",
+                           return_value=SimpleNamespace(
+                               run=fails_once_preflight_has_begun)),
+                redirect_stderr(live),
+                redirect_stdout(out),
+                self.assertRaises(RuntimeError),
+            ):
+                cli.main([
+                    "run-suite", "--plan", str(root / "plan.yaml"),
+                    "--suite", "fast", "--hardware", str(root / "hardware.yaml"),
+                    "--host", "Host_Linux", "--ubertooth-source", str(source),
+                    "--ubertooth-ref", "HEAD", "--run-id", "broken-executor",
+                    "--output", str(root / "runs"),
+                ])
+
+            printed = live.getvalue()
+            self.assertEqual(1, printed.count("RUN SUMMARY"), printed)
+            self.assertIn("VERDICT: INCOMPLETE (NO RUN_FINISHED RECORD)", printed)
+            self.assertIn("Ubertooth          HEAD = ", printed)
+            # The records the block was compiled from are the run's own.
+            run_log = root / "runs" / "broken-executor" / "run.jsonl"
+            kinds = [json.loads(line)["event_type"]
+                     for line in run_log.read_text().splitlines()]
+            self.assertEqual("run_started", kinds[0])
+            self.assertIn("manifest", kinds)
+            self.assertNotIn("run_finished", kinds)
+
 
 if __name__ == "__main__":  # pragma: no cover - renders the sample by hand
     # `python -m tests.test_console_output [test name]` prints what a person

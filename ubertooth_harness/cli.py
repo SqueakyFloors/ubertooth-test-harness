@@ -436,8 +436,10 @@ def _build_command(args: argparse.Namespace) -> int:
             args.with_python, run_dir=output,
             firmware_images=_firmware_images(with_btbr=args.with_btbr),
         )
-    except BuildError as error:
-        _finish_failed_run(publisher, output, str(error))
+    except BaseException as error:
+        # Every way out: a build error, a cancellation, or an error of the
+        # harness's own closes the record it opened and ends with the block.
+        _finish_failed_run(publisher, output, str(error) or type(error).__name__)
         raise
     publisher.emit("run_finished", "passed", {"status": "passed", "failure_reason": ""})
     write_report(output)

@@ -2657,8 +2657,9 @@ still names its sources and its verdict.
 
 `report.md`'s transcript says the same words on its own `[S]` line
 (`[S] STATE FAIL: guard Ubertooth 1 channel unchanged (expected 2441,
-observed 2426)`), where one record is one timestamped line, so a reader
-moving between the live stream and the report reads one vocabulary.
+observed 2426): observed 2426`), where one record is one timestamped line,
+so a reader moving between the live stream and the report reads one
+vocabulary.
 
 ### Checks read the output files
 
