@@ -395,6 +395,47 @@ class ConsoleSummaryTests(unittest.TestCase):
         self.assertIn(f"libbtbb            fork-pin at 52b2afcb0c{'1' * 30} "
                       "(git-52b2afc)", text)
 
+    def test_the_version_line_is_one_line_however_it_was_recorded(self):
+        # A build keeps the whole answer `-V` gave, which is more than one
+        # line, and every row of this block is read by its alignment.
+        answer = (
+            "Host tools version: libubertooth 1.07 (git-9903b42), "
+            "libbtbb 1.3 (git-52b2afc)\n"
+            "libbtbb loaded from: /usr/local/lib/libbtbb.so.1\n"
+        )
+        events = summary_events()
+        # No preflight output of its own: the build's record is the source.
+        events = [item for item in events
+                  if item["event_type"] != "output_checks"]
+        events[1]["details"]["manifest"]["build"] = {"host_version": answer}
+        rows = [line for line in self.summary(events).splitlines()
+                if line.startswith("  ")]
+        self.assertIn(
+            "  host tools         Host tools version: libubertooth 1.07 "
+            "(git-9903b42), libbtbb 1.3 (git-52b2afc)",
+            rows,
+        )
+        self.assertFalse([line for line in rows if "loaded from" in line])
+        # A build that recorded something else still says what it said, on
+        # one line.
+        events[1]["details"]["manifest"]["build"] = {"host_version": "odd\nanswer"}
+        self.assertIn("  host tools         odd answer",
+                      self.summary(events).splitlines())
+
+    def test_a_reason_keeps_the_characters_it_was_recorded_with(self):
+        events = summary_events()
+        events[-1]["status"] = "failed"
+        events[-1]["details"].update(
+            status="failed", passed=False,
+            failure_reason="Failed capture files: no file matched "
+                           "'captures/**/*.pcap' or `-q -`",
+        )
+        self.assertIn(
+            "  reason             Failed capture files: no file matched "
+            "'captures/**/*.pcap' or `-q -`",
+            self.summary(events).splitlines(),
+        )
+
     def test_it_carries_the_version_line_the_host_tools_printed(self):
         # Both halves: the libubertooth and libbtbb versions and commits the
         # tools themselves reported, which is the only thing that says which

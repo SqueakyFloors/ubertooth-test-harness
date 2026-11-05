@@ -2011,20 +2011,25 @@ def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, ti
 _SUMMARY_LABEL = 18
 # The rule the console summary is drawn with, the width of a test banner.
 _SUMMARY_RULE = "=" * BANNER_WIDTH
-# The report's own emphasis, which a terminal would show as the characters
-# it is written with. A backtick is left alone: a reason that quotes a
-# command or an option carries one, and that is the reason's own text.
-_MARKUP = re.compile(r"\*\*")
-
-
 def _plain(text: str) -> str:
-    """One row of the console summary: no markup, and one line.
+    """One row of the console summary, on one line.
 
     A reason comes from a run record and may carry anything, including a
     newline; one would leave the rest of it looking like output nobody
-    tagged, under a label that is no longer there.
+    tagged, under a label that is no longer there. Nothing else is taken
+    out: a reason that quotes a glob, a command, or an option carries the
+    characters the report writes emphasis with, and they are its own text.
     """
-    return inline(_one_line(_MARKUP.sub("", str(text))))
+    return inline(_one_line(str(text)))
+
+
+# The report's own emphasis, taken out of the one row that is built from a
+# report cell rather than from a record.
+_MARKUP = re.compile(r"\*\*|`")
+
+
+def _without_markup(text: str) -> str:
+    return _MARKUP.sub("", str(text))
 
 
 # The line every host tool prints its own and its libbtbb's version and
@@ -2098,20 +2103,30 @@ def _host_tools_version(run: _Run) -> str:
                     matched = found
     if matched:
         return matched
-    built = str((run.manifest.get("build") or {}).get("host_version", ""))
-    if built:
-        return built
-    # A `build` command records no manifest, so its own record is what says
-    # which version the tools it built report (build.py).
-    return next(
-        (
-            str((e.get("details") or {}).get("host_version", ""))
-            for e in reversed(run.events)
-            if e["event_type"] == "build_finished"
-            and (e.get("details") or {}).get("host_version")
-        ),
-        "",
-    )
+    # What a build recorded. It keeps the whole answer `ubertooth-util -V`
+    # gave, which is more than one line (the version line, then the library
+    # it loaded from), so the line itself is picked out of it: this is one
+    # row of a block read by its alignment.
+    recorded = str((run.manifest.get("build") or {}).get("host_version", ""))
+    if not recorded:
+        # A `build` command records no manifest, so its own record is what
+        # says which version the tools it built report (build.py).
+        recorded = next(
+            (
+                str((e.get("details") or {}).get("host_version", ""))
+                for e in reversed(run.events)
+                if e["event_type"] == "build_finished"
+                and (e.get("details") or {}).get("host_version")
+            ),
+            "",
+        )
+    printed = _TOOLS_VERSION_LINE.search(recorded)
+    if printed:
+        return printed[0].strip()
+    # Not a version line at all (an older record, or a build that reported
+    # something else): one line of whatever it holds, so the block still
+    # says what the tools answered.
+    return inline(recorded).strip()
 
 
 def _device_roles(run: _Run) -> dict[str, str]:
@@ -2171,7 +2186,9 @@ def _summary_rows(run: _Run) -> list[tuple[str, str]]:
         rows.append(("host tools", tools))
     loaded = _libbtbb_in_the_tools(run)
     if loaded:
-        rows.append(("libbtbb in tools", _plain(loaded)))
+        # The one row that comes from a report cell, so the one that carries
+        # the report's own emphasis.
+        rows.append(("libbtbb in tools", _plain(_without_markup(loaded))))
     roles = _device_roles(run)
     for alias, device in _devices(run).items():
         where = roles.get(alias)
