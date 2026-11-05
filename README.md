@@ -2397,6 +2397,65 @@ is allowed and is held as one set. No test binds a programmer and the harness
 never drives one; see
 [`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs).
 
+## BLE address parity and soak
+
+[`testplans/address-soak.yaml`](testplans/address-soak.yaml) runs the
+`BLE address parity soak` test: one `ubertooth-btle -n -U <serial>` capture
+for as long as the suite asks, against a registered nRF52840 DK advertising
+its address on a schedule the run applies, with the one capture read two
+ways. The *text* reader takes the documented `AdvA:  xx:xx:xx:xx:xx:xx
+(random)` line libbtbb prints for each packet it decodes, which is what a
+production-style advertising-detection service parses out of the tool's
+output; the *structural* reader tails the capture file as it grows, decodes
+each record, recomputes the link-layer CRC, and takes the AdvA of the packets
+whose CRC is right. Both addresses are normalized before anything is
+compared, and what is compared is which windows each reader found the address
+in, with an allowance that is a share of the windows either of them saw it in
+(the two readers differ for documented reasons:
+[docs/tests.md](docs/tests.md#ble-address-parity-soak)).
+
+Around that, the run measures what only a long window finds: detection within
+a deadline and sustained presence per on period, the longest silence inside
+one, packets a minute, the capture process's resident memory, every process
+exit with its status and last `error:` line, restarts and what caused them,
+board resets, and the firmware's watchdog record, read before the run, after
+each restart, and at the end. A pass needs the detection objective met by
+both readers, the readers in agreement, no gap beyond the configured limit,
+no restart beyond the budget, a clean final stop, and a board that answers
+afterwards; every figure is reported with its distribution either way.
+
+Four suites, none of them in `fast` or in the non-soak `release` plan: a
+`address-parity` run of about a minute for development and a short bench
+check, then `address-soak-4h`, `address-soak-24h`, and `address-soak-72h`,
+the release-candidate soak. Every figure the verdict rests on is a plan
+argument, and the relationships between them are checked when the plan loads,
+before any board is leased: a detection deadline longer than the advertiser
+is on for, a liveness timeout the schedule's own silence would trip, a gap
+limit every period crosses, and three more are each refused with their
+reason.
+
+```sh
+python -m ubertooth_harness run-suite \
+  --plan testplans/address-soak.yaml --suite address-parity \
+  --hardware hardware.yaml --host Host_Linux \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --artifact "nRF52840 advertiser=/path/to/zephyr.hex" --output runs
+```
+
+Run the long suites from the deployed [target runner](#target-runner-service),
+which keeps the run going when whatever started it disconnects: the driver
+appends a progress record to `progress.jsonl` in the run's own capture
+directory as it goes, and writes `summary.json` at the end, so a soak is
+reviewable while it runs and after the client has gone. Each capture attempt
+keeps its own `capture-NNNN.pcap` and the tool's own transcript in
+`btle-NNNN.log`, and a capture file that reaches the plan's `capture file
+limit` is rolled over at the start of an off period, so a run of days does
+not fill the host's disk. The short suite also asks for a `restart probe`:
+the driver kills the capture once, at the middle of the run, with no stop
+sent to the board -- the way a lost session ends one -- and the advertiser
+must be heard again afterwards, so a run carries evidence that the restart
+path recovers rather than only evidence that it was never needed.
+
 ## MAC polling workload soak
 
 [`testplans/mac-polling.yaml`](testplans/mac-polling.yaml) contains one dedicated `MAC polling soak` item.

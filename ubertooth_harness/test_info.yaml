@@ -1478,6 +1478,98 @@ Follow a BLE connection across its end:
     - ubertooth#505
     - ubertooth-test-harness#168
 
+BLE address parity soak:
+  purpose: >-
+    Catches two things a short capture cannot. First, a change in how a known
+    advertiser's address reaches a reader: a service that watches the tool's
+    output and picks the documented "AdvA:" line must keep seeing the
+    advertiser exactly when a reader of the capture records does, and the two
+    are compared over the same windows of the same capture. Second, what only
+    time finds: a capture that dies, a board that resets itself, a host
+    process that grows, a detection that arrives late, and a silence inside a
+    period the advertiser was known to be advertising in.
+  theory: >-
+    The advertiser is driven on a schedule, so every on period is a detection
+    with a deadline and every off period a silence with a known cause rather
+    than an absence of evidence. The one capture is then read twice: the text
+    line libbtbb prints for each decoded packet, timestamped when the host
+    read it, and the capture's own records, decoded with the link-layer CRC
+    recomputed and timestamped as the capture recorded them. Both addresses
+    are normalized before anything is compared, since one source prints lower
+    case and the other is raw bytes. The readers are not expected to agree
+    packet for packet and are not asked to: libbtbb prints a decoded packet
+    whether or not its CRC checks, so the text reader can report an address
+    from a corrupted packet the record reader drops, and the "AdvA:" of a
+    SCAN_REQ or a CONNECT_REQ is the target's address, so a scanner that
+    addressed this advertiser would appear in the text reader alone. What is
+    compared is which windows each reader found the address in, with an
+    allowance that scales with the run. Beside that, the schedule makes the
+    liveness rule sound: a capture is restarted when its process exits or when
+    no packet of any address arrives for the liveness timeout, which has to
+    be longer than the advertiser's own silence or the schedule would restart
+    the capture itself.
+  hardware: >-
+    One Ubertooth, selected by serial and receiving only, and one nRF52840 DK
+    advertising its registered address on one channel at normal BLE power.
+    The DK is flashed when it reports a firmware version other than the one
+    the harness pins, so the run holds the host lock; nothing else is
+    written, and no power is switched. The Ubertooth's channel, squelch, and
+    LEDs are recorded before the run and restored afterwards, and the DK is
+    left idle in the advertiser role. The board's watchdog record is read
+    before the run, after each restart, and at the end, while no capture is
+    running. The recovery ladder may reset the board once between restarts; a
+    board that does not answer before the capture starts is reported as a
+    configuration failure and never reset, because something else is using
+    it.
+  expected: >-
+    Two cases: the advertiser is confirmed to run the pinned firmware at its
+    registered address, then the soak itself. The soak passes when both
+    readers met the detection objective for first sighting and for sustained
+    presence, the readers disagreed about no more windows than the allowance,
+    no judged period held a silence longer than the gap limit, the rate over
+    the minutes the advertiser was on cleared its floor, at least one captured
+    packet carried the harness payload tag, no restart beyond the budget
+    happened, the final stop was a clean one, the advertiser's schedule was
+    applied throughout, and the board answered every read afterwards. A period
+    is judged only if the advertiser was known to be on for the whole of it
+    and something was listening throughout, and the run must be able to judge
+    that same share of the periods it ran, so a capture that kept dying fails
+    rather than passing on the few periods it covered. Every
+    figure is reported with its distribution -- packets per reader, periods
+    detected and sustained, longest gap, packets a minute, resident memory,
+    restarts and their causes, and watchdog reads -- so a run says what
+    happened rather than only whether it passed. The restart probe, where a
+    plan asks for it, kills the capture once with no stop sent to the board
+    and requires the advertiser to be heard again in the first judged period
+    after it; where no judged period followed, the run says the recovery is
+    not established rather than claiming one.
+  limitations: >-
+    The two readers keep different clocks by nature: the text reader's time
+    is when the host read a line, which the tool's own output buffering
+    delays, and the record reader's is what the capture wrote. A window near
+    a boundary can therefore fall either side for one reader and not the
+    other, which is why the comparison carries an allowance and why a run
+    reports the disagreements rather than requiring none. Nothing here proves
+    the text and record readers would agree about a device the harness does
+    not control: the comparison is about one address whose schedule is known.
+    The detection floors are bench figures, not a bound from the
+    specification, and a noisier room can fail them with nothing wrong in the
+    code. The memory figures come from the operating system's resident set
+    size, which says nothing about what inside the process grew, and no
+    growth limit is applied unless a plan sets one, because what counts as
+    growth over three days is not established. The schedule is applied by the
+    host over the DK's serial shell, so a transition that failed twice is
+    recorded against its period and that period is left out of the verdict
+    rather than counted as a missed detection; so is a period in which the
+    capture was stopped or started, which is why the coverage floor exists
+    and why the periods the run itself interrupted are allowed against it. A
+    run the harness has to kill outright can leave the capture tool holding
+    the board, which the case's own cleanup then stops.
+  related:
+    - ubertooth-test-harness#350
+    - ubertooth#703
+    - ubertooth#239
+
 Capture known Classic device:
   purpose: >-
     Gives Classic Bluetooth a piconet with a known address, which the harness

@@ -93,6 +93,20 @@ The connection tests need two DKs, one registered `central` and one
 role with a default named after the role (`central:`, `peripheral:`, and the
 plain `nRF52840 DK:` for the advertiser).
 
+**Booking the advertiser for a soak.** `BLE address parity soak`
+(`testplans/address-soak.yaml`) holds one Ubertooth and the `advertiser` DK
+for its whole window, which its longest suite makes three days, and it drives
+the DK on and off throughout, so nothing else can use either device
+meanwhile. Book it rather than scheduling it beside other bench work, and run
+it from the deployed target runner, which keeps the run going after whatever
+started it disconnects. Two things it costs the host: the DK's serial port
+stays open for the run, and the capture file grows for as long as the run
+lasts — on a crowded advertising channel the capture holds every advertiser in
+range, not only this one, so the plan's `capture file limit` is what keeps a
+long run inside the host's disk. The run reports the capture process's
+resident memory from `ps`, which needs no privilege and nothing installed; a
+host that refuses to run `ps` costs the memory figures and nothing else.
+
 Registered by its J-Link serial, quoted so leading zeros survive, plus the
 BLE address its `status` reports. That address is a static random address
 derived from the chip's FICR, so it is the same on every boot of the same
