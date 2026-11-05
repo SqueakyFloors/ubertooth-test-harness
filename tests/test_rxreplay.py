@@ -199,6 +199,25 @@ class ReplayRx:
             return True
         return False
 
+    def _reaches_stdout(self, value, fds):
+        """Whether a destination reaches descriptor 1, a link to it included.
+
+        A writer writes through a symbolic link, so a link whose chain ends
+        at one of the names for that descriptor reaches the stream as surely
+        as the name itself (opt_destination_is_stdout).
+        """
+        if self._is_stdout_value(value, fds):
+            return True
+        if value == "-":
+            return True
+        path, hops = value, 0
+        while os.path.islink(path) and hops < 16:
+            target = os.readlink(path)
+            path = target if os.path.isabs(target) else os.path.join(
+                os.path.dirname(path), target)
+            hops += 1
+        return hops > 0 and path in self._STDOUT_VALUES[1:]
+
     def _destination_file(self, value, stdout_name, fds):
         """(device, inode) a writer given ``value`` would write to, or None.
 
@@ -323,6 +342,15 @@ class ReplayRx:
         # Where each capture would go, in the order ubertooth-rx.c lists them.
         destinations = [(option, self._value(options, option))
                         for option in ("-r", "-q", "-d")]
+        # PcapNG seeks back over what it has written, which no stream allows,
+        # so -r refuses every destination that reaches standard output while
+        # the command line is read (opt_check_pcapng_destination).
+        pcapng = self._value(options, "-r")
+        if ("pcapng-stdout-allowed" not in self.bugs and pcapng is not None
+                and self._reaches_stdout(pcapng, fds)):
+            return self._result(command, 1, "",
+                                "error: PCAPNG capture to stdout is not "
+                                "supported; use -q -\n")
         refusal, warning, status = self._destination_problems(
             destinations, stdout_name, fds, path)
         if refusal:
@@ -799,7 +827,12 @@ class ReplayCaseTests(unittest.TestCase):
                           "replay-destination-is-input"],
                          [c.case_id for c in smoke])
         _a, full = replay_cases("comprehensive")
-        self.assertEqual(28, len(full))
+        self.assertEqual(30, len(full))
+        # One of them is Linux's: /proc names descriptor 1 there and nothing
+        # at all elsewhere, so a macOS run has 29.
+        linux_only = [case.case_id for case in full
+                      if case.needs.platforms == ("linux",)]
+        self.assertEqual(["replay-stdout-proc-path"], linux_only)
         context = {"capture dir": "/run/captures/x"}
         for case in full:
             self.assertIsInstance(case, StateCase)
@@ -882,12 +915,18 @@ class ReplayCaseTests(unittest.TestCase):
                              - {"-i -q /dev/fd/3 is the caller's file, not stdout"},
             "stdout-alias-is-a-file": _STDOUT_ALIAS_CASES,
             "other-fd-is-stdout":
-                {"-i -q /dev/fd/3 is the caller's file, not stdout"},
+                {"-i -q /dev/fd/3 is the caller's file, not stdout",
+                 "-i: a link, a hard link, and a descriptor beside the file it "
+                 "holds"},
             "no-destination-check":
                 {"-i -q and -r on one file is refused",
-                 "-i: one file under two names is refused, /dev/null twice is not"},
+                 "-i: one file under two names is refused, /dev/null twice is not",
+                 "-i: a link, a hard link, and a descriptor beside the file it "
+                 "holds"},
             "null-twice-refused":
                 {"-i: one file under two names is refused, /dev/null twice is not"},
+            "pcapng-stdout-allowed":
+                {"-i -r refuses every destination that reaches stdout"},
             "no-input-check":
                 {"-i -d naming the dump being replayed is refused",
                  "-i: a symbolic and a hard link to the dump are refused",

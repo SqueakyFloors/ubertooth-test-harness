@@ -1464,7 +1464,7 @@ a `-d` that names the dump `-i` is replaying is refused as
 five ends by stating the whole directory, with the input's SHA-256, so a
 refusal that truncated or rewrote the file it was reading fails.
 
-Comprehensive runs 28, adding the survey listing of both piconets
+Comprehensive runs 30 (29 where there is no `/proc`), adding the survey listing of both piconets
 (the two addresses on standard output and the `Survey Results` heading on
 standard error),
 a LAP filter, a correct and a wrong `-u`, `-e 0` dropping the packet with an
@@ -1474,15 +1474,23 @@ records), a missing file, the recorded systime on every packet line, a
 directory passed as `-i` (exit 1 with the read error), and `-u` without `-l`
 refused before any record is decoded.
 
-Comprehensive also adds four more capture-destination cases:
-`/proc/self/fd/1`, which is that stream on Linux and is left out elsewhere;
-one file under two spellings refused as
+Comprehensive also adds six more capture-destination cases.
+`/proc/self/fd/1` is that stream on Linux and the one case left out
+elsewhere. One file under two spellings is refused as
 `error: -q and -d cannot both write to one file (<first> and <second>)`, while
-`/dev/null` twice is accepted and decodes, since nothing is kept there; a
-symbolic link and a hard link to the input both refused, naming the link the
-user wrote, with the links still what they were; and standard output pointed
-at the input, where `-q -` is refused with the input untouched and the bare
-decode, which no option names and nothing can refuse by then, exits 0 with
+`/dev/null` twice is accepted and decodes, since nothing is kept there. The
+file is identified and not the name for that pair check too, so a symbolic
+link, a hard link, `-` beside the name the shell pointed that stream at, and
+`/dev/fd/3` beside the file the case opened there are each refused as one
+file under two names, each named as the user wrote it. `-r` refuses every
+destination that reaches standard output while the command line is read, `-`,
+`/dev/stdout`, and a link to it alike, with
+`error: PCAPNG capture to stdout is not supported; use -q -`, because PcapNG
+seeks back over what it has written. A symbolic link and a hard link to the
+`-i` input are both refused, naming the link the user wrote, with the links
+still what they were. And with standard output pointed at the input, `-q -`
+is refused with the input untouched while the bare decode, which no option
+names and nothing can refuse by then, exits 0 with
 `warning: the decode is going to the dump -i is replaying, so the capture is
 lost` and leaves the fixture's own records at the start of the file.
 

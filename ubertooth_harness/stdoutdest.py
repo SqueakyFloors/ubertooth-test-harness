@@ -111,27 +111,30 @@ def run(argv, stdout: Path | None, append: bool, fds) -> tuple[int, list[str]]:
                     raise ValueError(
                         f"--fd {number}={_STDOUT} needs --stdout, so there is a "
                         "file to point it at")
+                # The file object owns this descriptor, so it closes it.
                 source = target.fileno()
                 notes.append(f"fd {number} -> the same stream as stdout")
+                owned = True
             else:
                 # os.open rather than open(): the descriptor is handed to the
-                # tool by number, and the only thing to close afterwards is
-                # that number -- a file object closing the same descriptor a
-                # second time is what an EBADF here would be.
-                raw = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-                source = raw
+                # tool by number, so this function owns it and closes it
+                # itself. A file object on the same descriptor would close it
+                # a second time, which is the one EBADF this can give.
+                source = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                owned = False
                 notes.append(f"fd {number} -> {Path(name).name}")
             # Into the number the tool was told to write to. dup2 leaves the
             # new descriptor inheritable, which is what pass_fds then keeps.
-            # Where the file already landed on that number, there is nothing
-            # to duplicate and nothing of its own to close: closing it here
-            # and again with the file would be the one EBADF this can give.
             handed.append(number)
             if source != number:
                 os.dup2(source, number)
                 duplicated.append(number)
-                if name != _STDOUT:
+                if not owned:
                     os.close(source)
+            elif not owned:
+                # The open already landed on that number, so there is nothing
+                # to duplicate and this is the descriptor to close at the end.
+                duplicated.append(number)
         completed = subprocess.run(
             list(argv), stdout=target, stderr=None, check=False,
             pass_fds=tuple(handed),
@@ -219,6 +222,10 @@ def main(argv: list[str] | None = None) -> int:
     seeder.add_argument("directory", type=Path)
     seeder.add_argument("names", nargs="+")
 
+    unlinker = sub.add_parser("unlink", help="remove names a case created")
+    unlinker.add_argument("directory", type=Path)
+    unlinker.add_argument("names", nargs="+")
+
     linker = sub.add_parser("link", help="create links to a file")
     linker.add_argument("directory", type=Path)
     linker.add_argument("--symlink", type=_pair, action="append", default=[],
@@ -263,6 +270,20 @@ def main(argv: list[str] | None = None) -> int:
             (args.directory / name).write_bytes(seed_contents(name))
         print(f"Seeded: {len(args.names)} file(s) in {args.directory}: "
               + ", ".join(args.names))
+        return 0
+    if args.command == "unlink":
+        # A case that made a link the run must not open afterwards takes it
+        # back here, in its cleanup, so it goes whether the case passed or
+        # failed: a link to a standard stream left in the case directory
+        # would be read when the run measures the files the case wrote.
+        removed = []
+        for name in args.names:
+            path = args.directory / name
+            if path.is_symlink() or path.exists():
+                os.unlink(path)
+                removed.append(name)
+        print(f"Removed: {len(removed)} of {len(args.names)} name(s) in "
+              f"{args.directory}" + (": " + ", ".join(removed) if removed else ""))
         return 0
     if args.command == "link":
         for name, target in args.symlink:

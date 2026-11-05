@@ -126,6 +126,15 @@ class RunTests(unittest.TestCase):
         self.assertEqual(1, status)
         self.assertIn("exit 1", printed)
 
+    def test_the_descriptors_it_opened_are_closed_again(self):
+        # A run leaves nothing open: the file the descriptor was opened on
+        # would otherwise still be held after the tool it was for had gone.
+        before = len(os.listdir("/dev/fd"))
+        for index in range(3):
+            self.helper("--fd", f"3={self.directory / f'f{index}.bin'}",
+                        "--", *self.tool(3))
+        self.assertLessEqual(len(os.listdir("/dev/fd")), before)
+
     def test_a_standard_stream_is_refused_as_an_extra_descriptor(self):
         with self.assertRaises(SystemExit):
             run(["run", "--fd", "1=/tmp/x", "--", "true"])

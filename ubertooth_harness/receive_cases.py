@@ -661,14 +661,25 @@ def _replay_step(name, options, *, check=None, patterns=(), forbidden=(),
     )
 
 
-def _replay_case(case_id, name, steps, expected_state, *, needs=NO_NEEDS):
+def _replay_case(case_id, name, steps, expected_state, *, needs=NO_NEEDS,
+                 remove=()):
+    # A name the case made that the run must not open when it measures the
+    # files the case wrote -- a link to a standard stream -- is taken back
+    # first, so it goes whether the case passed or failed.
+    cleanup = ()
+    if remove:
+        cleanup += (Step("remove-links", "Remove " + ", ".join(remove),
+                         lambda context: (sys.executable, _STDOUTDEST, "unlink",
+                                          require(context, CAPTURE_DIR_KEY),
+                                          *remove),
+                         output_patterns=(r"Removed: \d+ of \d+ name",)),)
     return StateCase(
         case_id,
         name,
         tuple(steps),
         # Nothing on a device to restore; list what the case wrote (names and
         # sizes only) so the record shows the files were left in the run.
-        (Step("list-files", "List the files the case wrote",
+        cleanup + (Step("list-files", "List the files the case wrote",
               lambda context: (sys.executable, _REPLAY, "files",
                                require(context, CAPTURE_DIR_KEY)),
               output_patterns=(r"Replay files: \d+ in ",)),),
@@ -819,6 +830,28 @@ def _dest_check_step(name, *, unchanged=(), prefix=(), absent=(), kept=(),
 
     return Step(step_id, name, argv,
                 output_patterns=(r"Stdout destination check: ",))
+
+
+_PCAPNG_NOT_STDOUT = (r"(?m)^error: PCAPNG capture to stdout is not supported; "
+                      r"use -q -$")
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def _one_file(first: str, second: str, *, first_is_text=False,
+              second_is_text=False) -> str:
+    """The refusal for two destinations that are one file under two names.
+
+    Each name is the destination as the user wrote it, which for a file in
+    the case's own directory is an absolute path only the run knows, so the
+    pattern allows whatever leads up to the name; a name that is not a path
+    ("standard output", "/dev/fd/3") is matched as it stands.
+    """
+    def text(name, as_written):
+        return re.escape(name) if as_written else rf"\S*{re.escape(name)}"
+
+    return (r"(?m)^error: -q and -d cannot both write to one file \("
+            + text(first, first_is_text) + " and "
+            + text(second, second_is_text) + r"\)$")
 
 
 def _over_input(option: str, named: str) -> str:
@@ -990,6 +1023,78 @@ def _stdout_destination_comprehensive(base, count, digest, size):
                              hardlinks=(("hard.bin", _FIXTURE),)),
         ), "both refused (exit 1) naming the link the user wrote; the fixture "
            "unchanged; the links still what they were"),
+        # The file is identified and not the name for the destination pair
+        # check too, so a link, a hard link, and a descriptor beside the file
+        # it holds are each one file under two names.
+        _replay_case("replay-destinations-one-file-by-link",
+                     "-i: a link, a hard link, and a descriptor beside the file "
+                     "it holds", (
+            _fixture_step(base),
+            _dest_seed_step(("pair.pcap",)),
+            _dest_link_step(symlinks=(("pair.link", "pair.pcap"),),
+                            hardlinks=(("pair.hard", "pair.pcap"),)),
+            _dest_run_step("refuse-symlink",
+                           "ubertooth-rx -i <fixture> -q <pair.pcap> -d <pair.link>",
+                           ("-q", ("file", "pair.pcap"), "-d", ("file", "pair.link")),
+                           returncodes=(1,), patterns=(_one_file("pair.pcap",
+                                                                 "pair.link"),),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _dest_run_step("refuse-hardlink",
+                           "ubertooth-rx -i <fixture> -q <pair.pcap> -d <pair.hard>",
+                           ("-q", ("file", "pair.pcap"), "-d", ("file", "pair.hard")),
+                           returncodes=(1,), patterns=(_one_file("pair.pcap",
+                                                                 "pair.hard"),),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            # "-" beside the name the shell pointed that stream at.
+            _dest_run_step("refuse-stdout-and-file",
+                           "ubertooth-rx -i <fixture> -q - -d <shared.bin>, with "
+                           "stdout on shared.bin",
+                           ("-q", "-", "-d", ("file", "shared.bin")),
+                           stdout="shared.bin", returncodes=(1,),
+                           patterns=(_one_file("standard output", "shared.bin",
+                                               first_is_text=True),),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            # /dev/fd/N beside the name the caller opened on N.
+            _dest_run_step("refuse-descriptor-and-file",
+                           "ubertooth-rx -i <fixture> -q <fd3.bin> -d /dev/fd/3, "
+                           "with 3 on fd3.bin",
+                           ("-q", ("file", "fd3.bin"), "-d", "/dev/fd/3"),
+                           fds=((3, "fd3.bin"),), returncodes=(1,),
+                           patterns=(_one_file("fd3.bin", "/dev/fd/3",
+                                               second_is_text=True),),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _dest_check_step("Verify nothing was written to any of them",
+                             unchanged=(fixture, ("shared.bin", _EMPTY_SHA256),
+                                        ("fd3.bin", _EMPTY_SHA256)),
+                             kept=("pair.pcap",),
+                             symlinks=(("pair.link", "pair.pcap"),),
+                             hardlinks=(("pair.hard", "pair.pcap"),)),
+        ), "each pair refused (exit 1) naming both options and both names as "
+           "written; the seeded file unchanged, the two the run opened still "
+           "empty, the links still what they were"),
+        # PcapNG seeks back over what it has written, which no stream allows,
+        # so -r refuses every destination that reaches standard output while
+        # the command line is read, a link to it included.
+        _replay_case("replay-pcapng-not-stdout",
+                     "-i -r refuses every destination that reaches stdout", (
+            _fixture_step(base),
+            _dest_link_step(symlinks=(("to-stdout", "/dev/stdout"),)),
+        ) + tuple(
+            _dest_run_step(f"refuse-{index}",
+                           f"ubertooth-rx -i <fixture> -r {shown}",
+                           ("-r", value), returncodes=(1,),
+                           patterns=(_PCAPNG_NOT_STDOUT,),
+                           forbidden=(_PACKET_LINE_PATTERN,))
+            for index, (shown, value) in enumerate(
+                (("-", "-"), ("/dev/stdout", "/dev/stdout"),
+                 ("<dir>/to-stdout", ("file", "to-stdout"))))
+        ) + (
+            _dest_check_step("Verify nothing was created",
+                             unchanged=(fixture,),
+                             symlinks=(("to-stdout", "/dev/stdout"),)),
+        ), "each refused (exit 1) with 'PCAPNG capture to stdout is not "
+           "supported; use -q -'; nothing created and the link left alone",
+           remove=("to-stdout",)),
         # Standard output pointed at the dump: a capture option is refused,
         # and the decode, which no option names, is one warning line.
         _replay_case("replay-stdout-is-input",
