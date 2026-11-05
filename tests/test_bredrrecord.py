@@ -20,8 +20,9 @@ from ubertooth_harness import bredrrecord, capturefile, rxreplay
 
 LAP = 0xE9C5BA
 UAP = 0x0D
-# Types with a one-byte and a two-byte payload header.
-DH1, DH5, POLL = 4, 15, 1
+# Types with a one-byte and a two-byte payload header, the one that carries
+# none, and the one code two types share.
+DH1, DH5, POLL, HV3 = 4, 15, 1, 7
 
 GOOD_FLAGS = (bredrrecord.DEWHITENED | bredrrecord.SIGPOWER_VALID
               | bredrrecord.NOISEPOWER_VALID | bredrrecord.REFLAP_VALID
@@ -57,10 +58,12 @@ def record(payload=b"", *, channel=39, signal=-50, noise=-80, offenses=0,
 
 
 def pcap(records, link_type=bredrrecord.LINKTYPE_BLUETOOTH_BREDR_BB,
-         magic=0xA1B23C4D, first_ns=1_000_000_000):
+         magic=0xA1B23C4D, first_ns=1_000_000_000, times=None):
+    """``times`` gives each record's offset from ``first_ns``, for a capture
+    whose record times are the point; by default they are 1 ms apart."""
     out = struct.pack("<IHHiIII", magic, 2, 4, 0, 0, 0xFFFF, link_type)
     for step, data in enumerate(records):
-        when = first_ns + step * 1_000_000
+        when = first_ns + (times[step] if times else step * 1_000_000)
         out += struct.pack("<IIII", when // 10 ** 9, when % 10 ** 9,
                            len(data), len(data)) + data
     return out
@@ -214,6 +217,95 @@ class Decoding(unittest.TestCase):
             bredrrecord.following_address(path)
 
 
+def timed_records(times_ns, *, start=1_000_000_000):
+    """Well-formed records carrying these times, in file order."""
+    return [
+        bredrrecord.Record(index, None if when is None else start + when,
+                           39, -50, -80, 0, 0, 0, 0, LAP, LAP | (UAP << 24),
+                           bt_header(POLL), GOOD_FLAGS, b"")
+        for index, when in enumerate(times_ns)
+    ]
+
+
+S = 1_000_000_000
+# The clock a followed capture is put on wraps every 327.68 s, and a move is
+# anything up to that, either way.
+PERIOD_NS = 327_680_000_000
+
+
+class RecordTimes(unittest.TestCase):
+    """The record times measure the run that captured them.
+
+    The fault these bound is SqueakyFloors/ubertooth#1195: following a
+    piconet puts the board's clock on the piconet's, and a reconstruction
+    that read that move as time passing gave per-packet times that did not
+    measure the run. The figures below are the ones that PR measured, so the
+    bounds are tested against the fault as it really appeared rather than
+    against a made-up one.
+    """
+
+    def bounds(self, found, *, run_s=25.0):
+        return bredrrecord.problems(
+            found, max_span_s=run_s + 5.0,
+            max_backward_step_us=2000.0)
+
+    def test_a_capture_whose_times_measure_its_run_passes(self):
+        found = timed_records([step * S for step in range(21)])
+        self.assertEqual([], self.bounds(found))
+
+    def test_a_clock_moved_forward_spans_longer_than_the_run(self):
+        """The bench wrote records spanning 191.3 s of a 15 s follow, and the
+        unit figures in that PR 222.4 s of a 110 s run."""
+        found = timed_records([0, 10 * S, int(191.3 * S)])
+        problem = " ".join(self.bounds(found, run_s=15.0))
+        self.assertIn("the records span 191.3 s, more than the 20.0 s", problem)
+        self.assertIn("not the run's", problem)
+
+    def test_a_clock_moved_back_sends_a_record_behind_the_one_ahead(self):
+        """What the bench saw on main: record 304 timed 41.16 s before record
+        303. The whole-period form, a step of 327.68 s less the real gap, is
+        the same fault at its largest."""
+        found = timed_records([0, 10 * S, 10 * S - int(41.16 * S), 20 * S])
+        problem = " ".join(self.bounds(found, run_s=180.0))
+        self.assertIn("a record time 41.160 s before the record ahead of it",
+                      problem)
+        wrapped = timed_records([0, 10 * S, 10 * S - (PERIOD_NS - 10 * S)])
+        self.assertIn("317.680 s before the record ahead of it",
+                      " ".join(self.bounds(wrapped, run_s=180.0)))
+
+    def test_two_packets_of_one_slot_bank_may_land_in_either_order(self):
+        """Ordinary reordering stays allowed: a bench capture of 285 records
+        had one step of 225 us, and a slot pair is 1250 us."""
+        for step_us in (225, 1250, 2000):
+            with self.subTest(step_us=step_us):
+                found = timed_records([0, 10 * S, 10 * S - step_us * 1000, 20 * S])
+                self.assertEqual([], self.bounds(found))
+        over = timed_records([0, 10 * S, 10 * S - 2_001_000, 20 * S])
+        self.assertIn("2000 us is allowed", " ".join(self.bounds(over)))
+
+    def test_the_span_bound_is_the_run_and_not_a_floor(self):
+        """A capture that heard its packets in one burst spans far less than
+        the run, which is a quiet room rather than a fault, so nothing
+        requires the records to fill the window."""
+        self.assertEqual([], self.bounds(timed_records([0, S // 2, S])))
+
+    def test_times_are_reported_and_bounded_only_when_asked(self):
+        found = timed_records([0, 10 * S, int(191.3 * S)])
+        self.assertEqual([], bredrrecord.problems(found))
+        self.assertIn("spanning 191.3 s",
+                      " ".join(bredrrecord.summary(found, "x.pcap")))
+
+    def test_a_capture_carrying_no_times_cannot_be_held_to_them(self):
+        """Asked for the bounds and given nothing to check, this says so
+        rather than passing: a file whose records lost their timestamps
+        would otherwise clear both bounds."""
+        found = timed_records([None, None])
+        self.assertIn("no record carries a timestamp",
+                      " ".join(self.bounds(found)))
+        self.assertIn("no record carries one",
+                      " ".join(bredrrecord.summary(found, "x.pcap")))
+
+
 class Consistency(unittest.TestCase):
     """Each check names the record and what is out of step in it."""
 
@@ -297,17 +389,82 @@ class Consistency(unittest.TestCase):
         broken = record(dh1_payload() + b"\0", header=bt_header(DH1))
         self.assertEqual([], self.check(broken, payload_checks=False))
 
-    def test_a_transport_or_rate_a_receive_capture_cannot_know_is_a_problem(self):
-        self.assertProblem("transport 3", record(transport_rate=0x30))
+    def test_a_rate_a_basic_rate_capture_cannot_know_is_a_problem(self):
         self.assertProblem("rate 1", record(transport_rate=0x01))
 
+    def test_a_transport_named_with_no_payload_is_a_problem(self):
+        """libbtbb names a transport only for a payload it produced, and
+        clears it again wherever it drops one, so a record with no payload
+        bytes naming one has the two out of step."""
+        self.assertProblem("transport ACL with no payload",
+                           record(transport_rate=0x30))
+        self.assertProblem("transport SCO with no payload",
+                           record(transport_rate=0x10))
+
+    def test_a_payload_carries_its_own_types_transport(self):
+        """A DH1 rides on the asynchronous link, so its payload's transport
+        is ACL and nothing else; SCO over it is one packet's header beside
+        another's payload."""
+        self.assertEqual([], self.check(
+            record(dh1_payload(), transport_rate=0x30, header=bt_header(DH1))))
+        self.assertProblem(
+            "transport SCO on a DH1/2-DH1 payload, whose transport is ACL",
+            record(dh1_payload(), transport_rate=0x10, header=bt_header(DH1)))
+        self.assertProblem(
+            "transport eSCO on a DH1/2-DH1 payload",
+            record(dh1_payload(), transport_rate=0x20, header=bt_header(DH1)))
+
+    def test_the_one_code_two_types_share_takes_either_voice_transport(self):
+        """An HV3 and an EV3 share TYPE code 0111 and a length, so only this
+        nibble says which a record holds: the decoder names SCO where it read
+        an HV3 and eSCO where the CRC settled an EV3. Both are honest, and
+        ACL over that code is not."""
+        voice = b"\x11" * 30
+        for nibble in (0x10, 0x20):
+            with self.subTest(transport=nibble):
+                self.assertEqual([], self.check(
+                    record(voice, transport_rate=nibble,
+                           header=bt_header(HV3))))
+        self.assertProblem(
+            "transport ACL on a HV3/EV3/3-EV3 payload, whose transport is "
+            "SCO or eSCO",
+            record(voice, transport_rate=0x30, header=bt_header(HV3)))
+
+    def test_a_payload_that_names_no_transport_is_accepted(self):
+        """What a libbtbb from before SqueakyFloors/libbtbb#133 recorded for
+        every packet, so a run against an older --libbtbb-ref is not failed
+        for a field that library never filled in."""
+        self.assertEqual([], self.check(
+            record(dh1_payload(), transport_rate=0x00, header=bt_header(DH1))))
+
     def test_any_transport_leaves_the_nibble_alone_and_keeps_the_rate(self):
-        """The nibble comes from the header, so a capture whose headers do
-        not decode carries whatever the bits gave; the rate does not."""
+        """The type the nibble is checked against comes from the header, so a
+        capture whose headers do not decode carries whatever the bits gave;
+        the rate does not."""
         self.assertEqual([], self.check(record(transport_rate=0x30),
                                         transport_checks=False))
+        self.assertEqual([], self.check(
+            record(dh1_payload(), transport_rate=0x10, header=bt_header(DH1)),
+            transport_checks=False))
         self.assertProblem("rate 1", record(transport_rate=0x01),
                            transport_checks=False)
+
+    def test_a_reference_uap_of_zero_is_an_address_and_not_an_absence(self):
+        """0x00 is a UAP a device really has, and the record says so with its
+        own flag rather than by the value: libbtbb read the value instead and
+        a piconet given 0x00 never reached its clock search
+        (SqueakyFloors/libbtbb#135, the fork's #1125). So a record carrying
+        0x00 with the flag set is checked against 0x00 like any other, and
+        0xff is the one value that means the capture had none."""
+        zero = record(ref_uap=0x00, header=bt_header(POLL, uap=0x00))
+        self.assertEqual([], self.check(zero))
+        self.assertEqual([], self.check(zero, reference_uap=0x00))
+        self.assertEqual(
+            [], self.check(zero, reference_uap=0x00, min_reference_uap=1))
+        self.assertProblem("reference UAP is not 0d", zero, reference_uap=UAP)
+        # And it is the HEC's own answer, not a value the check skipped.
+        self.assertProblem("the header's HEC gives UAP",
+                           record(ref_uap=0x00, header=bt_header(POLL, uap=UAP)))
 
     def test_corrected_bit_counts_outside_the_codes_are_problems(self):
         self.assertProblem("11 corrected header bits", record(corrected_header=11))
@@ -364,10 +521,11 @@ class Consistency(unittest.TestCase):
                                    GOOD_FLAGS, b"")
                 for index, when in enumerate(times)]
 
-    def test_the_timestamps_are_reported_and_not_judged(self):
-        # A packet caught as the capture clock's period count ticks over can
-        # carry a time a whole period out in either direction, so a bound on
-        # these would fail a good capture; the summary says what they did.
+    def test_the_timestamps_are_reported_whether_or_not_they_are_judged(self):
+        # The bounds are a caller's to ask for (RecordTimes above covers
+        # them); the summary line is there either way, and says how many
+        # times a capture carried, over what span, and the largest step
+        # backwards, so a run record holds them for a person to read.
         records = self.stamped(2_000_000_000, 1_000_000_000, 3_000_000_000)
         self.assertEqual([], bredrrecord.problems(records))
         line, = [line for line in bredrrecord.summary(records, "x.pcap")
@@ -462,6 +620,28 @@ class CommandLine(unittest.TestCase):
         path = self.write("one.pcap", pcap([record()]))
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             self.run_main(path, "--types", "DH9")
+
+    def test_a_capture_spanning_longer_than_its_run_fails(self):
+        """The forward half of SqueakyFloors/ubertooth#1195, read out of a
+        file: a 15 s follow whose records spanned 191.3 s."""
+        path = self.write("long.pcap", pcap(
+            [record(), record(), record()],
+            times=[0, 10 * S, int(191.3 * S)]))
+        code, output = self.run_main(path, "--max-span-s", "20")
+        self.assertEqual(1, code)
+        self.assertIn("the records span 191.3 s, more than the 20.0 s", output)
+        # The same file passes unbounded, so it is the bound that fails it.
+        self.assertEqual(0, self.run_main(path)[0])
+
+    def test_a_capture_whose_times_step_backwards_fails(self):
+        """The backward half: a record timed before the record ahead of it."""
+        path = self.write("back.pcap", pcap(
+            [record(), record(), record()],
+            times=[0, int(41.16 * S), 1_000_000]))
+        code, output = self.run_main(path, "--max-backward-step-us", "2000")
+        self.assertEqual(1, code)
+        self.assertIn("before the record ahead of it", output)
+        self.assertEqual(0, self.run_main(path)[0])
 
     def test_it_runs_as_a_script_from_any_directory(self):
         path = self.write("one.pcap", pcap([record()]))
