@@ -17,6 +17,13 @@ runs in order down the same prompt, and the session ends with `exit`, because
 the board has to be flashed with `btbr` before it and back to the application
 image after it: a second session would cost two more flashes.
 
+The same module answers a second command, which needs no board and no image::
+
+    python btbrconsole.py options
+
+That one runs the tool's own command line a few times over, for the option
+values it must refuse before it goes looking for a board at all.
+
 What the session checks, and why each answer is knowable in advance:
 
 - **start**: the board was opened, the `btbr` image answered the requests that
@@ -27,11 +34,38 @@ What the session checks, and why each answer is knowable in advance:
   one. The tool is describing itself, so no board state is involved.
 - **no-such-command**, **no-help**, **bad-address**, **page-no-address**: the
   safe half of malformed input, and the only half a shared bench allows. A
-  word that is no command, `?` on a word that is no command, an address that
-  is empty, not hex, or too long, and `page` with no address at all: each is
-  one `error:` line, the prompt stays up, and no radio is touched.
+  word that is no command, `?` on a word that is no command, an address the
+  prompt will not take -- empty, not hex, too long, shorter than six bytes,
+  with the colons in the wrong places, with another separator, or in one of
+  the forms Python would read as a number -- and `page` with no address at
+  all: each is one `error:` line, the prompt stays up, and no radio is
+  touched.
 - **set-address**: `bdaddr` takes an address and echoes the sync word it
   derived.
+- **zero-address**: an address whose first byte is zero is echoed with its
+  twelve digits, so what the console prints is an address the prompt takes
+  back (firmware `Set bdaddr %012llx`).
+- **tx-refusals**: the `tx` command lines the host refuses before anything
+  reaches the board -- no format, a format that is none, a length or a count
+  the format will not carry, a length or a count that is not a number, a
+  payload that is not hex or does not match the length, too many words -- and
+  a well-formed `tx` with no connection up, which is refused for having no
+  transmit slot to use. Each is one `error:` line with the prompt left up and
+  nothing printed on the capture stream.
+- **tx-formats**: with the connection up, each chosen format is transmitted
+  and the line the tool prints is compared with the packet this module builds
+  for itself from the format table in the man page: the data bytes, the
+  counted fill, the payload header the host writes, and a `dv`'s voice field,
+  whose fill starts at `0xa0` so the boundary between the two fields is
+  visible in the bytes alone.
+- **tx-link**: the connection carries on after those runs. New capture
+  records arrive, and none of the board's own "packet not sent" lines appeared
+  while the runs were on the air.
+- **page-idle**: the connection is held, then `idle` ends it.
+- **page-repeat**: the peer is paged again, and the page completes and
+  exchanges its name again. A pager that reported a connection its page
+  response never earned carries nothing and loses the attempt to link
+  supervision, so repeating the page is what says the answer was its own.
 - **inquiry**: the registered ESP32 Classic peer is discoverable and
   connectable from boot (docs/hardware.md), so an inquiry has to hear it. Its
   BD_ADDR is in the registry and its name carries its own LAP, so the address
@@ -45,12 +79,31 @@ What the session checks, and why each answer is knowable in advance:
   not one per packet. These controllers ask for power control several times a
   second, so a regression to one line per packet is loud.
 - **idle**: `idle` stops the running command, the firmware reports it, and
-  the prompt comes back. It runs after the inquiry and again after the page.
+  the prompt comes back. It runs after the inquiry, after the page, and after
+  each of the scan modes.
+- **scan-modes**: `page_scan` and `inquiry_scan` each start, report the board
+  in that state, and go back to standby on `idle`. Nothing on this bench
+  pages or inquires on demand, so what is checked is that the mode runs and
+  returns, not that it answers one.
+- **scheduler-quiet**: none of the board's own refusal lines appeared in the
+  whole session -- a transmit it could not put on the air, a slot or a window
+  it could not schedule, an answer to a page or an inquiry it did not send.
+  On a healthy board there are none, and each has deterministic firmware
+  tests of its own in the fork (see the test's section in `docs/tests.md`);
+  what this says is that none of them happened here, which is what makes the
+  rest of the session's results mean what they say.
+- **no-detach**: this end did not hang up on a peer that took the connection.
+  The tool detaches when the peer refuses the connection request the setup
+  leads to, and closes the link at once rather than waiting out link
+  supervision; a peer that accepts must see neither.
 - **streams**: the capture is on standard output and the progress on standard
   error, with nothing of either on the other.
 - **page-no-answer** (comprehensive): paging an address nothing answers ends
   in `paging timeout` and no connection, which is the one missing-response
   path a bench can produce safely.
+
+Comprehensive coverage also transmits more of the formats and pages the peer
+once more.
 
 Standard output carries the tool's own standard output unchanged, which is the
 packets it decoded; the report, and the tool's standard error marked with
@@ -114,6 +167,10 @@ DEFAULT_PAGE_S = 30.0
 # How long the connection is held once it is up, so the LMP exchange and the
 # peer's own requests reach the capture.
 DEFAULT_HOLD_S = 10.0
+# Pages after the first, which say that a page completes every time and not
+# once. Each costs the page and a little, and nothing is held on them.
+PAGE_REPEATS = 1
+PAGE_REPEATS_COMPREHENSIVE = 2
 # A page nothing answers: the firmware allows one attempt of about 45 s and
 # then reports the timeout (host/doc/ubertooth-btbr.md, PROMPT COMMANDS).
 DEFAULT_NO_ANSWER_S = 75.0
@@ -192,24 +249,228 @@ CAPTURE_LINE = re.compile(r"(?m)\d\d:\d\d:\d\d [A-Z0-9]")
 # a line of what `?` printed.
 NOT_A_RECORD = re.compile(r"(?m)^(?!\d\d:\d\d:\d\d [A-Z0-9])(?P<line>.+)$")
 
-# A word that is no command and no address, and three addresses that are not
-# ones. Nothing on the bench answers to any of them and none reaches the
-# radio. An address shorter than six bytes is deliberately absent: the tool
-# takes one today and acts on a different address (fork issue 1075), so a case
-# here would pin that rather than check it.
+# A word that is no command, and the addresses that are not ones. Nothing on
+# the bench answers to any of them and none reaches the radio. The prompt
+# takes six bytes written with the five colons or with none, and nothing else:
+# a word of another length names a different address from the one that was
+# typed, and so does anything Python's int() would read as a number
+# (ubertooth-btbr.md, DIAGNOSTICS; fork #1075, which is where the short one
+# comes from -- the tool used to take it and act on 00:00:11:22:33).
 BAD_WORD = "wibble"
-BAD_ADDRESSES = ("", "zzz", "11:22:33:44:55:66:77")
+BAD_ADDRESSES = ("", "zzz", "11:22:33:44:55:66:77", "11:22:33",
+                 "11:2233:4455:66", "11-22-33-44-55-66",
+                 "0x112233445566", "11_2233445566")
 # The address to set the board to. It is not `11:22:33:44:55:66`, which the
 # tool gives the board itself at startup (host/doc/ubertooth-btbr.md,
 # DESCRIPTION), so the check is a change rather than a rewrite of the same
 # value.
 TEST_ADDRESS = "22:33:44:55:66:77"
+# An address whose first byte is zero. The console prints an address as twelve
+# hex digits, so this one must come back as `001122334455`: an echo that
+# dropped the leading zeros would be an address the prompt will not take back,
+# and the same print writes the address a page scan or a monitor read off the
+# air (firmware btphy.c, page_scan_state.c, monitor1_state.c).
+ZERO_ADDRESS = "00:11:22:33:44:55"
+ZERO_ADDRESS_DIGITS = "001122334455"
 # What the no-answer check pages is derived from the registered peer instead
 # of being a constant: a page is addressed by the access code the LAP gives,
 # and a constant would sooner or later be some bench's peer. The low byte of
 # the peer's own address is inverted, which changes the LAP and so the access
 # code, and leaves an address nothing is listening on.
 _NO_DEVICE_MASK = 0xFF
+
+# ---------------------------------------------------------------------------
+# Transmitting chosen packet types
+
+# The line `tx` prints on the capture stream: the packet the board was asked
+# for, which is the only record of what a receiver's decode has to be compared
+# with (ubertooth-btbr.md, TRANSMITTING CHOSEN PACKET TYPES). The board reports
+# nothing back about a packet it sent, so this line says what was asked for
+# and not that it reached the air.
+TX_PKT = re.compile(
+    r"(?m)TX pkt: (?P<format>\S+) len=(?P<length>\d+) count=(?P<count>\d+) "
+    r"data=(?P<data>[0-9a-f]*) payload=(?P<payload>[0-9a-f]*)")
+
+
+@dataclass(frozen=True)
+class TxFormat:
+    """What one basic-rate format carries, for building the expected packet.
+
+    ``header`` is how many bytes of payload header the host writes, ``voice``
+    how many voice bytes come before it, and ``least``/``most`` the data bytes
+    the format will carry. Read from the man page's own table
+    (ubertooth-btbr.md, TRANSMITTING CHOSEN PACKET TYPES), deliberately as a
+    second copy: the fork compares its host table, its firmware table and its
+    man page with each other, and this one is what says the tool agrees with
+    the page a user acts on.
+    """
+
+    least: int
+    most: int
+    header: int
+    voice: int
+
+
+TX_FORMATS = {
+    "dm1": TxFormat(0, 17, 1, 0),
+    "dh1": TxFormat(0, 27, 1, 0),
+    "dh5": TxFormat(0, 339, 2, 0),
+    "aux1": TxFormat(0, 29, 1, 0),
+    "dv": TxFormat(0, 9, 1, 10),
+    "hv3": TxFormat(30, 30, 0, 0),
+    "ev3": TxFormat(1, 30, 0, 0),
+}
+# The payload header the host writes over the data: the data length, then the
+# flow bit and the logical link identifier of an L2CAP packet's first fragment
+# (host/python/ubtbr/ubtbr/btctl.py, tx_payload).
+TX_FLOW = 1
+TX_LLID_L2CAP_START = 2
+# Where each counted fill starts. The data counts from zero and a `dv`'s voice
+# field from 0xa0, so a decoder can see where the voice field ends from the
+# bytes alone, without being told how long either field is.
+TX_DATA_BASE = 0x00
+TX_VOICE_BASE = 0xA0
+
+# The transmit runs, as `tx` command lines with the count of slots each
+# occupies. One run at a time waits for a slot, so the driver waits for each
+# line before sending the next and then leaves TX_SETTLE_S for the slots to
+# run: a `tx` sent while one is still waiting is refused by the board, which
+# would be a refusal this check caused rather than one it found.
+TX_RUNS = (
+    # The two asynchronous formats a connection carries anyway, at a length of
+    # our choosing, and the counted pattern in both.
+    "dm1 17",
+    "dh1 27 2",
+    # The voice format, whose two fields a decoder has to tell apart.
+    "dv",
+    # No payload header and no voice field, so the payload is the data alone.
+    "ev3 3 4",
+)
+TX_RUNS_COMPREHENSIVE = (
+    # A `dh1` with no CRC, and a fixed-length synchronous format.
+    "aux1 29",
+    "hv3",
+    # The longest format, two packets of five slots each.
+    "dh5 339 2",
+    # A payload given by hand rather than counted.
+    "dm1 4 1 deadbeef",
+    # The clearest view of the voice boundary: the data is not counted, so the
+    # counted bytes that are there are the voice field and nothing else.
+    "dv 3 1 aabbcc",
+)
+# The most slots a run may ask for, so the count a format allows is this over
+# the slots one of its packets fills (ubertooth-btbr.md: 400 of a one-slot
+# format, 80 of a five-slot `dh5`).
+TX_MAX_SLOTS = 400
+# How long the slots of a run may take before the next `tx` is sent. The
+# longest run allowed is 400 slots at 625 us, about 250 ms.
+TX_SETTLE_S = 0.4
+# How long a new capture record may take to arrive after the runs. The link is
+# up and the central polls the peripheral every slot pair, so a record arrives
+# in milliseconds; this is the backstop.
+TX_LINK_S = 5.0
+
+# The `tx` command lines the host refuses, and the line each is refused with.
+# None of them reaches the board: the first nine are refused while the command
+# line is read, and the last when the prompt finds no connection to transmit
+# on. Each is one `error:` line with the prompt left up.
+TX_REFUSALS = (
+    ("tx", "error: tx needs a format: "),
+    ("tx nosuch", "error: no such format 'nosuch'; one of "),
+    ("tx dm1 18", "error: dm1 carries 0 to 17 data bytes, not 18"),
+    ("tx ev3 0", "error: ev3 carries 1 to 30 data bytes, not 0"),
+    ("tx dm1 x", "error: length must be a number (got x)"),
+    ("tx dh5 339 81", "error: count must be 1 to 80 for dh5 (got 81)"),
+    ("tx dm1 2 x", "error: count must be a number (got x)"),
+    ("tx dm1 4 1 deadbee",
+     "error: payload must be hex digits, an even number of them "
+     "(got deadbee)"),
+    ("tx dm1 4 1 deadbeefaa",
+     "error: payload of 5 bytes where the length says 4"),
+    ("tx dm1 1 1 00 extra",
+     "error: tx takes a format, a length, a count and a payload (got 5 "
+     "words)"),
+    # Well formed, and refused for the one reason left: there is no transmit
+    # slot without a connection.
+    ("tx dm1 4", "error: tx needs a connection: "),
+)
+
+# ---------------------------------------------------------------------------
+# The scan modes, and the lines the board and the tool print for them
+
+# Each is (prompt command, the tool's line when it starts, the board's state,
+# the tool's line when it has gone back to standby). Nothing on this bench
+# makes a page or an inquiry on demand, so a scan is started, seen to be
+# running, and stopped.
+SCAN_MODES = (
+    ("page_scan", "Starting BTCtlPageScanCmd", "State STANDBY -> PAGE_SCAN",
+     "Page Scan state Ready", "Page scan done"),
+    ("inquiry_scan", "Starting BTCtlInquiryScanCmd",
+     "State STANDBY -> INQUIRY_SCAN", "Inquiry Scan state Ready",
+     "Inquiry scan done"),
+)
+# How long a scan is left running before `idle` stops it.
+SCAN_HOLD_S = 2.0
+
+# The board's own refusal lines: a transmit it could not put on the air, a
+# slot or a window it could not schedule, and an answer to a page or an
+# inquiry it did not send (firmware/btbr/src/btphy/*.c). A healthy board
+# prints none of them, and each has deterministic firmware tests of its own.
+BOARD_REFUSALS = (
+    "TX: cannot schedule transmit, packet not sent",
+    "TX: cannot schedule start of transmission, packet not sent",
+    "TX: cannot schedule end of transmission, packet not sent",
+    "TX: synthesizer not locked, packet not sent",
+    "RX: cannot schedule receive",
+    "RX: cannot schedule rest of decode, packet lost",
+    "scan: cannot schedule scan",
+    "page: cannot schedule start",
+    "inquiry: cannot schedule start",
+    "page answer not sent, scanning again",
+    "inquiry response not sent, scanning again",
+    "Tx packet already waiting, send this one after it",
+    "Tx packet queue full",
+)
+# A connection that came up and carried nothing: the pager goes back to its
+# page train and says so. That is what a connection reported on an answer the
+# board never earned looks like from outside (fork #1168).
+PAGING_RESUMED = "Paging resumed"
+# This end hanging up: the peer refused the connection request the setup leads
+# to, so the link is closed at once rather than left to link supervision
+# (ubertooth-btbr.md, LIMITATIONS; host/python/ubtbr/ubtbr/lmp.py).
+DECLINED = "closing the link"
+LMP_DETACH_SENT = re.compile(r"(?m)lmp_tx.*LMP_DETACH")
+PEER_DETACHED = "Peer detached"
+
+# ---------------------------------------------------------------------------
+# The option values the command line refuses before it looks for a board
+
+# An index no bench has a board at. The index path names a board without
+# reading any serial, so it disturbs none of the attached boards -- unlike a
+# -U serial, which has to open each of them to read its own.
+NO_SUCH_INDEX = "99"
+# Each is (the words after the tool's name, the line it must be refused with).
+# -U is given first in every one, so what each shows is the order: the value
+# is refused, and the board the -U names is never looked for.
+OPTION_REFUSALS = (
+    (("-U", NO_SUCH_INDEX, "-f", "64"), "error: -f must be 0-63 (got 64)"),
+    (("-U", NO_SUCH_INDEX, "-f", "bad"), "error: -f must be 0-63 (got bad)"),
+    (("-U", NO_SUCH_INDEX, "-b", "4"), "error: -b must be 0-3 (got 4)"),
+    (("-U", NO_SUCH_INDEX, "-b", "-1"), "error: -b must be 0-3 (got -1)"),
+)
+# The same -U on its own, which must reach the device stage: that is what says
+# the index above names no board, and so that the refusals of it are refusals
+# of the value and not of the selection. Either line will do -- the tool looks
+# for the board after it imports the package a session needs, so a host
+# without that package stops one step earlier.
+OPTION_CONTROL = ("-U", NO_SUCH_INDEX)
+OPTION_CONTROL_LINES = (
+    f"error: no Ubertooth at index {NO_SUCH_INDEX}",
+    "error: no Ubertooth devices found",
+    "error: could not start the session: No module named 'usb1'",
+)
+# One command line of this kind, which prints one line and exits.
+OPTION_TIMEOUT_S = 20.0
 
 
 class ConsoleError(RuntimeError):
@@ -475,6 +736,42 @@ def no_device_address(peer: str) -> str:
     return ":".join(parts[:-1] + [f"{low:02X}"])
 
 
+def counted_fill(count: int, base: int = TX_DATA_BASE) -> bytes:
+    """``count`` bytes counting up from ``base``, as a `tx` payload is filled."""
+    return bytes((base + index) & 0xFF for index in range(count))
+
+
+def tx_payload(name: str, data: bytes) -> bytes:
+    """The payload the named format goes on the air with, built from scratch.
+
+    The voice field where the format has one, then the payload header where it
+    has one, then the data. The board adds the CRC, so that is not here.
+    """
+    fmt = TX_FORMATS[name]
+    payload = counted_fill(fmt.voice, TX_VOICE_BASE)
+    if fmt.header:
+        word = (len(data) << 3) | (TX_FLOW << 2) | TX_LLID_L2CAP_START
+        payload += word.to_bytes(fmt.header, "little")
+    return payload + data
+
+
+def tx_expectation(line: str) -> tuple[str, int, int, bytes, bytes]:
+    """What the tool must print for one `tx` command line.
+
+    Returns the format, the data length, the count, the data bytes and the
+    whole payload, worked out here from the format table and the defaults the
+    man page gives: the length defaults to the format's maximum and the count
+    to 1, and data not given by hand is the counted pattern.
+    """
+    words = line.split()
+    name = words[0]
+    fmt = TX_FORMATS[name]
+    length = int(words[1]) if len(words) > 1 else fmt.most
+    count = int(words[2]) if len(words) > 2 else 1
+    data = bytes.fromhex(words[3]) if len(words) > 3 else counted_fill(length)
+    return name, length, count, data, tx_payload(name, data)
+
+
 def _record(text: str, match: re.Match) -> str:
     """The whole capture line a match landed on, trimmed for a report line.
 
@@ -505,7 +802,15 @@ class Session:
     hold_seconds: float
     no_answer_seconds: float
     report: Callable[[str], None]
+    comprehensive: bool = False
     opcodes: list[str] = field(default_factory=list)
+    # Where the page's own output starts, so the checks that read the
+    # connection -- the transmit runs and the records that follow them -- read
+    # that connection and not an earlier command's output.
+    page_mark: int = 0
+    # When the connection came up, so the hold that follows the transmit runs
+    # is the hold and not the hold on top of them.
+    page_started: float = 0.0
 
     @property
     def peer_bdaddr(self) -> str:
@@ -597,6 +902,8 @@ def check_bad_address(session: Session) -> str:
                                  BAD_ADDRESS.format(word=word))
         if reason:
             return reason
+    session.report(f"check bad-address: {len(BAD_ADDRESSES)} addresses the "
+                   "prompt will not take refused, prompt up")
     return ""
 
 
@@ -626,6 +933,199 @@ def check_set_address(session: Session) -> str:
         return f"bdaddr {TEST_ADDRESS} set {match['address']}, not {wanted}"
     session.report(f"check set-address: {TEST_ADDRESS} set in {took:.1f} s, "
                    f"sync word derived")
+    return ""
+
+
+def check_zero_address(session: Session) -> str:
+    """An address whose first byte is zero keeps its twelve digits.
+
+    The console prints an address as twelve hex digits so that what a user
+    reads can be typed back at the prompt, which takes six bytes and nothing
+    shorter. An echo that dropped the leading zeros would name a different
+    address from the one that was set.
+    """
+    console = session.console
+    mark = console.mark()
+    console.send(f"bdaddr {ZERO_ADDRESS}")
+    match, took = console.wait(re.compile(SET_BDADDR), REPLY_TIMEOUT_S,
+                               since=mark)
+    if match is None:
+        return f"bdaddr {ZERO_ADDRESS} did not report the address it set"
+    if match["address"] != ZERO_ADDRESS_DIGITS:
+        return (f"bdaddr {ZERO_ADDRESS} echoed {match['address']}, not "
+                f"{ZERO_ADDRESS_DIGITS}: an address the prompt will not take "
+                "back")
+    session.report(f"check zero-address: {ZERO_ADDRESS} echoed as "
+                   f"{ZERO_ADDRESS_DIGITS} in {took:.1f} s, twelve digits")
+    return ""
+
+
+def check_tx_refusals(session: Session) -> str:
+    """The `tx` command lines the host refuses, before the board is asked.
+
+    Nine are refused while the command line is read and the last when the
+    prompt finds no connection to transmit on, which is the state the session
+    is in here: the page comes later. None of them may print a packet on the
+    capture stream.
+    """
+    console = session.console
+    out_mark = console.mark("stdout")
+    for line, expected in TX_REFUSALS:
+        reason = session.refused("tx-refusals", line, expected)
+        if reason:
+            return reason
+    printed = TX_PKT.search(console.text("stdout"), out_mark)
+    if printed is not None:
+        return (f"a refused tx printed a packet on the capture stream: "
+                f"{printed[0]!r}")
+    session.report(f"check tx-refusals: {len(TX_REFUSALS)} tx command lines "
+                   "refused, prompt up, no packet printed")
+    return ""
+
+
+def check_tx_formats(session: Session) -> str:
+    """Each chosen format is transmitted, and the packet is the one asked for.
+
+    The line the tool prints is the only record of what a receiver's decode
+    has to be compared with, since the board reports nothing back about a
+    packet it sent. It is compared here with the packet this module builds
+    from the man page's format table: the data length, the counted fill, the
+    payload header the host writes, and the voice field of a `dv`, whose own
+    fill starts at 0xa0 so that the boundary between the two fields is
+    visible in the bytes alone.
+    """
+    console = session.console
+    runs = TX_RUNS + (TX_RUNS_COMPREHENSIVE if session.comprehensive else ())
+    for line in runs:
+        name, length, count, data, payload = tx_expectation(line)
+        mark = console.mark("stdout")
+        err_mark = console.mark()
+        console.send(f"tx {line}")
+        printed, _ = console.wait(TX_PKT, REPLY_TIMEOUT_S, stream="stdout",
+                                  since=mark)
+        if printed is None:
+            refused = re.search(r"(?m)^error: .*$", console.text()[err_mark:])
+            return (f"tx {line} printed no packet line within "
+                    f"{REPLY_TIMEOUT_S:g}s"
+                    + (f"; the tool said: {refused[0]}" if refused else ""))
+        found = (printed["format"], int(printed["length"]),
+                 int(printed["count"]), printed["data"], printed["payload"])
+        wanted = (name, length, count, data.hex(), payload.hex())
+        if found != wanted:
+            return (f"tx {line} reported {found}, not {wanted}: the packet the "
+                    "board was asked for is not the one the format gives")
+        # One run at a time waits for a slot, so the slots of this one are
+        # left to run before the next is sent.
+        time.sleep(TX_SETTLE_S)
+    session.report(f"check tx-formats: {len(runs)} run(s) transmitted, each "
+                   "the packet its format gives: "
+                   + ", ".join(line.split()[0] for line in runs))
+    return ""
+
+
+def check_tx_link(session: Session) -> str:
+    """The connection carries on after the transmit runs.
+
+    A transmit slot the board could not put on the air used to cost the link
+    the repeat it was carrying and the acknowledgment with it (fork #1166),
+    and the board says on its console when a slot went nowhere. Neither can be
+    produced on a healthy board, so what a bench can say is this: no slot was
+    reported lost, and the link is still carrying packets afterwards.
+    """
+    console = session.console
+    said = [line for line in BOARD_REFUSALS if line in console.text()]
+    if said:
+        return ("the board reported a slot it could not put on the air: "
+                + "; ".join(said))
+    mark = console.mark("stdout")
+    record, took = console.wait(CAPTURE_LINE, TX_LINK_S, stream="stdout",
+                                since=mark)
+    if record is None:
+        return (f"no packet arrived in the {TX_LINK_S:g}s after the transmit "
+                "runs: the connection did not carry on")
+    session.report(f"check tx-link: the link carried a packet {took:.1f} s "
+                   "after the runs, and no slot was reported not sent")
+    return ""
+
+
+def check_scan_modes(session: Session) -> str:
+    """`page_scan` and `inquiry_scan` each start, run, and return to standby.
+
+    Nothing on this bench pages or inquires on demand, so neither mode is
+    asked to answer one: what is checked is that the board enters the state,
+    the tool reports it ready, and `idle` brings it back. A scheduler that ran
+    out of room for a scan window reports it and goes back to scanning, which
+    a healthy board never does -- the scheduler-quiet check below is what says
+    it did not happen here.
+    """
+    console = session.console
+    for command, starting, state, ready, done in SCAN_MODES:
+        mark = console.mark()
+        console.send(command)
+        begun, _ = console.wait(starting, REPLY_TIMEOUT_S, since=mark)
+        if begun is None:
+            return f"{command} did not start ({starting!r} not printed)"
+        entered, _ = console.wait(state, REPLY_TIMEOUT_S, since=begun.end())
+        if entered is None:
+            return f"{command} started but the board did not report {state!r}"
+        reported, _ = console.wait(ready, REPLY_TIMEOUT_S, since=begun.end())
+        if reported is None:
+            return f"{command} reached {state!r} but not {ready!r}"
+        # Left running, so the mode is one that keeps scanning rather than one
+        # that starts and stops.
+        time.sleep(SCAN_HOLD_S)
+        reason = session.idle(f"{command}-idle", done)
+        if reason:
+            return reason
+    session.report("check scan-modes: "
+                   + ", ".join(command for command, *_rest in SCAN_MODES)
+                   + " each started, held, and returned to standby")
+    return ""
+
+
+def check_scheduler_quiet(session: Session) -> str:
+    """The board refused nothing it was asked to put on the air.
+
+    Every line here is one the firmware prints when a slot, a window, or an
+    answer to a page or an inquiry could not be scheduled or did not reach the
+    air. None of them can be produced on a healthy board without an image
+    patched to drop a transmit, so each is covered by deterministic firmware
+    tests in the fork; this check is what says none of them happened in this
+    session, which is what the page, transmit and scan results above rest on.
+    """
+    text = session.console.text()
+    said = sorted(line for line in BOARD_REFUSALS if line in text)
+    if said:
+        return ("the board refused something it was asked to send: "
+                + "; ".join(said))
+    if PAGING_RESUMED in text:
+        return (f"{PAGING_RESUMED!r}: a connection came up, carried nothing, "
+                "and link supervision ended it")
+    session.report(f"check scheduler-quiet: none of the {len(BOARD_REFUSALS)} "
+                   "refusal lines the board can print, and no page resumed")
+    return ""
+
+
+def check_no_detach(session: Session) -> str:
+    """This end did not hang up on a peer that took the connection.
+
+    The tool hangs up when the peer refuses the connection request the setup
+    leads to: that peer is declining the connection itself, so the link is
+    closed at once instead of being left for link supervision. A peer that
+    accepts must see neither the warning nor the detach. The peer's own detach
+    is its business and is reported rather than failed; a peer that hung up
+    mid-session would already have failed the checks that needed the link.
+    """
+    text = session.console.text()
+    if DECLINED in text:
+        return (f"this end hung up on the peer ({DECLINED!r}): the peer "
+                "refused a request the connection opens by making")
+    sent = LMP_DETACH_SENT.search(text)
+    if sent is not None:
+        return f"this end sent a detach to a peer that took the connection: {sent[0]!r}"
+    note = "" if PEER_DETACHED not in text else "; the peer hung up"
+    session.report("check no-detach: the peer took the connection and this "
+                   f"end did not hang up{note}")
     return ""
 
 
@@ -670,8 +1170,12 @@ def check_inquiry(session: Session) -> str:
     return session.idle("inquiry-idle", INQUIRY_DONE)
 
 
-def check_page(session: Session) -> str:
-    """Paging the peer brings a connection up and opens it with LMP."""
+def _page_once(session: Session, label: str) -> str:
+    """Page the peer, and see the connection up and the peer name it.
+
+    Leaves the connection running: what ends it is the `idle` of the check
+    that follows. Returns a failure reason, or "".
+    """
     console = session.console
     out_mark, err_mark = console.mark("stdout"), console.mark()
     console.send(f"page {session.peer_address}")
@@ -690,19 +1194,74 @@ def check_page(session: Session) -> str:
     if done is None:
         return (f"the connection came up but the LMP exchange did not reach "
                 f"{LMP_COMPLETE!r} in {REPLY_TIMEOUT_S:g}s")
+    # A connection reported on an answer the board never earned carries
+    # nothing, and the pager goes back to its page train when link supervision
+    # ends it. That is the one thing a bench can see of a false connection
+    # (fork #1168), so it is read here rather than left to the whole session.
+    resumed, _ = console.wait(PAGING_RESUMED, 0.0, since=central.end())
+    if resumed is not None:
+        return (f"the connection was reported and then {PAGING_RESUMED!r}: it "
+                "carried nothing and link supervision ended it")
+    session.page_mark = out_mark
+    session.page_started = _now()
     session.report(
-        f"check page: connected to {session.peer_address} in {took:.1f} s, "
+        f"check {label}: connected to {session.peer_address} in {took:.1f} s, "
         f"lt_addr={ready['lt_addr']}, LMP setup complete")
-    reason = _check_peer_named(session, out_mark)
-    if reason:
-        return reason
-    # The link is held so the peer's own requests reach the capture, which is
-    # what lmp-unhandled below reads.
-    time.sleep(session.hold_seconds)
+    return _check_peer_named(session, out_mark, f"{label}-peer-name")
+
+
+def check_page(session: Session) -> str:
+    """Paging the peer brings a connection up and opens it with LMP.
+
+    The connection is left up: the transmit runs below need it, and the hold
+    and the `idle` that end it are a check of their own.
+    """
+    return _page_once(session, "page")
+
+
+def check_page_idle(session: Session) -> str:
+    """The connection is held, and then `idle` ends it.
+
+    The link is held so the peer's own requests reach the capture, which is
+    what the unhandled-opcode check reads. The transmit runs before this one
+    have already held it for a few seconds, so what is left of the hold is
+    what is waited out here.
+    """
+    held = _now() - session.page_started if session.page_started else 0.0
+    left = max(0.0, session.hold_seconds - held)
+    if left:
+        time.sleep(left)
     return session.idle("page-idle", PAGING_DONE)
 
 
-def _check_peer_named(session: Session, out_mark: int) -> str:
+def check_page_repeat(session: Session) -> str:
+    """The peer is paged again, and the page completes again.
+
+    A pager that reported a connection its own page response never earned
+    carries nothing and loses the attempt (fork #1168, #1183), and a page that
+    lost its hop phase to a transmit the scheduler could not place went out
+    where the paged device had stopped listening (fork #1191). Neither can be
+    produced on a healthy board, and both cost a page: repeating it is what
+    says this bench's pages complete and exchange the peer's name every time,
+    not once.
+    """
+    repeats = (PAGE_REPEATS_COMPREHENSIVE if session.comprehensive
+               else PAGE_REPEATS)
+    for number in range(1, repeats + 1):
+        label = f"page-repeat-{number}" if repeats > 1 else "page-repeat"
+        reason = _page_once(session, label)
+        if reason:
+            return f"page {number} of {repeats} after the first: {reason}"
+        reason = session.idle(f"{label}-idle", PAGING_DONE)
+        if reason:
+            return reason
+    session.report(f"check page-repeat: {repeats} further page(s) completed "
+                   "and named the peer")
+    return ""
+
+
+def _check_peer_named(session: Session, out_mark: int,
+                      label: str = "page-peer-name") -> str:
     """The peer answered the name request with its own name, on the air."""
     wanted = " ".join(f"{byte:02x}" for byte in
                       session.peer_name.encode()[:NAME_BYTES_CHECKED])
@@ -713,7 +1272,7 @@ def _check_peer_named(session: Session, out_mark: int) -> str:
         return (f"no {LMP_NAME_RES} on the air carried the peer's name "
                 f"{session.peer_name!r} (first {NAME_BYTES_CHECKED} bytes "
                 f"{wanted})")
-    session.report(f"check page-peer-name: {LMP_NAME_RES} carried "
+    session.report(f"check {label}: {LMP_NAME_RES} carried "
                    f"{session.peer_name!r}")
     session.report(f"  record: {_record(session.console.text('stdout'), match)}")
     return ""
@@ -800,8 +1359,10 @@ def check_streams(session: Session) -> str:
 
 # In order down one prompt: the refusals first, because they need no radio and
 # a board that cannot answer them is not worth a radio window; then the
-# address, the inquiry and the page it is all about, and the streams check
-# last, over everything that was printed.
+# addresses, the inquiry, and the page it is all about, with the transmit runs
+# inside the connection the page brought up and the hold and `idle` that end
+# it after them; then the page again, the scan modes, and last the three
+# checks that read over everything that was printed.
 SMOKE_CHECKS = (
     ("help", check_help),
     ("help-one", check_help_one),
@@ -809,14 +1370,27 @@ SMOKE_CHECKS = (
     ("no-help", check_no_help),
     ("bad-address", check_bad_address),
     ("page-no-address", check_page_no_address),
+    ("tx-refusals", check_tx_refusals),
     ("set-address", check_set_address),
+    ("zero-address", check_zero_address),
     ("inquiry", check_inquiry),
     ("page", check_page),
+    ("tx-formats", check_tx_formats),
+    ("tx-link", check_tx_link),
+    ("page-idle", check_page_idle),
     ("lmp-unhandled", check_lmp_unhandled),
-    ("streams", check_streams),
+    ("page-repeat", check_page_repeat),
+    ("scan-modes", check_scan_modes),
 )
 # The missing-response path, which costs the firmware's whole page attempt.
 NO_ANSWER_CHECK = ("page-no-answer", check_page_no_answer)
+# Last, in this order: the two that read the whole session, then the streams
+# check, which reads both streams and is also where an overflow is caught.
+FINAL_CHECKS = (
+    ("scheduler-quiet", check_scheduler_quiet),
+    ("no-detach", check_no_detach),
+    ("streams", check_streams),
+)
 
 
 # What each check may wait out, in the module's windows above. A case sets its
@@ -827,8 +1401,13 @@ NO_ANSWER_CHECK = ("page-no-answer", check_page_no_answer)
 # entry and that no entry is left behind by one that went away, which is the
 # drift that would otherwise leave a new check outside the budget.
 def _check_seconds(label: str, *, inquiry: float, page: float, hold: float,
-                   no_answer: float) -> float:
+                   no_answer: float, comprehensive: bool) -> float:
     reply, idle = REPLY_TIMEOUT_S, IDLE_TIMEOUT_S
+    # The page itself: the start, the page, ready, LMP complete, the look for
+    # a page resumed, and the name on the air.
+    one_page = 5 * reply + page
+    runs = len(TX_RUNS) + (len(TX_RUNS_COMPREHENSIVE) if comprehensive else 0)
+    repeats = PAGE_REPEATS_COMPREHENSIVE if comprehensive else PAGE_REPEATS
     return {
         # The heading, then the prompt that says the list is whole.
         "help": 2 * reply,
@@ -836,26 +1415,42 @@ def _check_seconds(label: str, *, inquiry: float, page: float, hold: float,
         # The refusal, then the prompt after it.
         "no-such-command": 2 * reply,
         "no-help": 2 * reply,
-        # Three addresses, each a refusal and a prompt.
-        "bad-address": 3 * 2 * reply,
+        # Each address a refusal and a prompt.
+        "bad-address": len(BAD_ADDRESSES) * 2 * reply,
         # The refusal, the prompt, and the look for a paging line.
         "page-no-address": 2 * reply,
+        # Each command line a refusal and a prompt.
+        "tx-refusals": len(TX_REFUSALS) * 2 * reply,
         "set-address": reply,
+        "zero-address": reply,
         # The start, the peer's response, then what is left of the inquiry
         # window for its name, then idle: the stop line and the prompt.
         "inquiry": reply + 2 * inquiry + idle + reply,
-        # The start, the page, ready, LMP complete, the name on the air, the
-        # hold, then idle.
-        "page": 5 * reply + page + hold + idle + reply,
-        # Both read what is already there.
+        "page": one_page,
+        # Each run its own line, then the settle that leaves its slots to run.
+        "tx-formats": runs * (reply + TX_SETTLE_S),
+        # The look for a record, over the whole window.
+        "tx-link": TX_LINK_S,
+        # What is left of the hold, then idle: the stop line and the prompt.
+        "page-idle": hold + idle + reply,
+        # Each page again, each followed by its own idle.
+        "page-repeat": repeats * (one_page + idle + reply),
+        # Each mode: the start, the state, the ready line, the hold, then
+        # idle.
+        "scan-modes": len(SCAN_MODES) * (3 * reply + SCAN_HOLD_S + idle
+                                         + reply),
+        # These three read what is already there.
         "lmp-unhandled": 0.0,
+        "scheduler-quiet": 0.0,
+        "no-detach": 0.0,
         "streams": 0.0,
         # The start, the timeout, the look for a connection, and the done line.
         "page-no-answer": 3 * reply + no_answer,
     }[label]
 
 
-def worst_case_seconds(no_answer: bool, *, inquiry: float = DEFAULT_INQUIRY_S,
+def worst_case_seconds(comprehensive: bool, *,
+                       inquiry: float = DEFAULT_INQUIRY_S,
                        page: float = DEFAULT_PAGE_S,
                        hold: float = DEFAULT_HOLD_S,
                        no_answer_seconds: float = DEFAULT_NO_ANSWER_S) -> float:
@@ -867,22 +1462,17 @@ def worst_case_seconds(no_answer: bool, *, inquiry: float = DEFAULT_INQUIRY_S,
     return (
         START_TIMEOUT_S + 3 * REPLY_TIMEOUT_S
         + sum(_check_seconds(label, inquiry=inquiry, page=page, hold=hold,
-                             no_answer=no_answer_seconds)
-              for label, _check in checks(no_answer))
+                             no_answer=no_answer_seconds,
+                             comprehensive=comprehensive)
+              for label, _check in checks(comprehensive))
         + EXIT_TIMEOUT_S
     )
 
 
-def checks(no_answer: bool):
+def checks(comprehensive: bool):
     """The checks to run, in order."""
-    if not no_answer:
-        return SMOKE_CHECKS
-    # After the page that works and before the streams check, which reads
-    # everything printed.
-    checks_list = list(SMOKE_CHECKS)
-    checks_list.insert(checks_list.index(("streams", check_streams)),
-                       NO_ANSWER_CHECK)
-    return tuple(checks_list)
+    middle = (NO_ANSWER_CHECK,) if comprehensive else ()
+    return SMOKE_CHECKS + middle + FINAL_CHECKS
 
 
 # ---------------------------------------------------------------------------
@@ -926,8 +1516,9 @@ def run_session(arguments, out, err, environment) -> int:
         console, arguments.peer, arguments.peer_name,
         arguments.inquiry_seconds, arguments.page_seconds,
         arguments.hold_seconds, arguments.no_answer_seconds, report,
+        comprehensive=arguments.comprehensive,
     )
-    planned = checks(arguments.no_answer)
+    planned = checks(arguments.comprehensive)
     failures: list[str] = []
     failed_checks: list[str] = []
     decided: list[str] = []
@@ -1033,10 +1624,89 @@ def _end(console: Console, report, failures: list[str]) -> int:
     return status
 
 
+def run_options(out, err, environment) -> int:
+    """The option values the command line refuses before it looks for a board.
+
+    `-f` and `-b` are written to fields of the radio, six bits and two, and a
+    value outside the field is refused as the command line is read -- before
+    the package a session needs is imported, let alone a board opened
+    (ubertooth-btbr.md, DIAGNOSTICS). Each refusal here is given a `-U` that
+    names no board: the control run below shows that selector reaching the
+    device stage, so a run that answers with the value's own refusal instead
+    is one that checked the value first.
+
+    An index is used rather than a serial because the index path names a board
+    without reading any serial, so no board on a shared bench is opened by
+    this at all.
+    """
+    tool = tool_path(environment)
+    if tool is None:
+        out.write(f"SKIP: {TOOL} is installed only by "
+                  "run-suite --build --with-python\n")
+        out.flush()
+        return SKIP_EXIT
+
+    def report(line: str) -> None:
+        err.write(line + "\n")
+        err.flush()
+
+    report(f"btbr options: {tool}")
+    failures: list[str] = []
+    for words, expected in OPTION_REFUSALS + ((OPTION_CONTROL, None),):
+        argv = (tool, *words)
+        try:
+            finished = subprocess.run(argv, capture_output=True, text=True,
+                                      env=environment,
+                                      timeout=OPTION_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            failures.append(f"{' '.join(words)}: did not exit within "
+                            f"{OPTION_TIMEOUT_S:g}s")
+            continue
+        printed = (finished.stderr or "").strip()
+        label = " ".join(words)
+        if finished.returncode != 1:
+            failures.append(f"{label}: exited {finished.returncode}, not 1")
+            continue
+        if finished.stdout:
+            failures.append(f"{label}: printed on standard output: "
+                            f"{finished.stdout.strip()[:120]!r}")
+            continue
+        if expected is None:
+            # The control: this selector must reach the stage that looks for
+            # the board, so that the refusals above are refusals of the value.
+            if not any(line in printed for line in OPTION_CONTROL_LINES):
+                failures.append(
+                    f"{label}: said {printed[:120]!r}, none of the lines a "
+                    "selector that reaches the device stage gives")
+                continue
+            report(f"check option control: {label} reached the device stage: "
+                   f"{printed.splitlines()[0]}")
+            continue
+        if expected not in printed:
+            failures.append(f"{label}: said {printed[:120]!r}, not "
+                            f"{expected!r}")
+            continue
+        if any(line in printed for line in OPTION_CONTROL_LINES):
+            failures.append(
+                f"{label}: refused the value and went looking for the board "
+                f"as well: {printed[:160]!r}")
+            continue
+        report(f"check option {label}: {expected!r}, and no board looked for")
+    decided = len(OPTION_REFUSALS) + 1
+    report(f"options: {decided - len(failures)} passed of {decided}, "
+           f"{len(failures)} failed")
+    if failures:
+        for failure in failures:
+            report(f"check option: FAILED: {failure}")
+        return 1
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Drive the ubertooth-btbr console against a known peer")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("options")
     one = sub.add_parser("session")
     one.add_argument("--serial", required=True, help="the Ubertooth to open")
     one.add_argument("--peer", required=True, help="the peer's registered BD_ADDR")
@@ -1051,9 +1721,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     one.add_argument("--no-answer-seconds", type=float,
                     default=DEFAULT_NO_ANSWER_S,
                      help="how long a page nothing answers may take to time out")
-    one.add_argument("--no-answer", action="store_true",
-                     help="also page an address nothing answers")
+    one.add_argument("--comprehensive", action="store_true",
+                     help="the longer profile: more transmit formats, another "
+                          "page, and an address nothing answers")
     arguments = parser.parse_args(argv)
+    if arguments.command == "options":
+        return run_options(sys.stdout, sys.stderr, dict(os.environ))
     try:
         arguments.peer = esp32peer.normalize_address(arguments.peer)
     except esp32peer.PeerError as error:

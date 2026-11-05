@@ -2549,11 +2549,13 @@ not this test's.
 
 ## Classic btbr console
 
-**What it does.** Writes the `btbr` firmware image to the board, checks the
-board reports that image, drives one `ubertooth-btbr` console session against
-a registered ESP32 Classic peer, and always writes the application image back.
-It is the only test that puts a firmware image other than `bluetooth_rxtx` on
-a board, and the only one that runs `ubertooth-btbr`.
+**What it does.** Runs the tool's command line for the option values it must
+refuse before it looks for a board, writes the `btbr` firmware image to the
+board, checks the board reports that image, drives one `ubertooth-btbr`
+console session against a registered ESP32 Classic peer, and always writes the
+application image back. It is the only test that puts a firmware image other
+than `bluetooth_rxtx` on a board, and the only one that runs
+`ubertooth-btbr`.
 
 **Theory of operation.** `ubertooth-btbr` needs the separate `btbr` image and
 nothing else runs it, so a board is set up for one tool or for all the others.
@@ -2575,16 +2577,72 @@ something did. The reset before the session reads the board's own name and
 checks it is the one the address gives, so the session is not left looking for
 a name no board on the bench answers with.
 
-The prompt: a word that is no command, `?` on a word that is no command, and
-an address that is empty, not hex, or too long are each one `error:` line with
-the prompt left up, and none of them reaches the radio. That is the half of
-malformed input a shared bench can produce safely.
+The prompt: a word that is no command, `?` on a word that is no command, an
+address the prompt will not take, and a `tx` command line the host will not
+take are each one `error:` line with the prompt left up, and none of them
+reaches the radio. That is the half of malformed input a shared bench can
+produce safely. The prompt takes six bytes written with the five colons or
+with none, and nothing else, because a word of another length names a
+different address from the one that was typed; the refused list therefore
+holds a short address, one with the colons in the wrong places, one with
+another separator, and the two forms Python would read as a number
+([ubertooth#1075](https://github.com/SqueakyFloors/ubertooth/issues/1075)).
+What the console prints back is twelve hex digits whatever the value, so an
+address whose first byte is zero comes back as an address the prompt takes.
+
+The transmit formats: `tx` hands the board a packet built to a chosen
+basic-rate format and prints, on the capture stream, the packet it asked for —
+the data bytes, and the whole payload with the payload header and a `dv`'s
+voice field. The driver builds the same packet for itself from the format
+table in the tool's man page and compares the two, so the length, the counted
+fill, the header, and the boundary between a `dv`'s voice and data fields are
+each checked against something other than the tool's own table. The two fills
+are deliberately apart — the data counts from `0x00` and the voice field from
+`0xa0` — so where the voice field ends is visible in the bytes alone.
 
 The session is driven by
 [`btbrconsole.py`](../ubertooth_harness/btbrconsole.py), which starts the tool
 once, runs every check down the same prompt, and reports one line per check:
 the board has to be flashed before the session and restored after it, so a
-second session would cost two more firmware writes.
+second session would cost two more firmware writes. That is why one session
+carries as much as it does — the refusals, the inquiry, the page, the
+transmit runs inside that connection, the page again, and the two scan modes
+([#332](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/332)).
+
+The option values: `-f` and `-b` are written to fields of the radio, six bits
+and two, and a value outside the field is refused as the command line is read,
+before the board is looked for. That step runs first and needs neither the
+board nor the image. Each refusal is given a `-U` naming no board by index,
+and a control run shows that same selector reaching the stage that looks for
+one, so what the step checks is the order and not only the message. An index
+is used rather than a serial because matching a serial has to open every
+attached board to read its own, and an index names a board without reading
+any.
+
+The mechanisms this bench cannot produce honestly. A transmit the board could
+not put on the air, a scan window the scheduler had no room for, and a page
+response that never reached the air are each one line on the board's console,
+and none of them happens on a healthy board: showing one needs a firmware
+image patched to drop a transmit, which is what the fork's own hardware runs
+for [ubertooth#1183](https://github.com/SqueakyFloors/ubertooth/pull/1183)
+did. Those mechanisms are covered by deterministic firmware tests in the fork
+— `firmware/tests/test_btbr_tx_queue.c` (a dropped slot gives its repeat and
+its acknowledgment back), `test_btbr_tx_hop_phase.c` (which phase a transmit
+moves, including the four ways one is dropped),
+`test_btbr_connection_end.c` (the report reaching the link layer),
+`test_btbr_page_response.c` (a dropped page response starts no connection; a
+page answer that did not go out goes back to scanning) and
+`test_btbr_inquiry_response.c` (the same for an inquiry response) — and by
+`host/python/ubtbr/tests/test_ubtbr.py` for a peer that declines the
+connection. What this test adds is the other half: the observable end result
+on a real bench. The page completes and exchanges the peer's name every time
+it is asked, not once; the link carries packets after the transmit runs; the
+scan modes run and return; no connection is reported and then given up
+(`Paging resumed`); this end hangs up on nobody who took the connection; and
+none of the board's own refusal lines appeared at all. A pass therefore says
+those mechanisms did not misfire here. It does not say the firmware handles
+them correctly — that is what the fork's tests are for — and this file does
+not claim it.
 
 **Hardware and arguments.** One `Ubertooth` and one ESP32 Classic peer as
 `acceptor`; a required `allow RF transmission: true`, because the board
@@ -2607,15 +2665,24 @@ and holds for a suite holding this test
 ([#257](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/257),
 [#279](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/279)).
 
-**Expected outcome.** One case per session. The startup and the prompt come
-first, and a session that does not reach the prompt fails there. Then smoke
-decides 11 checks: `?`, `? <command>`, a word that is no command, `?` on one,
-three addresses that are not ones, `page` with no address, `bdaddr`, the
-inquiry, the page and the LMP exchange, the once-per-opcode report of an LMP
-request with no handler, and the split between the capture on standard output
-and the progress on standard error (`idle` is checked inside the inquiry and
-the page). Comprehensive decides a twelfth: paging an address nothing answers
-must end in `paging timeout` with no connection. The report says how many checks passed,
+**Expected outcome.** One case per session. The option-value step comes first:
+four command lines refused with the line each value earns, one control run
+that reaches the board stage, and nothing on standard output. Then the writes
+and the version reads, then the session. The startup and the prompt come
+first, and a session that does not reach the prompt fails there. Smoke then
+decides 20 checks: `?`, `? <command>`, a word that is no command, `?` on one,
+eight addresses the prompt will not take, `page` with no address, eleven `tx`
+command lines the host will not take, `bdaddr`, an address whose first byte is
+zero, the inquiry, the page and the LMP exchange, four transmit runs compared
+with the packets their formats give, the link still carrying packets after
+them, the hold and the `idle` that end the connection, the once-per-opcode
+report of an LMP request with no handler, the page again, the two scan modes,
+the board's own refusal lines all absent, no hang-up on a peer that took the
+connection, and the split between the capture on standard output and the
+progress on standard error (`idle` is checked inside the inquiry, the page and
+each scan). Comprehensive decides 21: paging an address nothing answers must
+end in `paging timeout` with no connection, and it also transmits five more
+formats and pages the peer once more. The report says how many checks passed,
 how many failed, and how many never ran, so a session that stopped early is not
 read as a pass. The cleanup always writes the application image back, reads it,
 and resets the peer; a cleanup failure fails the case, so the board cannot be
@@ -2630,19 +2697,44 @@ and not named.
 Measured on the lab bench at fork `b2cd6c68`: each firmware write took 4 s,
 the prompt came up in about 2 s, an inquiry heard the peer in about 2 s, a page
 connected in about 7 s, and a page nothing answers reported its timeout after
-the firmware's whole attempt of about 45 s. The catalog estimate is 60 s per
-session for smoke and 115 s for comprehensive.
+the firmware's whole attempt of about 45 s. The catalog estimate is 85 s per
+session for smoke and 150 s for comprehensive.
 
-**Known limits.** A pass says the image runs, the prompt answers, and the
-board can run an inquiry and hold a connection with one peer. It says nothing
-about `inquiry_scan`, `page_scan`, `discoverable`, `l2ping`, or `monitor`:
-answering an inquiry or a page needs something on the bench to make one, and
-`monitor` is a race against a real peripheral that often takes several
-attempts. The refusals leave out an address shorter than six bytes, which the
-tool takes today and acts on as a different address
-([ubertooth#1075](https://github.com/SqueakyFloors/ubertooth/issues/1075)); a
-case for it would pin that rather than check it. Encryption is not reachable:
-`btbr` does not implement it.
+**Known limits.** A pass says the image runs, the command line refuses what it
+should, the prompt answers, the board can run an inquiry, hold a connection
+with one peer, transmit the chosen packet types on it, page that peer again,
+and enter and leave both scan modes.
+
+What a pass does not prove:
+
+- **That a transmitted packet reached the air.** The board reports nothing
+  back about a packet it sent, so the line `tx` prints is what was asked for.
+  The packet the harness compares it with is the harness's own, which is a
+  real check of what the host composed and no check at all of the radio. A
+  receiver would need a second board following the piconet, and a count taken
+  there could not tell a packet lost on the air from one the board never sent
+  — which is exactly the distinction
+  [ubertooth#1166](https://github.com/SqueakyFloors/ubertooth/issues/1166) is
+  about, and why its gate is the fork's four firmware tests on `ll_tx_done()`
+  rather than a bench recipe.
+- **That the firmware handles a dropped transmit, an exhausted scheduler, or
+  a page response that never went out.** None of those happens on a healthy
+  board. The fork's deterministic tests are the gate (listed above); this
+  test says they did not misfire in this session.
+- **That a connection the peer declines is closed at once.** The registered
+  peer accepts, and its shell has no way to make it refuse the connection
+  request the setup leads to, so that path is unreachable with the bench's
+  current fixtures. The fork's `test_ubtbr.py` covers it; this test checks
+  the complement, that this end hangs up on nobody who accepted.
+- **That the scan modes answer anything.** Nothing on the bench pages or
+  inquires on demand — the ESP32 peer's shell has no `inquiry` command and
+  pages only through its SPP profile, which `btbr` cannot answer — so
+  `page_scan` and `inquiry_scan` are checked for entering the state, running,
+  and returning to standby, not for a connection or a response.
+- **`discoverable`, `l2ping`, and `monitor`**, which are not run at all:
+  `l2ping` needs a peer that answers a 4-byte echo request and `monitor` is a
+  race against a real peripheral that often takes several attempts.
+- **Encryption**, which `btbr` does not implement.
 
 The unhandled-opcode check leans on the peer. Measured on the bench on
 2026-11-01: with the link up, the peer sent `LMP_DECR_POWER_REQ` about four

@@ -6,6 +6,9 @@ or the other, and switching means reflashing it (host/doc/ubertooth-btbr.md,
 FIRMWARE). So this is the one test that puts another image on a board, and
 the single case it generates does the whole of it in one flash session:
 
+0. run the tool's own command line for the option values it must refuse
+   before it looks for a board at all, which needs neither the board nor the
+   image (btbrconsole.py, ``options``);
 1. read what the board is carrying, then write the run's `btbr` image;
 2. check the board reports that image **by name** at the run's revision
    (`image_name_pattern` plus the revision observation). The
@@ -17,8 +20,10 @@ the single case it generates does the whole of it in one flash session:
 4. drive one console session against that peer (btbrconsole.py): the prompt,
    `?`, the refusals the prompt answers without touching the radio, an
    inquiry that hears the peer by address and by name, a page that connects to
-   it and runs the LMP exchange, `idle` after each, and the split between the
-   capture on standard output and the progress on standard error;
+   it and runs the LMP exchange, the chosen packet types transmitted on that
+   connection, the page again, the two scan modes, `idle` after each, and the
+   split between the capture on standard output and the progress on standard
+   error;
 5. always, in cleanup, write the application image back, check the board
    reports it, and return the peer to its boot state.
 
@@ -130,7 +135,7 @@ def _image_step(serial: str, step_id: str, name: str, image: str, key: str) -> S
     )
 
 
-def console_argv(serial: str, peer, *, no_answer: bool) -> tuple[str, ...]:
+def console_argv(serial: str, peer, *, comprehensive: bool) -> tuple[str, ...]:
     argv = (
         sys.executable, _CONSOLE, "session",
         "--serial", serial,
@@ -140,20 +145,25 @@ def console_argv(serial: str, peer, *, no_answer: bool) -> tuple[str, ...]:
         "--page-seconds", f"{btbrconsole.DEFAULT_PAGE_S:g}",
         "--hold-seconds", f"{btbrconsole.DEFAULT_HOLD_S:g}",
     )
-    if no_answer:
-        argv += ("--no-answer", "--no-answer-seconds",
+    if comprehensive:
+        argv += ("--comprehensive", "--no-answer-seconds",
                  f"{btbrconsole.DEFAULT_NO_ANSWER_S:g}")
     return argv
 
 
-def console_budget(*, no_answer: bool) -> float:
+def options_argv() -> tuple[str, ...]:
+    """The command line that checks the option values, which needs no board."""
+    return (sys.executable, _CONSOLE, "options")
+
+
+def console_budget(*, comprehensive: bool) -> float:
     """Every wait the driver may sit out, which it works out per check.
 
     The step's deadline is this and a little more, so a check that fails ends
     in the driver's own reason rather than in the harness killing the step.
-    The measured session is about 40 s; this is the backstop.
+    The measured session is a little under two minutes; this is the backstop.
     """
-    return btbrconsole.worst_case_seconds(no_answer)
+    return btbrconsole.worst_case_seconds(comprehensive)
 
 
 def _reset_peer(step_id: str, peer) -> Step:
@@ -172,25 +182,75 @@ def _reset_peer(step_id: str, peer) -> Step:
     ))
 
 
-def _console_step(serial: str, peer, *, no_answer: bool) -> Step:
+def _options_step() -> Step:
+    """The option values the tool refuses before it looks for a board.
+
+    No board and no image: the value is refused as the command line is read,
+    which is why this runs before the write rather than inside the session.
+    The `-U` each refusal carries names no board by index, and the control run
+    shows that selector reaching the stage that looks for one, so what the
+    step reports is the order and not just the message.
+    """
+    refusals = len(btbrconsole.OPTION_REFUSALS) + 1
+    return Step(
+        "option-values",
+        "ubertooth-btbr refuses an option value outside the radio's field "
+        "before it looks for a board",
+        options_argv(),
+        timeout_s=btbrconsole.OPTION_TIMEOUT_S * (refusals + 1),
+        skip_returncode=SKIP_EXIT,
+        output_patterns=(
+            r"(?m)^check option -U \S+ -f 64: 'error: -f must be 0-63 "
+            r"\(got 64\)', and no board looked for$",
+            r"(?m)^check option -U \S+ -b 4: 'error: -b must be 0-3 "
+            r"\(got 4\)', and no board looked for$",
+            r"(?m)^check option control: .* reached the device stage: ",
+            rf"(?m)^options: {refusals} passed of {refusals}, 0 failed$",
+        ),
+        forbidden_patterns=(r"(?m)^check option: FAILED: ",),
+    )
+
+
+def _console_step(serial: str, peer, *, comprehensive: bool) -> Step:
     """One console session: the whole of what this test is for."""
-    checks = len(btbrconsole.checks(no_answer))
+    checks = len(btbrconsole.checks(comprehensive))
+    runs = len(btbrconsole.TX_RUNS) + (
+        len(btbrconsole.TX_RUNS_COMPREHENSIVE) if comprehensive else 0)
+    repeats = (btbrconsole.PAGE_REPEATS_COMPREHENSIVE if comprehensive
+               else btbrconsole.PAGE_REPEATS)
     return Step(
         "console-session",
         f"ubertooth-btbr runs {checks} checks down one prompt against "
         f"{peer['name']}",
-        console_argv(serial, peer, no_answer=no_answer),
-        timeout_s=console_budget(no_answer=no_answer) + 30.0,
+        console_argv(serial, peer, comprehensive=comprehensive),
+        timeout_s=console_budget(comprehensive=comprehensive) + 30.0,
         mutates=True,
         skip_returncode=SKIP_EXIT,
         output_patterns=(
             rf"(?m)^peer address: {peer['address']}$",
             r"(?m)^prompt: up after \d+\.\d s$",
+            rf"(?m)^check bad-address: {len(btbrconsole.BAD_ADDRESSES)} "
+            r"addresses the prompt will not take refused, prompt up$",
+            rf"(?m)^check tx-refusals: {len(btbrconsole.TX_REFUSALS)} tx "
+            r"command lines refused, prompt up, no packet printed$",
+            r"(?m)^check zero-address: .* twelve digits$",
             rf"(?m)^check inquiry: peer {peer['bdaddr']} answered after ",
             rf"(?m)^check page: connected to {peer['address']} in ",
             rf"(?m)^check page-peer-name: LMP_NAME_RES carried "
             rf"'{peer['name']}'$",
+            rf"(?m)^check tx-formats: {runs} run\(s\) transmitted, each the "
+            r"packet its format gives: ",
+            r"(?m)^check tx-link: the link carried a packet .* and no slot "
+            r"was reported not sent$",
             r"(?m)^check lmp-unhandled: .*, each named once$",
+            rf"(?m)^check page-repeat: {repeats} further page\(s\) completed "
+            r"and named the peer$",
+            r"(?m)^check scan-modes: page_scan, inquiry_scan each started, "
+            r"held, and returned to standby$",
+            r"(?m)^check scheduler-quiet: none of the \d+ refusal lines the "
+            r"board can print, and no page resumed$",
+            r"(?m)^check no-detach: the peer took the connection and this end "
+            r"did not hang up",
             r"(?m)^check streams: \d+ capture records on stdout, nothing "
             r"else, and none on stderr$",
             r"(?m)^session exit: 0 after \d+\.\d s$",
@@ -210,15 +270,16 @@ def btbr_console_cases(arguments, resources, resource_identities):
             f"{TEST_NAME} needs the {ACCEPTOR_ROLE}'s registered name: the "
             "inquiry check reads it out of the Extended Inquiry Response the "
             "peer answers with")
-    no_answer = arguments["coverage"] == "comprehensive"
+    comprehensive = arguments["coverage"] == "comprehensive"
     sessions = int(arguments["sessions"])
     return tuple(
-        _case(serial, peer, number, sessions, no_answer=no_answer)
+        _case(serial, peer, number, sessions, comprehensive=comprehensive)
         for number in range(1, sessions + 1)
     )
 
 
-def _case(serial, peer, number: int, sessions: int, *, no_answer: bool) -> StateCase:
+def _case(serial, peer, number: int, sessions: int, *,
+          comprehensive: bool) -> StateCase:
     """One flash-and-session cycle, which is one case.
 
     With ``sessions`` greater than one the cycle repeats, for a long suite:
@@ -229,6 +290,10 @@ def _case(serial, peer, number: int, sessions: int, *, no_answer: bool) -> State
     """
     case_id = CASE_ID if sessions == 1 else f"{CASE_ID}-{number}"
     steps = (
+        # First, because it needs neither the image nor the board: a tool
+        # that will not refuse an option value is worth knowing about before
+        # the board's flash is written.
+        _options_step(),
         Step("read-original-image", "Read the image the board is carrying",
              _util(serial, "-v"),
              observe=Observation("original firmware", _REVISION)),
@@ -245,7 +310,7 @@ def _case(serial, peer, number: int, sessions: int, *, no_answer: bool) -> State
              observe=Observation("btbr build revision", _BUILD_REVISION,
                                  _revision)),
         _reset_peer("reset-peer-before", peer),
-        _console_step(serial, peer, no_answer=no_answer),
+        _console_step(serial, peer, comprehensive=comprehensive),
     )
     cleanup = (
         _flash_step(serial, "restore-application",

@@ -36,7 +36,7 @@ from ubertooth_harness.stateful import (
 SERIAL = "0123456789abcdef0123456789abcdef"
 
 
-def fake_session_report(*, faults=(), no_answer=False) -> str:
+def fake_session_report(*, faults=(), comprehensive=False) -> str:
     """One console session against the fake, and the report it printed."""
     with tempfile.TemporaryDirectory() as directory:
         tools = Path(directory) / "bin"
@@ -48,7 +48,7 @@ def fake_session_report(*, faults=(), no_answer=False) -> str:
             SimpleNamespace(
                 serial=SERIAL, peer=PEER_ADDRESS, peer_name=PEER_NAME,
                 inquiry_seconds=2.0, page_seconds=2.0, hold_seconds=0.05,
-                no_answer_seconds=2.0, no_answer=no_answer),
+                no_answer_seconds=2.0, comprehensive=comprehensive),
             out, err, environment)
         return err.getvalue()
 UBERTOOTH = SourceRevision(
@@ -164,8 +164,9 @@ class CaseTests(unittest.TestCase):
         (case,) = cases()
         self.assertEqual("btbr-console", case.case_id)
         self.assertEqual(
-            ["read-original-image", "flash-btbr", "verify-btbr-image",
-             "verify-btbr-build", "reset-peer-before", "console-session"],
+            ["option-values", "read-original-image", "flash-btbr",
+             "verify-btbr-image", "verify-btbr-build", "reset-peer-before",
+             "console-session"],
             [step.step_id for step in case.steps])
         self.assertEqual(
             ["restore-application", "verify-restored-image",
@@ -227,14 +228,17 @@ class CaseTests(unittest.TestCase):
         self.assertIn("btbrconsole.py session", argv)
         self.assertIn(f"--peer {PEER_ADDRESS}", argv)
         self.assertIn(f"--peer-name {PEER_NAME}", argv)
-        self.assertNotIn("--no-answer", argv)
+        self.assertNotIn("--comprehensive", argv)
         self.assertEqual(btbrconsole.SKIP_EXIT, step.skip_returncode)
 
-    def test_the_comprehensive_profile_adds_the_page_nothing_answers(self):
+    def test_the_comprehensive_profile_adds_more_of_each(self):
         (case,) = cases("comprehensive")
         step = case.steps[-1]
-        self.assertIn("--no-answer", " ".join(step.resolve_argv({})))
-        self.assertIn("12 checks", step.name)
+        self.assertIn("--comprehensive", " ".join(step.resolve_argv({})))
+        self.assertIn(f"{len(btbrconsole.checks(True))} checks", step.name)
+        (smoke,) = cases("smoke")
+        self.assertIn(f"{len(btbrconsole.checks(False))} checks",
+                      smoke.steps[-1].name)
 
     def test_the_cases_patterns_match_a_real_session_report(self):
         """The case's patterns are matched against what the driver prints.
@@ -245,8 +249,9 @@ class CaseTests(unittest.TestCase):
         run against tests/fake_btbr.py, a stand-in console, and its own
         report is what the patterns have to match.
         """
-        for coverage, no_answer in (("smoke", False), ("comprehensive", True)):
-            report = fake_session_report(no_answer=no_answer)
+        for coverage, comprehensive in (("smoke", False),
+                                        ("comprehensive", True)):
+            report = fake_session_report(comprehensive=comprehensive)
             (case,) = cases(coverage)
             step = case.steps[-1]
             with self.subTest(coverage):
@@ -254,6 +259,36 @@ class CaseTests(unittest.TestCase):
                     self.assertRegex(report, pattern, pattern)
                 for pattern in step.forbidden_patterns:
                     self.assertIsNone(re.search(pattern, report), pattern)
+
+    def test_the_option_step_runs_before_the_board_is_touched(self):
+        (case,) = cases()
+        first = case.steps[0]
+        self.assertEqual("option-values", first.step_id)
+        self.assertIn("btbrconsole.py options",
+                      " ".join(first.resolve_argv({})))
+        # It writes nothing: no board, no image, no serial.
+        self.assertNotIn(SERIAL, " ".join(first.resolve_argv({})))
+        self.assertFalse(first.mutates)
+        self.assertEqual(btbrconsole.SKIP_EXIT, first.skip_returncode)
+
+    def test_the_option_steps_patterns_match_a_real_options_report(self):
+        # As with the session below: the driver is run against the fake and
+        # its own report is what the patterns have to match.
+        with tempfile.TemporaryDirectory() as directory:
+            tools = Path(directory) / "bin"
+            environment = {"PATH": "/usr/bin:/bin",
+                           PYTHON_TOOLS_ENV: str(tools),
+                           **write_fake_btbr(tools)}
+            out, err = io.StringIO(), io.StringIO()
+            status = btbrconsole.run_options(out, err, environment)
+        report = err.getvalue()
+        self.assertEqual(0, status, report)
+        (case,) = cases()
+        step = case.steps[0]
+        for pattern in step.output_patterns:
+            self.assertRegex(report, pattern, pattern)
+        for pattern in step.forbidden_patterns:
+            self.assertIsNone(re.search(pattern, report), pattern)
 
     def test_a_failed_check_trips_the_forbidden_patterns(self):
         report = fake_session_report(faults=("quiet-lmp",))
@@ -305,12 +340,14 @@ class CaseTests(unittest.TestCase):
     def test_the_step_deadline_outlasts_every_wait_the_driver_may_sit_out(self):
         # Counted from the driver's own windows, check by check, so a check
         # that grows a wait grows the budget with it.
-        for coverage, no_answer in (("smoke", False), ("comprehensive", True)):
+        for coverage, comprehensive in (("smoke", False),
+                                        ("comprehensive", True)):
             (case,) = cases(coverage)
             step = case.steps[-1]
             with self.subTest(coverage):
-                self.assertGreater(step.timeout_s,
-                                   btbrconsole.worst_case_seconds(no_answer))
+                self.assertGreater(
+                    step.timeout_s,
+                    btbrconsole.worst_case_seconds(comprehensive))
         self.assertGreater(btbrconsole.worst_case_seconds(True),
                            btbrconsole.worst_case_seconds(False))
 

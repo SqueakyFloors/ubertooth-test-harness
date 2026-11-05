@@ -393,11 +393,14 @@ asks for it outright).
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-U <index\|serial>` | device selection | Covered | Classic btbr console: the session opens the board the case selected by serial, and the report names it |
-| `-f <n>` | frequency offset | Not covered | The session leaves the radio's `MOD_OFFSET` as the firmware set it; nothing a capture shows would say the register was written |
-| `-b <n>` | max access-code errors | Not covered | A higher value finds more packets and more noise, so a count over the air would not say whether it took effect |
+| `-U <index\|serial>` | device selection | Covered | Classic btbr console: the session opens the board the case selected by serial, and the report names it. The option-value step also shows an index no board answers to reaching the device stage |
+| `-f <n>` | frequency offset | Partial | The refusal is covered: `-f 64` and `-f bad` are each `error: -f must be 0-63 (got <value>)` with exit 1, before the board is looked for (the same command line names a board by an index nothing answers to, and that refusal does not appear). A value the field takes is not: the session leaves the radio's `MOD_OFFSET` as the firmware set it, and nothing a capture shows would say the register was written |
+| `-b <n>` | max access-code errors | Partial | The refusal is covered the same way: `-b 4` and `-b -1` are each `error: -b must be 0-3 (got <value>)` with exit 1 before the board stage. A value the field takes is not: a higher value finds more packets and more noise, so a count over the air would not say whether it took effect |
 | `-h` | usage | Not covered | No case runs it; `Host CLI surface` covers the C tools' `-h`, not this one |
 | `-V` | version | Not covered | It answers from whatever image the board carries, by running `ubertooth-util -V`; no case asks it |
+
+The option-value refusals run before the board is written and need neither the
+board nor the image, so they are a step of their own at the front of the case.
 
 Prompt commands (`Classic btbr console`, one session, smoke unless noted):
 
@@ -405,12 +408,14 @@ Prompt commands (`Classic btbr console`, one session, smoke unless noted):
 |---|---|---|
 | `?`, `? <command>` | Covered | `?` lists the ten commands the test names; `? inquiry` describes it |
 | `inquiry` | Covered | The registered peer answers with its BD_ADDR, and its name is in the Extended Inquiry Response |
-| `page <BD_ADDR>` | Covered | Connects to the peer, reaches `LMP setup complete`, and the peer's `LMP_NAME_RES` on the air carries its registered name. Comprehensive also pages an address nothing answers: `paging timeout`, no connection |
-| `bdaddr <BD_ADDR>` | Partial | A good address is set and echoed with the sync word; an empty, non-hex, or too-long one is refused. An address shorter than six bytes is left out: the tool takes one and acts on a different address ([ubertooth#1075](https://github.com/SqueakyFloors/ubertooth/issues/1075)) |
-| `idle` | Covered | Stops the inquiry and then the connection; the firmware reports it and the prompt comes back |
+| `page <BD_ADDR>` | Covered | Connects to the peer, reaches `LMP setup complete`, and the peer's `LMP_NAME_RES` on the air carries its registered name. The page is then made again — twice more in comprehensive — and must complete and name the peer every time, which is the bench half of the pager fixes ([ubertooth#1168](https://github.com/SqueakyFloors/ubertooth/issues/1168), [#1191](https://github.com/SqueakyFloors/ubertooth/issues/1191)); a connection reported and then given up shows as `Paging resumed` and fails. Comprehensive also pages an address nothing answers: `paging timeout`, no connection |
+| `tx <format> [<length>] [<count>] [<hex>]` | Partial | With the connection up, four formats in smoke (`dm1`, `dh1`, `dv`, `ev3`) and nine in comprehensive (adding `aux1`, `hv3`, `dh5`, a payload given by hand, and a `dv` with one) are transmitted, and each `TX pkt:` line is compared with the packet the driver builds from the man page's format table: the length, the counted fill, the payload header, and the `dv` voice/data boundary. Eleven command lines the host refuses are checked too, including the one refused for having no connection. Not covered: that the packet reached the air. The board reports nothing back about a packet it sent, and a count taken at a third board could not tell a packet lost on the air from one never sent ([ubertooth#1166](https://github.com/SqueakyFloors/ubertooth/issues/1166), whose gate is the fork's firmware tests). What the bench adds is that the link still carries packets afterwards and that the board reported no slot it could not send |
+| `bdaddr <BD_ADDR>` | Covered | A good address is set and echoed with the sync word; an address whose first byte is zero is echoed with its twelve digits, so it is one the prompt takes back. Eight words the prompt will not take are refused: empty, not hex, too long, shorter than six bytes, the colons in the wrong places, another separator, and the two forms Python would read as a number ([ubertooth#1075](https://github.com/SqueakyFloors/ubertooth/issues/1075), now fixed) |
+| `idle` | Covered | Stops the inquiry, the connection, and each scan mode; the firmware reports it and the prompt comes back |
 | a word that is no command | Covered | `error: no such command '<word>'`, prompt up |
 | `? <no such command>` | Covered | `error: no help on '<word>'`, prompt up |
-| `inquiry_scan`, `page_scan`, `discoverable` | Hard | Answering an inquiry or a page needs something on the bench to make one; the ESP32 peer's shell cannot |
+| `inquiry_scan`, `page_scan` | Partial | Each starts, the board reports the state, the tool reports it ready, and `idle` brings it back to standby. Answering an inquiry or a page is not covered: nothing on the bench makes either on demand — the ESP32 peer's shell has no `inquiry` and pages only through its SPP profile, which `btbr` cannot answer |
+| `discoverable` | Hard | It takes the two scans in turn, and neither can be answered here for the reason above |
 | `l2ping <BD_ADDR>` | Not covered | Would page and then exchange L2CAP echo packets; no case yet |
 | `monitor <BD_ADDR>` | Hard | A race against the real peripheral, which often takes several attempts |
 | `exit`, `q`, `x`, Ctrl-D | Partial | `exit` must end the session with status 0; `q`, `x`, and Ctrl-D are not run |
@@ -420,6 +425,8 @@ Prompt commands (`Classic btbr console`, one session, smoke unless noted):
 | the `btbr` image is on the board | Covered | `ubertooth-util -v` must name `btbr` at the run's revision after the write, and `bluetooth_rxtx` at the same revision after the cleanup; `-V`'s build string is checked too |
 | output streams | Covered | The capture records are on standard output and the prompt and progress on standard error, with nothing of either on the other |
 | an LMP request with no handler | Covered | Refused and named in one `warning:` line per opcode, not one per packet |
+| a refused transmit, an exhausted scan scheduler, a page response that never went out | Partial | None of these happens on a healthy board: showing one needs a firmware image patched to drop a transmit. The fork's deterministic firmware tests are the gate (`test_btbr_tx_queue.c`, `test_btbr_tx_hop_phase.c`, `test_btbr_connection_end.c`, `test_btbr_page_response.c`, `test_btbr_inquiry_response.c`). The session checks the observable end result: none of the thirteen refusal lines the board can print appeared, no page was resumed, the repeated pages completed, and the link carried packets after the transmit runs |
+| a connection the peer declines | Not covered | The tool hangs up at once rather than waiting out link supervision, and the registered peer accepts — its shell cannot make it refuse the connection request the setup leads to, so the path is out of reach with the bench's fixtures. The fork's `host/python/ubtbr/tests/test_ubtbr.py` covers it; the session checks the complement, that this end hung up on nobody who accepted |
 | encryption | N/A | `btbr` does not implement it |
 
 ## btle-extcap (Python, Wireshark extcap; not installed by CMake)
