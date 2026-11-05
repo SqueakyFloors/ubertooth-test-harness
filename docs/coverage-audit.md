@@ -83,3 +83,13 @@ They are grouped by mechanism so a candidate test can be scored against the
 whole group it would cover rather than one PR at a time. Picking which
 candidates to implement is a maintainer decision; this file supplies the
 evidence for it.
+
+Where a pass's gap and partial rows have been consolidated into work, the
+issue says which rows it came from, so a reader goes from a row to the tracker
+through its `candidate_key`:
+
+| Tracker | What it consolidates |
+|---|---|
+| [#331](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/331) | Classic capture and clock: record timestamps across a piconet-clock move (`classic-capture-record-times`), a stated or withdrawn UAP through clock loss, clock search giving up honestly, record payload transport, the `none` signal and noise representation, and multi-board receive |
+| [#332](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/332) | `ubertooth-btbr` and the `btbr` image, as assertions added to `Classic btbr console`: transmitted packet types and lengths, the DV voice/data boundary, option and address refusals, a refused or dropped transmit and the hop phase after it (`btbr-page-reliability-and-transmit-accounting`), page reliability against the known peer, a refused connection's detach, and scheduler exhaustion |
+| [#333](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/333) | Host-only capture, replay, and installed-library work that needs no bench: standard-output aliases and the streams beside them, outputs colliding with their own input, BLE dump and replay parameters, a pkg-config and a CMake consumer against an installed prefix, and the cheap CLI refusals |
