@@ -3702,7 +3702,7 @@ specan-ui on both (no firmware build, installed tools). On Linux it also
 checks that the build installed `ubertooth-scan` and `ubertooth-follow` and
 that their `-h` cases passed.
 
-Before those two steps the build job reads the install the way something
+Before the steps above the build job reads the install the way something
 outside the fork's own tree would, with every program it runs given `UBERTOOTH_TEST_NO_DEVICES=1`, so
 the steps are about the install and not about which boards are attached.
 `pkg-config` is asked for `libubertooth`, and the prefix, the include
@@ -3717,14 +3717,20 @@ project of the same program is configured with
 `libubertooth.pc` gave, so `ubertoothConfigVersion.cmake` is read and has to
 answer for that version; the imported target's location has to be inside the
 prefix, and the program's output has to be byte for byte the `pkg-config`
-consumer's, which is where the two files are really held to describing one
-install. Then `host/ubertooth-tools` is configured on its own
+consumer's. (Both describe one install and both versions come from the one
+`VERSION` the build expands, so what these two steps really establish is that
+each file leads a consumer to this install's library and headers, not that the
+two could be told apart if they disagreed.) Then `host/ubertooth-tools` is configured on its own
 against that prefix, which is how a packager builds the tools and the one path
 `FindUBERTOOTH.cmake` is read on (a whole-tree build uses the libubertooth
 beside it); the libubertooth it found has to be the install's, the configure has
 to name the libbtbb it found, which has to be the install's, the commit that
 library was built from, and a pin which has to be the one the fork's own
-`FindBTBB.cmake` sets, a tag as readily as a commit -- so the line a reader of a measurement relies on is
+`FindBTBB.cmake` sets, a tag as readily as a commit, so the line a reader of a
+measurement relies on reports the tree's own pin rather than merely being well
+formed (which commit the found library was built from is named but compared
+with nothing: the harness pins libbtbb itself, and `check_libbtbb_pin` above
+is what warns when the two pins differ) -- so the line a reader of a measurement relies on is
 read back to the tree, rather than only being well formed -- and `ubertooth-util` is built
 and run from that build and has to print the same version line. Last, the same
 configure is repeated against a copy of the prefix with one of the functions

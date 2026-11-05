@@ -243,6 +243,8 @@ def age_headers(directory: Path, function: str = DEFAULT_FUNCTION) -> list[str]:
     # a plain substring would also rename the functions whose names begin
     # with this one (cmd_get_bootloader_info_quiet sits beside the default),
     # so the aged install would be missing more than the step says.
+    if not directory.is_dir():
+        raise InstalledLibraryError(f"{directory} is not a directory")
     name = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(function)}(?![A-Za-z0-9_])")
     edited = []
     for path in sorted(directory.glob(_HEADERS)):

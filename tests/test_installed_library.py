@@ -291,8 +291,8 @@ class ForkPinTests(unittest.TestCase):
         module = Path(source) / "host/cmake/modules/FindBTBB.cmake"
         if not module.is_file():
             self.skipTest(f"{module} is not there")
-        self.assertRegex(installedlib.fork_pin(module.read_text()),
-                         r"^[0-9a-fA-F]{7,40}$")
+        # A commit or, for a release, a tag; either is a pin this reads.
+        self.assertTrue(installedlib.fork_pin(module.read_text()).strip())
 
 
 class AgeHeadersTests(unittest.TestCase):
@@ -386,7 +386,10 @@ class CommandLineTests(unittest.TestCase):
     def test_a_directory_that_is_not_there(self):
         done = self.run_module("age-headers", "/nonexistent/include")
         self.assertEqual(1, done.returncode)
-        self.assertIn("installed library:", done.stderr)
+        # Named as the missing path, not as a fork module that declares
+        # nothing.
+        self.assertIn("is not a directory", done.stderr)
+        self.assertNotIn("FindUBERTOOTH", done.stderr)
 
 
 class BuildStepTests(unittest.TestCase):

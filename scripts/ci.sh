@@ -187,13 +187,11 @@ check_installed_library() {
     il_work=$WORK/installed
     rm -rf "$il_work"
     mkdir -p "$il_work"
-    # Which of lib and lib64 this install used, for the loader path and the
-    # rpath (host/CMakeLists.txt chooses by system). Both go on the
-    # pkg-config and loader paths, because the two libraries choose
-    # independently -- libubertooth follows CMAKE_INSTALL_LIBDIR and libbtbb
-    # its own LIB_SUFFIX -- so an install can hold one in each.
-    il_libdir=$il_prefix/lib
-    [ -d "$il_prefix/lib64" ] && il_libdir=$il_prefix/lib64
+    # Both lib and lib64, on the pkg-config path, the loader path and the
+    # build rpath alike: host/CMakeLists.txt chooses by system, and the two
+    # libraries choose independently -- libubertooth follows
+    # CMAKE_INSTALL_LIBDIR and libbtbb its own LIB_SUFFIX -- so an install
+    # can hold one in each, and naming both costs nothing where one is empty.
     il_libpath=$il_prefix/lib:$il_prefix/lib64
     # Prepended, not replaced: libubertooth.pc has "Requires: libbtbb
     # libusb-1.0", and libusb's own file is the system's. The install's
@@ -235,6 +233,10 @@ EOF
     step "pkg-config describes the installed libubertooth"
     pkg-config --exists libubertooth
     il_pcversion=$(pkg-config --modversion libubertooth)
+    [ -n "$il_pcversion" ] || {
+        echo "error: libubertooth.pc answered no version, so there is none to" \
+             "ask ubertoothConfigVersion.cmake for" >&2
+        return 1; }
     echo "libubertooth.pc: version $il_pcversion, prefix \
 $(pkg-config --variable=prefix libubertooth)"
     pkg-config --cflags --libs libubertooth
@@ -352,7 +354,10 @@ EOF
         "$il_work/old-prefix/include"
     # pkg-config pointed at the aged copy too, so which headers the probe
     # reads does not rest on CMake preferring CMAKE_PREFIX_PATH to the
-    # hints pkg-config gave it.
+    # hints pkg-config gave it. This step is also what says the headers come
+    # from the prefix at all: nothing in the step above compares the include
+    # directory FindUBERTOOTH chose, and editing one header of this copy is
+    # what changes the configure's answer.
     if PKG_CONFIG_PATH=$il_work/old-prefix/lib/pkgconfig:$il_work/old-prefix/lib64/pkgconfig \
         cmake -S "$il_source/host/ubertooth-tools" -B "$il_work/old-build" \
             -DCMAKE_PREFIX_PATH="$il_work/old-prefix" -DBUILD_TESTING=OFF \
@@ -373,7 +378,7 @@ EOF
     # it found, so the step shows the refusal without a second search that
     # could disagree with this one about where the lines are.
     tr '\n' ' ' < "$il_work/old-configure.txt" | tr -s ' ' \
-        | grep -oE 'is older than these tools: it does not have [^.]*cmd_get_bootloader_info[^.]*' \
+        | grep -oE 'is older than these tools: it does not have [^.]*cmd_get_bootloader_info[^.A-Za-z0-9_][^.]*' \
         || { cat "$il_work/old-configure.txt"
              echo "error: the configure refused the aged install for some" \
                   "other reason than the function it is missing" >&2
