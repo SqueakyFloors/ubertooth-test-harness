@@ -41,7 +41,11 @@ ends are named.
 
 `--expected-pin` is the pin the fork's own `FindBTBB.cmake` sets, which
 `fork-pin` reads out of it, so the step compares the configure's pin with the
-tree's rather than only checking that it is a commit.
+tree's rather than only checking that it is a commit. The pin may be a tag
+rather than a commit -- FindBTBB handles both, a release pointing it at a tag
+of the libbtbb fork -- so neither this nor `fork-pin` judges which it is;
+without `--expected-pin` the line has to name a commit in full, which is what
+a caller with no tree to read gets.
 
 The wordings that name no commit are a failure here. FindBTBB prints one when
 it cannot read a commit out of the library, which a libbtbb built from a
@@ -71,17 +75,26 @@ LIBBTBB_LINE = "-- libbtbb: "
 # commit with something after it. libbtbb appends "*" for a tree with
 # uncommitted changes, which FindBTBB reports as its own wording and is still
 # a commit named.
+# A commit in full, which is how a pin is written where it is one.
+_COMMIT = re.compile(r"[0-9a-fA-F]{40}")
 _BUILT_FROM = re.compile(r"built from commit (?![0-9a-fA-F]{41})"
                          r"(?P<commit>[0-9a-fA-F]{7,40})(?![0-9a-fA-F])")
 # The pin, which is written in full wherever it is named, in whichever case
 # the fork writes it (FindBTBB's btbb_pin_is_commit reads either).
-_PINNED = re.compile(r"built against \(?(?<![0-9a-fA-F])"
-                     r"(?P<pin>[0-9a-fA-F]{40})(?![0-9a-fA-F])\)?")
+# What the tree is built against, as the line names it: a commit in full, a
+# tag, or a commit followed by FindBTBB's "which names no commit to compare
+# it with". The value is read out and compared with the tree's own, so the
+# shape is not what decides.
+_PINNED = re.compile(r"built against \(?(?P<pin>[^()\s,;]+)\)?")
 # Where the library it found is named in that line: the first field, between
 # the prefix of the line and the comma before what it says about the commit.
 _LIBRARY_IN_LINE = re.compile(r"^-- libbtbb: (?P<library>[^,]+),")
-# The pin the fork's own FindBTBB.cmake sets.
-_FORK_PIN = re.compile(r'set\(LIBBTBB_PINNED_REF\s+"?(?P<pin>[0-9a-fA-F]{7,40})"?\s*\)')
+# The pin the fork's own FindBTBB.cmake sets, read from the start of a line
+# so that an example or a commented-out one is not taken for it. It may be a
+# commit or, for a release, a tag: FindBTBB handles both, so this does not
+# judge which (btbb_pin_is_commit).
+_FORK_PIN = re.compile(r'^\s*set\(LIBBTBB_PINNED_REF\s+"?(?P<pin>[^"\s)]+)"?\s*\)',
+                       re.M)
 # What a program built against the install prints: libubertooth's own version
 # line, the libbtbb it loaded, and, with the no-devices switch set, that there
 # is no board (ubertooth_print_versions).
@@ -139,6 +152,10 @@ def configure_identity(text: str, prefix: str,
         raise InstalledLibraryError(
             f"the configure says the tree is built against {pinned['pin']}, "
             f"where its own FindBTBB.cmake sets {expected_pin}")
+    if expected_pin is None and not _COMMIT.fullmatch(pinned["pin"]):
+        raise InstalledLibraryError(
+            f"the configure names {pinned['pin']} as the commit the tree is "
+            f"built against, which is no commit: {line}")
     return line
 
 

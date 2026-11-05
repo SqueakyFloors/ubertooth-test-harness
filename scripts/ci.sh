@@ -176,7 +176,9 @@ check_dfu_part_table() {
 # $1 is the Ubertooth source tree the build used -- the checkout it made at
 # the ref it resolved, under $WORK/build/src/ubertooth, and not the clone the
 # job was pointed at, whose HEAD may be another commit -- and $2 the prefix
-# the build installed into.
+# the build installed into. It also reads $WORK/host-version.txt, the version
+# line the build's own tools printed, which every program built against this
+# install has to print too.
 # The names here all begin il_, because POSIX sh has no local variables and
 # the other functions in this file use short generic ones.
 check_installed_library() {
@@ -259,7 +261,8 @@ EOF
     # told where the library is, which is what a packaged program's own
     # install would do.
     DYLD_LIBRARY_PATH=$il_libpath LD_LIBRARY_PATH=$il_libpath \
-        "$il_work/pc-consumer" > "$il_work/pc-consumer.txt" 2>&1
+        "$il_work/pc-consumer" > "$il_work/pc-consumer.txt" 2>&1 \
+        || { cat "$il_work/pc-consumer.txt"; return 1; }
     cat "$il_work/pc-consumer.txt"
     .venv/bin/python -m ubertooth_harness.installedlib consumer-identity \
         "$il_work/pc-consumer.txt" --prefix "$il_prefix" \
@@ -283,7 +286,8 @@ add_executable(consumer consumer.c)
 target_link_libraries(consumer PRIVATE ubertooth::ubertooth)
 EOF
     cmake -S "$il_work/cmake-consumer" -B "$il_work/cmake-build" \
-        -DCMAKE_PREFIX_PATH="$il_prefix" -DCMAKE_BUILD_RPATH="$il_libdir" \
+        -DCMAKE_PREFIX_PATH="$il_prefix" \
+        -DCMAKE_BUILD_RPATH="$il_prefix/lib;$il_prefix/lib64" \
         -DUBERTOOTH_EXPECTED_VERSION="$il_pcversion" \
         > "$il_work/cmake-configure.txt" 2>&1 || {
             cat "$il_work/cmake-configure.txt"; return 1; }
@@ -292,7 +296,8 @@ EOF
         --marker '-- consumer links '
     cmake --build "$il_work/cmake-build" > "$il_work/cmake-build.txt" 2>&1 || {
             cat "$il_work/cmake-build.txt"; return 1; }
-    "$il_work/cmake-build/consumer" > "$il_work/cmake-consumer.txt" 2>&1
+    "$il_work/cmake-build/consumer" > "$il_work/cmake-consumer.txt" 2>&1 \
+        || { cat "$il_work/cmake-consumer.txt"; return 1; }
     cat "$il_work/cmake-consumer.txt"
     # The same answer as the pkg-config consumer: the two files describe one
     # install, which is what the fork writes them side by side to do. Both
@@ -304,7 +309,8 @@ EOF
     # tools and the one path FindUBERTOOTH.cmake is read on; a whole-tree
     # build uses the libubertooth beside it and never reads that file.
     cmake -S "$il_source/host/ubertooth-tools" -B "$il_work/tools-build" \
-        -DCMAKE_PREFIX_PATH="$il_prefix" > "$il_work/tools-configure.txt" 2>&1 \
+        -DCMAKE_PREFIX_PATH="$il_prefix" -DBUILD_TESTING=OFF \
+        > "$il_work/tools-configure.txt" 2>&1 \
         || { cat "$il_work/tools-configure.txt"; return 1; }
     .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
         "$il_work/tools-configure.txt" --prefix "$il_prefix" \
@@ -330,7 +336,8 @@ EOF
     # grep's.
     DYLD_LIBRARY_PATH=$il_libpath LD_LIBRARY_PATH=$il_libpath \
         "$il_work/tools-build/src/ubertooth-util" -V \
-        > "$il_work/tools-version.txt" 2>&1
+        > "$il_work/tools-version.txt" 2>&1 \
+        || { cat "$il_work/tools-version.txt"; return 1; }
     cat "$il_work/tools-version.txt"
     grep -qxF "$il_version" "$il_work/tools-version.txt"
 
@@ -348,7 +355,7 @@ EOF
     # hints pkg-config gave it.
     if PKG_CONFIG_PATH=$il_work/old-prefix/lib/pkgconfig:$il_work/old-prefix/lib64/pkgconfig \
         cmake -S "$il_source/host/ubertooth-tools" -B "$il_work/old-build" \
-            -DCMAKE_PREFIX_PATH="$il_work/old-prefix" \
+            -DCMAKE_PREFIX_PATH="$il_work/old-prefix" -DBUILD_TESTING=OFF \
             > "$il_work/old-configure.txt" 2>&1
     then
         cat "$il_work/old-configure.txt"
@@ -412,9 +419,9 @@ run_build() {
     test -z "$(git -C "$ut" status --porcelain)"
 
     check_installed_library "$WORK/build/src/ubertooth" "$WORK/build/prefix"
-    # The source tree is only read by the checks above; say so here rather
-    # than leave a reader to trust it.
-    test -z "$(git -C "$ut" status --porcelain)"
+    # The checks above only read the checkout the build made; the job's own
+    # clone was already shown clean, and this says the same of that one.
+    test -z "$(git -C "$WORK/build/src/ubertooth" status --porcelain)"
 
     step "host-only tests with the built tools (no Ubertooth)"
     case "$(uname -s)" in

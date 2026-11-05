@@ -3702,11 +3702,12 @@ specan-ui on both (no firmware build, installed tools). On Linux it also
 checks that the build installed `ubertooth-scan` and `ubertooth-follow` and
 that their `-h` cases passed.
 
-The build job then reads the install the way something outside the fork's own
-tree would, with every program it runs given `UBERTOOTH_TEST_NO_DEVICES=1`, so
+Before those two steps the build job reads the install the way something
+outside the fork's own tree would, with every program it runs given `UBERTOOTH_TEST_NO_DEVICES=1`, so
 the steps are about the install and not about which boards are attached.
-`pkg-config` is asked for `libubertooth`, the prefix and the include directory
-its file reports have to be the install's, and a small C program is compiled and linked with what it
+`pkg-config` is asked for `libubertooth`, and the prefix, the include
+directory and the library directory its file reports have to be the
+install's, and a small C program is compiled and linked with what it
 answered and then run: it calls `ubertooth_print_versions()`, which needs no
 board, and what it prints has to be the version line the build's own tools
 printed (so a library from elsewhere that answered is caught), a libbtbb loaded
@@ -3721,9 +3722,9 @@ install. Then `host/ubertooth-tools` is configured on its own
 against that prefix, which is how a packager builds the tools and the one path
 `FindUBERTOOTH.cmake` is read on (a whole-tree build uses the libubertooth
 beside it); the libubertooth it found has to be the install's, the configure has
-to name the libbtbb it found, which has to be the install's, and a commit the
-tree is built against which has to be the one the fork's own
-`FindBTBB.cmake` sets -- so the line a reader of a measurement relies on is
+to name the libbtbb it found, which has to be the install's, the commit that
+library was built from, and a pin which has to be the one the fork's own
+`FindBTBB.cmake` sets, a tag as readily as a commit -- so the line a reader of a measurement relies on is
 read back to the tree, rather than only being well formed -- and `ubertooth-util` is built
 and run from that build and has to print the same version line. Last, the same
 configure is repeated against a copy of the prefix with one of the functions

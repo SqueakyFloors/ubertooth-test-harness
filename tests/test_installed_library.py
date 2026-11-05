@@ -72,6 +72,24 @@ class ConfigureIdentityTests(unittest.TestCase):
             self.identity(OTHER_LINES + text)
         self.assertIn("not in", str(caught.exception))
 
+    def test_a_tag_the_tree_pins_is_compared_as_it_stands(self):
+        # FindBTBB's third wording, for a pin that names no commit.
+        text = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from "
+                "commit 52b2afc; this tree is built against 2024-12-R1, which "
+                "names no commit to compare it with\n")
+        self.assertIn("2024-12-R1",
+                      configure_identity(OTHER_LINES + text, PREFIX, "2024-12-R1"))
+        with self.assertRaises(InstalledLibraryError):
+            configure_identity(OTHER_LINES + text, PREFIX, "2024-12-R2")
+
+    def test_without_a_tree_to_read_the_line_must_name_a_commit(self):
+        text = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from "
+                "commit 52b2afc; this tree is built against 2024-12-R1, which "
+                "names no commit to compare it with\n")
+        with self.assertRaises(InstalledLibraryError) as caught:
+            configure_identity(OTHER_LINES + text, PREFIX)
+        self.assertIn("which is no commit", str(caught.exception))
+
     def test_the_pin_is_compared_with_the_tree_s_own(self):
         pin = "52b2afcb0c4b8b03412dac759aad88debdfb18e2"
         self.assertIn(pin, configure_identity(OTHER_LINES + AGREED, PREFIX, pin))
@@ -239,6 +257,18 @@ class PathTests(unittest.TestCase):
 
 
 class ForkPinTests(unittest.TestCase):
+
+    def test_a_tag_pin_is_read_as_it_stands(self):
+        # FindBTBB handles a pin that is a tag, which a release points it at,
+        # so reading one must not end the build job.
+        text = 'set(LIBBTBB_PINNED_REF "2024-12-R1")\n'
+        self.assertEqual("2024-12-R1", installedlib.fork_pin(text))
+
+    def test_a_commented_out_pin_is_not_the_pin(self):
+        text = ('# set(LIBBTBB_PINNED_REF "0000000")\n'
+                'set(LIBBTBB_PINNED_REF "7e1cdf0336857a714da1af8c7496fe32453ac6d0")\n')
+        self.assertEqual("7e1cdf0336857a714da1af8c7496fe32453ac6d0",
+                         installedlib.fork_pin(text))
 
     def test_the_pin_is_read_out_of_the_module(self):
         text = ('set(LIBBTBB_PINNED_REPO "SqueakyFloors/libbtbb")\n'
@@ -410,6 +440,10 @@ class BuildStepTests(unittest.TestCase):
         self.assertIn('cmake -S "$il_source/host/ubertooth-tools" '
                       '-B "$il_work/tools-build"', self.text)
         self.assertIn('"$il_source/host/cmake/modules/FindBTBB.cmake"', self.text)
+        # A packager does not build the tools' own tests, and leaving them on
+        # widens what can fail the step for reasons that are not the
+        # install's.
+        self.assertEqual(2, self.text.count("-DBUILD_TESTING=OFF"))
         self.assertIn("ubertooth_harness.installedlib configure-identity",
                       self.text)
         self.assertIn("--target ubertooth-util", self.text)
@@ -418,8 +452,10 @@ class BuildStepTests(unittest.TestCase):
         self.assertIn("ubertooth_harness.installedlib age-headers", self.text)
         self.assertIn("is older than these tools", self.text)
         self.assertIn(installedlib.DEFAULT_FUNCTION, self.text)
-        # A configure that accepted it is the failure, so the success branch
-        # of that `if` has to be the one that fails the step.
+        # The message the step prints where the configure accepted the aged
+        # install. This reads the script's text, so it says the message is
+        # there and not that the branch printing it is the right one; the
+        # build job is what runs the branch.
         self.assertIn("error: the configure accepted a libubertooth missing a "
                       "function", self.text)
 
