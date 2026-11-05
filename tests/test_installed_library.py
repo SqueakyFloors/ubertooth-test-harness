@@ -6,6 +6,7 @@ judgements they rest on (`installedlib.py`) and that the build step still
 makes them.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -250,12 +251,16 @@ class ForkPinTests(unittest.TestCase):
             installedlib.fork_pin("set(LIBBTBB_PINNED_REPO \"x\")\n")
         self.assertIn("LIBBTBB_PINNED_REF", str(caught.exception))
 
-    def test_the_fork_s_own_module_is_read(self):
-        # The fork tree is not always here; where it is, the real file has to
-        # be readable by this, since the build step reads it.
-        module = Path("/tmp/ut-main/host/cmake/modules/FindBTBB.cmake")
+    def test_a_real_module_is_read_where_one_is_named(self):
+        # UBERTOOTH_SOURCE is how the sibling fork-reading tests are pointed
+        # at a tree (test_dfu_part_table.py, test_libbtbb_drift.py); without
+        # it there is no fork here to read.
+        source = os.environ.get("UBERTOOTH_SOURCE")
+        if not source:
+            self.skipTest("UBERTOOTH_SOURCE names no fork tree")
+        module = Path(source) / "host/cmake/modules/FindBTBB.cmake"
         if not module.is_file():
-            self.skipTest("no fork checkout to read")
+            self.skipTest(f"{module} is not there")
         self.assertRegex(installedlib.fork_pin(module.read_text()),
                          r"^[0-9a-fA-F]{7,40}$")
 
@@ -362,14 +367,19 @@ class BuildStepTests(unittest.TestCase):
 
     def test_the_build_step_calls_the_installed_library_checks(self):
         self.assertIn("check_installed_library()", self.text)
-        self.assertIn('check_installed_library "$ut" "$WORK/build/prefix"',
-                      self.text)
+        # The sources the build used, at the ref it resolved, not the clone
+        # the job was pointed at.
+        self.assertIn('check_installed_library "$WORK/build/src/ubertooth" '
+                      '"$WORK/build/prefix"', self.text)
         # Every program it runs is run with the no-devices switch, so the
-        # step is about the install and not about attached boards.
-        self.assertIn("UBERTOOTH_TEST_NO_DEVICES=1", self.text)
+        # step is about the install and not about attached boards. The
+        # assignment and its export, not the words in a comment.
+        self.assertIn("    UBERTOOTH_TEST_NO_DEVICES=1\n"
+                      "    export UBERTOOTH_TEST_NO_DEVICES\n", self.text)
+        self.assertIn("    unset UBERTOOTH_TEST_NO_DEVICES\n", self.text)
         # After the build and before the host-only tests, which need the
         # prefix the build wrote.
-        build = self.text.index('check_installed_library "$ut"')
+        build = self.text.index('check_installed_library "$WORK/build/src')
         self.assertLess(self.text.index('--with-python --output "$WORK/build"'),
                         build)
         self.assertLess(build, self.text.index(
@@ -388,9 +398,10 @@ class BuildStepTests(unittest.TestCase):
             "installedlib same-path",
             "installedlib under-prefix",
             "installedlib fork-pin",
+            "--variable=$il_variable",
             "--expected-pin",
             "EXACT REQUIRED",
-            "--variable=includedir",
+            "--variable=$il_variable",
         ):
             with self.subTest(fragment):
                 self.assertIn(fragment, self.text)
@@ -398,6 +409,7 @@ class BuildStepTests(unittest.TestCase):
     def test_it_configures_the_tools_against_the_install(self):
         self.assertIn('cmake -S "$il_source/host/ubertooth-tools" '
                       '-B "$il_work/tools-build"', self.text)
+        self.assertIn('"$il_source/host/cmake/modules/FindBTBB.cmake"', self.text)
         self.assertIn("ubertooth_harness.installedlib configure-identity",
                       self.text)
         self.assertIn("--target ubertooth-util", self.text)

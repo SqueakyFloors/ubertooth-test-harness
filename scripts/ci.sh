@@ -173,7 +173,10 @@ check_dfu_part_table() {
 # report opens every attached board, and on a bench host a board another agent
 # took between two runs would make two identical installs answer differently.
 #
-# $1 is the Ubertooth source tree, $2 the prefix the build installed into.
+# $1 is the Ubertooth source tree the build used -- the checkout it made at
+# the ref it resolved, under $WORK/build/src/ubertooth, and not the clone the
+# job was pointed at, whose HEAD may be another commit -- and $2 the prefix
+# the build installed into.
 # The names here all begin il_, because POSIX sh has no local variables and
 # the other functions in this file use short generic ones.
 check_installed_library() {
@@ -204,6 +207,12 @@ check_installed_library() {
     # built against this install must print too: it names the libubertooth
     # revision, so a system library that answered instead is caught.
     il_version=$(grep '^Host tools version: ' "$WORK/host-version.txt")
+    # One line, which is what both ends of the comparison below read it as:
+    # consumer-identity looks for it among a program's lines, and the grep at
+    # the end of the step is -F, which would take two lines as two patterns.
+    [ "$(printf '%s\n' "$il_version" | wc -l)" -eq 1 ] || {
+        echo "error: the build's own tools printed more than one version line" >&2
+        return 1; }
 
     # One program for both consumers. ubertooth_print_versions() is the
     # library call that needs no board: it prints the library's own version
@@ -235,11 +244,12 @@ $(pkg-config --variable=prefix libubertooth)"
     .venv/bin/python -m ubertooth_harness.installedlib same-path \
         "$(pkg-config --variable=prefix libubertooth)" "$il_prefix" \
         --what "the prefix libubertooth.pc reports"
-    .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
-        /dev/stdin --prefix "$il_prefix" --marker 'includedir: ' \
-        <<EOF
-includedir: $(pkg-config --variable=includedir libubertooth)
+    for il_variable in includedir libdir; do
+        .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
+            /dev/stdin --prefix "$il_prefix" --marker "$il_variable: " <<EOF
+$il_variable: $(pkg-config --variable=$il_variable libubertooth)
 EOF
+    done
     # Deliberately word-split, which is how a compiler takes pkg-config's
     # answer; a prefix holding a space would need an array and this is sh.
     # shellcheck disable=SC2086
@@ -277,7 +287,6 @@ EOF
         -DUBERTOOTH_EXPECTED_VERSION="$il_pcversion" \
         > "$il_work/cmake-configure.txt" 2>&1 || {
             cat "$il_work/cmake-configure.txt"; return 1; }
-    grep -E '^-- consumer links ' "$il_work/cmake-configure.txt"
     .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
         "$il_work/cmake-configure.txt" --prefix "$il_prefix" \
         --marker '-- consumer links '
@@ -297,7 +306,6 @@ EOF
     cmake -S "$il_source/host/ubertooth-tools" -B "$il_work/tools-build" \
         -DCMAKE_PREFIX_PATH="$il_prefix" > "$il_work/tools-configure.txt" 2>&1 \
         || { cat "$il_work/tools-configure.txt"; return 1; }
-    grep -E '^-- Found LIBUBERTOOTH: ' "$il_work/tools-configure.txt"
     .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
         "$il_work/tools-configure.txt" --prefix "$il_prefix" \
         --marker '-- Found LIBUBERTOOTH: '
@@ -352,15 +360,17 @@ EOF
     # naming some other function would be a different failure, and the name
     # appearing anywhere in the log would not be the refusal at all. The
     # message wraps, so the log is read with its line endings squeezed out.
+    # The log's line endings are squeezed out before the search, because
+    # CMake wraps a FATAL_ERROR at about 76 columns and where it wraps
+    # depends on the length of the prefix's path. grep -o prints the phrase
+    # it found, so the step shows the refusal without a second search that
+    # could disagree with this one about where the lines are.
     tr '\n' ' ' < "$il_work/old-configure.txt" | tr -s ' ' \
-        | grep -qE 'is older than these tools: it does not have [^.]*cmd_get_bootloader_info' \
+        | grep -oE 'is older than these tools: it does not have [^.]*cmd_get_bootloader_info[^.]*' \
         || { cat "$il_work/old-configure.txt"
              echo "error: the configure refused the aged install for some" \
                   "other reason than the function it is missing" >&2
              return 1; }
-    # The refusal as the user would read it, which is three wrapped lines of
-    # a log the rest of which is an ordinary configure.
-    grep -A 2 'is older than these tools' "$il_work/old-configure.txt"
     unset UBERTOOTH_TEST_NO_DEVICES
     # Put back what the job had, so the steps after this one see it.
     if [ -n "$il_saved_pkg_config_path" ]; then
@@ -401,7 +411,7 @@ run_build() {
     grep -q '^Host tools version: ' "$WORK/host-version.txt"
     test -z "$(git -C "$ut" status --porcelain)"
 
-    check_installed_library "$ut" "$WORK/build/prefix"
+    check_installed_library "$WORK/build/src/ubertooth" "$WORK/build/prefix"
     # The source tree is only read by the checks above; say so here rather
     # than leave a reader to trust it.
     test -z "$(git -C "$ut" status --porcelain)"

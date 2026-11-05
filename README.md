@@ -3721,9 +3721,10 @@ install. Then `host/ubertooth-tools` is configured on its own
 against that prefix, which is how a packager builds the tools and the one path
 `FindUBERTOOTH.cmake` is read on (a whole-tree build uses the libubertooth
 beside it); the libubertooth it found has to be the install's, the configure has
-to name the libbtbb it found, which has to be the install's, and the commit the
-fork's own `FindBTBB.cmake` pins, so a measurement taken from a build can be
-read back to a libbtbb, and `ubertooth-util` is built
+to name the libbtbb it found, which has to be the install's, and a commit the
+tree is built against which has to be the one the fork's own
+`FindBTBB.cmake` sets -- so the line a reader of a measurement relies on is
+read back to the tree, rather than only being well formed -- and `ubertooth-util` is built
 and run from that build and has to print the same version line. Last, the same
 configure is repeated against a copy of the prefix with one of the functions
 `FindUBERTOOTH.cmake` probes for taken out of the headers -- what an install
