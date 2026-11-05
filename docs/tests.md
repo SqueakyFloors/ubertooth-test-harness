@@ -1454,7 +1454,7 @@ where the case needs them, since a harness step otherwise runs with the
 harness's own streams). `-q -` writes the capture to the stream the case
 redirected, which is then read back as a PCAP of the fixture's packet count,
 and the packet report appears on neither stream: the capture owns standard
-output and the tool's own goes to the null device, so nothing can land in the
+output, so the report is printed nowhere at all and nothing can land in the
 middle of a capture. `/dev/stdout` and `/dev/fd/1` mean the same stream.
 `/dev/fd/3` does not: it is whatever the caller opened there, so the capture
 goes to that file and the report stays on standard output. `-q` and `-r`
@@ -1482,7 +1482,10 @@ elsewhere. One file under two spellings is refused as
 file is identified and not the name for that pair check too, so a symbolic
 link, a hard link, `-` beside the name the shell pointed that stream at, and
 `/dev/fd/3` beside the file the case opened there are each refused as one
-file under two names, each named as the user wrote it. `-r` refuses every
+file under two names, each named as the user wrote it; two captures that both
+ask for that stream belong to the one-capture-on-standard-output rule instead
+and are refused by it (`error: -q and -d cannot both write to standard
+output`). `-r` refuses every
 destination that reaches standard output while the command line is read, `-`,
 `/dev/stdout`, and a link to it alike, with
 `error: PCAPNG capture to stdout is not supported; use -q -`, because PcapNG
@@ -1492,7 +1495,11 @@ still what they were. And with standard output pointed at the input, `-q -`
 is refused with the input untouched while the bare decode, which no option
 names and nothing can refuse by then, exits 0 with
 `warning: the decode is going to the dump -i is replaying, so the capture is
-lost` and leaves the fixture's own records at the start of the file.
+lost` and leaves the fixture's own records at the start of the file. That
+last case reads its own standard output back as a file, so it holds while the
+tool's standard output stays buffered until it exits, which it does for the
+fixture's 15 packet lines; a report long enough to flush part-way through
+would be read as a record cut short and the run would exit 1 instead of 0.
 
 **Known limits.** The fixture is synthetic, never an over-the-air capture, so
 this covers the decode path and not the receive path. There is no LE

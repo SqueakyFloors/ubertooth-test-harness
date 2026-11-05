@@ -1000,7 +1000,9 @@ Raw receive replay:
     stream on Linux; one file under two spellings refused while /dev/null
     twice is accepted; a symbolic link, a hard link, - beside the name the
     shell pointed that stream at, and /dev/fd/3 beside the file the case
-    opened there, each refused as one destination pair that is one file; -r
+    opened there, each refused as one destination pair that is one file, while
+    two captures that both ask for that stream are refused by the
+    one-capture-on-standard-output rule instead; -r
     refusing every destination that reaches standard output, since PcapNG
     seeks; a symbolic and a hard link to the input both refused; and standard
     output pointed at the input, where a capture option is refused and the

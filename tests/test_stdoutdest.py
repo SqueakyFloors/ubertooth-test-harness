@@ -126,6 +126,25 @@ class RunTests(unittest.TestCase):
         self.assertEqual(1, status)
         self.assertIn("exit 1", printed)
 
+    def test_stdout_and_an_extra_descriptor_reach_their_own_files(self):
+        # The stdout file's own open may land on the very number a --fd asks
+        # for, so the descriptors are taken first: otherwise the --fd would
+        # replace it and both outputs would go to one file.
+        out = self.directory / "out.bin"
+        three = self.directory / "three.bin"
+        status, _printed = self.helper(
+            "--stdout", str(out), "--fd", f"3={three}", "--", *self.tool(3))
+        self.assertEqual(0, status)
+        self.assertEqual(b"CAPTURE", out.read_bytes())
+        self.assertEqual(b"ON-FD", three.read_bytes())
+
+    def test_a_descriptor_number_may_be_given_once(self):
+        status, printed = self.helper(
+            "--fd", f"3={self.directory / 'a.bin'}",
+            "--fd", f"3={self.directory / 'b.bin'}", "--", *self.tool(3))
+        self.assertEqual(2, status)
+        self.assertIn("may be given once", printed)
+
     def test_the_descriptors_it_opened_are_closed_again(self):
         # A run leaves nothing open: the file the descriptor was opened on
         # would otherwise still be held after the tool it was for had gone.

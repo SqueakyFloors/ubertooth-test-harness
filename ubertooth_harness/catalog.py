@@ -1006,15 +1006,17 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # about a dozen board reads around them. Measured on the Linux lab host at
     # fork 166b4f91 with a 3 s duration.
     "Board state between runs": _default(Estimate(15.5, per_duration=1)),
-    # Measured on the macOS host at fork 7cbc191a: 11 cases and 48 commands
-    # in smoke, 30 and 123 comprehensive (29 and 123 on macOS, where the
-    # /proc case is not applicable), against 6 and 20 and 19 and 72 for the
-    # cases this test had before the capture-destination ones were added.
-    # Smoke took 2.9-3.1 s against 1.1 s, and comprehensive 8.0 s of command
-    # time against 6.2 s for the same run without the last two cases; these
-    # are the earlier estimates plus the measured difference. A busy host
-    # takes two to six times longer, which is why an estimate is a countdown
-    # and never a timeout.
+    # The earlier estimates (0.9 and 3.9) plus the measured difference the
+    # capture-destination cases make, taken in two steps on the macOS host at
+    # fork 7cbc191a. First: smoke 2.9-3.1 s against 1.1 s without them, and
+    # comprehensive 6.1-6.7 s against 3.0 s, so +1.9 and +3.3. Then three
+    # more cases: comprehensive 8.0 s of command time against 6.2 s for the
+    # same run without them, so +1.8 more, and smoke unchanged, those three
+    # being comprehensive-only. 0.9 + 1.9 = 2.8 and 3.9 + 3.3 + 1.8 = 9.0.
+    # 11 cases and 48 commands in smoke, 30 and 127 comprehensive (29 and 124
+    # where there is no /proc). Each pair of command-time figures was taken
+    # back to back, because a busy host takes two to six times longer, which
+    # is why an estimate is a countdown and never a timeout.
     "Raw receive replay": _profiles(Estimate(2.8), Estimate(9.0)),
     # Two cases and 35 commands in smoke, three and 52 comprehensive.
     # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,

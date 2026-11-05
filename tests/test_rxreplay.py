@@ -206,17 +206,22 @@ class ReplayRx:
         at one of the names for that descriptor reaches the stream as surely
         as the name itself (opt_destination_is_stdout).
         """
-        if self._is_stdout_value(value, fds):
-            return True
-        if value == "-":
-            return True
         path, hops = value, 0
-        while os.path.islink(path) and hops < 16:
+        while hops <= 16:
+            # A path naming one of this process's descriptors ends the chain
+            # (link_target): on Linux /dev/stdout is itself a link, to
+            # /proc/self/fd/1, and following it any further walks into the
+            # real file's path, where a destination that does reach standard
+            # output would stop being recognized as it.
+            if self._is_stdout_value(path, fds):
+                return True
+            if not os.path.islink(path):
+                return False
             target = os.readlink(path)
             path = target if os.path.isabs(target) else os.path.join(
                 os.path.dirname(path), target)
             hops += 1
-        return hops > 0 and path in self._STDOUT_VALUES[1:]
+        return False
 
     def _destination_file(self, value, stdout_name, fds):
         """(device, inode) a writer given ``value`` would write to, or None.
@@ -259,6 +264,15 @@ class ReplayRx:
     def _destination_problems(self, destinations, stdout_name, fds, input_path):
         """The refusal and warning lines opt_parse.c would print, in order."""
         named = [(option, value) for option, value in destinations if value]
+        # Standard output carries one stream, so two captures cannot both
+        # have it, however the two are spelled (a link to it included). Its
+        # own gate, before the one-file check below.
+        if "two-captures-on-stdout-allowed" not in self.bugs:
+            reaching = [option for option, value in named
+                        if self._reaches_stdout(value, fds)]
+            if len(reaching) > 1:
+                return (f"error: {reaching[0]} and {reaching[1]} cannot both "
+                        "write to standard output\n", "", 1)
         if "no-destination-check" not in self.bugs:
             for index, (option, value) in enumerate(named):
                 for other_option, other in named[index + 1:]:
@@ -458,6 +472,24 @@ class ReplayRx:
                             notice + partial + survey_heading + warning
                             + "".join(note + "\n" for note in notes))
 
+    @staticmethod
+    def _under_a_device(path):
+        """Whether a path, or any link in its chain, is under /dev or /proc.
+
+        Checked before writing, so that a fake that failed to recognize a
+        destination as a stream cannot then write capture bytes into the test
+        process's own output through a link.
+        """
+        for _hop in range(17):
+            if path.startswith(("/dev/", "/proc/")):
+                return True
+            if not os.path.islink(path):
+                return False
+            target = os.readlink(path)
+            path = target if os.path.isabs(target) else os.path.join(
+                os.path.dirname(path), target)
+        return True
+
     def _destination_path(self, value, stdout_name, fds):
         """The file a writer given ``value`` opens, as this fake sees it."""
         if self._is_stdout_value(value, fds):
@@ -477,11 +509,11 @@ class ReplayRx:
         def write(option, data):
             target = self._destination_path(
                 self._value(options, option), stdout_name, fds)
-            # Nothing under /dev is written: the null device keeps nothing,
-            # and a descriptor path this fake did not resolve to one of its
-            # own files is a destination it declines to reach, rather than
-            # the test process's own stream.
-            if target is None or target.startswith(("/dev/", "/proc/")):
+            # Nothing under /dev or /proc is written, by name or through a
+            # link: the null device keeps nothing, and a descriptor path this
+            # fake did not resolve to one of its own files is a destination it
+            # declines to reach, rather than the test process's own stream.
+            if target is None or self._under_a_device(target):
                 return
             Path(target).write_bytes(prefix + data)
 
@@ -812,6 +844,61 @@ _STDOUT_CAPTURE_CASES = _STDOUT_ALIAS_CASES | {
 }
 
 
+class StdoutChainTests(unittest.TestCase):
+    """The fake's reading of a destination that reaches standard output.
+
+    Written against a chain built here rather than against the host's own,
+    because the two platforms spell it differently: on macOS /dev/stdout is a
+    link to /dev/fd/1 and stops there, while on Linux it is a link to
+    /proc/self/fd/1, which is itself a link to the file the stream is on. A
+    walk that followed the chain to its end would answer "not standard
+    output" on Linux for a destination that does reach it, which is why
+    link_target() in the fork stops at the first name that is a descriptor.
+    """
+
+    def chain(self):
+        directory = Path(tempfile.mkdtemp())
+        (directory / "proc/self/fd").mkdir(parents=True)
+        (directory / "dev").mkdir()
+        real = directory / "real.out"
+        real.write_bytes(b"")
+        (directory / "proc/self/fd/1").symlink_to(real)
+        (directory / "dev/stdout").symlink_to(directory / "proc/self/fd/1")
+        (directory / "to-stdout").symlink_to(directory / "dev/stdout")
+        fake = ReplayRx()
+        fake._STDOUT_VALUES = (
+            "-", str(directory / "dev/stdout"), str(directory / "dev/fd/1"),
+            str(directory / "proc/self/fd/1"),
+        )
+        return fake, directory, real
+
+    def test_a_link_through_the_linux_spelling_reaches_stdout(self):
+        fake, directory, _real = self.chain()
+        self.assertTrue(fake._reaches_stdout(str(directory / "to-stdout"), {}))
+        self.assertTrue(fake._reaches_stdout(str(directory / "dev/stdout"), {}))
+        self.assertTrue(
+            fake._reaches_stdout(str(directory / "proc/self/fd/1"), {}))
+
+    def test_an_ordinary_file_and_a_link_to_one_do_not(self):
+        fake, directory, real = self.chain()
+        (directory / "plain").symlink_to(real)
+        self.assertFalse(fake._reaches_stdout(str(real), {}))
+        self.assertFalse(fake._reaches_stdout(str(directory / "plain"), {}))
+
+    def test_a_link_that_points_at_itself_answers_no(self):
+        fake, directory, _real = self.chain()
+        (directory / "loop").symlink_to(directory / "loop")
+        self.assertFalse(fake._reaches_stdout(str(directory / "loop"), {}))
+
+    def test_nothing_under_a_device_is_written_to(self):
+        fake, directory, real = self.chain()
+        self.assertTrue(fake._under_a_device("/dev/stdout"))
+        self.assertTrue(fake._under_a_device("/proc/self/fd/1"))
+        self.assertFalse(fake._under_a_device(str(real)))
+        (directory / "to-dev").symlink_to("/dev/stdout")
+        self.assertTrue(fake._under_a_device(str(directory / "to-dev")))
+
+
 class ReplayCaseTests(unittest.TestCase):
 
     def test_case_sets_and_no_board(self):
@@ -913,7 +1000,12 @@ class ReplayCaseTests(unittest.TestCase):
             # Where a capture goes, and the pairs that are one file (#333).
             "stdout-report": _STDOUT_CAPTURE_CASES
                              - {"-i -q /dev/fd/3 is the caller's file, not stdout"},
-            "stdout-alias-is-a-file": _STDOUT_ALIAS_CASES,
+            # An alias read as an ordinary file name loses the two gates that
+            # ask whether a destination reaches the stream as well.
+            "stdout-alias-is-a-file": _STDOUT_ALIAS_CASES | {
+                "-i -r refuses every destination that reaches stdout",
+                "-i: a link, a hard link, and a descriptor beside the file it "
+                "holds"},
             "other-fd-is-stdout":
                 {"-i -q /dev/fd/3 is the caller's file, not stdout",
                  "-i: a link, a hard link, and a descriptor beside the file it "
@@ -927,6 +1019,9 @@ class ReplayCaseTests(unittest.TestCase):
                 {"-i: one file under two names is refused, /dev/null twice is not"},
             "pcapng-stdout-allowed":
                 {"-i -r refuses every destination that reaches stdout"},
+            "two-captures-on-stdout-allowed":
+                {"-i: a link, a hard link, and a descriptor beside the file it "
+                 "holds"},
             "no-input-check":
                 {"-i -d naming the dump being replayed is refused",
                  "-i: a symbolic and a hard link to the dump are refused",

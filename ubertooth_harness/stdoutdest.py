@@ -16,6 +16,7 @@ standard output and still be read in a run record:
     python stdoutdest.py seed DIR NAME...
     python stdoutdest.py link DIR [--symlink NAME=TARGET]
                                   [--hardlink NAME=TARGET]
+    python stdoutdest.py unlink DIR NAME...
     python stdoutdest.py check DIR [--sha256 NAME=HEX] [--prefix NAME=HEX:LEN]
                                    [--absent NAME] [--kept NAME]
                                    [--symlink NAME=TARGET]
@@ -93,11 +94,40 @@ def run(argv, stdout: Path | None, append: bool, fds) -> tuple[int, list[str]]:
     already (it is the run's own), except for an ``--append`` standard
     output, which is how a run is pointed at a file it is also reading.
     """
+    numbers = [number for number, _name in fds]
+    if len(set(numbers)) != len(numbers):
+        raise ValueError("a descriptor number may be given once, and "
+                         + ", ".join(str(number) for number in numbers)
+                         + " repeats one")
     opened = []
     duplicated = []
-    handed = []
     notes = []
     try:
+        # The file descriptors first, so that each takes the number it was
+        # asked for before the stdout file is opened: opening that one first
+        # could land it on a number a --fd then replaced, which would send
+        # the tool's standard output to the wrong file and leave one
+        # descriptor to be closed twice.
+        for number, name in fds:
+            if name == _STDOUT:
+                continue
+            # os.open rather than open(): the descriptor is handed to the
+            # tool by number, so this function owns it and closes it itself.
+            # A file object on the same descriptor would close it a second
+            # time, which is the one EBADF this can give.
+            source = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            try:
+                if source != number:
+                    # dup2 leaves the new descriptor inheritable, which is
+                    # what pass_fds then keeps.
+                    os.dup2(source, number)
+            finally:
+                # Either the duplicate is the one to close at the end, or the
+                # open already landed on that number and it is.
+                duplicated.append(number)
+                if source != number:
+                    os.close(source)
+            notes.append(f"fd {number} -> {Path(name).name}")
         if stdout is None:
             target = None
         else:
@@ -106,38 +136,22 @@ def run(argv, stdout: Path | None, append: bool, fds) -> tuple[int, list[str]]:
             notes.append(f"stdout -> {stdout.name} "
                          f"({'append' if append else 'new'})")
         for number, name in fds:
-            if name == _STDOUT:
-                if target is None:
-                    raise ValueError(
-                        f"--fd {number}={_STDOUT} needs --stdout, so there is a "
-                        "file to point it at")
-                # The file object owns this descriptor, so it closes it.
-                source = target.fileno()
-                notes.append(f"fd {number} -> the same stream as stdout")
-                owned = True
-            else:
-                # os.open rather than open(): the descriptor is handed to the
-                # tool by number, so this function owns it and closes it
-                # itself. A file object on the same descriptor would close it
-                # a second time, which is the one EBADF this can give.
-                source = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-                owned = False
-                notes.append(f"fd {number} -> {Path(name).name}")
-            # Into the number the tool was told to write to. dup2 leaves the
-            # new descriptor inheritable, which is what pass_fds then keeps.
-            handed.append(number)
-            if source != number:
-                os.dup2(source, number)
+            if name != _STDOUT:
+                continue
+            if target is None:
+                raise ValueError(
+                    f"--fd {number}={_STDOUT} needs --stdout, so there is a "
+                    "file to point it at")
+            if target.fileno() != number:
+                os.dup2(target.fileno(), number)
                 duplicated.append(number)
-                if not owned:
-                    os.close(source)
-            elif not owned:
-                # The open already landed on that number, so there is nothing
-                # to duplicate and this is the descriptor to close at the end.
-                duplicated.append(number)
+            # Where the stdout file's own open landed on that number there is
+            # nothing to duplicate, and the file object is what closes it:
+            # closing it here as well is the one EBADF this can give.
+            notes.append(f"fd {number} -> the same stream as stdout")
         completed = subprocess.run(
             list(argv), stdout=target, stderr=None, check=False,
-            pass_fds=tuple(handed),
+            pass_fds=tuple(numbers),
         )
     finally:
         for number in duplicated:
@@ -158,7 +172,10 @@ def _problem_for(directory: Path, args) -> str:
             return (f"{name} holds {path.stat().st_size} bytes hashing to "
                     f"{found[:12]}, expected {expected[:12]}")
     for name, expected in args.prefix:
-        digest, _separator, length = expected.partition(":")
+        digest, separator, length = expected.partition(":")
+        if not separator or not length.isdigit():
+            return (f"--prefix {name}={expected} is not NAME=HEX:LENGTH, so "
+                    "there is no length to compare")
         size = int(length)
         path = directory / name
         if not path.is_file():
