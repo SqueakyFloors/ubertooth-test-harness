@@ -2484,16 +2484,18 @@ count of the room rather than of the decoder.
 pins, a payload-bearing record always names a transport — the library names
 one whenever it produced a payload, and an abandoned trial clock clears the
 transport and the payload together — so a libbtbb that stopped filling the
-field in would pass here. What it is accepted for now is a run that names an
-older `--libbtbb-ref` of its own, one from before
-[libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133), which names
-no transport at all: the *harness's* own `LIBBTBB_PIN` reached that change
-with [#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341),
-so a default run no longer needs the escape. A floor is no substitute either
-way, at 11 payload-bearing records in 2620. Dropping it is
+field in would pass here. What it covers is a run that names a libbtbb from
+before [libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133)
+itself, which names no transport at all. A run that takes the fork's pin, as a
+deployed runner's `fork-pin` does, has named transports since that change; the
+*harness's* own `LIBBTBB_PIN` and the README's example refs named an older one
+until
+[#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341)
+moved them, and those were the runs the escape was written for. A floor is no
+substitute either way, at 11 payload-bearing records in 2620. Dropping it is
 [#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339),
-whose one precondition, that pin, is now met; it is left there because
-requiring a named transport changes what a run on the bench accepts.
+whose one precondition, that pin, is now met; it is left there because it
+changes the rule a live capture is judged by, which is that issue's subject.
 
 On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the

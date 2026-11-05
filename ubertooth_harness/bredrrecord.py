@@ -467,14 +467,17 @@ def _transport_problems(record: Record) -> list[str]:
 
     That second escape is a real gap, kept on purpose: at the commit the fork
     pins, a payload-bearing record always names a transport, so a libbtbb
-    that stopped filling the field in would pass here. What it is for is a
-    run that names an older ``--libbtbb-ref`` of its own; the harness's own
-    ``LIBBTBB_PIN`` reached libbtbb#133 with harness #341, so a default run
-    no longer needs it. A floor on payload-bearing records is no alternative
-    either way, because they are rare on the bench. Dropping the escape is
-    harness #339, whose one precondition -- that pin -- is now met; it is
-    left to that issue because requiring a named transport changes what a
-    Classic capture run on the bench accepts.
+    that stopped filling the field in would pass here. What it covers is a
+    run that names a libbtbb from before libbtbb#133 itself. A run that takes
+    the fork's pin, which is what a deployed runner's ``fork-pin`` resolves
+    to, has named transports since that change; the harness's own
+    ``LIBBTBB_PIN`` and the README's example refs named an older one until
+    harness #341 moved them, and those were the runs the escape was written
+    for. A floor on payload-bearing records is no alternative either way,
+    because they are rare on the bench. Dropping the escape is harness #339,
+    whose one precondition, that pin, is now met; it is left to that issue
+    because it changes the rule a live Classic capture is judged by, which is
+    that issue's subject rather than this one's.
     """
     named = transport_name(record.transport)
     if not record.payload:
