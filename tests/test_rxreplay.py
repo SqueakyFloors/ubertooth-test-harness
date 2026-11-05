@@ -1,4 +1,5 @@
 import io
+import os
 import random
 import struct
 import subprocess
@@ -9,7 +10,9 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from ubertooth_harness import capturefile, receive_cases, rxdump, rxreplay
+from ubertooth_harness import (
+    capturefile, receive_cases, rxdump, rxreplay, stdoutdest,
+)
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.planner import TestInvocation
@@ -121,9 +124,13 @@ class ReplayRx:
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
             return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
+        if (command[0] == sys.executable and command[1].endswith("stdoutdest.py")
+                and command[2] == "run"):
+            return self._stdout_destination(command)
         if command[0] == sys.executable and command[1].endswith(".py"):
             module = {"rxreplay.py": rxreplay, "capturefile.py": capturefile,
-                      "rxdump.py": rxdump}[Path(command[1]).name]
+                      "rxdump.py": rxdump, "stdoutdest.py": stdoutdest}[
+                          Path(command[1]).name]
             out = io.StringIO()
             with redirect_stdout(out):
                 code = module.main(list(command[2:]))
@@ -135,6 +142,148 @@ class ReplayRx:
         assert "-U" not in command
         return self._rx(command)
 
+    # --- where a capture goes (opt_parse.c) ---------------------------------
+    #
+    # stdoutdest.py puts the descriptors where a case needs them and then runs
+    # the tool, so the fake answers it here rather than letting it spawn one:
+    # it reads the same options, decides where descriptor 1 and the extra
+    # descriptors point, and hands that to _rx().
+
+    def _stdout_destination(self, command):
+        words = list(command[3:])
+        stdout_name, append, fds = None, False, {}
+        while words and words[0].startswith("--") and words[0] != "--":
+            option = words.pop(0)
+            if option == "--append":
+                append = True
+            elif option == "--stdout":
+                stdout_name = words.pop(0)
+            elif option == "--fd":
+                number, _separator, target = words.pop(0).partition("=")
+                fds[int(number)] = target
+            else:  # pragma: no cover - the cases pass no other option
+                raise AssertionError(option)
+        if words and words[0] == "--":
+            words.pop(0)
+        if stdout_name is not None:
+            mode = "ab" if append else "xb"
+            with open(stdout_name, mode):
+                pass
+        for target in fds.values():
+            if target != "stdout":
+                Path(target).write_bytes(b"")
+        result = self._rx(tuple(words), stdout_name=stdout_name,
+                          fds={number: (stdout_name if target == "stdout" else target)
+                               for number, target in fds.items()})
+        notes = []
+        if stdout_name is not None:
+            notes.append(f"stdout -> {Path(stdout_name).name}")
+        notes += [f"fd {number} -> {Path(target).name}" for number, target in fds.items()]
+        summary = (f"Stdout destination: ubertooth-rx exit {result.returncode}; "
+                   + ("; ".join(notes) or "the harness's own streams") + "\n")
+        # A capture that took descriptor 1 has the tool's own output on it;
+        # anything the tool still printed comes back on this command's stdout,
+        # as it does when the tool inherits the harness's stream.
+        return self._result(command, result.returncode,
+                            summary + result.stdout, result.stderr)
+
+    # The values that name descriptor 1 (opt_parse.c, stdout_paths plus "-").
+    _STDOUT_VALUES = ("-", "/dev/stdout", "/dev/fd/1", "/proc/self/fd/1")
+
+    def _is_stdout_value(self, value, fds):
+        if value is None:
+            return False
+        if value in self._STDOUT_VALUES:
+            return "stdout-alias-is-a-file" not in self.bugs or value == "-"
+        if "other-fd-is-stdout" in self.bugs and value.startswith("/dev/fd/"):
+            return True
+        return False
+
+    def _destination_file(self, value, stdout_name, fds):
+        """(device, inode) a writer given ``value`` would write to, or None.
+
+        None is a destination that does not exist yet, which is the ordinary
+        case for a capture; the comparisons treat a matched pair of them as
+        one file by their text, as opt_parse.c does.
+        """
+        if value is None or value == "":
+            return None
+        if self._is_stdout_value(value, fds):
+            value = stdout_name
+            if value is None:
+                return None
+        elif value.startswith("/dev/fd/"):
+            number = value.removeprefix("/dev/fd/")
+            if number.isdigit() and int(number) in fds:
+                value = fds[int(number)]
+        try:
+            info = os.stat(value)
+        except OSError:
+            return None
+        return (info.st_dev, info.st_ino)
+
+    def _same_destination(self, first, second, stdout_name, fds):
+        first_file = self._destination_file(first, stdout_name, fds)
+        second_file = self._destination_file(second, stdout_name, fds)
+        if first_file is not None and second_file is not None:
+            return first_file == second_file
+        if first_file is None and second_file is None:
+            # Neither exists yet, so only the text can answer. os.path
+            # reduces the redundant "/." elements that same_path_text() does.
+            return os.path.normpath(first) == os.path.normpath(second)
+        return False
+
+    @staticmethod
+    def _keeps_nothing(value):
+        return value == "/dev/null"
+
+    def _destination_problems(self, destinations, stdout_name, fds, input_path):
+        """The refusal and warning lines opt_parse.c would print, in order."""
+        named = [(option, value) for option, value in destinations if value]
+        if "no-destination-check" not in self.bugs:
+            for index, (option, value) in enumerate(named):
+                for other_option, other in named[index + 1:]:
+                    both_stdout = (self._is_stdout_value(value, fds)
+                                   and self._is_stdout_value(other, fds))
+                    if both_stdout:
+                        continue
+                    if not self._same_destination(value, other, stdout_name, fds):
+                        continue
+                    if (self._keeps_nothing(value)
+                            and "null-twice-refused" not in self.bugs):
+                        continue
+                    first = ("standard output" if value == "-" else value)
+                    last = ("standard output" if other == "-" else other)
+                    if value == other:
+                        return (f"error: {option} and {other_option} cannot both "
+                                f"write to {first}\n", "", 1)
+                    return (f"error: {option} and {other_option} cannot both write "
+                            f"to one file ({first} and {last})\n", "", 1)
+        if input_path is None:
+            return ("", "", 0)
+        input_file = self._destination_file(str(input_path), stdout_name, fds)
+        if "no-input-check" not in self.bugs:
+            for option, value in named:
+                if "input-check-ignores-links" in self.bugs:
+                    same = os.path.normpath(value) == os.path.normpath(str(input_path))
+                else:
+                    same = (self._destination_file(value, stdout_name, fds)
+                            == input_file)
+                if not same:
+                    continue
+                named_as = "standard output" if value == "-" else value
+                if "refusal-truncates-input" in self.bugs:
+                    Path(input_path).write_bytes(b"")
+                return (f"error: {option} would write over the dump -i is "
+                        f"replaying ({named_as})\n", "", 1)
+        if ("no-stdout-warning" not in self.bugs and stdout_name is not None
+                and not any(self._is_stdout_value(value, fds)
+                            for _option, value in named)
+                and self._destination_file("-", stdout_name, fds) == input_file):
+            return ("", "warning: the decode is going to the dump -i is replaying, "
+                    "so the capture is lost\n", 0)
+        return ("", "", 0)
+
     @staticmethod
     def _result(command, code, stdout, stderr=""):
         return CommandResult(command, code, stdout, stderr, 0.01, False)
@@ -143,7 +292,8 @@ class ReplayRx:
     def _value(options, flag):
         return options[options.index(flag) + 1] if flag in options else None
 
-    def _rx(self, command):
+    def _rx(self, command, *, stdout_name=None, fds=None):
+        fds = dict(fds or {})
         options = list(command[1:])
         if options == ["-h"]:
             sweep = ("" if "no-sweep-help" in self.bugs else
@@ -170,6 +320,13 @@ class ReplayRx:
             return self._result(command, 1 if self.fixed else 0, "",
                                 f"error: reading {path} failed: Is a directory\n"
                                 if self.fixed else "")
+        # Where each capture would go, in the order ubertooth-rx.c lists them.
+        destinations = [(option, self._value(options, option))
+                        for option in ("-r", "-q", "-d")]
+        refusal, warning, status = self._destination_problems(
+            destinations, stdout_name, fds, path)
+        if refusal:
+            return self._result(command, status, "", refusal)
         dump = self._value(options, "-d")
         if dump is not None and not Path(dump).parent.is_dir():
             # The -d file is opened before any record is read; 5ac22a8^
@@ -251,31 +408,71 @@ class ReplayRx:
                     lines.append(f"??:??:{known:02X}:{text}")
                 else:
                     lines.append(f"??:??:??:{text}")
-        self._write_outputs(options, found, dumped)
-        return self._result(command, 1 if partial else 0,
-                            "".join(line + "\n" for line in lines),
-                            notice + partial + survey_heading
+        report = "".join(line + "\n" for line in lines)
+        # A capture that was given descriptor 1 owns it: the tool's own
+        # standard output goes to the null device for the rest of the run
+        # (take_stdout), so the report is printed nowhere at all.
+        on_stdout = any(self._is_stdout_value(value, fds)
+                        for _option, value in destinations)
+        spoiled = report if on_stdout and "stdout-report" in self.bugs else ""
+        self._write_outputs(options, found, dumped, stdout_name, fds,
+                            prefix=spoiled.encode())
+        if on_stdout:
+            report = ""
+        elif stdout_name is not None:
+            # Not a capture's stream, so the report goes where the caller
+            # pointed standard output -- which is how a decode ends up in the
+            # dump it is replaying.
+            with open(stdout_name, "ab") as handle:
+                handle.write(report.encode())
+            report = ""
+        return self._result(command, 1 if partial else 0, report,
+                            notice + partial + survey_heading + warning
                             + "".join(note + "\n" for note in notes))
 
-    def _write_outputs(self, options, found, dumped):
+    def _destination_path(self, value, stdout_name, fds):
+        """The file a writer given ``value`` opens, as this fake sees it."""
+        if self._is_stdout_value(value, fds):
+            return stdout_name
+        if value.startswith("/dev/fd/"):
+            number = value.removeprefix("/dev/fd/")
+            if number.isdigit() and int(number) in fds:
+                return fds[int(number)]
+        return value
+
+    def _write_outputs(self, options, found, dumped, stdout_name=None, fds=None,
+                       prefix=b""):
+        fds = dict(fds or {})
         link = 1 if "link-type" in self.bugs else 255
         count = 0 if "no-capture" in self.bugs else len(found)
+
+        def write(option, data):
+            target = self._destination_path(
+                self._value(options, option), stdout_name, fds)
+            # Nothing under /dev is written: the null device keeps nothing,
+            # and a descriptor path this fake did not resolve to one of its
+            # own files is a destination it declines to reach, rather than
+            # the test process's own stream.
+            if target is None or target.startswith(("/dev/", "/proc/")):
+                return
+            Path(target).write_bytes(prefix + data)
+
         if "-q" in options:
             data = struct.pack("<IHHiIII", 0xA1B23C4D, 2, 4, 0, 0, 400, link)
             for _ in range(count):
                 data += struct.pack("<IIII", 1, 2, 6, 6) + bytes(6)
-            Path(self._value(options, "-q")).write_bytes(data)
+            write("-q", data)
         if "-r" in options:
             shb = struct.pack("<IIIHHq", 0x0A0D0D0A, 28, 0x1A2B3C4D, 1, 0, -1)
             shb += struct.pack("<I", 28)
             idb = struct.pack("<IIHHI", 1, 20, link, 0, 0) + struct.pack("<I", 20)
             epb = struct.pack("<IIIIIII", 6, 32, 0, 0, 0, 0, 0) + struct.pack("<I", 32)
-            Path(self._value(options, "-r")).write_bytes(shb + idb + epb * count)
+            write("-r", shb + idb + epb * count)
         if "-d" in options:
             data = b"".join(dumped)
             if "dump-mangled" in self.bugs and data:
                 data = data[:20] + bytes([data[20] ^ 1]) + data[21:]
-            Path(self._value(options, "-d")).write_bytes(data)
+            write("-d", data)
 
 
 def replay_cases(coverage):
@@ -574,6 +771,19 @@ class CaptureCountTests(unittest.TestCase):
             self.assertEqual(0, capturefile.count_packets(empty))
 
 
+# The capture-destination cases that read back a PCAP, so anything that
+# changes what reaches a capture file fails them along with the older
+# PCAP cases (#333).
+_STDOUT_ALIAS_CASES = {
+    "-i -q /dev/stdout and /dev/fd/1 are that stream too",
+    "-i -q /proc/self/fd/1 is that stream on Linux",
+}
+_STDOUT_CAPTURE_CASES = _STDOUT_ALIAS_CASES | {
+    "-i -q - writes the capture to stdout",
+    "-i -q /dev/fd/3 is the caller's file, not stdout",
+}
+
+
 class ReplayCaseTests(unittest.TestCase):
 
     def test_case_sets_and_no_board(self):
@@ -583,10 +793,13 @@ class ReplayCaseTests(unittest.TestCase):
         _a, smoke = replay_cases("smoke")
         self.assertEqual(["replay-decode-lap", "replay-lap-uap", "replay-pcapng",
                           "replay-pcap", "replay-dump-unopenable",
-                          "replay-sweep-explicit"],
+                          "replay-sweep-explicit", "replay-stdout-dash",
+                          "replay-stdout-paths", "replay-stdout-other-fd",
+                          "replay-destinations-collide",
+                          "replay-destination-is-input"],
                          [c.case_id for c in smoke])
         _a, full = replay_cases("comprehensive")
-        self.assertEqual(19, len(full))
+        self.assertEqual(28, len(full))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
             self.assertIsInstance(case, StateCase)
@@ -634,7 +847,9 @@ class ReplayCaseTests(unittest.TestCase):
                        "-i -d writes the packet records back",
                        "-i of a file whose last record is cut", "-i -z lists both piconets",
                        "-i packet lines carry the recorded systime",
-                       "-i -s decodes as without -s"},
+                       "-i -s decodes as without -s"} | _STDOUT_CAPTURE_CASES | {
+                           "-i: one file under two names is refused, "
+                           "/dev/null twice is not"},
             "no-uap": {"-i -l <LAP> derives the UAP"},
             "wrong-uap": {"-i -l <LAP> derives the UAP"},
             "ignores-l": {"-i -l <LAP> derives the UAP", "-i -l 0f1e2d: only that LAP",
@@ -643,9 +858,11 @@ class ReplayCaseTests(unittest.TestCase):
                           "-i -l 5a3c96 -q: only that LAP captured"},
             "ignores-e": {"-i -e 0 drops the packet with an error"},
             "link-type": {"-i -r replays into PCAPNG", "-i -q replays into PCAP",
-                          "-i -l 5a3c96 -q: only that LAP captured"},
+                          "-i -l 5a3c96 -q: only that LAP captured"}
+                         | _STDOUT_CAPTURE_CASES,
             "no-capture": {"-i -r replays into PCAPNG", "-i -q replays into PCAP",
-                           "-i -l 5a3c96 -q: only that LAP captured"},
+                           "-i -l 5a3c96 -q: only that LAP captured"}
+                          | _STDOUT_CAPTURE_CASES,
             "dump-mangled": {"-i -d writes the packet records back"},
             "survey-no-uap": {"-i -z lists both piconets"},
             "survey-heading-on-stdout": {"-i -z lists both piconets"},
@@ -660,6 +877,30 @@ class ReplayCaseTests(unittest.TestCase):
             "no-sweep-help": {"-i -s decodes as without -s"},
             "u-fails": {"-i -l -u with the right UAP"},
             "wrong-u-confirms": {"-i -l -u with a wrong UAP confirms nothing"},
+            # Where a capture goes, and the pairs that are one file (#333).
+            "stdout-report": _STDOUT_CAPTURE_CASES
+                             - {"-i -q /dev/fd/3 is the caller's file, not stdout"},
+            "stdout-alias-is-a-file": _STDOUT_ALIAS_CASES,
+            "other-fd-is-stdout":
+                {"-i -q /dev/fd/3 is the caller's file, not stdout"},
+            "no-destination-check":
+                {"-i -q and -r on one file is refused",
+                 "-i: one file under two names is refused, /dev/null twice is not"},
+            "null-twice-refused":
+                {"-i: one file under two names is refused, /dev/null twice is not"},
+            "no-input-check":
+                {"-i -d naming the dump being replayed is refused",
+                 "-i: a symbolic and a hard link to the dump are refused",
+                 "-i with stdout on the dump: -q refused, the decode warned about"},
+            "input-check-ignores-links":
+                {"-i: a symbolic and a hard link to the dump are refused",
+                 "-i with stdout on the dump: -q refused, the decode warned about"},
+            "no-stdout-warning":
+                {"-i with stdout on the dump: -q refused, the decode warned about"},
+            "refusal-truncates-input":
+                {"-i -d naming the dump being replayed is refused",
+                 "-i: a symbolic and a hard link to the dump are refused",
+                 "-i with stdout on the dump: -q refused, the decode warned about"},
         }
         for bug, names in expectations.items():
             with self.subTest(bug):

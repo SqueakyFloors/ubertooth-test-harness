@@ -28,13 +28,15 @@ started with two records from before it; fixed in 9e31dd5 and ed30131).
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import sys
 import time
 from pathlib import Path
 
-from ubertooth_harness import capturefile, rxdump, rxreplay, stalecheck
+from ubertooth_harness import capturefile, rxdump, rxreplay, stalecheck, stdoutdest
+from ubertooth_harness.hostneeds import NO_NEEDS, Needs
 from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
@@ -659,7 +661,7 @@ def _replay_step(name, options, *, check=None, patterns=(), forbidden=(),
     )
 
 
-def _replay_case(case_id, name, steps, expected_state):
+def _replay_case(case_id, name, steps, expected_state, *, needs=NO_NEEDS):
     return StateCase(
         case_id,
         name,
@@ -672,6 +674,7 @@ def _replay_case(case_id, name, steps, expected_state):
               output_patterns=(r"Replay files: \d+ in ",)),),
         expected_state=expected_state,
         capture_dir=True,
+        needs=needs,
     )
 
 
@@ -686,6 +689,332 @@ def _capture_packets(step_id, name, file_name, header_format, packets):
             rf"packets: {packets}$",
         ),
     )
+
+
+# --- where a replay's capture goes, and the pairs that are one file ----------
+#
+# A capture option's value may be standard output: the documented "-", a path
+# that names this process's descriptor 1 ("/dev/stdout", "/dev/fd/1", and
+# "/proc/self/fd/1" on Linux), or a symbolic link whose chain ends at one of
+# those (ubertooth(7), OPTION VALUES). The capture then owns the stream: the
+# tool's own standard output goes to the null device for the rest of the run
+# (opt_parse.c, take_stdout), so no packet report can land in the middle of a
+# capture, while a diagnostic still reaches standard error. "/dev/fd/N" for
+# any other N is not that stream but whatever the caller opened there, so the
+# capture goes to that file and the report stays on standard output.
+#
+# Two destinations that are one file are refused before either is opened,
+# naming both options ("error: -r and -q cannot both write to <file>", or
+# "... to one file (<first> and <second>)" where the two names differ). The
+# file is identified rather than the name, so a second spelling, a symbolic
+# link, a hard link, and standard output pointed at a named file are all
+# caught; "/dev/null" twice is not, since nothing is kept there. A destination
+# that is the dump "-i" is replaying is refused the same way
+# ("error: -q would write over the dump -i is replaying (<name>)"), and the
+# one redirection no option names -- the decode itself going into that dump --
+# is one warning line, the shell having already opened the file (fork #1203).
+#
+# Each case states the whole directory afterwards, with the input's SHA-256,
+# so a refusal that truncated or rewrote the file it was reading fails.
+
+_STDOUTDEST = str(Path(stdoutdest.__file__).resolve())
+# What a capture written to standard output must not hold, and what a run that
+# gave the stream away must not print: the packet report.
+_PACKET_LINE_PATTERN = r"(?m)^systime=\d+ ch=\s*\d+ LAP=[0-9a-f]{6} err=\d+ "
+_STDOUT_PATHS = ("/dev/stdout", "/dev/fd/1")
+_PROC_STDOUT_PATH = "/proc/self/fd/1"
+
+
+def _dest_run_step(step_id, name, options, *, stdout=None, append=False, fds=(),
+                   returncodes=(0,), patterns=(), forbidden=(), check=None,
+                   source=_FIXTURE):
+    """One ubertooth-rx replay run with chosen descriptors (stdoutdest.py).
+
+    ``stdout`` names a file in the case directory to put the tool's standard
+    output on; without one the tool inherits the harness's, so the usual
+    output checks read its report. ``fds`` are (number, file name) pairs, or
+    (number, "stdout") for a descriptor the caller pointed at the stream
+    itself. Standard error is always the harness's.
+    """
+    def argv(context):
+        where = []
+        if stdout is not None:
+            where += ["--stdout", _path(stdout)(context)]
+            if append:
+                where.append("--append")
+        for number, target in fds:
+            value = target if target == "stdout" else _path(target)(context)
+            where += ["--fd", f"{number}={value}"]
+        # A plain word is passed as written; ("file", NAME) is a path in the
+        # case's own directory, which only the run knows, and ("spelling",
+        # SUFFIX) is that directory with SUFFIX appended as text, so a
+        # redundant "/./" survives to the tool (Path would drop it).
+        words = []
+        for word in options:
+            if not isinstance(word, tuple):
+                words.append(word)
+            elif word[0] == "spelling":
+                words.append(require(context, CAPTURE_DIR_KEY) + word[1])
+            else:
+                words.append(_path(word[1])(context))
+        words = tuple(words)
+        return ((sys.executable, _STDOUTDEST, "run") + tuple(where)
+                + ("--", "ubertooth-rx", "-i", _path(source)(context)) + words)
+
+    return Step(
+        step_id, name, argv, timeout_s=20.0,
+        expected_returncodes=tuple(returncodes),
+        output_patterns=tuple(patterns), forbidden_patterns=tuple(forbidden),
+        output_check=check,
+    )
+
+
+def _dest_seed_step(names) -> Step:
+    return Step(
+        "seed", "Seed " + ", ".join(names) + " with known contents",
+        lambda context: (sys.executable, _STDOUTDEST, "seed",
+                         require(context, CAPTURE_DIR_KEY), *names),
+        output_patterns=(r"Seeded: \d+ file",),
+    )
+
+
+def _dest_link_step(symlinks=(), hardlinks=()) -> Step:
+    what = [f"{name} -> {target}" for name, target in symlinks]
+    what += [f"{name} as another name for {target}" for name, target in hardlinks]
+
+    def argv(context):
+        words = []
+        for name, target in symlinks:
+            words += ["--symlink", f"{name}={target}"]
+        for name, target in hardlinks:
+            words += ["--hardlink", f"{name}={target}"]
+        return ((sys.executable, _STDOUTDEST, "link",
+                 require(context, CAPTURE_DIR_KEY)) + tuple(words))
+
+    return Step("link", "Link " + "; ".join(what), argv,
+                output_patterns=(r"Linked: \d+ symbolic, \d+ hard,",))
+
+
+def _dest_check_step(name, *, unchanged=(), prefix=(), absent=(), kept=(),
+                     symlinks=(), hardlinks=(), also=(),
+                     step_id="verify-directory") -> Step:
+    def argv(context):
+        words = []
+        for file_name, digest in unchanged:
+            words += ["--sha256", f"{file_name}={digest}"]
+        for file_name, digest, length in prefix:
+            words += ["--prefix", f"{file_name}={digest}:{length}"]
+        for file_name in absent:
+            words += ["--absent", file_name]
+        for file_name in kept:
+            words += ["--kept", file_name]
+        for file_name, target in symlinks:
+            words += ["--symlink", f"{file_name}={target}"]
+        for file_name, target in hardlinks:
+            words += ["--hardlink", f"{file_name}={target}"]
+        for file_name in also:
+            words += ["--also", file_name]
+        return ((sys.executable, _STDOUTDEST, "check",
+                 require(context, CAPTURE_DIR_KEY)) + tuple(words))
+
+    return Step(step_id, name, argv,
+                output_patterns=(r"Stdout destination check: ",))
+
+
+def _over_input(option: str, named: str) -> str:
+    """The refusal for a destination that is the dump being replayed.
+
+    ``named`` is the destination as the user wrote it, which for a file in
+    the case's own directory is an absolute path only the run knows: the
+    pattern allows whatever leads up to the name.
+    """
+    text = (re.escape(named) if named == "standard output"
+            else rf"\S*{re.escape(named)}")
+    return (rf"(?m)^error: {re.escape(option)} would write over the dump -i is "
+            rf"replaying \({text}\)$")
+
+
+def _stdout_destination_cases(base, count, digest):
+    """Smoke: the stream a capture is given, and the pairs that are one file."""
+    fixture = (_FIXTURE, digest)
+    cases = [
+        # The capture owns standard output, so the packet report is printed
+        # nowhere at all: not into the capture, and not on standard error
+        # either, which the forbidden pattern covers for both streams.
+        _replay_case("replay-stdout-dash", "-i -q - writes the capture to stdout", (
+            _fixture_step(base),
+            _dest_run_step("capture", "ubertooth-rx -i <fixture> -q - > stdout.pcap",
+                           ("-q", "-"), stdout="stdout.pcap",
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _capture_packets("verify-capture", "Verify the stdout capture",
+                             "stdout.pcap", "pcap", count),
+            _dest_check_step("Verify the fixture came through unchanged",
+                             unchanged=(fixture,), also=("stdout.pcap",)),
+        ), f"exit 0; pcap, link type 255, {count} packets on stdout; no packet "
+           "line on either stream; the fixture unchanged"),
+        # The paths that name descriptor 1 mean the same stream as "-".
+        _replay_case("replay-stdout-paths",
+                     "-i -q /dev/stdout and /dev/fd/1 are that stream too", (
+            _fixture_step(base),
+        ) + tuple(
+            step
+            for index, path in enumerate(_STDOUT_PATHS)
+            for step in (
+                _dest_run_step(f"capture-{index}",
+                               f"ubertooth-rx -i <fixture> -q {path} > {index}.pcap",
+                               ("-q", path), stdout=f"{index}.pcap",
+                               forbidden=(_PACKET_LINE_PATTERN,)),
+                _capture_packets(f"verify-capture-{index}",
+                                 f"Verify the capture {path} wrote",
+                                 f"{index}.pcap", "pcap", count),
+            )
+        ) + (
+            _dest_check_step("Verify the fixture came through unchanged",
+                             unchanged=(fixture,),
+                             also=tuple(f"{index}.pcap"
+                                        for index in range(len(_STDOUT_PATHS)))),
+        ), f"each path writes pcap, link type 255, {count} packets to the "
+           "redirected stream; no packet line on either stream"),
+        # Another descriptor is whatever the caller opened on it, so the
+        # capture goes there and the report keeps standard output.
+        _replay_case("replay-stdout-other-fd",
+                     "-i -q /dev/fd/3 is the caller's file, not stdout", (
+            _fixture_step(base),
+            _dest_run_step("capture", "ubertooth-rx -i <fixture> -q /dev/fd/3 "
+                           "(3 on fd3.pcap)", ("-q", "/dev/fd/3"),
+                           fds=((3, "fd3.pcap"),),
+                           check=rxreplay.packets_check(
+                               rxreplay.expected_packets())),
+            _capture_packets("verify-capture", "Verify the file descriptor 3 held",
+                             "fd3.pcap", "pcap", count),
+            _dest_check_step("Verify the fixture came through unchanged",
+                             unchanged=(fixture,), also=("fd3.pcap",)),
+        ), f"exit 0; the {count} packet lines still on stdout; pcap, link type "
+           f"255, {count} packets in the file descriptor 3 held"),
+        # Two destinations, one file: refused before either is opened.
+        _replay_case("replay-destinations-collide",
+                     "-i -q and -r on one file is refused", (
+            _fixture_step(base),
+            _dest_seed_step(("collide.pcap",)),
+            _dest_run_step("refuse", "ubertooth-rx -i <fixture> -q <collide> "
+                           "-r <collide>",
+                           ("-q", ("file", "collide.pcap"),
+                            "-r", ("file", "collide.pcap")),
+                           returncodes=(1,),
+                           patterns=(r"(?m)^error: -r and -q cannot both write to "
+                                     r"\S*collide\.pcap$",),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _dest_check_step("Verify both files are as they were",
+                             unchanged=(fixture,), kept=("collide.pcap",)),
+        ), "refused (exit 1) naming -r and -q; collide.pcap unchanged; the "
+           "fixture unchanged; no packet decoded"),
+        # A destination that is the dump being replayed.
+        _replay_case("replay-destination-is-input",
+                     "-i -d naming the dump being replayed is refused", (
+            _fixture_step(base),
+            _dest_run_step("refuse", "ubertooth-rx -i <fixture> -d <fixture>",
+                           ("-d", ("file", _FIXTURE)), returncodes=(1,),
+                           patterns=(_over_input("-d", _FIXTURE),),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _dest_check_step("Verify the fixture is byte for byte as it was",
+                             unchanged=(fixture,)),
+        ), "refused (exit 1) naming -d and -i; the fixture unchanged and still "
+           "the only file; no packet decoded"),
+    ]
+    return cases
+
+
+def _stdout_destination_comprehensive(base, count, digest, size):
+    """Comprehensive: the other spellings, the links, and the one warning."""
+    fixture = (_FIXTURE, digest)
+    return [
+        # Linux names descriptor 1 here as well; macOS has no /proc, where
+        # the path is an ordinary name and nothing creates it.
+        _replay_case("replay-stdout-proc-path",
+                     f"-i -q {_PROC_STDOUT_PATH} is that stream on Linux", (
+            _fixture_step(base),
+            _dest_run_step("capture",
+                           f"ubertooth-rx -i <fixture> -q {_PROC_STDOUT_PATH} "
+                           "> proc.pcap", ("-q", _PROC_STDOUT_PATH),
+                           stdout="proc.pcap",
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _capture_packets("verify-capture", "Verify the capture it wrote",
+                             "proc.pcap", "pcap", count),
+            _dest_check_step("Verify the fixture came through unchanged",
+                             unchanged=(fixture,), also=("proc.pcap",)),
+        ), f"pcap, link type 255, {count} packets on the redirected stream; no "
+           "packet line on either stream", needs=Needs(platforms=("linux",))),
+        # The file is identified rather than the name, and the one pair that
+        # keeps nothing is allowed.
+        _replay_case("replay-destinations-spelled-differently",
+                     "-i: one file under two names is refused, /dev/null twice "
+                     "is not", (
+            _fixture_step(base),
+            _dest_run_step("refuse", "ubertooth-rx -i <fixture> -q <dir>/cap.pcap "
+                           "-d <dir>/./cap.pcap",
+                           ("-q", ("file", "cap.pcap"),
+                            "-d", ("spelling", "/./cap.pcap")),
+                           returncodes=(1,),
+                           patterns=(r"(?m)^error: -q and -d cannot both write to "
+                                     r"one file \(\S*/cap\.pcap and "
+                                     r"\S*/\./cap\.pcap\)$",),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _dest_run_step("null-twice",
+                           "ubertooth-rx -i <fixture> -q /dev/null -d /dev/null",
+                           ("-q", "/dev/null", "-d", "/dev/null"),
+                           check=rxreplay.packets_check(
+                               rxreplay.expected_packets())),
+            _dest_check_step("Verify nothing was created", unchanged=(fixture,),
+                             absent=("cap.pcap",)),
+        ), "the pair under two spellings refused (exit 1) naming both; "
+           "/dev/null twice accepted and decoded; cap.pcap never created"),
+        # A writer writes through a link, and a hard link is the same file.
+        _replay_case("replay-destination-links-to-input",
+                     "-i: a symbolic and a hard link to the dump are refused", (
+            _fixture_step(base),
+            _dest_link_step(symlinks=(("link.bin", _FIXTURE),),
+                            hardlinks=(("hard.bin", _FIXTURE),)),
+            _dest_run_step("refuse-symlink",
+                           "ubertooth-rx -i <fixture> -d <dir>/link.bin",
+                           ("-d", ("file", "link.bin")), returncodes=(1,),
+                           patterns=(_over_input("-d", "link.bin"),),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _dest_run_step("refuse-hardlink",
+                           "ubertooth-rx -i <fixture> -q <dir>/hard.bin",
+                           ("-q", ("file", "hard.bin")), returncodes=(1,),
+                           patterns=(_over_input("-q", "hard.bin"),),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _dest_check_step("Verify the fixture and both links are as they were",
+                             unchanged=(fixture,),
+                             symlinks=(("link.bin", _FIXTURE),),
+                             hardlinks=(("hard.bin", _FIXTURE),)),
+        ), "both refused (exit 1) naming the link the user wrote; the fixture "
+           "unchanged; the links still what they were"),
+        # Standard output pointed at the dump: a capture option is refused,
+        # and the decode, which no option names, is one warning line.
+        _replay_case("replay-stdout-is-input",
+                     "-i with stdout on the dump: -q refused, the decode warned "
+                     "about", (
+            _fixture_step(base),
+            _dest_run_step("refuse", "ubertooth-rx -i <fixture> -q - >> <fixture>",
+                           ("-q", "-"), stdout=_FIXTURE, append=True,
+                           returncodes=(1,),
+                           patterns=(_over_input("-q", "standard output"),),
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _dest_check_step("Verify the refusal added nothing to the fixture",
+                             unchanged=(fixture,), step_id="verify-refusal"),
+            _dest_run_step("warn", "ubertooth-rx -i <fixture> >> <fixture>",
+                           (), stdout=_FIXTURE, append=True,
+                           patterns=(r"(?m)^warning: the decode is going to the "
+                                     r"dump -i is replaying, so the capture is "
+                                     r"lost$",)),
+            _dest_check_step("Verify the decode was appended to the fixture",
+                             prefix=((_FIXTURE, digest, size),),
+                             step_id="verify-warning"),
+        ), "the capture option refused (exit 1) with the fixture untouched; the "
+           "bare decode exits 0 with one warning line and its records still at "
+           "the start of the file"),
+    ]
 
 
 def replay_cases(arguments, _resources, _resource_identities, *, now=None):
@@ -759,6 +1088,9 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
         ), f"exit 0; the same {count} packet lines; no notice; -h lists -s as the "
            "default"),
     ]
+    fixture = rxreplay.fixture_bytes(base)
+    digest = hashlib.sha256(fixture).hexdigest()
+    cases += _stdout_destination_cases(base, count, digest)
     if arguments["coverage"] != "comprehensive":
         return tuple(cases)
     survey = {
@@ -863,4 +1195,5 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
                          patterns=(_UAP_NEEDS_LAP,)),
         ), "exit 1 with 'requires -l <LAP>' before any record is decoded"),
     ]
+    cases += _stdout_destination_comprehensive(base, count, digest, len(fixture))
     return tuple(cases)

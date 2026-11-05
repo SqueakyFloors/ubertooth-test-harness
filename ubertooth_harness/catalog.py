@@ -1006,7 +1006,11 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # about a dozen board reads around them. Measured on the Linux lab host at
     # fork 166b4f91 with a 3 s duration.
     "Board state between runs": _default(Estimate(15.5, per_duration=1)),
-    "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
+    # Measured on the macOS host at fork 7cbc191a: 11 cases in smoke took
+    # 2.9-3.1 s and 28 comprehensive 6.1-6.7 s, against 1.1 s and 3.0 s for
+    # the cases this test had before the capture-destination ones were added,
+    # so the earlier estimates plus the measured difference.
+    "Raw receive replay": _profiles(Estimate(2.8), Estimate(7.2)),
     # Two cases and 35 commands in smoke, three and 52 comprehensive.
     # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
     # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three
@@ -1471,7 +1475,9 @@ def builtin_catalog() -> TestCatalog:
         TestDefinition(
             "Raw receive replay",
             "ubertooth-rx -i decodes a synthetic raw capture with no Ubertooth: "
-            "LAP/UAP lines, filters, PCAPNG/PCAP/dump output, bad input files",
+            "LAP/UAP lines, filters, PCAPNG/PCAP/dump output, bad input files, "
+            "the destinations that mean standard output, and the destination "
+            "pairs that are one file",
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=receive_cases.replay_cases,
