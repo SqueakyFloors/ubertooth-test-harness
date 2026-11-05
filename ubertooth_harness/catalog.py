@@ -749,8 +749,10 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
     host version line and exiting 0 with no board attached
     ([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
     These cases have no `-H` fallback, so against a fork from before the one
-    `-V` answer (ubertooth#813) the nine new cases fail, as preflight's own
-    host version check would not.
+    `-V` answer (ubertooth#813) all thirteen fail: the host version came from
+    `-H` there and `-V` was the board's compile info, and the pattern asks
+    for the `Host tools version:` line. Preflight's own host version check
+    does have the fallback (preflight.HOST_VERSION_FALLBACK_ARGV).
 
     The two BlueZ-only tools carry their host need on both cases, so a host
     without BlueZ leaves out each one's help and version together.

@@ -473,8 +473,9 @@ EOF
     .venv/bin/python - "$platform" "$WORK/build.json" "$WORK/runs/ci-host/run.jsonl" <<'EOF'
 import json, sys
 platform, build, record = sys.argv[1:]
-# The case IDs end in these; the names a run prints are `<tool> -h` and
-# `<tool> -V` (catalog._host_cli_surface_cases).
+# The case IDs end in these; the names a run prints are `<tool> -h
+# (BlueZ builds)` and `<tool> -V (BlueZ builds)`
+# (catalog._host_cli_surface_cases).
 tools = ("ubertooth-scan", "ubertooth-follow")
 cases = ("help", "version")
 names = {item["name"] for item in json.load(open(build))["artifacts"]}

@@ -760,13 +760,18 @@ ubertooth-util   -U <serial> -a8           # and -a 8, -aa, -a 7x
 ubertooth-util   -U <serial> -z19          # and -z183, -q19, -q121, -l2, -d2
 ubertooth-util   -U <serial> -z -I         # and -z -q, -z -x
 ubertooth-util   -U <serial> -U all -<setter or mode>
-ubertooth-btle   -U <serial> -x33          # and -A36, -A40, -k 2, -k stray
-ubertooth-btle   -U <serial> -a zzzz       # and -a -, -tnot-a-mac
-ubertooth-ego    -U <serial> -l0           # and -l49, -a zz
-ubertooth-ducky  -U <serial> -A36          # and -A40, -anot-an-address
+ubertooth-btle   -U <serial> -x33
+ubertooth-btle   -U <serial> -A36          # and -A40
+ubertooth-btle   -U <serial> -k 2          # and -k stray
+ubertooth-btle   -U <serial> -a zzzz       # and -a -
+ubertooth-btle   -U <serial> -tnot-a-mac
+ubertooth-ego    -U <serial> -l0           # and -l49
+ubertooth-ducky  -U <serial> -A36          # and -A40
+ubertooth-ducky  -U <serial> -anot-an-address
 ubertooth-rx     -U <serial> -u 12         # -u without -l
 ubertooth-rx     -U <serial> -z -l 123456  # -z with -l
-ubertooth-specan -U <serial> -l 2401       # and -u 2481, -l 2480 -u 2402
+ubertooth-specan -U <serial> -l 2401
+ubertooth-specan -U <serial> -u 2481       # and -l 2480 -u 2402
 ```
 
 and a stray word on every built tool, which is the fork's one argument rule:
@@ -885,7 +890,8 @@ bounded sniffing mode, and each capture file is walked by `capturefile.py`:
 ```text
 ubertooth-btle -U <serial> -k<0|1>                     # and -k 0, -k 1 as next words
 ubertooth-btle -U <serial> -k0 -k1                     # repeated, refused
-ubertooth-btle -U <serial> -n -A<37|38|39> -k<0|1>     # and -f, for both modes
+ubertooth-btle -U <serial> -n -A<37|38|39> -k<0|1>
+ubertooth-btle -U <serial> -f -A<37|38|39> -k<0|1>     # the other mode
 ubertooth-btle -U <serial> -n -A37 -k<0|1> -r <case dir>/capture.pcapng
 ubertooth-btle -U <serial> -n -A37 -k<0|1> -q <case dir>/capture.pcap
 ubertooth-btle -U <serial> -n -A37 -k<0|1> -c <case dir>/capture-ppi.pcap
@@ -1023,7 +1029,8 @@ until both phases appear, at most 60 samples or 10 s):
 ```text
 ubertooth-util -U <serial> -I                  # identify, and -s -I
 ubertooth-util -U <serial> -q120               # and -q20 and a bare -q: the LED spectrum
-ubertooth-util -U <serial> -m                  # the range-test result, after -r
+ubertooth-util -U <serial> -r                  # no stale range-test result
+ubertooth-util -U <serial> -m                  # the result, read after it
 ledblink.py ubertooth-util <serial> --max-samples 60 --deadline 10 --interval 0.05
 ```
 
@@ -1467,7 +1474,9 @@ files it writes:
 ```text
 ubertooth-specan -U <serial>                           # the full band
 ubertooth-specan -U <serial> -l <MHz> -u <MHz>         # a narrow, single, top-of-band range
-ubertooth-specan -U <serial> -v -l 2402 -u 2420        # and -g and -G
+ubertooth-specan -U <serial> -v -l 2402 -u 2420
+ubertooth-specan -U <serial> -g -l 2402 -u 2420
+ubertooth-specan -U <serial> -G -l 2402 -u 2420        # the 3D form
 ubertooth-specan -U <serial> -l 2430 -u 2440 -d <case dir>/specan.bin
 ubertooth-specan -U <serial> -l 2430 -u 2440 -d -x.bin # the file named -x.bin
 ubertooth-specan -U <serial> -d /dev/full              # Linux only
@@ -1560,12 +1569,15 @@ no attenuation), so the planner keeps these cases off an attenuated board.
 ```text
 ubertooth-rx  -U <serial> -t <duration> -z             # the survey
 ubertooth-rx  -U <serial> -t <duration>                # no target
-ubertooth-rx  -U <serial> -t <duration> -c 39          # one channel, and -s, -s -c 39
+ubertooth-rx  -U <serial> -t <duration> -c 39          # one channel
+ubertooth-rx  -U <serial> -t <duration> -s            # the default sweep, and -s -c 39
 ubertooth-rx  -U <serial> -t <duration> -e <0|4>       # the error allowance
 ubertooth-rx  -U <serial> -t <duration> -r <case dir>/rx.pcapng
 ubertooth-rx  -U <serial> -t <duration> -q <case dir>/rx.pcap
 ubertooth-rx  -U <serial> -t <duration> -d <case dir>/rx.dump
-ubertooth-afh -U <serial> -l <LAP> -u <UAP> -t <duration>   # and -e 2, and -r
+ubertooth-afh -U <serial> -l <LAP> -u <UAP> -t <duration>
+ubertooth-afh -U <serial> -l <LAP> -u <UAP> -t <duration> -e 2
+ubertooth-afh -U <serial> -l <LAP> -u <UAP> -r         # a map line a second
 ubertooth-afh -U <unknown serial> -l <LAP> -u <UAP> -t 1    # exits 1
 capturefile.py <case dir>/rx.pcapng
 rxdump.py <case dir>/rx.dump full --min-records 0 --types br
@@ -1634,11 +1646,15 @@ reading the modulation back, `rxdump.py` checking the records, and
 ```text
 ubertooth-dump  -U <serial> -d <case dir>/dump-full.bin
 ubertooth-dump  -U <serial> -b -d <case dir>/dump-bitstream.bin
-ubertooth-dump  -U <serial> -c -d <case dir>/dump-classic.bin   # and -l
+ubertooth-dump  -U <serial> -c -d <case dir>/dump-classic.bin
+ubertooth-dump  -U <serial> -l -d <case dir>/dump-le.bin
 ubertooth-debug -U <serial> -r 0x03 -v0                         # MDMCTRL, for -c and -l
-ubertooth-ego   -U <serial> -r -c 2440                          # and -l 1, -l 48, -a 630f9ffe
+ubertooth-ego   -U <serial> -r -c 2440
+ubertooth-ego   -U <serial> -r -c 2440 -l 1                     # and -l 48
+ubertooth-ego   -U <serial> -r -c 2440 -a 630f9ffe
 ubertooth-ego   -U <serial> -r -c 2440 -a zz                    # refused
-ubertooth-btle  -U <serial> -n -A37                             # and -q <case dir>/stale-N.pcap
+ubertooth-btle  -U <serial> -n -A37
+ubertooth-btle  -U <serial> -n -A37 -q <case dir>/stale-<n>.pcap
 rxdump.py <case dir>/dump-full.bin full --min-records 150 --types br,keep-alive
 stalecheck.py --dumps <case dir>/stale-N.bin ... --captures <case dir>/stale-N.pcap ... --channel 0
 ```
@@ -1726,6 +1742,7 @@ killedcapture.py kill   --capture <case dir>/killed-specan.bin \
     -- ubertooth-specan -U <serial> -l 2440 -u 2444 -d <case dir>/killed-specan.bin
 killedcapture.py verify --capture <case dir>/killed-specan.bin \
     --record <case dir>/killed-specan.json
+ubertooth-util -U <serial> -r                  # back to the boot defaults
 ubertooth-dump  -U <serial> -l -d <case dir>/after-killed-specan.bin
 ubertooth-debug -U <serial> -r 0x03 -v0
 rxdump.py <case dir>/after-killed-specan.bin full --min-records 150 \
@@ -1921,7 +1938,11 @@ extra descriptors pointed where the case needs them, and `capturefile.py` and
 ```text
 rxreplay.py fixture <case dir>/replay.bin --variant <full|empty|truncated> --base-time <epoch>
 ubertooth-rx -i <case dir>/replay.bin                      # the bare decode
-ubertooth-rx -i <case dir>/replay.bin -l <LAP>             # and -l -u <UAP>, -e 0, -s, -z
+ubertooth-rx -i <case dir>/replay.bin -l <LAP>             # and -l -u <UAP>
+ubertooth-rx -i <case dir>/replay.bin -l <LAP> -u <UAP>
+ubertooth-rx -i <case dir>/replay.bin -e 0
+ubertooth-rx -i <case dir>/replay.bin -s                   # the default sweep
+ubertooth-rx -i <case dir>/replay.bin -z                   # the survey
 ubertooth-rx -i <case dir>/replay.bin -r <case dir>/replay.pcapng
 ubertooth-rx -i <case dir>/replay.bin -q <case dir>/replay.pcap
 ubertooth-rx -i <case dir>/replay.bin -d <case dir>/replay.dump
@@ -1929,7 +1950,12 @@ ubertooth-rx -i <case dir>/a-directory                      # and a missing file
 ubertooth-rx -h
 stdoutdest.py run --stdout <case dir>/stdout.pcap -- ubertooth-rx -i <case dir>/replay.bin -q -
 stdoutdest.py run --fd 3=<case dir>/fd3.pcap -- ubertooth-rx -i <case dir>/replay.bin -q /dev/fd/3
-stdoutdest.py seed|link|unlink|check <case dir> ...         # the destinations, before and after
+stdoutdest.py seed|link|unlink <case dir> ...               # the destinations
+stdoutdest.py link <case dir> --symlink <name>=<target> --hardlink <name>=<target>
+stdoutdest.py check <case dir> --sha256 <name>=<digest> --prefix <name>=<digest>:<size>:<n> \
+    --also <name> --absent <name> --kept <name> --symlink <name>=<target> \
+    --hardlink <name>=<target>
+stdoutdest.py run --stdout <case dir>/<name> --append -- <command ...>
 rxreplay.py dump-check <case dir>/replay.dump <case dir>/replay.bin
 rxdump.py      <case dir>/replay.dump full --min-records 11 --types br
 capturefile.py --packets <case dir>/replay.pcap
@@ -2050,16 +2076,24 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-specan -d <case dir>/missing/new.speca
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu    -s|-u <case dir>/<file> <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow -r|-q|-d <case dir>/new.<ext> <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-scan   stray        # BlueZ builds, no file
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-scan   -- -x        # and -h stray, and a bare -
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow stray        # BlueZ builds, no file
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow -- -x        # and -h stray, and a bare -
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx     -c 79        # a bad later value
 refusal.py probe <tool>                   # opens every case: can the switch be used
 refusal.py seed <case dir> <names>        # the files a case must find unchanged
 refusal.py files <case dir>               # the directory before the refusal
 refusal.py check <case dir> --absent <files> --kept <files>
 ```
 
-`<refusal>` is what the case refuses the command with: a stray word, `-h`, a
-bad later value (`-A 40`, `-l 9999`, `-U` with no value), the same file option
-twice, `-f -n`, a bare `-`, or `--`.
+`<refusal>` is what the case refuses the command with: a stray word; `-h`;
+the same file option twice; a bare `-`; `--` followed by an option; and a bad
+later value, which is each tool's own (`btle -A 40`, `rx -c 79`, `rx -e 9`,
+`rx -u 12`, `rx -z -l <LAP>`, `specan -l 9999`, `specan -l <high> -u <low>`,
+`dump -U` with no value, `dfu -s <other>`, `dfu -d <bad image>`,
+`follow -e 9`, `btle -f -n`, `btle -a -a<address>`, `btle -r -`). The scan
+and follow lines take the three that need no file: a stray word, `-h stray`,
+a bare `-`, and `-- -x`.
 
 **Expected outcome.** On a Linux host, smoke runs 45 cases and comprehensive
 67; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
@@ -2126,7 +2160,10 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -r <case dir>/new.pcapng -q <c
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -c <case dir>/new-ppi.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump -d <case dir>/new.dump      # and a seeded file
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/no-record.bin -q <destination>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/input.d -r <case dir>/new.pcapng \
+    -q <case dir>/new.pcap -d <case dir>/new.dump   # a directory as the input
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -q <case dir>/gone/x.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -q -                     # no -i: the board lookup
 rxreplay.py fixture <case dir>/<name>.bin --variant <full|partial|skipped|truncated> \
     --base-time <epoch>
 rxreplay.py dump-check <case dir>/new.dump <case dir>/<name>.bin --variant <skipped|truncated>
@@ -2274,6 +2311,8 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -d <case dir>/<variant>.dfu -r
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -d <case dir>/synthetic.dfu -r   # reaches the lookup
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.bin
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.dfu          # refused
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.bin \
+    -d <case dir>/synthetic.dfu -r     # signs, then stops at the board lookup
 dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <reference> \
     --reference-name <name>
 dfuimage.py copy|strip|same|regular|state|not-root ...
@@ -2281,6 +2320,7 @@ mkdir <case dir>/ro                # read-only, and folder.bin, folder.dfu:
                                    # a directory where a file is expected
 ln -s target.dfu <case dir>/image.dfu   # the .dfu link a signing replaces
 chmod 555|755 <case dir>/ro        # read-only for the signing, back afterwards
+chmod 600 <case dir>/image.dfu     # the mode a replacement must keep
 refusal.py probe ubertooth-dfu     # opens every case: can the switch be used
 ```
 
@@ -2344,7 +2384,11 @@ pytools.py extcap --extcap-dlts       # and --extcap-interface=<interface> --ext
 pytools.py extcap --extcap-config     # with each interface the cases try
 pytools.py extcap --extcap-interface=<interface> --capture      # no --fifo
 pytools.py extcap --extcap-interface=<interface> --capture --fifo=unused.fifo --channel=40
-pytools.py extcap --extcap-bogus      # and Wireshark's other options
+pytools.py extcap --extcap-bogus      # an unknown option
+pytools.py extcap --extcap-reload-option=x --extcap-config
+pytools.py extcap --extcap-control-in=x --extcap-config
+pytools.py extcap --extcap-control-out=x --extcap-config
+pytools.py extcap --extcap-config-option-name=x --extcap-config
 pytools.py extcap --extcap-version=4.2.0 ...                    # and 4.4.1 as a next word
 pytools.py extcap-failing-util --extcap-interfaces
 ```
@@ -2441,10 +2485,16 @@ extcapcapture.py --seconds <duration> --fifo <case dir>/extcap.fifo \
     -- --capture --extcap-interface=ubertooth<serial> --fifo=<case dir>/extcap.fifo
 ```
 
-and the same with `--channel=37|38|39` passed on to the script, with
-`--extcap-capture-filter <filter>`, with `--close` (the FIFO closed after the
-first record), and with `--refused` for a serial no board has and for
-`--channel=40`. The script itself runs
+and these, where the driver's own options say what the capture must do:
+
+```text
+extcapcapture.py ... --extcap-capture-filter <filter> -- --capture ...
+extcapcapture.py ... --close -- --capture ...          # the FIFO closed early
+extcapcapture.py ... --refused -- --capture ...        # a serial no board has
+extcapcapture.py ... --refused --no-btle -- --capture ... --channel=40
+```
+
+with `--channel=37|38|39` passed on to the script. The script itself runs
 `ubertooth-btle -f -U <serial> -q <fifo> -A <channel>`.
 
 **Expected outcome.** Smoke runs 1 case: a DLT 256 PCAP stream on the FIFO
@@ -2521,8 +2571,14 @@ tsharkcapture.py capture --interface ubertooth<serial> --seconds <duration> \
     --address <DK address> --min-packets 1 --held ubertooth<serial>
 ```
 
-and the same capture with `--filter <filter>` and with `--interrupt-after
-<seconds>`. `tshark -i ubertooth<serial>` is what the driver runs, with
+and the same capture with these:
+
+```text
+tsharkcapture.py capture ... --filter <filter>
+tsharkcapture.py capture ... --interrupt-after <seconds>
+```
+
+`tshark -i ubertooth<serial>` is what the driver runs, with
 `-T fields -e btle.advertising_address -e btle.advertising_header.pdu_type`.
 
 **Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
@@ -2603,7 +2659,8 @@ ubertooth-btle -U <serial> -n -A<channel> -q <case dir>/capture.pcap
 ubertooth-btle -U <serial> -f -A<channel> -r <case dir>/capture.pcapng
 advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel> \
     --payload <tag> --chmap <channel> --type <type> \
-    --counter-min <counter before> --counter-max <counter after> --min-packets <n>
+    --counter-min <counter before> --counter-max <counter after> \
+    --min-packets <n> --max-packets <n>
 advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel> --absent
 ```
 
@@ -2671,7 +2728,9 @@ nrfdk.py status|idle --jlink <jlink serial> --alias <alias>
 ubertooth-btle -U <serial> -f -A37 -r <case dir>/capture-<n>.pcapng
 ubertooth-btle -U <serial> -f -A37 -q <case dir>/capture-<n>.pcap
 conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <address> \
-    --interval-units <n> --latency 0 --timeout-units 400 --min-data-packets 5 ...
+    --interval-units <n> --latency 0 --timeout-units 400 --min-data-packets 5 \
+    --min-valid-packets 1 --min-data-length <bytes> --long-packets <n> \
+    --check-connection-info
 ```
 
 **Expected outcome.** Smoke runs 2 cases: both DKs confirmed on the pinned
@@ -2797,8 +2856,9 @@ nrfdk.py identify|ensure|peripheral|central|status|idle --jlink <jlink serial> \
     --alias <alias> ...
 ubertooth-btle -U <serial> -f -A37 -r <case dir>/capture-<n>.pcapng
 conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <address> \
-    --min-connections 2 --min-connection-packets 3 --after-update-ms <ms> \
-    --require-announced --max-quiet-ms <ms> --min-span-ms <ms> ...
+    --interval-units <n> --latency 0 --timeout-units 400 --min-data-packets 5 \
+    --min-valid-packets 1 --min-connections 2 --min-connection-packets 3 \
+    --after-update-ms <ms> --require-announced --max-quiet-ms <ms> --min-span-ms <ms>
 ubertooth-util -U <serial> -s -C      # the board answers at once, read back in idle mode
 ```
 
@@ -3173,11 +3233,15 @@ the capture files:
 
 ```text
 esp32peer.py stream <peer options> -- ubertooth-rx -U <serial> -t <duration> \
-    -l <central LAP> -u <central UAP> -q <case dir>/records.pcap -r <case dir>/records.pcapng
-esp32peer.py audio  <peer options> --type ev3 -- ubertooth-rx ...   # comprehensive
+    -l <central LAP> -u <central UAP> [-z] -q <case dir>/records.pcap \
+    -r <case dir>/records.pcapng
+esp32peer.py audio  <peer options> --type ev3 --min-frames <n> -- ubertooth-rx ...
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 bredrrecord.py <case dir>/records.pcapng --min-packets 10 --max-access-code-errors 2 \
-    --lap <central LAP> --reference-lap <central LAP> --reference-uap <central UAP> ...
+    --max-span-s <s> --max-backward-step-us <us> --min-hec-valid <n> \
+    --lap <central LAP> --reference-lap <central LAP> --reference-uap <central UAP> \
+    --following-lap <central LAP> --following-uap <central UAP> \
+    --following-uap-mask <mask> --min-reference-uap <n> --require-types <types>
 ```
 
 **Expected outcome.** Smoke runs 2 cases. `-l <central LAP> -u <central UAP>`
@@ -3526,7 +3590,8 @@ ubertooth-util -U <serial> -v                            # it reports btbr at th
 ubertooth-util -U <serial> -V
 btbrconsole.py session --serial <serial> --peer <BD_ADDR> --peer-name <name> \
     --peer-reset esp32peer.py --peer-device <peer port> --inquiry-seconds <n> \
-    --page-seconds <n> ...
+    --page-seconds <n> --hold-seconds <n> --no-answer-seconds <n> \
+    [--comprehensive] ...
 ubertooth-dfu  -U <serial> -d <application image> -r     # the cleanup, always
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role acceptor --alias <alias>
 ```
@@ -4076,7 +4141,9 @@ esp32peer.py stream <peer options> --interrupt-after <seconds> \
     [-a] [-q <case dir>/follow.pcap]
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 capturefile.py <case dir>/follow.pcap --packets
-bredrrecord.py <case dir>/follow.pcap --min-packets 10 --lap <central LAP> ...
+bredrrecord.py <case dir>/follow.pcap --min-packets 10 --lap <central LAP> \
+    --max-access-code-errors 2 --min-hec-valid 0 --reference-lap <central LAP> \
+    --reference-uap <central UAP> --min-reference-uap <n> --any-transport
 ```
 
 **Expected outcome.** Smoke runs two cases: `-t <central>`, where the tool
