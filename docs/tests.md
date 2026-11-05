@@ -2638,11 +2638,26 @@ connection. What this test adds is the other half: the observable end result
 on a real bench. The page completes and exchanges the peer's name every time
 it is asked, not once; the link carries packets after the transmit runs; the
 scan modes run and return; no connection is reported and then given up
-(`Paging resumed`); this end hangs up on nobody who took the connection; and
-none of the board's own refusal lines appeared at all. A pass therefore says
-those mechanisms did not misfire here. It does not say the firmware handles
-them correctly — that is what the fork's tests are for — and this file does
-not claim it.
+(`Paging resumed`, read once the connection has been held and stopped, which
+is long enough for link supervision to have ended a connection that carried
+nothing); this end hangs up on nobody who took the connection; and every
+refusal line the board can print is counted.
+
+Counted, not forbidden: each of those eleven lines is an exceptional condition
+the firmware is *built* to survive, so one of them is reported and allowed —
+the checks around it say whether the session came through it — and more than
+three of the same line fails, because that is no longer an exceptional
+condition. The two lines the board prints about a `tx` this session sent (a
+second run while one was still waiting for a slot, a full queue) are not
+exceptional and either one fails. A pass therefore says those mechanisms did
+not misfire here. It does not say the firmware handles them correctly — that
+is what the fork's tests are for — and this file does not claim it.
+
+One limit of that count is worth stating: those thirteen strings are the
+board's own console wording, which the tool's man page does not promise. A
+fork that rewords one leaves the count reading zero where it should not,
+without failing anything. Guarding it would mean reading the firmware sources,
+which a bench run does not have, so it is written down here instead.
 
 **Hardware and arguments.** One `Ubertooth` and one ESP32 Classic peer as
 `acceptor`; a required `allow RF transmission: true`, because the board
@@ -2697,7 +2712,9 @@ and not named.
 Measured on the lab bench at fork `b2cd6c68`: each firmware write took 4 s,
 the prompt came up in about 2 s, an inquiry heard the peer in about 2 s, a page
 connected in about 7 s, and a page nothing answers reported its timeout after
-the firmware's whole attempt of about 45 s. The catalog estimate is 85 s per
+the firmware's whole attempt of about 45 s. The work added for
+[#332](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/332) was
+measured on the same bench at fork `80123099`; the catalog estimate is 85 s per
 session for smoke and 150 s for comprehensive.
 
 **Known limits.** A pass says the image runs, the command line refuses what it

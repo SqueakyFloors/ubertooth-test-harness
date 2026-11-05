@@ -1081,7 +1081,8 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Classic capture record fields": _profiles(
         Estimate(45.0, per_duration=2), Estimate(95.0, per_duration=4)
     ),
-    # Per flash-and-session cycle, measured on the lab bench: the option
+    # Per flash-and-session cycle, measured on the lab bench (the first
+    # figures at fork b2cd6c68, the work #332 added at 80123099): the option
     # values, two firmware writes of about 4 s, the version reads, the peer
     # reset, and a console session whose radio checks end as soon as their
     # answer arrives. The session also transmits the chosen packet types on

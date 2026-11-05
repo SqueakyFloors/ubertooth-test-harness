@@ -57,6 +57,8 @@ OTHER_NAME = "Example Device"
 #   takes-bad-tx        a length the format will not carry is transmitted
 #   wrong-tx-payload    the payload printed is not the one the format gives
 #   slot-not-sent       the board reports a transmit it did not put on the air
+#   scheduler-storm     it reports that transmit over and over
+#   tx-already-waiting  it refuses a tx this session sent
 #   dead-link           the connection carries nothing after the transmit runs
 #   second-page-fails   a page after the first is never answered
 #   false-connection    a connection is reported and then the page resumes
@@ -221,6 +223,11 @@ def do_tx(rest, connected):
         payload = payload[:-1] + bytes([payload[-1] ^ 0xff]) if payload else b"\\x00"
     if "slot-not-sent" in FAULTS:
         err("TX: cannot schedule transmit, packet not sent")
+    if "scheduler-storm" in FAULTS:
+        for _ in range(5):
+            err("TX: cannot schedule transmit, packet not sent")
+    if "tx-already-waiting" in FAULTS:
+        err("Tx packet already waiting, send this one after it")
     out("TX pkt: %s len=%d count=%d data=%s payload=%s"
         % (name, len(data), count, data.hex(), payload.hex()))
 
@@ -277,6 +284,9 @@ running = None
 status = 0
 pages = 0
 link = None
+# Lines the board prints on its own while a command runs, delivered when the
+# next one arrives.
+pending = []
 
 def carry_the_link(stop):
     """While the connection is up it carries packets, as a real one does.
@@ -310,6 +320,8 @@ while True:
     if not line:
         break
     line = line.strip()
+    while pending:
+        err(pending.pop(0))
     word, _, rest = line.partition(" ")
     rest = rest.strip()
     if word in ("exit", "q", "x"):
@@ -414,9 +426,12 @@ while True:
         if "capture-on-stderr" in FAULTS:
             err("09:11:00 RX LMP: BBHdr(lt_addr=1, type=DM1, flags=F) | x")
         if "false-connection" in FAULTS:
-            # The connection carried nothing, so link supervision ended it
-            # and the pager went back to its page train.
-            err("Paging resumed")
+            # The connection carried nothing, so link supervision ends it and
+            # the pager goes back to its page train -- a second later on a
+            # board, which here is when the next line arrives, so that it
+            # lands while the connection is being held rather than inside the
+            # answers the page itself printed.
+            pending.append("Paging resumed")
         if "hangs-up" in FAULTS:
             err("warning: the peer refused LMP_HOST_CONNECTION_REQ: "
                 "unsupported LMP feature; closing the link")

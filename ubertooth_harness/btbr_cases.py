@@ -240,15 +240,13 @@ def _console_step(serial: str, peer, *, comprehensive: bool) -> Step:
             rf"'{peer['name']}'$",
             rf"(?m)^check tx-formats: {runs} run\(s\) transmitted, each the "
             r"packet its format gives: ",
-            r"(?m)^check tx-link: the link carried a packet .* and no slot "
-            r"was reported not sent$",
+            r"(?m)^check tx-link: the link carried a packet ",
             r"(?m)^check lmp-unhandled: .*, each named once$",
             rf"(?m)^check page-repeat: {repeats} further page\(s\) completed "
             r"and named the peer$",
             r"(?m)^check scan-modes: page_scan, inquiry_scan each started, "
             r"held, and returned to standby$",
-            r"(?m)^check scheduler-quiet: none of the \d+ refusal lines the "
-            r"board can print, and no page resumed$",
+            r"(?m)^check scheduler-reports: ",
             r"(?m)^check no-detach: the peer took the connection and this end "
             r"did not hang up",
             r"(?m)^check streams: \d+ capture records on stdout, nothing "

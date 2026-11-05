@@ -1664,11 +1664,15 @@ Classic btbr console:
     board could not tell a packet lost on the air from one that was never sent
     (ubertooth#1166). It does not say the firmware handles a dropped transmit,
     an exhausted scheduler, or a page response that never went out: none of
-    those happens on a healthy board, the fork's firmware tests are the gate,
-    and what this test adds is that none of them happened here -- the page
+    those can be produced on a healthy board, the fork's firmware tests are the
+    gate, and what this test adds is the observable end result -- the page
     completing every time it is asked, the link carrying packets after the
-    transmit runs, no connection reported and then given up, and none of the
-    board's refusal lines printed. A connection the peer declines is out of
+    transmit runs, no connection reported and then given up, and a count of
+    every refusal line the board can print. The count allows one: each line is
+    an exceptional condition the firmware is built to survive, so one is
+    reported and a run of the same line fails. Those strings are the board's
+    own console wording, which the tool's man page does not promise, so a fork
+    that rewords one leaves the count reading zero. A connection the peer declines is out of
     reach: the registered peer accepts and its shell cannot make it refuse, so
     the fork's host-side tests cover that and this test checks the complement.
     The scan modes are checked for running and returning, not for answering a

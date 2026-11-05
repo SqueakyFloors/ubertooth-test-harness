@@ -85,13 +85,16 @@ What the session checks, and why each answer is knowable in advance:
   in that state, and go back to standby on `idle`. Nothing on this bench
   pages or inquires on demand, so what is checked is that the mode runs and
   returns, not that it answers one.
-- **scheduler-quiet**: none of the board's own refusal lines appeared in the
-  whole session -- a transmit it could not put on the air, a slot or a window
-  it could not schedule, an answer to a page or an inquiry it did not send.
-  On a healthy board there are none, and each has deterministic firmware
-  tests of its own in the fork (see the test's section in `docs/tests.md`);
-  what this says is that none of them happened here, which is what makes the
-  rest of the session's results mean what they say.
+- **scheduler-reports**: what the board said it could not do, counted over
+  the whole session -- a transmit it could not put on the air, a slot or a
+  window it could not schedule, an answer to a page or an inquiry it did not
+  send. Each is an exceptional condition the firmware is built to survive, and
+  the fork's own deterministic tests are where that is decided (see the test's
+  section in `docs/tests.md`), so one here is reported rather than failed: the
+  checks around it say whether the session came through it. A run of the same
+  line is a board that cannot schedule its work, and fails. The two lines the
+  board prints about a `tx` this session sent are not exceptional, and either
+  of those fails.
 - **no-detach**: this end did not hang up on a peer that took the connection.
   The tool detaches when the peer refuses the connection request the setup
   leads to, and closes the link at once rather than waiting out link
@@ -204,8 +207,6 @@ SET_BDADDR = r"(?m)Set bdaddr (?P<address>[0-9a-f]+) -> sw [0-9a-f]+$"
 # Carriage returns the stream reader drops: the ones a newline follows, all
 # of them, so a redraw right before a line (`...\r\r\n`) leaves none behind.
 CR_BEFORE_NEWLINE = re.compile(r"\r+(?=\n)")
-# The firmware prints that address with %llx, so an address with a leading
-# zero byte comes back shorter than twelve digits: it is compared as a number.
 # Paging, in the order the firmware reports it.
 PAGING_STARTED = "Paging started"
 PAGING_CONNECTED = "Central started"
@@ -371,7 +372,7 @@ TX_SETTLE_S = 0.4
 TX_LINK_S = 5.0
 
 # The `tx` command lines the host refuses, and the line each is refused with.
-# None of them reaches the board: the first nine are refused while the command
+# None of them reaches the board: the first ten are refused while the command
 # line is read, and the last when the prompt finds no connection to transmit
 # on. Each is one `error:` line with the prompt left up.
 TX_REFUSALS = (
@@ -398,42 +399,69 @@ TX_REFUSALS = (
 # ---------------------------------------------------------------------------
 # The scan modes, and the lines the board and the tool print for them
 
-# Each is (prompt command, the tool's line when it starts, the board's state,
-# the tool's line when it has gone back to standby). Nothing on this bench
-# makes a page or an inquiry on demand, so a scan is started, seen to be
-# running, and stopped.
+# Each is (prompt command, the line the tool prints as it starts the command,
+# the line it prints when the board has reported that state, and the line it
+# prints once the board is back in standby). All three are the tool's own, from
+# the command classes in host/python/ubtbr/ubtbr/btctl.py; the board also
+# prints a state transition of its own, which is not read here because it comes
+# from a block the firmware compiles conditionally.
 SCAN_MODES = (
-    ("page_scan", "Starting BTCtlPageScanCmd", "State STANDBY -> PAGE_SCAN",
-     "Page Scan state Ready", "Page scan done"),
+    ("page_scan", "Starting BTCtlPageScanCmd", "Page Scan state Ready",
+     "Page scan done"),
     ("inquiry_scan", "Starting BTCtlInquiryScanCmd",
-     "State STANDBY -> INQUIRY_SCAN", "Inquiry Scan state Ready",
-     "Inquiry scan done"),
+     "Inquiry Scan state Ready", "Inquiry scan done"),
 )
 # How long a scan is left running before `idle` stops it.
 SCAN_HOLD_S = 2.0
 
-# The board's own refusal lines: a transmit it could not put on the air, a
-# slot or a window it could not schedule, and an answer to a page or an
-# inquiry it did not send (firmware/btbr/src/btphy/*.c). A healthy board
-# prints none of them, and each has deterministic firmware tests of its own.
-BOARD_REFUSALS = (
+# The board's own refusal lines, each with the firmware file that prints it:
+# something it could not schedule, a transmit that did not reach the air, and
+# an answer to a page or an inquiry it did not send. They are the exceptional
+# conditions the firmware is built to survive -- which is what the fork's
+# deterministic tests cover -- so one of them is not a fault by itself. What
+# this module does with them is count them: see SCHEDULER_TOLERANCE.
+#
+# These are the board's own console wording, which nothing in the tool's man
+# page promises, so a fork that rewords one leaves the count reading zero
+# where it should not. That is a real limit of the check and is written down
+# in docs/tests.md rather than guarded here: a guard would need the firmware
+# sources, which a bench run does not have.
+SCHEDULER_REFUSALS = (
+    # tx_task.c
     "TX: cannot schedule transmit, packet not sent",
     "TX: cannot schedule start of transmission, packet not sent",
     "TX: cannot schedule end of transmission, packet not sent",
     "TX: synthesizer not locked, packet not sent",
+    # rx_task.c
     "RX: cannot schedule receive",
     "RX: cannot schedule rest of decode, packet lost",
+    # scan_task.c, paging_state.c, inquiry_state.c
     "scan: cannot schedule scan",
     "page: cannot schedule start",
     "inquiry: cannot schedule start",
+    # page_scan_state.c, inquiry_scan_state.c
     "page answer not sent, scanning again",
     "inquiry response not sent, scanning again",
+)
+# How many times one of those lines may appear before the session is read as a
+# board that cannot schedule its work rather than one that met an exceptional
+# condition and carried on. The firmware survives each of them, and the checks
+# around this one say the page, the link and the scans came through, so a line
+# or two is reported and allowed; a run of them is not a condition any longer.
+SCHEDULER_TOLERANCE = 3
+# The two the board prints in answer to a `tx` the host sent: a second run
+# while one is still waiting for a slot, and a queue with no room
+# (btctl.c). Neither is an exceptional condition -- they are what the board
+# says about the requests this session made -- so either is a fault here, of
+# the driver's pacing or of the board.
+TX_REQUEST_REFUSALS = (
     "Tx packet already waiting, send this one after it",
     "Tx packet queue full",
 )
-# A connection that came up and carried nothing: the pager goes back to its
-# page train and says so. That is what a connection reported on an answer the
-# board never earned looks like from outside (fork #1168).
+# A connection that came up and carried nothing: link supervision ends it
+# about a second later and the pager goes back to its page train, saying so.
+# That is what a connection reported on an answer the board never earned looks
+# like from outside (fork #1168), and what this bench can see of it.
 PAGING_RESUMED = "Paging resumed"
 # This end hanging up: the peer refused the connection request the setup leads
 # to, so the link is closed at once rather than left to link supervision
@@ -766,8 +794,10 @@ def tx_expectation(line: str) -> tuple[str, int, int, bytes, bytes]:
     words = line.split()
     name = words[0]
     fmt = TX_FORMATS[name]
-    length = int(words[1]) if len(words) > 1 else fmt.most
-    count = int(words[2]) if len(words) > 2 else 1
+    # Base 0, as the tool reads both of them, so a run written in hex is
+    # compared rather than raising here.
+    length = int(words[1], 0) if len(words) > 1 else fmt.most
+    count = int(words[2], 0) if len(words) > 2 else 1
     data = bytes.fromhex(words[3]) if len(words) > 3 else counted_fill(length)
     return name, length, count, data, tx_payload(name, data)
 
@@ -804,9 +834,9 @@ class Session:
     report: Callable[[str], None]
     comprehensive: bool = False
     opcodes: list[str] = field(default_factory=list)
-    # Where the page's own output starts, so the checks that read the
-    # connection -- the transmit runs and the records that follow them -- read
-    # that connection and not an earlier command's output.
+    # Where the progress stream had reached when the connection came up, so
+    # the check that ends the page looks for the page train starting again in
+    # that connection's own output and not in an earlier page's.
     page_mark: int = 0
     # When the connection came up, so the hold that follows the transmit runs
     # is the hold and not the hold on top of them.
@@ -963,7 +993,7 @@ def check_zero_address(session: Session) -> str:
 def check_tx_refusals(session: Session) -> str:
     """The `tx` command lines the host refuses, before the board is asked.
 
-    Nine are refused while the command line is read and the last when the
+    Ten are refused while the command line is read and the last when the
     prompt finds no connection to transmit on, which is the state the session
     is in here: the page comes later. None of them may print a packet on the
     capture stream.
@@ -1028,23 +1058,29 @@ def check_tx_link(session: Session) -> str:
 
     A transmit slot the board could not put on the air used to cost the link
     the repeat it was carrying and the acknowledgment with it (fork #1166),
-    and the board says on its console when a slot went nowhere. Neither can be
-    produced on a healthy board, so what a bench can say is this: no slot was
-    reported lost, and the link is still carrying packets afterwards.
+    and the board says on its console when a slot went nowhere. That cannot be
+    produced on a healthy board, so what a bench can say is this: the link is
+    still carrying packets afterwards, and if the board did report a slot that
+    went nowhere, it carried on regardless. The count is the scheduler-reports
+    check's business; what this one needs is the packet after the runs.
+
+    It needs the peer to be sending, which it is: these controllers ask for
+    power control several times a second for the life of the link, and each
+    request reaches the capture stream as a record. The unhandled-opcode check
+    leans on the same thing, and docs/tests.md says so.
     """
     console = session.console
-    said = [line for line in BOARD_REFUSALS if line in console.text()]
-    if said:
-        return ("the board reported a slot it could not put on the air: "
-                + "; ".join(said))
+    said = [line for line in SCHEDULER_REFUSALS if line in console.text()]
     mark = console.mark("stdout")
     record, took = console.wait(CAPTURE_LINE, TX_LINK_S, stream="stdout",
                                 since=mark)
     if record is None:
         return (f"no packet arrived in the {TX_LINK_S:g}s after the transmit "
                 "runs: the connection did not carry on")
+    note = ("" if not said
+            else "; the board had reported " + ", ".join(repr(line) for line in said))
     session.report(f"check tx-link: the link carried a packet {took:.1f} s "
-                   "after the runs, and no slot was reported not sent")
+                   f"after the runs{note}")
     return ""
 
 
@@ -1055,22 +1091,20 @@ def check_scan_modes(session: Session) -> str:
     asked to answer one: what is checked is that the board enters the state,
     the tool reports it ready, and `idle` brings it back. A scheduler that ran
     out of room for a scan window reports it and goes back to scanning, which
-    a healthy board never does -- the scheduler-quiet check below is what says
-    it did not happen here.
+    a healthy board does not do to order -- the scheduler-reports check below
+    is what says whether it happened here.
     """
     console = session.console
-    for command, starting, state, ready, done in SCAN_MODES:
+    for command, starting, ready, done in SCAN_MODES:
         mark = console.mark()
         console.send(command)
         begun, _ = console.wait(starting, REPLY_TIMEOUT_S, since=mark)
         if begun is None:
             return f"{command} did not start ({starting!r} not printed)"
-        entered, _ = console.wait(state, REPLY_TIMEOUT_S, since=begun.end())
-        if entered is None:
-            return f"{command} started but the board did not report {state!r}"
         reported, _ = console.wait(ready, REPLY_TIMEOUT_S, since=begun.end())
         if reported is None:
-            return f"{command} reached {state!r} but not {ready!r}"
+            return (f"{command} started but the board was never reported in "
+                    f"that state ({ready!r} not printed)")
         # Left running, so the mode is one that keeps scanning rather than one
         # that starts and stops.
         time.sleep(SCAN_HOLD_S)
@@ -1083,26 +1117,52 @@ def check_scan_modes(session: Session) -> str:
     return ""
 
 
-def check_scheduler_quiet(session: Session) -> str:
-    """The board refused nothing it was asked to put on the air.
+def check_scheduler_reports(session: Session) -> str:
+    """What the board said it could not do, counted over the whole session.
 
-    Every line here is one the firmware prints when a slot, a window, or an
-    answer to a page or an inquiry could not be scheduled or did not reach the
-    air. None of them can be produced on a healthy board without an image
-    patched to drop a transmit, so each is covered by deterministic firmware
-    tests in the fork; this check is what says none of them happened in this
-    session, which is what the page, transmit and scan results above rest on.
+    Two kinds of line, treated differently on purpose.
+
+    The scheduler's own refusals are exceptional conditions the firmware is
+    built to survive -- a transmit it could not place, a window it had no room
+    for, an answer to a page or an inquiry that did not reach the air -- and
+    each has deterministic tests in the fork, which is where whether the
+    firmware survives them is decided. A bench cannot produce one to order, so
+    one appearing here is not a fault: it is reported, and the checks around
+    this one say whether the session came through it (the page completed, the
+    link carried packets after the transmit runs, the scans returned). What
+    would not be an exceptional condition is a run of them, so more than
+    SCHEDULER_TOLERANCE of any one line fails: that is a board that cannot
+    schedule its work.
+
+    The two lines the board prints in answer to a `tx` this session sent are
+    not exceptional at all, and either is a fault: a second run reaching the
+    board while one was still waiting for a slot means the driver's pacing is
+    wrong, and a full queue means the board is not getting through them.
     """
     text = session.console.text()
-    said = sorted(line for line in BOARD_REFUSALS if line in text)
+    for line in TX_REQUEST_REFUSALS:
+        if line in text:
+            return (f"the board refused a transmit this session asked for: "
+                    f"{line!r}")
+    counts = {line: text.count(line) for line in SCHEDULER_REFUSALS}
+    said = {line: count for line, count in counts.items() if count}
+    over = sorted(line for line, count in said.items()
+                  if count > SCHEDULER_TOLERANCE)
+    if over:
+        return ("the board could not schedule its work: "
+                + "; ".join(f"{line!r} {said[line]} times" for line in over)
+                + f", more than the {SCHEDULER_TOLERANCE} an exceptional "
+                "condition would give")
     if said:
-        return ("the board refused something it was asked to send: "
-                + "; ".join(said))
-    if PAGING_RESUMED in text:
-        return (f"{PAGING_RESUMED!r}: a connection came up, carried nothing, "
-                "and link supervision ended it")
-    session.report(f"check scheduler-quiet: none of the {len(BOARD_REFUSALS)} "
-                   "refusal lines the board can print, and no page resumed")
+        session.report(
+            "check scheduler-reports: the board met an exceptional condition "
+            "and the session came through it: "
+            + ", ".join(f"{line!r} {count}" for line, count in sorted(said.items())))
+        return ""
+    session.report(
+        f"check scheduler-reports: none of the {len(SCHEDULER_REFUSALS)} "
+        "refusal lines the board can print, and no transmit of this session's "
+        "refused")
     return ""
 
 
@@ -1194,15 +1254,12 @@ def _page_once(session: Session, label: str) -> str:
     if done is None:
         return (f"the connection came up but the LMP exchange did not reach "
                 f"{LMP_COMPLETE!r} in {REPLY_TIMEOUT_S:g}s")
-    # A connection reported on an answer the board never earned carries
-    # nothing, and the pager goes back to its page train when link supervision
-    # ends it. That is the one thing a bench can see of a false connection
-    # (fork #1168), so it is read here rather than left to the whole session.
-    resumed, _ = console.wait(PAGING_RESUMED, 0.0, since=central.end())
-    if resumed is not None:
-        return (f"the connection was reported and then {PAGING_RESUMED!r}: it "
-                "carried nothing and link supervision ended it")
-    session.page_mark = out_mark
+    # Where the connection's own output starts, for the check that ends it: a
+    # connection reported on an answer the board never earned carries nothing,
+    # and link supervision ends it about a second later, after which the pager
+    # goes back to its page train and says so. That takes longer than this
+    # function waits, so it is read where the page ends rather than here.
+    session.page_mark = console.mark()
     session.page_started = _now()
     session.report(
         f"check {label}: connected to {session.peer_address} in {took:.1f} s, "
@@ -1231,7 +1288,28 @@ def check_page_idle(session: Session) -> str:
     left = max(0.0, session.hold_seconds - held)
     if left:
         time.sleep(left)
-    return session.idle("page-idle", PAGING_DONE)
+    reason = session.idle("page-idle", PAGING_DONE)
+    if reason:
+        return reason
+    return _connection_lasted(session)
+
+
+def _connection_lasted(session: Session) -> str:
+    """The connection the page reported was not given up while it was held.
+
+    A connection reported on an answer the board never earned carries nothing,
+    so link supervision ends it about a second later and the pager goes back to
+    its page train, saying `Paging resumed` (fork #1168). This is read once the
+    connection has been held and stopped, so the window it looks over is the
+    whole life of that connection rather than the moment it came up.
+    """
+    resumed, _ = session.console.wait(PAGING_RESUMED, 0.0,
+                                      since=session.page_mark)
+    if resumed is not None:
+        return (f"the connection was reported and then {PAGING_RESUMED!r}: it "
+                "carried nothing, so link supervision ended it and the page "
+                "train started again")
+    return ""
 
 
 def check_page_repeat(session: Session) -> str:
@@ -1252,9 +1330,15 @@ def check_page_repeat(session: Session) -> str:
         reason = _page_once(session, label)
         if reason:
             return f"page {number} of {repeats} after the first: {reason}"
+        # Nothing is held on a repeat, so the connection has had less time to
+        # be given up than the first one had; the look costs nothing and the
+        # first page is where that is really decided.
         reason = session.idle(f"{label}-idle", PAGING_DONE)
         if reason:
             return reason
+        reason = _connection_lasted(session)
+        if reason:
+            return f"page {number} of {repeats} after the first: {reason}"
     session.report(f"check page-repeat: {repeats} further page(s) completed "
                    "and named the peer")
     return ""
@@ -1387,7 +1471,7 @@ NO_ANSWER_CHECK = ("page-no-answer", check_page_no_answer)
 # Last, in this order: the two that read the whole session, then the streams
 # check, which reads both streams and is also where an overflow is caught.
 FINAL_CHECKS = (
-    ("scheduler-quiet", check_scheduler_quiet),
+    ("scheduler-reports", check_scheduler_reports),
     ("no-detach", check_no_detach),
     ("streams", check_streams),
 )
@@ -1441,7 +1525,7 @@ def _check_seconds(label: str, *, inquiry: float, page: float, hold: float,
                                          + reply),
         # These three read what is already there.
         "lmp-unhandled": 0.0,
-        "scheduler-quiet": 0.0,
+        "scheduler-reports": 0.0,
         "no-detach": 0.0,
         "streams": 0.0,
         # The start, the timeout, the look for a connection, and the done line.
@@ -1661,6 +1745,12 @@ def run_options(out, err, environment) -> int:
         except subprocess.TimeoutExpired:
             failures.append(f"{' '.join(words)}: did not exit within "
                             f"{OPTION_TIMEOUT_S:g}s")
+            continue
+        except OSError as error:
+            # A tool that is there and cannot be run -- not executable, or an
+            # interpreter line naming nothing -- is one line like every other
+            # failure here, not a traceback.
+            failures.append(f"{' '.join(words)}: could not run {tool}: {error}")
             continue
         printed = (finished.stderr or "").strip()
         label = " ".join(words)

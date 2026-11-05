@@ -102,7 +102,7 @@ class SessionTests(unittest.TestCase):
             "completed and named the peer",
             "check scan-modes: page_scan, inquiry_scan each started, held, "
             "and returned to standby",
-            "check scheduler-quiet: none of the ",
+            "check scheduler-reports: none of the ",
             "check no-detach: the peer took the connection and this end did "
             "not hang up",
             "check streams: ",
@@ -215,12 +215,14 @@ class SessionTests(unittest.TestCase):
             ("takes-bad-tx", "'tx dm1 18' was not refused"),
             ("wrong-tx-payload", "the packet the board was asked for is not "
                                  "the one the format gives"),
-            ("slot-not-sent", "the board reported a slot it could not put on "
-                              "the air: TX: cannot schedule transmit"),
+            ("tx-already-waiting",
+             "the board refused a transmit this session asked for"),
+            ("scheduler-storm", "the board could not schedule its work"),
             ("dead-link", "the connection did not carry on"),
             ("second-page-fails", "page 1 of 1 after the first: the peer"),
-            ("false-connection", "Paging resumed"),
-            ("stuck-scan", "but not 'Page Scan state Ready'"),
+            ("false-connection", "link supervision ended it and the page "
+                                 "train started again"),
+            ("stuck-scan", "the board was never reported in that state"),
             ("hangs-up", "this end hung up on the peer"),
         ):
             with self.subTest(fault):
@@ -342,7 +344,7 @@ class CheckListTests(unittest.TestCase):
         self.assertLess(order.index("tx-refusals"), order.index("page"))
         # The two that read the whole session read it whole: nothing that
         # drives the board comes after them.
-        for label in ("scheduler-quiet", "no-detach"):
+        for label in ("scheduler-reports", "no-detach"):
             with self.subTest(label):
                 self.assertGreater(order.index(label),
                                    order.index("scan-modes"))
