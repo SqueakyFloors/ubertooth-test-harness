@@ -586,7 +586,7 @@ serial. `update` also needs a `Debug programmer` paired with the board, with a
 
 ```text
 ubertooth-util -U <serial> -B                     # every --bootloader setting
-lpc21isp -control -bin <bootloader.bin> <serial device> 115200 12000
+lpc21isp -control <bootloader.hex> <serial device> 230400 4000
 ubertooth-util -U <serial> -v                     # the application came back
 ```
 
@@ -2045,7 +2045,8 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle   -q <case dir>/new.pcap <refusal
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle   -c <case dir>/new.pcap <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx     -r|-q|-d <case dir>/new.<ext> <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump   -d <case dir>/new.dump <refusal>
-env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-specan -d <case dir>/new.bin <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-specan -d <case dir>/new.specan <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-specan -d <case dir>/missing/new.specan
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu    -s|-u <case dir>/<file> <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow -r|-q|-d <case dir>/new.<ext> <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-scan   stray        # BlueZ builds, no file
@@ -2114,8 +2115,9 @@ that wrote it.
 **Commands.** No board. A command that is accepted and then stopped at the
 board lookup must create no file; a replay really writes one, from an input
 `rxreplay.py` builds. `dfuimage.py` states the directory and makes the links
-and read-only directory the cases need, and `capturefile.py` reads what was
-kept:
+read-only directory the cases need (the symbolic link itself is made with
+`ln -s`, and `dfuimage.py symlink` is the check that it still points where it
+did), and `capturefile.py` reads what was kept:
 
 ```text
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -r <case dir>/new.pcapng \
@@ -2125,10 +2127,15 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -c <case dir>/new-ppi.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump -d <case dir>/new.dump      # and a seeded file
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/no-record.bin -q <destination>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -q <case dir>/gone/x.pcap
-rxreplay.py fixture <case dir>/replay.bin --variant <full|empty> --base-time <epoch>
-rxreplay.py dump-check <case dir>/replay.dump <case dir>/replay.bin
+rxreplay.py fixture <case dir>/<name>.bin --variant <full|partial|skipped|truncated> \
+    --base-time <epoch>
+rxreplay.py dump-check <case dir>/new.dump <case dir>/<name>.bin --variant <skipped|truncated>
+mkdir <case dir>/ro                            # read-only, and in-the-way,
+                                               # input.d: a directory where a
+                                               # file is expected
+ln -s target.pcap <case dir>/link.pcap         # the link a case must not follow
+dfuimage.py symlink <case dir>/link.pcap --to target.pcap   # it still points there
 dfuimage.py state <case dir> --before <directory before> --allow <files>
-dfuimage.py symlink <case dir>/link.pcap --to target.pcap
 dfuimage.py not-root
 chmod 555|755 <case dir>/ro
 refusal.py probe <tool>
@@ -2210,6 +2217,9 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -i -z          # and -z-60, both 
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -f             # and -f -i
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -N -i          # and -i -N
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -U all -i
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -x -i -q       # and -i -q -x, -i -i -x
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -z -x -i
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -x -i stray    # the stray word first
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V             # the cleanup, needs no board
 ```
 
@@ -2267,7 +2277,10 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.dfu          #
 dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <reference> \
     --reference-name <name>
 dfuimage.py copy|strip|same|regular|state|not-root ...
-chmod 555|755 <case dir>/ro
+mkdir <case dir>/ro                # read-only, and folder.bin, folder.dfu:
+                                   # a directory where a file is expected
+ln -s target.dfu <case dir>/image.dfu   # the .dfu link a signing replaces
+chmod 555|755 <case dir>/ro        # read-only for the signing, back afterwards
 refusal.py probe ubertooth-dfu     # opens every case: can the switch be used
 ```
 
@@ -2585,7 +2598,7 @@ nrfdk.py identify  --jlink <jlink serial> --alias <alias>
 nrfdk.py ensure    --jlink <jlink serial> --alias <alias> --address <DK address>
 nrfdk.py advertise --jlink <jlink serial> --alias <alias> --chmap <channel> \
     --interval <ms> --payload <tag> --type <nonconn|conn>
-nrfdk.py status|stop|idle --jlink <jlink serial> --alias <alias>
+nrfdk.py stop|idle --jlink <jlink serial> --alias <alias>
 ubertooth-btle -U <serial> -n -A<channel> -q <case dir>/capture.pcap
 ubertooth-btle -U <serial> -f -A<channel> -r <case dir>/capture.pcapng
 advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel> \
@@ -2784,7 +2797,8 @@ nrfdk.py identify|ensure|peripheral|central|status|idle --jlink <jlink serial> \
     --alias <alias> ...
 ubertooth-btle -U <serial> -f -A37 -r <case dir>/capture-<n>.pcapng
 conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <address> \
-    --connections 2 --min-packets-per-connection 3 ...
+    --min-connections 2 --min-connection-packets 3 --after-update-ms <ms> \
+    --require-announced --max-quiet-ms <ms> --min-span-ms <ms> ...
 ubertooth-util -U <serial> -s -C      # the board answers at once, read back in idle mode
 ```
 
@@ -3160,7 +3174,7 @@ the capture files:
 ```text
 esp32peer.py stream <peer options> -- ubertooth-rx -U <serial> -t <duration> \
     -l <central LAP> -u <central UAP> -q <case dir>/records.pcap -r <case dir>/records.pcapng
-esp32peer.py audio  <peer options> --sco-type ev3 -- ubertooth-rx ...   # comprehensive
+esp32peer.py audio  <peer options> --type ev3 -- ubertooth-rx ...   # comprehensive
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 bredrrecord.py <case dir>/records.pcapng --min-packets 10 --max-access-code-errors 2 \
     --lap <central LAP> --reference-lap <central LAP> --reference-uap <central UAP> ...

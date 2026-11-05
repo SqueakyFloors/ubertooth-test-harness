@@ -70,28 +70,42 @@ UNCOLLECTED = {
     # flash runner assembles per write rather than as steps (flash.py).
     "Flash reliability": "its case is a FlashCase, not argv",
 }
-# Programs a driver runs itself, so they are in no argv the catalog builds.
-# The forward check cannot ask for them and the backward check must not call
-# them invented.
-BY_A_DRIVER = frozenset({
-    "ubertooth-specan-ui",  # pytools.py specan-ui
-    "btle-extcap.py",       # pytools.py extcap, from the resolved commit
-    "ubertooth-btle",       # extcapcapture.py, and the btbr console's own
-    "ubertooth-btbr",       # btbrconsole.py
-    "nrfutil",              # nrfdk.py
-    "tshark",               # tsharkcapture.py
-    "lpc21isp",             # bootloader.py, over a programmer
-    "ubertooth-dfu",        # flash.py per write, and bootloader.py
-    "ubertooth-util",       # flash.py per write
-})
-# Shell and file utilities a case runs around the tool under test; naming
-# them in a Commands block would say nothing about the fork's CLI.
-UTILITIES = frozenset({"env", "sh", "bash", "chmod", "ln", "mkdir", "python",
-                       "python3", "timeout", "date", "printf", "echo", "sleep",
-                       "tail", "exit", "tr", "cat"})
-# Words a Commands block writes that look like a program and are not: a
-# placeholder, and the two shell builtins the blocks quote.
+# Programs a driver runs itself, so they are in no argv the catalog builds,
+# per test: the backward check must not call these invented, and it must not
+# excuse them anywhere else. The forward check cannot ask for them at all.
+BY_A_DRIVER = {
+    # pytools.py runs the installed specan-ui and the btle-extcap.py of the
+    # resolved commit; extcapcapture.py and tsharkcapture.py run
+    # ubertooth-btle behind the extcap script.
+    "Python tools": {"ubertooth-specan-ui", "btle-extcap.py"},
+    "BLE extcap interfaces": {"btle-extcap.py"},
+    "BLE extcap capture": {"btle-extcap.py", "ubertooth-btle"},
+    "BLE extcap in tshark": {"btle-extcap.py", "ubertooth-btle", "tshark",
+                             "nrfutil"},
+    # nrfdk.py flashes with nrfutil.
+    "Capture known BLE advertiser": {"nrfutil"},
+    "Capture known BLE connection": {"nrfutil"},
+    "Follow a BLE connection across its end": {"nrfutil"},
+    # btbrconsole.py drives the prompt of ubertooth-btbr.
+    "Classic btbr console": {"ubertooth-btbr"},
+    # The flash runner assembles these per write (UNCOLLECTED).
+    "Flash reliability": {"ubertooth-dfu", "ubertooth-util"},
+    # Preflight's own read, and the bootloader write over a programmer.
+    "Bootloader identity": {"ubertooth-util", "lpc21isp"},
+}
+# Wrappers a case puts in front of the tool under test. They are not what a
+# section is about, and `env` or `timeout` in front of every no-board
+# command would say nothing, so `program` does not name them. The file
+# utilities a case uses to set its directory up (ln, chmod, mkdir) are NOT
+# here: they change what the tool then finds, so a section names them.
+WRAPPERS = frozenset({"env", "sh", "bash", "timeout", "python", "python3"})
+# A word a Commands block writes that looks like a program and is not: a
+# placeholder in angle brackets.
 NOT_A_PROGRAM = re.compile(r"^<.*>$")
+# Option words a Commands block writes that stand for a set of real options
+# rather than naming one: `-<mode>`, `-<query>`, `-r|-q|-d`, `--variant`'s
+# `<full|partial>` value. A word with a placeholder in it is one of those.
+OPTION = re.compile(r"^-{1,2}[A-Za-z][A-Za-z0-9-]*$")
 
 
 def _registry(directory):
@@ -157,6 +171,8 @@ def program(token: str) -> str:
         return name
     if name in HARNESS_MODULES:
         return name
+    if name in ("ln", "chmod", "mkdir"):
+        return name
     return ""
 
 
@@ -179,10 +195,38 @@ def _words(argv) -> list[str]:
     return words
 
 
+def _options(argv) -> set[tuple[str, str]]:
+    """(program, option) for every option a command passes to a program.
+
+    The program is whichever one the option follows, so a driver's own
+    options and the options of the tool it wraps are kept apart. An attached
+    value is dropped (`-c2426` is `-c`, `--variant=x` is `--variant`), since
+    only the option names are compared.
+    """
+    found = set()
+    current = ""
+    for word in _words(argv):
+        name = program(word)
+        if name:
+            current = name
+            continue
+        if not current or not word.startswith("-") or word == "-":
+            continue
+        word = word.split("=", 1)[0]
+        if word.startswith("--"):
+            found.add((current, word))
+            continue
+        # A short option carries its value attached: `-c2426`, `-U<serial>`,
+        # `-A37`. The option is its first letter.
+        found.add((current, word[:2]))
+    return found
+
+
 def programs_by_test():
     """Every program each test's cases run, from the catalog's own cases."""
     catalog = builtin_catalog()
     used: dict[str, set[str]] = {}
+    options: dict[str, set[tuple[str, str]]] = {}
     with tempfile.TemporaryDirectory() as directory:
         registry = _registry(directory)
         compiler = PlanCompiler(catalog, registry)
@@ -211,6 +255,8 @@ def programs_by_test():
         for case in cases:
             for argv in _argvs(case):
                 found.update(filter(None, (program(w) for w in _words(argv))))
+                options.setdefault(invocation.test_name, set()).update(
+                    _options(argv))
     # A test no committed plan names (`Host version` and `Help smoke`, whose
     # question every run asks in preflight instead) still has commands: ask
     # it for them with nothing but a host.
@@ -223,7 +269,9 @@ def programs_by_test():
         for case in definition.command_cases(arguments, {}, {}):
             for argv in _argvs(case):
                 found.update(filter(None, (program(w) for w in _words(argv))))
-    return {name: found - UTILITIES for name, found in used.items()}, skipped
+                options.setdefault(name, set()).update(_options(argv))
+    used = {name: found - WRAPPERS for name, found in used.items()}
+    return used, options, skipped
 
 
 def _argvs(case):
@@ -282,16 +330,38 @@ def commands_of(body: str) -> list[str]:
     return fences(field[1].split("**Expected outcome.**", 1)[0])
 
 
-def programs_named(lines) -> set[str]:
-    """The programs the lines of a Commands block name."""
-    named = set()
+def _fence_words(lines):
+    """The words of a Commands block, with the comments taken off."""
     for line in lines:
         text = line.split("#", 1)[0]
         for word in text.replace("|", " ").split():
-            name = program(word.strip(",;`"))
-            if name:
-                named.add(name)
-    return named - UTILITIES
+            yield word.strip(",;`.)(")
+
+
+def programs_named(lines) -> set[str]:
+    """The programs the lines of a Commands block name."""
+    named = {program(word) for word in _fence_words(lines)}
+    return {name for name in named if name} - WRAPPERS
+
+
+def options_named(lines) -> set[tuple[str, str]]:
+    """(program, option) for every option a Commands block names.
+
+    A word with a placeholder in it stands for a set of real options
+    (`-<mode>`, `-<query>`, `-<setter or mode>`) and is passed over: which
+    options it covers is what the prose beside the block says.
+    """
+    found = set()
+    current = ""
+    for word in _fence_words(lines):
+        name = program(word)
+        if name:
+            current = name
+            continue
+        if not current or "<" in word or not OPTION.match(word):
+            continue
+        found.add((current, word if word.startswith("--") else word[:2]))
+    return {(prog, opt) for prog, opt in found if prog not in WRAPPERS}
 
 
 class DocumentStructureTests(unittest.TestCase):
@@ -348,21 +418,28 @@ class DocumentedCommandTests(unittest.TestCase):
     def setUpClass(cls):
         cls.catalog = builtin_catalog()
         cls.sections = dict(sections())
-        cls.used, cls.skipped = programs_by_test()
+        cls.used, cls.options, cls.skipped = programs_by_test()
         cls.named = {
             name: programs_named(commands_of(body))
+            for name, body in cls.sections.items()
+        }
+        cls.named_options = {
+            name: options_named(commands_of(body))
             for name, body in cls.sections.items()
         }
 
     def test_only_the_weak_link_suites_are_left_out_of_the_comparison(self):
         # Those ask for an attenuated board the example registry carries
         # commented out. Any other planning failure would quietly shrink
-        # what is compared, so it is a failure here.
+        # what is compared, so it is a failure here -- every suite that was
+        # left out is named, `weak-link.yaml`'s included.
+        expected = [
+            "ble.yaml:ble-weak-link", "classic.yaml:classic-weak-link",
+            "range.yaml:range-weak-link",
+        ] + [f"weak-link.yaml:{suite}" for suite in
+             load_plan(PLANS / "weak-link.yaml", self.catalog).suites]
         self.assertEqual(
-            ["ble.yaml:ble-weak-link", "classic.yaml:classic-weak-link",
-             "range.yaml:range-weak-link"],
-            sorted(suite for suite, _reason in self.skipped
-                   if not suite.startswith("weak-link.yaml:")),
+            sorted(expected), sorted(suite for suite, _reason in self.skipped),
             [reason for _suite, reason in self.skipped],
         )
 
@@ -402,17 +479,44 @@ class DocumentedCommandTests(unittest.TestCase):
     def test_every_executable_a_commands_block_names_is_one_that_test_runs(self):
         # The other way round: a command form nobody sends must not sit in
         # the field a reader trusts. A tool a driver finds for itself is in
-        # no argv the catalog builds, so those are allowed by name.
+        # no argv the catalog builds, so those are allowed for the tests
+        # whose driver runs them, and only those.
         for name in self.catalog.names:
-            used = self.used.get(name, set())
+            used = self.used.get(name, set()) | BY_A_DRIVER.get(name, set())
             with self.subTest(name):
                 invented = sorted(
-                    item for item in self.named[name]
-                    if item not in used and item not in BY_A_DRIVER
+                    item for item in self.named[name] if item not in used
                 )
                 self.assertEqual(
                     [], invented,
                     f"{name}'s Commands block names these and it runs none of them",
+                )
+
+    def test_every_option_a_commands_block_names_is_one_that_test_passes(self):
+        """An option a test does not send must not sit in its Commands block.
+
+        This is where a wrong option name is caught, which naming the
+        executable cannot do: a block that wrote `--sco-type` for
+        `esp32peer.py audio`, which takes `--type`, reads as authoritative
+        and is not. What it does not compare is values, argument order, or
+        whether a form the block collapses covers every case: a word with a
+        placeholder in it stands for a set of options and is passed over.
+        """
+        for name in self.catalog.names:
+            passed = self.options.get(name, set())
+            # A tool a driver runs itself takes options no argv here
+            # carries, so its options are passed over -- that tool's, not
+            # the whole test's.
+            by_a_driver = BY_A_DRIVER.get(name, set())
+            with self.subTest(name):
+                invented = sorted(
+                    f"{prog} {option}"
+                    for prog, option in self.named_options[name]
+                    if (prog, option) not in passed and prog not in by_a_driver
+                )
+                self.assertEqual(
+                    [], invented,
+                    f"{name}'s Commands block names options it never passes",
                 )
 
     def test_the_program_reader_finds_the_tool_a_command_runs(self):

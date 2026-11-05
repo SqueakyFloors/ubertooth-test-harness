@@ -70,7 +70,9 @@
   substitutes. `tests/test_tests_document.py` checks the headings, their
   order, the fields, and that every executable a test's cases really run is
   named in its section or in "What every test shares"; it builds the cases
-  from the catalog, so there is no second list of commands to maintain. The one exception is the trailing `Out of scope: ...` section, which
+  from the catalog, so there is no second list of commands to maintain, and
+  it refuses an option a block names that the test never passes. The one
+  exception is the trailing `Out of scope: ...` section, which
   records what the harness has decided not to test so that a missing catalog
   entry is not mistaken for an oversight; the file's own intro says so.
   Reviewers check for it.
