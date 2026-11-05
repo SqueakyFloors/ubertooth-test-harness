@@ -1114,10 +1114,21 @@ power measurement again rather than sensitivity. The ESP32 peers do put real
 packets on the air, and their transmit level is not ours to set. Which of
 those three the test should use is the open question.
 
-One thing the record format does help with: a packet line either carries the
-board's own background estimate for its channel or says `none` for both noise
-and ratio, never one of each, so a run can tell a measured floor from an
-absent one.
+One thing the line format does help with: a packet line says `none` rather
+than a figure wherever the board has no reading to give, and the ratio goes
+whenever either figure it comes from does, never one of each, so a run can
+tell a measured level or floor from an absent one. Both halves of that
+matter to a sensitivity reading. The noise column is `none` where the mode
+had no background estimate for the channel, and the level column is `none`
+where the board's own reading is at the top of the radio's scale, which says
+no more than "at least this loud" and used to print as `0 dBm` — about a
+fifth of the packets of a close Classic link
+([ubertooth#1192](https://github.com/SqueakyFloors/ubertooth/pull/1192)). A
+capture record has no room for the distinction and still carries 0 dBm
+there, so it is the printed lines that carry it. The harness's packet-line
+pattern accepts every combination that rule allows and refuses the ones it
+does not, which is what keeps a saturated packet counted as a packet rather
+than quietly dropped.
 
 **Hardware and arguments.** A `sender` and a `receiver` (both Ubertooth) on
 one named `host:`, a required `allow RF transmission: true`, one `PA level:`
@@ -1229,7 +1240,9 @@ with no peer in range, and checks their exits, output shape, and files.
 behavior of the tool rather than the content of the air. `ubertooth-rx -t N`
 must stop itself at about N seconds and exit 0, and every packet line it does
 print must match the documented format, which is where a change in the record
-shape or a malformed signal-and-noise pair shows up. Where the command fixes a
+shape, or a power column out of step with the two beside it, shows up: each
+of the level and noise columns is a figure or `none`, and the ratio is a
+figure exactly when both of them are. Where the command fixes a
 channel, every packet reported must be on that channel; where it caps
 access-code errors, no packet may exceed the cap. `ubertooth-afh -t N` has a
 known answer in the other direction: with nothing from the named piconet, it
@@ -2302,8 +2315,12 @@ LAP, with the clock acquired.
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
 the peer that is not the central reports no packet at all. Comprehensive runs
 4, adding `-l` without `-u` and `-l -u -q` into PCAP, where the file must hold
-packets as well as a header. The cleanup is the same: both peers reset, the
-Ubertooth restored.
+packets as well as a header. Every case also refuses a clock reported with no
+score, or with a score only equal to the next best candidate's — see **A
+clock that is reported is a clock that was scored** under
+`Classic capture record fields`, which carries the same two guards and the
+reason they sit on every capture case. Nothing here requires a clock to be
+reached. The cleanup is the same: both peers reset, the Ubertooth restored.
 
 **Known limits.** Same floors and the same bench dependence as
 `Capture known Classic device`. The absence case asserts an exact zero over a
@@ -2353,10 +2370,44 @@ three. The rest are flag-to-field agreements of the same kind, for each flag tha
 describes a field the record carries: the noise flag is set exactly when the
 noise figure is below the signal, the payload flag exactly when the record
 holds payload bytes, the two reference flags exactly when the reference fields
-hold an address, a valid check is never one that was not made, and the
-transport and rate nibbles say what a receive-only basic-rate capture knows
-and nothing more. Two flags are read and reported but not constrained, because
-this writer never sets either: a decrypted payload and an aliased channel. On top of those, the bench
+hold an address, a valid check is never one that was not made, and the rate
+nibble says what a basic-rate capture receives and nothing more. Two flags
+are read and reported but not constrained, because this writer never sets
+either: a decrypted payload and an aliased channel.
+
+The transport nibble is the one of these that the record earns rather than
+declares. libbtbb names the logical transport the payload it produced decoded
+on — ACL for the data types, SCO for the voice types, eSCO for the extended
+voice types — and names none where it produced no payload, clearing it again
+wherever it drops one, such as a trial clock it abandons
+([libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133), which the
+fork picked up in
+[ubertooth#1122](https://github.com/SqueakyFloors/ubertooth/pull/1122)). So
+two rules hold: a record with no payload names no transport, and a record
+with one names its own type's. Only TYPE code `0111` takes two answers, and
+that is the point of the field — an HV3 and an EV3 share that code and a
+length, so nothing else in a record says which it holds, and so whether the
+payload ends in a CRC. A record naming `any` passes either way, which is what
+a libbtbb from before that change wrote for every packet, so a run against an
+older `--libbtbb-ref` is not failed for a field that library never filled in.
+No case puts a floor on how many records name a transport: payload-bearing
+records are rare on this bench (see the known limits), so a floor would be a
+count of the room rather than of the decoder.
+
+**That `any` is a real gap, kept on purpose.** At the libbtbb the *fork*
+pins, a payload-bearing record always names a transport — the library names
+one whenever it produced a payload, and an abandoned trial clock clears the
+transport and the payload together — so a libbtbb that stopped filling the
+field in would pass here. It is accepted because the *harness's* own
+`LIBBTBB_PIN` still predates
+[libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133) and names no
+transport at all, so a strict default would fail every payload-bearing record
+of a run built at the harness's own pin, and a floor is no substitute at 11
+payload-bearing records in 2620. Tightening it is
+[#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339),
+which waits on that pin rather than on a decision.
+
+On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the
 capture was given, and, in a PCAPNG, the address `ubertooth-rx -l` records
 once in an interface option. That address is only as much as the tool knows:
@@ -2410,8 +2461,10 @@ the measurements above are reported first either way, because a spent
 30-second capture whose figures were thrown away because of what happened
 afterwards is the worst of both outcomes.
 
-One thing a record does not carry is a clock, so this test asserts nothing
-about one; see the known limits.
+A record carries no clock field, so no case asserts a clock value. What the
+records do carry is their own times, and those are held to the run that
+wrote them; the clock a followed capture reads is what can put them wrong.
+See **The record times measure the run** below.
 
 The decoder is `ubertooth_harness/bredrrecord.py`, run as an ordinary logged
 command per capture file. It prints counts, ranges, flag tallies and packet
@@ -2439,7 +2492,13 @@ Comprehensive runs 4, adding the EV3 audio link, whose records must include at
 least one `HV3/EV3/3-EV3` packet and whose session must report one unbroken
 link, both applications' frame counters, and both controllers' packet
 counters, all measured across the capture alone; and a survey (`-z -r`), whose records must
-include at least one carrying a UAP the survey recovered for itself. Each case
+include at least one carrying a UAP the survey recovered for itself.
+
+Every case, over every capture file it writes, also requires each record's
+transport nibble to agree with its own payload, and the file's record times
+to span no longer than the capture ran and to step backwards no further than
+2000 us. Every case also refuses a clock reported with no score, or with a
+score only equal to the next best candidate's. Each case
 keeps its capture files in the run directory. The cleanup is the same as the
 other two Classic tests: both peers reset to their boot state, the Ubertooth's
 channel, squelch, and LEDs restored.
@@ -2523,15 +2582,86 @@ survey on the bench recorded 235 packets, 182 carrying a recovered UAP and
 one a header that had been checked, which is why the header floor belongs to
 the followed cases and not this one.
 
-**Nothing here asserts a clock.** The issue asked for clock and clock-offset
-consistency, and there is nothing to assert it against. A BR/EDR record has no
-clock field; `ubertooth-rx` never writes the interface option libbtbb has for a
-piconet's clock; and the two figures it prints beside each packet are already
-masked into range before they are printed (the clock with `CLKN_MASK`, the
-offset modulo the slot), so a bound on either could not fail. What the record
-reader does instead is report the timestamps — how many, over what span, and
-the largest step backwards — so a run record carries them for a person to
-read.
+**No clock value is asserted, and none can be.** The issue asked for clock
+and clock-offset consistency, and there is nothing to assert it against. A
+BR/EDR record has no clock field; `ubertooth-rx` never writes the interface
+option libbtbb has for a piconet's clock; and the two figures it prints
+beside each packet are already masked into range before they are printed (the
+clock with `CLKN_MASK`, the offset modulo the slot), so a bound on either
+could not fail.
+
+**The record times measure the run.** What a record does carry is a
+timestamp, and the clock a followed capture reads is what can put it wrong.
+Following a piconet puts the board's clock on the piconet's, which moves it
+by however far the two were apart — anything up to its 327.68 s period, in
+either direction — and a reconstruction that read that move as time passing
+gave times that did not measure the run at all. On the fork's bench a 15 s
+follow wrote records spanning 191.3 s, and where the clock moved back
+instead, a record's time came out before the record ahead of it
+([ubertooth#1195](https://github.com/SqueakyFloors/ubertooth/pull/1195) fixed
+it host-side). Every record check here now carries two bounds, which are what
+that fault shows up as:
+
+- the records span no more than the capture's own `-t` plus the slack a tool
+  is allowed for its exit, so the ceiling moves with `duration:` rather than
+  being a constant that stops meaning the run;
+- no record is timed more than 2000 us before the record ahead of it.
+
+Both are loose against a working capture and orders of magnitude clear of the
+fault. The fork measured spans within 2.9 s of the run across nine follow
+captures with the fix, against 41.3 s short and 176 s long without it, and no
+step backwards at all in those nine, against steps of 41.16 s and 317.68 s.
+Ordinary reordering stays allowed, because two packets decoded out of one
+400 us bank land in either order: a bench capture of 285 records had one step
+of 225 us, and a slot pair is 1250 us.
+
+**A clock move cannot be ordered on the bench, so the directions are tested
+synthetically.** This capture locks a piconet's clock on about one run in
+nine here, and the size of the move is whatever the two clocks happen to be
+apart, so neither a move nor its direction can be asked for. The fix also
+only reaches a live capture, so replaying a saved dump cannot stand in. What
+the hardware cases are therefore for is the live wiring — that the bounds
+hold on a real capture, which is what would catch them being computed from
+the wrong field or never run. Both move directions, at the sizes the bench
+measured, are covered deterministically in the unit tests, which feed the
+record reader synthetic captures carrying those times.
+
+One thing could fail a good capture: the firmware latches the clock and its
+period count with separate reads, so a packet caught as the count ticks over
+carries a time a whole period out. No bench capture has shown one, and the
+summary line names the size of what it saw, so a reader can tell a one-off
+straddle of about 327.68 s from a clock move.
+
+The summary line is there whether or not the bounds are asked for — how many
+times a capture carried, over what span, and the largest step backwards — so
+a run record holds them for a person to read.
+
+**A clock that is reported is a clock that was scored.** A capture given a
+piconet to follow searches for its clock, and every case here refuses two
+outcomes of that search. Candidates are scored on the hops they explain
+and a clock is accepted only while no other candidate explains them nearly as
+well; where the hops cannot tell the candidates apart the search ends with no
+clock, which for a caller is better than a wrong one
+([libbtbb#125](https://github.com/SqueakyFloors/libbtbb/pull/125), which the
+fork picked up in
+[ubertooth#1088](https://github.com/SqueakyFloors/ubertooth/pull/1088); on
+libbtbb's own synthetic sweep a fifth of the attempts used to confirm a clock
+that was not the device's). So a lock line carrying no score at all is
+refused, which is the form the elimination search printed when it accepted
+whichever candidate outlived the others, and so is a lock whose score only
+equals the next best candidate's, which is the coin toss between equally good
+clocks. Neither writes down the margin libbtbb enforces: that is its constant
+to tune, and asking for a clock strictly ahead of its runner-up is what these
+cases need. **Nothing here requires a lock**, for the same reason the packet
+counts are floors.
+
+The two guards sit on every capture case of this test and of `Follow Classic
+Bluetooth piconet`, rather than only on the ones that target a piconet.
+Neither can match a capture that reaches no clock — which most of this
+bench's do, and a survey never even starts a clock search — so they cost a
+run nothing wherever they sit, and a clock reported unscored or tied is wrong
+in any capture. Narrowing them to the targeted cases would drop coverage to
+no end.
 
 The flag rules assume this fork's libbtbb, the one the harness pins. It clears
 the HEC and CRC answers for a clock trial it abandons, and drops the payload
@@ -3232,10 +3362,15 @@ is what fork
 The `-q` case wrote 258 records, every one carrying the central's LAP and
 that LAP and UAP as its reference address, and then: **none** of them passed
 a header HEC, where `ubertooth-rx -l -u` on this same pair passes a fifth to
-a third of them, and 35 of them carried `transport 3`, which a receive-only
-basic-rate capture records as 0. Both fields come from the header, and both
-say the same thing — the access code is found and the header does not decode,
-which is about the clock the tool hops on. So the `-q` case checks that the
+a third of them, and 35 of them carried `transport 3`, ACL. Both say the same
+thing — the access code is found and the header does not decode, which is
+about the clock the tool hops on — and a transport is checked against the
+packet type the header carries, so a header that did not decode leaves
+nothing to check it against. What those 35 records would carry today is **not
+established**: that sweep ran against a different libbtbb than the one now
+pinned, and at the pinned commit an abandoned trial clock clears a record's
+transport and its payload together. The figures above are kept as measured.
+So the `-q` case checks that the
 file is a BR/EDR pcap holding the piconet's packets and leaves the records to
 `Classic capture record fields`, which reads a capture from a tool whose
 headers do decode. A bench measurement is what fork #518 was waiting for.

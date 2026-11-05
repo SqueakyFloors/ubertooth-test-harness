@@ -328,13 +328,18 @@ def packet_record_indices(lap: int | None = None,
 
 # --- output checks ------------------------------------------------------------
 
-# The noise figure and the signal-to-noise ratio beside it are either both
-# figures or both the word `none`: one comes from the other, so a line with one
-# of each is malformed and does not count as a packet. The fixture's records
-# set neither of the status bits that say the board measured this packet's
-# power or estimated its channel's background, so a current ubertooth-rx prints
-# `none` for both (fork 532adc19); a record from a board that does set them
-# prints figures.
+# The noise figure and the ratio beside it are either both figures or both
+# the word `none`: the ratio comes from the noise, so a line with one of each
+# is malformed and does not count as a packet. The fixture's records set no
+# NOISE_ESTIMATE status bit, so there is no background for this channel and a
+# current ubertooth-rx prints `none` for both (fork 532adc19).
+#
+# The level column is a figure in every line of a replay of this fixture, and
+# that is pinned rather than allowed for: the column reads `none` only where
+# the board's own reading is at the top of the radio's scale (fork
+# SqueakyFloors/ubertooth#1192), and these records carry a fixed strongest
+# reading far below it. A live capture can print `none` there, which is why
+# receive_cases' pattern accepts it and this one does not.
 _NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
 
 PACKET_LINE = re.compile(
