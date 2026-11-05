@@ -672,7 +672,10 @@ def _replay_case(case_id, name, steps, expected_state, *, needs=NO_NEEDS,
                          lambda context: (sys.executable, _STDOUTDEST, "unlink",
                                           require(context, CAPTURE_DIR_KEY),
                                           *remove),
-                         output_patterns=(r"Removed: \d+ of \d+ name",)),)
+                         # Every name, not "some of them": a link to a
+                         # standard stream left behind is what this prevents.
+                         output_patterns=(rf"Removed: {len(remove)} of "
+                                          rf"{len(remove)} name",)),)
     return StateCase(
         case_id,
         name,
@@ -918,6 +921,22 @@ def _stdout_destination_cases(base, count, digest):
                                         for index in range(len(_STDOUT_PATHS)))),
         ), f"each path writes pcap, link type 255, {count} packets to the "
            "redirected stream; no packet line on either stream"),
+        # Linux names descriptor 1 here as well; macOS has no /proc, where
+        # the path is an ordinary name and nothing creates it.
+        _replay_case("replay-stdout-proc-path",
+                     f"-i -q {_PROC_STDOUT_PATH} is that stream on Linux", (
+            _fixture_step(base),
+            _dest_run_step("capture",
+                           f"ubertooth-rx -i <fixture> -q {_PROC_STDOUT_PATH} "
+                           "> proc.pcap", ("-q", _PROC_STDOUT_PATH),
+                           stdout="proc.pcap",
+                           forbidden=(_PACKET_LINE_PATTERN,)),
+            _capture_packets("verify-capture", "Verify the capture it wrote",
+                             "proc.pcap", "pcap", count),
+            _dest_check_step("Verify the fixture came through unchanged",
+                             unchanged=(fixture,), also=("proc.pcap",)),
+        ), f"pcap, link type 255, {count} packets on the redirected stream; no "
+           "packet line on either stream", needs=Needs(platforms=("linux",))),
         # Another descriptor is whatever the caller opened on it, so the
         # capture goes there and the report keeps standard output.
         _replay_case("replay-stdout-other-fd",
@@ -971,22 +990,6 @@ def _stdout_destination_comprehensive(base, count, digest, size):
     """Comprehensive: the other spellings, the links, and the one warning."""
     fixture = (_FIXTURE, digest)
     return [
-        # Linux names descriptor 1 here as well; macOS has no /proc, where
-        # the path is an ordinary name and nothing creates it.
-        _replay_case("replay-stdout-proc-path",
-                     f"-i -q {_PROC_STDOUT_PATH} is that stream on Linux", (
-            _fixture_step(base),
-            _dest_run_step("capture",
-                           f"ubertooth-rx -i <fixture> -q {_PROC_STDOUT_PATH} "
-                           "> proc.pcap", ("-q", _PROC_STDOUT_PATH),
-                           stdout="proc.pcap",
-                           forbidden=(_PACKET_LINE_PATTERN,)),
-            _capture_packets("verify-capture", "Verify the capture it wrote",
-                             "proc.pcap", "pcap", count),
-            _dest_check_step("Verify the fixture came through unchanged",
-                             unchanged=(fixture,), also=("proc.pcap",)),
-        ), f"pcap, link type 255, {count} packets on the redirected stream; no "
-           "packet line on either stream", needs=Needs(platforms=("linux",))),
         # The file is identified rather than the name, and the one pair that
         # keeps nothing is allowed.
         _replay_case("replay-destinations-spelled-differently",
@@ -1077,13 +1080,16 @@ def _stdout_destination_comprehensive(base, count, digest, size):
             # one-capture-on-standard-output rule instead, which refuses the
             # second however it is spelled, a link to the stream included.
             _dest_run_step("refuse-both-stdout",
-                           "ubertooth-rx -i <fixture> -q - -d /dev/stdout",
-                           ("-q", "-", "-d", "/dev/stdout"), returncodes=(1,),
+                           "ubertooth-rx -i <fixture> -q - -d /dev/stdout, with "
+                           "stdout on both.bin",
+                           ("-q", "-", "-d", "/dev/stdout"), stdout="both.bin",
+                           returncodes=(1,),
                            patterns=(_both_stdout(("-q", "-d")),),
                            forbidden=(_PACKET_LINE_PATTERN,)),
             _dest_check_step("Verify nothing was written to any of them",
                              unchanged=(fixture, ("shared.bin", _EMPTY_SHA256),
-                                        ("fd3.bin", _EMPTY_SHA256)),
+                                        ("fd3.bin", _EMPTY_SHA256),
+                                        ("both.bin", _EMPTY_SHA256)),
                              kept=("pair.pcap",),
                              symlinks=(("pair.link", "pair.pcap"),),
                              hardlinks=(("pair.hard", "pair.pcap"),)),
@@ -1100,16 +1106,23 @@ def _stdout_destination_comprehensive(base, count, digest, size):
             _dest_link_step(symlinks=(("to-stdout", "/dev/stdout"),)),
         ) + tuple(
             _dest_run_step(f"refuse-{index}",
-                           f"ubertooth-rx -i <fixture> -r {shown}",
-                           ("-r", value), returncodes=(1,),
+                           f"ubertooth-rx -i <fixture> -r {shown}, with stdout "
+                           f"on {index}.out",
+                           ("-r", value), stdout=f"{index}.out",
+                           returncodes=(1,),
                            patterns=(_PCAPNG_NOT_STDOUT,),
                            forbidden=(_PACKET_LINE_PATTERN,))
             for index, (shown, value) in enumerate(
                 (("-", "-"), ("/dev/stdout", "/dev/stdout"),
                  ("<dir>/to-stdout", ("file", "to-stdout"))))
         ) + (
-            _dest_check_step("Verify nothing was created",
-                             unchanged=(fixture,),
+            # Each refusal's own standard output has to be empty: a run that
+            # wrote a PCAPNG header before refusing would be a capture in the
+            # run record, which is the thing these destinations are about.
+            _dest_check_step("Verify nothing was created or written",
+                             unchanged=((_FIXTURE, digest),)
+                                       + tuple((f"{index}.out", _EMPTY_SHA256)
+                                               for index in range(3)),
                              symlinks=(("to-stdout", "/dev/stdout"),)),
         ), "each refused (exit 1) with 'PCAPNG capture to stdout is not "
            "supported; use -q -'; nothing created and the link left alone",

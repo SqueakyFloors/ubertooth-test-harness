@@ -116,16 +116,19 @@ def run(argv, stdout: Path | None, append: bool, fds) -> tuple[int, list[str]]:
             # A file object on the same descriptor would close it a second
             # time, which is the one EBADF this can give.
             source = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-            try:
-                if source != number:
-                    # dup2 leaves the new descriptor inheritable, which is
-                    # what pass_fds then keeps.
-                    os.dup2(source, number)
-            finally:
-                # Either the duplicate is the one to close at the end, or the
-                # open already landed on that number and it is.
+            if source == number:
+                # The open already landed on that number, so there is nothing
+                # to duplicate and this is the descriptor to close at the end.
                 duplicated.append(number)
-                if source != number:
+            else:
+                try:
+                    # dup2 leaves the new descriptor inheritable, which is
+                    # what pass_fds then keeps. Recorded only once it has
+                    # happened, so a failure does not leave the cleanup
+                    # closing a number nothing opened.
+                    os.dup2(source, number)
+                    duplicated.append(number)
+                finally:
                     os.close(source)
             notes.append(f"fd {number} -> {Path(name).name}")
         if stdout is None:
@@ -209,7 +212,10 @@ def _problem_for(directory: Path, args) -> str:
         path, other = directory / name, directory / target
         if not path.is_file() or not other.is_file():
             return f"{name} or {target} is gone"
-        if path.stat().st_ino != other.stat().st_ino:
+        # Device and inode: an inode number alone is only unique within one
+        # filesystem.
+        if (path.stat().st_dev, path.stat().st_ino) != (
+                other.stat().st_dev, other.stat().st_ino):
             return f"{name} is no longer the same file as {target}"
     named = {name for name, _value in args.sha256}
     named |= {name for name, _value in args.prefix}

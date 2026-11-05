@@ -47,7 +47,13 @@ def inherited_streams(stdout_path, stderr_path):
     # Well above the descriptors the helper hands a tool, which start at 3:
     # os.dup() would answer with one of those and the helper would duplicate
     # a file over it.
-    saved = {number: fcntl.fcntl(number, fcntl.F_DUPFD, 20) for number in (1, 2)}
+    # Descriptor 3 as well as 1 and 2: run() duplicates a file onto the
+    # number a caller asks for and closes that number afterwards, so a
+    # descriptor this process (or another test module) held there would come
+    # back dead. In the harness the helper is a process of its own and there
+    # is nothing to protect; these tests call it in this one.
+    saved = {number: fcntl.fcntl(number, fcntl.F_DUPFD, 20)
+             for number in (1, 2, 3) if _is_open(number)}
     for number, path in ((1, stdout_path), (2, stderr_path)):
         with open(path, "wb") as handle:
             os.dup2(handle.fileno(), number)
@@ -57,6 +63,14 @@ def inherited_streams(stdout_path, stderr_path):
         for number, original in saved.items():
             os.dup2(original, number)
             os.close(original)
+
+
+def _is_open(number):
+    try:
+        os.fstat(number)
+    except OSError:
+        return False
+    return True
 
 
 class RunTests(unittest.TestCase):

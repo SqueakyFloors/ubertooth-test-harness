@@ -1013,11 +1013,13 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # more cases: comprehensive 8.0 s of command time against 6.2 s for the
     # same run without them, so +1.8 more, and smoke unchanged, those three
     # being comprehensive-only. 0.9 + 1.9 = 2.8 and 3.9 + 3.3 + 1.8 = 9.0.
-    # 11 cases and 48 commands in smoke, 30 and 127 comprehensive (29 and 124
-    # where there is no /proc). Each pair of command-time figures was taken
-    # back to back, because a busy host takes two to six times longer, which
-    # is why an estimate is a countdown and never a timeout.
-    "Raw receive replay": _profiles(Estimate(2.8), Estimate(9.0)),
+    # 12 cases and 51 commands in smoke, 30 and 127 comprehensive (11 and 48,
+    # and 29 and 124, where there is no /proc and the one case about it is not
+    # applicable); the smoke figure carries that case, so a macOS run comes
+    # in a little under it. Each pair of command-time figures was taken back
+    # to back, because a busy host takes two to six times longer, which is
+    # why an estimate is a countdown and never a timeout.
+    "Raw receive replay": _profiles(Estimate(3.1), Estimate(9.0)),
     # Two cases and 35 commands in smoke, three and 52 comprehensive.
     # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
     # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three

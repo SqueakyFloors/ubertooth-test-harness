@@ -193,8 +193,11 @@ class ReplayRx:
     def _is_stdout_value(self, value, fds):
         if value is None:
             return False
-        if value in self._STDOUT_VALUES:
-            return "stdout-alias-is-a-file" not in self.bugs or value == "-"
+        if value == "-":
+            return True
+        if any(self._same_path_text(value, name)
+               for name in self._STDOUT_VALUES[1:]):
+            return "stdout-alias-is-a-file" not in self.bugs
         if "other-fd-is-stdout" in self.bugs and value.startswith("/dev/fd/"):
             return True
         return False
@@ -252,10 +255,29 @@ class ReplayRx:
         if first_file is not None and second_file is not None:
             return first_file == second_file
         if first_file is None and second_file is None:
-            # Neither exists yet, so only the text can answer. os.path
-            # reduces the redundant "/." elements that same_path_text() does.
-            return os.path.normpath(first) == os.path.normpath(second)
+            # Neither exists yet, so only the text can answer, by the rule
+            # same_path_text() uses: the redundant separators and "."
+            # elements between two names are nothing, ".." is left alone
+            # because the element above a symbolic link is not the directory
+            # the text suggests, and a path that ends inside a name is equal
+            # to nothing but the very same text.
+            return self._same_path_text(first, second)
         return False
+
+    @staticmethod
+    def _same_path_text(first, second):
+        def ends_inside_a_name(path):
+            return (not path or path.endswith("/")
+                    or path.endswith("/.") or path == ".")
+
+        def components(path):
+            return [part for part in path.split("/") if part not in ("", ".")]
+
+        if first.startswith("/") != second.startswith("/"):
+            return False
+        if ends_inside_a_name(first) or ends_inside_a_name(second):
+            return first == second
+        return components(first) == components(second)
 
     @staticmethod
     def _keeps_nothing(value):
@@ -345,6 +367,26 @@ class ReplayRx:
                 return self._result(command, 1, "", "error: -u <UAP> requires -l <LAP>\n")
             if "-i" not in options:
                 return self._result(command, 1, "", "ubertooth_connect: no device found\n")
+        # Where each capture would go, in the order ubertooth-rx.c lists them.
+        destinations = [(option, self._value(options, option))
+                        for option in ("-r", "-q", "-d")]
+        # The order ubertooth-rx.c asks in: -r's stream refusal while the
+        # command line is read, then the destination pairs, and only then the
+        # input, so a refused command line opens nothing at all. The checks
+        # that need the open input come after it, below.
+        #
+        # PcapNG seeks back over what it has written, which no stream allows,
+        # so -r refuses every destination that reaches standard output.
+        pcapng = self._value(options, "-r")
+        if ("pcapng-stdout-allowed" not in self.bugs and pcapng is not None
+                and self._reaches_stdout(pcapng, fds)):
+            return self._result(command, 1, "",
+                                "error: PCAPNG capture to stdout is not "
+                                "supported; use -q -\n")
+        refusal, _warning, status = self._destination_problems(
+            destinations, stdout_name, fds, None)
+        if refusal:
+            return self._result(command, status, "", refusal)
         path = Path(self._value(options, "-i"))
         if not path.exists():
             code = 0 if "missing-exit-0" in self.bugs else 1
@@ -353,18 +395,6 @@ class ReplayRx:
             return self._result(command, 1 if self.fixed else 0, "",
                                 f"error: reading {path} failed: Is a directory\n"
                                 if self.fixed else "")
-        # Where each capture would go, in the order ubertooth-rx.c lists them.
-        destinations = [(option, self._value(options, option))
-                        for option in ("-r", "-q", "-d")]
-        # PcapNG seeks back over what it has written, which no stream allows,
-        # so -r refuses every destination that reaches standard output while
-        # the command line is read (opt_check_pcapng_destination).
-        pcapng = self._value(options, "-r")
-        if ("pcapng-stdout-allowed" not in self.bugs and pcapng is not None
-                and self._reaches_stdout(pcapng, fds)):
-            return self._result(command, 1, "",
-                                "error: PCAPNG capture to stdout is not "
-                                "supported; use -q -\n")
         refusal, warning, status = self._destination_problems(
             destinations, stdout_name, fds, path)
         if refusal:
@@ -909,10 +939,16 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertEqual(["replay-decode-lap", "replay-lap-uap", "replay-pcapng",
                           "replay-pcap", "replay-dump-unopenable",
                           "replay-sweep-explicit", "replay-stdout-dash",
-                          "replay-stdout-paths", "replay-stdout-other-fd",
+                          "replay-stdout-paths", "replay-stdout-proc-path",
+                          "replay-stdout-other-fd",
                           "replay-destinations-collide",
                           "replay-destination-is-input"],
                          [c.case_id for c in smoke])
+        # The /proc case is in smoke so that CI's Linux build job, which runs
+        # testplans/host.yaml at smoke coverage, runs it against the real
+        # tool; it is the one case macOS leaves out.
+        self.assertEqual(["replay-stdout-proc-path"],
+                         [c.case_id for c in smoke if c.needs.platforms])
         _a, full = replay_cases("comprehensive")
         self.assertEqual(30, len(full))
         # One of them is Linux's: /proc names descriptor 1 there and nothing
