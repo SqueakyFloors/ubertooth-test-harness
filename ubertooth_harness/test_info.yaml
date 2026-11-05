@@ -795,8 +795,10 @@ Classic Bluetooth receive:
     With no piconet on the bench, what is knowable is the behavior of the tool
     rather than the content of the air. ubertooth-rx -t N must stop itself at
     about N seconds and exit 0, and every packet line must match the
-    documented format, which is where a change in the record shape or a
-    malformed signal-and-noise pair shows up. Where the command fixes a
+    documented format, which is where a change in the record shape, or a
+    power column out of step with the two beside it, shows up: each of the
+    level and noise columns is a figure or the word none, and the ratio is a
+    figure exactly when both of them are. Where the command fixes a
     channel, every packet reported must be on it; where it caps access-code
     errors, no packet may exceed the cap. ubertooth-afh -t N has a known
     answer in the other direction: with nothing from the named piconet it must
@@ -1624,8 +1626,14 @@ Classic capture record fields:
     a whole period out; no bench capture has shown one, and the summary names
     the size of what it saw. No case requires a clock to be reached at all.
     No floor is put on records that name a transport, because payload-bearing
-    records are rare here, and a record naming no transport passes, which is
-    what a libbtbb from before the field was filled in writes. The survey case
+    records are rare here. A record naming no transport passes, and that is a
+    real gap rather than only backward compatibility: at the libbtbb the fork
+    pins, a payload-bearing record always names one, so a library that stopped
+    filling the field in would pass here. It is accepted because the harness's
+    own pin predates that change and names no transport at all, so a strict
+    default would fail every payload-bearing record of a run built at the
+    harness's own pin; harness #339 tightens it once the pin moves. The survey
+    case
     cannot assert whose records it reads. The flag rules assume the libbtbb
     this harness pins. The error flags do fire, on a clear board as well as an
     attenuated one, and attenuation does not order the rate: a weaker link is

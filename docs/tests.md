@@ -2394,6 +2394,19 @@ No case puts a floor on how many records name a transport: payload-bearing
 records are rare on this bench (see the known limits), so a floor would be a
 count of the room rather than of the decoder.
 
+**That `any` is a real gap, kept on purpose.** At the libbtbb the *fork*
+pins, a payload-bearing record always names a transport — the library names
+one whenever it produced a payload, and an abandoned trial clock clears the
+transport and the payload together — so a libbtbb that stopped filling the
+field in would pass here. It is accepted because the *harness's* own
+`LIBBTBB_PIN` still predates
+[libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133) and names no
+transport at all, so a strict default would fail every payload-bearing record
+of a run built at the harness's own pin, and a floor is no substitute at 11
+payload-bearing records in 2620. Tightening it is
+[#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339),
+which waits on that pin rather than on a decision.
+
 On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the
 capture was given, and, in a PCAPNG, the address `ubertooth-rx -l` records

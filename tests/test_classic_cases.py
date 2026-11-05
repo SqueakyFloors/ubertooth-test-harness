@@ -348,7 +348,7 @@ class RecordFieldCaseTests(unittest.TestCase):
                             str(MAX_BACKWARD_STEP_US),
                             checks[checks.index("--max-backward-step-us") + 1])
 
-    def test_a_targeted_capture_refuses_a_clock_it_could_not_score(self):
+    def test_no_capture_case_accepts_a_clock_it_could_not_score(self):
         """A clock is accepted on its score, and where the hops cannot tell
         the candidates apart the search ends with no clock rather than a
         wrong one (libbtbb#125, the fork's #1088). Neither guard can match a
