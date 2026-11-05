@@ -17,7 +17,8 @@ standard output and still be read in a run record:
     python stdoutdest.py link DIR [--symlink NAME=TARGET]
                                   [--hardlink NAME=TARGET]
     python stdoutdest.py unlink DIR NAME...
-    python stdoutdest.py check DIR [--sha256 NAME=HEX] [--prefix NAME=HEX:LEN]
+    python stdoutdest.py check DIR [--sha256 NAME=HEX]
+                                   [--prefix NAME=HEX:LEN[:ADDED]]
                                    [--absent NAME] [--kept NAME]
                                    [--symlink NAME=TARGET]
                                    [--hardlink NAME=TARGET] [--also NAME]
@@ -33,7 +34,14 @@ reaches the run record whatever the capture was given.
 said to be, and nothing else is there. ``--sha256`` is a file's whole
 contents, which is how the replay input is shown to have come through a
 refused command line byte for byte; ``--prefix`` is the first LEN bytes of a
-longer file, for the one run that is meant to have appended to its own input.
+longer file, for the one run that is meant to have appended to its own input;
+ADDED is the fewest bytes it must have gained, so that a run which added a
+byte and lost the rest is not a pass.
+
+``run`` duplicates a file onto the descriptor number a tool was told to write
+to, which replaces whatever this process holds there and closes it at the
+end. That is why it is a command rather than a function the harness calls:
+run as a process of its own it has no descriptors to spoil but its own.
 """
 
 from __future__ import annotations
@@ -175,18 +183,22 @@ def _problem_for(directory: Path, args) -> str:
             return (f"{name} holds {path.stat().st_size} bytes hashing to "
                     f"{found[:12]}, expected {expected[:12]}")
     for name, expected in args.prefix:
-        digest, separator, length = expected.partition(":")
-        if not separator or not length.isdigit():
-            return (f"--prefix {name}={expected} is not NAME=HEX:LENGTH, so "
-                    "there is no length to compare")
+        digest, separator, rest = expected.partition(":")
+        length, _separator, minimum = rest.partition(":")
+        if not separator or not length.isdigit() or (
+                minimum and not minimum.isdigit()):
+            return (f"--prefix {name}={expected} is not NAME=HEX:LENGTH or "
+                    "NAME=HEX:LENGTH:ADDED, so there is no length to compare")
         size = int(length)
+        added = int(minimum) if minimum else 1
         path = directory / name
         if not path.is_file():
             return f"{name} is gone"
         data = path.read_bytes()
-        if len(data) <= size:
-            return (f"{name} holds {len(data)} bytes, so nothing was added to "
-                    f"the {size} it started with")
+        if len(data) < size + added:
+            return (f"{name} holds {len(data)} bytes, {len(data) - size} more "
+                    f"than the {size} it started with, where {added} were "
+                    "expected")
         found = _digest(data[:size])
         if found != digest:
             return (f"{name} no longer starts with the {size} bytes it held "

@@ -1017,8 +1017,8 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # cannot be measured here; the three commands of a case like it cost
     # about 0.3 s on the hosts above, hence 2.8 + 0.3 = 3.1. A Linux
     # measurement should replace that estimate rather than this reasoning.
-    # 12 cases and 51 commands in smoke, 30 and 127 comprehensive (11 and 48,
-    # and 29 and 124, where there is no /proc and the one case about it is not
+    # 12 cases and 53 commands in smoke, 30 and 130 comprehensive (11 and 48,
+    # and 29 and 125, where there is no /proc and the one case about it is not
     # applicable); the smoke figure carries that case, so a macOS run comes
     # in a little under it. Each pair of command-time figures was taken back
     # to back, because a busy host takes two to six times longer, which is

@@ -487,6 +487,12 @@ class ReplayRx:
         on_stdout = any(self._is_stdout_value(value, fds)
                         for _option, value in destinations)
         spoiled = report if on_stdout and "stdout-report" in self.bugs else ""
+        # The other way a run that gave its stream away could print its
+        # report: on standard error, which is where a reader might think a
+        # suppressed report belongs. The cases forbid the packet line on
+        # either stream, and this is what shows that half of it biting.
+        if on_stdout and "report-on-stderr" in self.bugs:
+            notes = list(notes) + [line for line in lines]
         self._write_outputs(options, found, dumped, stdout_name, fds,
                             prefix=spoiled.encode())
         if on_stdout:
@@ -1036,6 +1042,9 @@ class ReplayCaseTests(unittest.TestCase):
             # Where a capture goes, and the pairs that are one file (#333).
             "stdout-report": _STDOUT_CAPTURE_CASES
                              - {"-i -q /dev/fd/3 is the caller's file, not stdout"},
+            "report-on-stderr": _STDOUT_CAPTURE_CASES
+                                - {"-i -q /dev/fd/3 is the caller's file, "
+                                   "not stdout"},
             # An alias read as an ordinary file name loses the two gates that
             # ask whether a destination reaches the stream as well.
             "stdout-alias-is-a-file": _STDOUT_ALIAS_CASES | {

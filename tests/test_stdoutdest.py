@@ -231,11 +231,29 @@ class CheckTests(unittest.TestCase):
         path.write_bytes(b"records")
         status, printed = self.check("--prefix", f"input.bin={digest}:7")
         self.assertEqual(1, status)
-        self.assertIn("nothing was added", printed)
+        self.assertIn("0 more than the 7 it started with", printed)
         path.write_bytes(b"spoiled" + b"decode")
         status, printed = self.check("--prefix", f"input.bin={digest}:7")
         self.assertEqual(1, status)
         self.assertIn("no longer starts with", printed)
+
+    def test_a_prefix_can_require_a_minimum_of_added_bytes(self):
+        digest = sha256(b"records").hexdigest()
+        path = self.directory / "input.bin"
+        path.write_bytes(b"records" + b"x")
+        # One byte is something, and not the report the case is about.
+        self.assertEqual(0, self.check("--prefix", f"input.bin={digest}:7")[0])
+        status, printed = self.check("--prefix", f"input.bin={digest}:7:500")
+        self.assertEqual(1, status)
+        self.assertIn("1 more than the 7 it started with, where 500 were "
+                      "expected", printed)
+        path.write_bytes(b"records" + b"x" * 500)
+        self.assertEqual(0, self.check("--prefix", f"input.bin={digest}:7:500")[0])
+
+    def test_a_prefix_without_a_length_is_a_usage_failure(self):
+        status, printed = self.check("--prefix", "input.bin=abc")
+        self.assertEqual(1, status)
+        self.assertIn("is not NAME=HEX:LENGTH", printed)
 
     def test_an_absent_name_must_not_exist(self):
         self.assertEqual(0, self.check("--absent", "cap.pcap")[0])

@@ -672,12 +672,15 @@ def _replay_case(case_id, name, steps, expected_state, *, needs=NO_NEEDS,
                          lambda context: (sys.executable, _STDOUTDEST, "unlink",
                                           require(context, CAPTURE_DIR_KEY),
                                           *remove),
-                         # Of how many it was asked for, so a link left
-                         # behind is caught by the count in the line, while
-                         # a case cancelled before it made any still has a
-                         # cleanup that can succeed: a cleanup failure
-                         # leaves the case unverified, which stops the run,
-                         # and there is no device state here to lose.
+                         # Of how many it was asked for, which a case
+                         # cancelled before it made any can still satisfy:
+                         # a cleanup failure leaves the case unverified,
+                         # which stops the whole run, and there is no device
+                         # state here to lose. So this says the helper did
+                         # its work and not that a link had to be there; a
+                         # link left behind is caught after the cleanup, by
+                         # the run measuring the files the case wrote, which
+                         # cannot read a standard stream.
                          output_patterns=(rf"Removed: \d+ of {len(remove)} "
                                           r"name",)),)
     return StateCase(
@@ -821,8 +824,8 @@ def _dest_check_step(name, *, unchanged=(), prefix=(), absent=(), kept=(),
         words = []
         for file_name, digest in unchanged:
             words += ["--sha256", f"{file_name}={digest}"]
-        for file_name, digest, length in prefix:
-            words += ["--prefix", f"{file_name}={digest}:{length}"]
+        for file_name, digest, length, added in prefix:
+            words += ["--prefix", f"{file_name}={digest}:{length}:{added}"]
         for file_name in absent:
             words += ["--absent", file_name]
         for file_name in kept:
@@ -842,6 +845,12 @@ def _dest_check_step(name, *, unchanged=(), prefix=(), absent=(), kept=(),
 
 _PCAPNG_NOT_STDOUT = (r"(?m)^error: PCAPNG capture to stdout is not supported; "
                       r"use -q -$")
+# Every spelling of that stream -r is given, as the user writes it: the
+# documented "-", the two fixed names for descriptor 1, and a link to one.
+_PCAPNG_STDOUT_WAYS = (
+    ("-", "-"), ("/dev/stdout", "/dev/stdout"), ("/dev/fd/1", "/dev/fd/1"),
+    ("<dir>/to-stdout", ("file", "to-stdout")),
+)
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
@@ -1072,7 +1081,12 @@ def _stdout_destination_comprehensive(base, count, digest, size):
                            patterns=(_one_file(("-q", "-d"), "standard output",
                                                "shared.bin", first_is_text=True),),
                            forbidden=(_PACKET_LINE_PATTERN,)),
-            # /dev/fd/N beside the name the caller opened on N.
+            # /dev/fd/N beside the name the caller opened on N. The tool
+            # asks the descriptor rather than the path (path_file() ->
+            # named_descriptor() -> fstat), so this holds on either
+            # platform, which looking the path up would not: on macOS
+            # stat("/dev/fd/3") reports the descriptor filesystem's own
+            # device number and not the file's.
             _dest_run_step("refuse-descriptor-and-file",
                            "ubertooth-rx -i <fixture> -q <fd3.bin> -d /dev/fd/3, "
                            "with 3 on fd3.bin",
@@ -1117,10 +1131,7 @@ def _stdout_destination_comprehensive(base, count, digest, size):
                            returncodes=(1,),
                            patterns=(_PCAPNG_NOT_STDOUT,),
                            forbidden=(_PACKET_LINE_PATTERN,))
-            for index, (shown, value) in enumerate(
-                (("-", "-"), ("/dev/stdout", "/dev/stdout"),
-                 ("/dev/fd/1", "/dev/fd/1"),
-                 ("<dir>/to-stdout", ("file", "to-stdout"))))
+            for index, (shown, value) in enumerate(_PCAPNG_STDOUT_WAYS)
         ) + (
             # Each refusal's own standard output has to be empty: a run that
             # wrote a PCAPNG header before refusing would be a capture in the
@@ -1128,7 +1139,8 @@ def _stdout_destination_comprehensive(base, count, digest, size):
             _dest_check_step("Verify nothing was created or written",
                              unchanged=((_FIXTURE, digest),)
                                        + tuple((f"{index}.out", _EMPTY_SHA256)
-                                               for index in range(4)),
+                                               for index in
+                                               range(len(_PCAPNG_STDOUT_WAYS))),
                              symlinks=(("to-stdout", "/dev/stdout"),)),
         ), "each refused (exit 1) with 'PCAPNG capture to stdout is not "
            "supported; use -q -'; nothing created and the link left alone",
@@ -1152,7 +1164,7 @@ def _stdout_destination_comprehensive(base, count, digest, size):
                                      r"dump -i is replaying, so the capture is "
                                      r"lost$",)),
             _dest_check_step("Verify the decode was appended to the fixture",
-                             prefix=((_FIXTURE, digest, size),),
+                             prefix=((_FIXTURE, digest, size, 500),),
                              step_id="verify-warning"),
         ), "the capture option refused (exit 1) with the fixture untouched; the "
            "bare decode exits 0 with one warning line and its records still at "
