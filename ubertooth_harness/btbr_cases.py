@@ -168,7 +168,8 @@ def console_budget(*, comprehensive: bool) -> float:
 
     The step's deadline is this and a little more, so a check that fails ends
     in the driver's own reason rather than in the harness killing the step.
-    The measured session is a little under two minutes; this is the backstop.
+    The measured sessions are 27 s and 89 s (docs/tests.md); this is the
+    backstop.
     """
     return btbrconsole.worst_case_seconds(comprehensive)
 

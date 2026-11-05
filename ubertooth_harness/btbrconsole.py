@@ -1342,14 +1342,22 @@ def _connection_lasted(session: Session) -> str:
     so link supervision ends it about a second later and the pager goes back to
     its page train, saying `Paging resumed` (fork #1168). This is read once the
     connection has been held and stopped, so the window it looks over is the
-    whole life of that connection rather than the moment it came up.
+    whole life of that connection rather than the moment it came up. The other
+    thing that gives the line is another board nearby answering the page and
+    being taken for the paged device, which the failure names too.
     """
     resumed, _ = session.console.wait(PAGING_RESUMED, 0.0,
                                       since=session.page_mark)
     if resumed is not None:
+        # Two things give this line, and the message names both: the pager's
+        # own page response not having reached the air (fork #1168), and some
+        # other board nearby answering the page and being taken for the paged
+        # device (ubertooth-btbr.md, PROMPT COMMANDS). Either way the
+        # connection carried nothing.
         return (f"the connection was reported and then {PAGING_RESUMED!r}: it "
                 "carried nothing, so link supervision ended it and the page "
-                "train started again")
+                "train started again -- either the page response did not "
+                "reach the air, or something else answered the page")
     return ""
 
 
