@@ -139,7 +139,7 @@ class RawLogFormatTests(unittest.TestCase):
         record = format_command_record(
             result(returncode=-9, timed_out=True, cancelled=True), capture_of()
         )
-        self.assertIn("[X] tool exit -9 in 0.250s, TIMED OUT, CANCELLED", record)
+        self.assertIn("[X] tool exit -9 in 0.250s, TIMED OUT, CANCELED", record)
         record = format_command_record(result(returncode=7), capture_of())
         self.assertIn("[X] tool exit 7 in 0.250s", record)
         self.assertNotIn("TIMED OUT", record)

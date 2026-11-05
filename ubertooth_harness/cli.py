@@ -441,6 +441,9 @@ def _build_command(args: argparse.Namespace) -> int:
         raise
     publisher.emit("run_finished", "passed", {"status": "passed", "failure_reason": ""})
     write_report(output)
+    # A build records a run of its own, so it ends with the same block,
+    # whether it passed or failed (#342).
+    write_console_summary(output)
     print(json.dumps({
         "sources": [source.to_dict() for source in sources],
         "build": result.to_manifest(),
@@ -1501,10 +1504,14 @@ def _run_leased(
             signal.signal(signum, handler)
         if isolation is not None:
             isolation.close()
-    # On stderr, with the live stream a reader is tailing: what was tested,
-    # on which board and firmware, and how it went (#342). stdout keeps the
-    # summary JSON alone, so a caller parsing it is unaffected.
-    write_console_summary(run_dir)
+        # On stderr, with the live stream a reader is tailing: what was
+        # tested, on which board and firmware, and how it went (#342). In the
+        # finally, so a sequencer that raises still ends with the block; the
+        # records it is compiled from are already on disk. Once per run: the
+        # paths that close a run before this one re-raise instead of reaching
+        # it. stdout keeps the summary JSON alone, so a caller parsing it is
+        # unaffected.
+        write_console_summary(run_dir)
     try:
         print(json.dumps(asdict(summary), indent=2, sort_keys=True))
     except OSError:

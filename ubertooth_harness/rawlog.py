@@ -484,10 +484,11 @@ VERDICTS = {
 def verdict(status) -> str:
     """The word a status is stated as, for example 'passed' as ``PASS``.
 
-    Taken as text first: a record written by another version of the harness
-    may carry anything, and a display must not be what ends a run.
+    A status this table has not got is stated as it is written, so a record
+    from another version of the harness says what it says. Taken as text
+    first, too: a display must not be what ends a run.
     """
-    return VERDICTS.get(str(status), str(status).replace("_", " ").upper())
+    return VERDICTS.get(str(status), str(status).upper())
 
 
 # The stages a state step is recorded under: a case's own actions
@@ -576,7 +577,8 @@ def result_text(result: CommandResult, *, stopped: bool = False) -> str:
     if result.timed_out:
         text += ", stopped at its planned deadline" if stopped else ", TIMED OUT"
     if result.cancelled:
-        text += ", CANCELLED"
+        # One spelling for the one word, the verdict's (#342).
+        text += ", CANCELED"
     return text
 
 

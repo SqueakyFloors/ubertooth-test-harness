@@ -15,9 +15,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from ubertooth_harness import cli, rawlog, report
+from ubertooth_harness.build import BuildError
 from ubertooth_harness.events import RunEvent, TerminalEventSink
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.flash import HarnessError
@@ -28,6 +30,7 @@ from ubertooth_harness.rawlog import (
     STAGE_STATE,
     STAGE_TRANSITION,
 )
+from ubertooth_harness.sequencer import NamedTestSequencer
 from tests import watchdog_samples
 from tests.test_guards import A, B, Bench, hardware, step_plan
 from tests.test_transitions import FakeUbertooth, patch_host_api
@@ -88,7 +91,7 @@ class SharedWordsTests(unittest.TestCase):
         self.assertEqual("N/A", rawlog.verdict("not_applicable"))
         self.assertEqual("BLOCKED", rawlog.verdict("blocked"))
         # A status this code does not know is still stated, not dropped.
-        self.assertEqual("SOMETHING NEW", rawlog.verdict("something_new"))
+        self.assertEqual("SOMETHING_NEW", rawlog.verdict("something_new"))
 
     def test_each_state_step_stage_has_a_plain_label(self):
         self.assertEqual("STEP", rawlog.stage_label(STAGE_TRANSITION))
@@ -430,7 +433,7 @@ class ConsoleSummaryTests(unittest.TestCase):
         }]
         text = report.console_summary(events)
         self.assertIn(f"Ubertooth          HEAD = {'c' * 40}", text)
-        self.assertIn("VERDICT: INCOMPLETE (NO RUN FINISHED RECORD)", text)
+        self.assertIn("VERDICT: INCOMPLETE (NO RUN_FINISHED RECORD)", text)
 
     def test_a_long_alias_does_not_cost_the_block_its_alignment(self):
         events = summary_events()
@@ -487,6 +490,12 @@ class ConsoleSummaryTests(unittest.TestCase):
             )
             report.write_console_summary(root, stream)
             self.assertIn("VERDICT: PASS", stream.getvalue())
+            # No report.md was written, so the block does not name one: a
+            # row pointing at a file that is not there would mislead.
+            self.assertNotIn("report ", stream.getvalue())
+            (root / "report.md").write_text("# report\n")
+            stream = io.StringIO()
+            report.write_console_summary(root, stream)
             self.assertIn(str(root / "report.md"), stream.getvalue())
 
 
@@ -540,12 +549,16 @@ class BenchTools:
 
 
 def run_sample(
-    root: Path, test_name="Radio setting transitions"
+    root: Path, test_name="Radio setting transitions", live=None,
+    resolve_libbtbb=False,
 ) -> tuple[int, str, str]:
     """One whole `run-suite` of ``test_name`` against fake boards.
 
     Returns its exit status, everything it wrote to stderr, which is what a
-    person tailing the run sees, and its stdout.
+    person tailing the run sees, and its stdout. ``live`` collects the
+    stderr of a run that is expected to raise, and ``resolve_libbtbb`` names
+    a libbtbb source, which is what makes the run record its own start
+    before the sequencer takes over.
     """
     source, short = source_repo(root)
     (root / "hardware.yaml").write_text(hardware((A, B)))
@@ -559,7 +572,7 @@ def run_sample(
         FakeUbertooth(serial=B, firmware=revision,
                       compile_info=f"ubertooth {revision} (builder@host) timestamp"),
     )
-    live, out = io.StringIO(), io.StringIO()
+    live, out = live if live is not None else io.StringIO(), io.StringIO()
     with (
         mock.patch.object(cli, "_detected_platform", return_value="linux"),
         mock.patch("ubertooth_harness.cli.SubprocessCommandExecutor",
@@ -571,6 +584,8 @@ def run_sample(
             "run-suite", "--plan", str(root / "plan.yaml"), "--suite", "fast",
             "--hardware", str(root / "hardware.yaml"), "--host", "Host_Linux",
             "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+            *(["--libbtbb-source", str(source), "--libbtbb-ref", "HEAD"]
+              if resolve_libbtbb else []),
             "--run-id", "console-demo", "--output", str(root / "runs"),
         ])
     return code, live.getvalue(), out.getvalue()
@@ -602,8 +617,9 @@ class WholeRunTests(unittest.TestCase):
             self.assertIn("[STATE PASS] guard Ubertooth 1 firmware unchanged\n"
                           "    expected: ", live)
             self.assertIn("[CLEANUP PASS] ", live)
-            # And the run closes with the block that identifies it.
+            # And the run closes with the block that identifies it, once.
             self.assertIn("VERDICT: PASS", live)
+            self.assertEqual(1, live.count("RUN SUMMARY"))
             self.assertIn(f"device UT_0        Ubertooth, serial {A}: "
                           "firmware git-", live)
             self.assertIn("host tools         Host tools version: libubertooth "
@@ -618,6 +634,40 @@ class WholeRunTests(unittest.TestCase):
             self.assertEqual("passed", json.loads(out)["status"])
             self.assertNotIn("VERDICT", out)
             self.assertIn("VERDICT: PASS", live)
+
+    def test_a_build_records_a_run_so_it_closes_with_the_block_too(self):
+        # `build` is a run of its own in the record, and a failed one already
+        # printed the block through _finish_failed_run; a build that passes
+        # has to as well, or the block depends on how the run went.
+        built = SimpleNamespace(to_manifest=lambda: {}, artifacts=())
+        for outcome, patched in (
+            ("passed", mock.patch.object(cli, "_build", return_value=built)),
+            ("failed", mock.patch.object(cli, "_build",
+                                         side_effect=BuildError("no compiler"))),
+        ):
+            with self.subTest(outcome), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, _short = source_repo(root)
+                live, out = io.StringIO(), io.StringIO()
+                with patched, redirect_stderr(live), redirect_stdout(out):
+                    try:
+                        cli.main([
+                            "build", "--ubertooth-source", str(source),
+                            "--ubertooth-ref", "HEAD",
+                            "--libbtbb-source", str(source), "--libbtbb-ref", "HEAD",
+                            "--output", str(root / "build"),
+                        ])
+                    except BuildError:
+                        pass  # the command's own failure, reported by main()
+                printed = live.getvalue()
+                self.assertEqual(1, printed.count("RUN SUMMARY"), printed)
+                self.assertIn(f"VERDICT: {'PASS' if outcome == 'passed' else 'FAIL'}",
+                              printed)
+                self.assertIn("Ubertooth          HEAD = ", printed)
+                self.assertIn("plan / suite       build / build", printed)
+                # A build names no host, so that row is left out rather
+                # than printed empty.
+                self.assertNotIn("  host ", printed)
 
     def test_the_report_keeps_the_same_records_and_every_command_response(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -683,7 +733,7 @@ class WholeRunTests(unittest.TestCase):
                     "--suite", "fast", "--hardware", str(root / "hardware.yaml"),
                     "--host", "Host_Linux", "--ubertooth-source", str(source),
                     "--ubertooth-ref", "HEAD", "--libbtbb-source", str(source),
-                    "--libbtbb-ref", "HEAD", "--build",
+                    "--libbtbb-ref", "HEAD", "--build", "--no-flash-build",
                     "--run-id", "failed-build", "--output", str(root / "runs"),
                 ])
 
@@ -696,6 +746,32 @@ class WholeRunTests(unittest.TestCase):
                           printed)
             # One block, not two: the run did not reach the sequencer.
             self.assertEqual(1, printed.count("RUN SUMMARY"))
+            # It never reached preflight, so it claims no counts: `0/0
+            # checks passed` would read as a run that asked for none.
+            self.assertNotIn("preflight ", printed)
+            self.assertNotIn("tests ", printed)
+
+    def test_a_sequencer_that_raises_still_closes_with_the_block(self):
+        # Nothing in the sequencer is meant to raise, but a case builder or
+        # an internal error can; the run's records are on disk either way.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live = io.StringIO()
+            with (
+                mock.patch.object(NamedTestSequencer, "run",
+                                  side_effect=RuntimeError("a case would not build")),
+                self.assertRaises(RuntimeError),
+            ):
+                # A libbtbb source, so the run has a record of its own
+                # before the sequencer takes over.
+                run_sample(root, live=live, resolve_libbtbb=True)
+
+            printed = live.getvalue()
+            self.assertEqual(1, printed.count("RUN SUMMARY"))
+            # No run_finished record was written, and the block says so
+            # rather than claiming an outcome.
+            self.assertIn("VERDICT: INCOMPLETE (NO RUN_FINISHED RECORD)", printed)
+            self.assertIn("Ubertooth          HEAD = ", printed)
 
 
 if __name__ == "__main__":  # pragma: no cover - renders the sample by hand

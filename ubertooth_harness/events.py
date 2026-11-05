@@ -127,15 +127,17 @@ def _test_context(details: Mapping) -> str:
     """Which invocation of a test this is, and on what: the line under a
     test's banner, so a tailed run says which board a result is about."""
     parts = []
-    invocation = str(details.get("invocation_id", ""))
-    host = str(details.get("host", ""))
+    invocation = inline(details.get("invocation_id") or "")
+    host = inline(details.get("host") or "")
     if invocation:
         parts.append(invocation + (f" on {host}" if host else ""))
     elif host:
         parts.append(host)
     resources = details.get("resources") or {}
     if isinstance(resources, Mapping) and resources:
-        parts.append(", ".join(f"{role}={alias}" for role, alias in resources.items()))
+        parts.append(", ".join(
+            f"{inline(role)}={inline(alias)}" for role, alias in resources.items()
+        ))
     return "; ".join(parts)
 
 
@@ -217,25 +219,27 @@ class TerminalEventSink:
         elif event.event_type == "known_target":
             self.stream.write(f"[M] {details.get('summary', '')}\n")
         elif event.event_type == "not_applicable":
-            what = str(details.get("test_name", ""))
+            what = inline(details.get("test_name") or "")
             if details.get("case_name"):
-                what += f" / {details['case_name']}"
+                what += f" / {inline(details['case_name'])}"
             self.stream.write(
                 f"[{verdict('not_applicable')}] {what}: not applicable on "
-                f"{details.get('host', '')}: {details.get('reason', '')}\n"
+                f"{inline(details.get('host') or '')}: "
+                f"{inline(details.get('reason') or '')}\n"
             )
         elif event.event_type == "blocked":
             self.stream.write(
-                f"[{verdict('blocked')}] {details.get('test_name', '')}: blocked on "
-                f"{details.get('host', '')}: {details.get('reason', '')}\n"
+                f"[{verdict('blocked')}] {inline(details.get('test_name') or '')}: "
+                f"blocked on {inline(details.get('host') or '')}: "
+                f"{inline(details.get('reason') or '')}\n"
             )
         elif event.event_type == "preflight_started":
             self.stream.write("\n== mandatory preflight ==\n")
         elif event.event_type == "test_started":
             # A banner, so the test a tailed run is on is easy to find (#342).
-            self.stream.write(
-                "\n" + banner("TEST", str(details.get("test_name", "")), rule=TEST_RULE)
-            )
+            self.stream.write("\n" + banner(
+                "TEST", inline(details.get("test_name") or ""), rule=TEST_RULE
+            ))
             context = _test_context(details)
             if context:
                 self.stream.write(f"[M] {context}\n")
@@ -252,12 +256,14 @@ class TerminalEventSink:
                 line += f": {reason.removeprefix(f'{name}: ')}"
             self.stream.write(line + "\n")
         elif event.event_type == "check_started":
-            name = details.get("check_name", details.get("case_name", "check"))
+            name = inline(
+                details.get("check_name") or details.get("case_name") or "check"
+            )
             phase = details.get("phase", "check")
             if phase == "test":
                 # Each case of a test gets its own banner, drawn with a
                 # lighter rule than the test's so the two nest visibly.
-                self.stream.write("\n" + banner("CASE", str(name), rule=CASE_RULE))
+                self.stream.write("\n" + banner("CASE", name, rule=CASE_RULE))
             else:
                 self.stream.write(f"\n[{phase}] {name}\n")
         elif event.event_type == "check_finished":

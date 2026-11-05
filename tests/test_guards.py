@@ -753,7 +753,7 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         finished = test_finished(events)
         self.assertEqual(0, finished.details["failed_cases"])
         self.assertEqual(1, finished.details["failed_guard_checks"])
-        self.assertIn("| 0 + 1 guard check |", report)
+        self.assertIn("| 0 + 1 state check |", report)
 
     def test_only_the_changed_guard_is_named(self):
         bench = Bench(

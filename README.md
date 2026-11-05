@@ -1223,8 +1223,9 @@ understood (see [Reading a run as it goes](#reading-a-run-as-it-goes)).
 A guard that differs is never restored: the failure
 reason names it (role, alias, and serial) so the operator can check and
 restore it by hand. `test_finished` counts failed guard checks in
-`failed_guard_checks`, not in `failed_cases`; the Results table shows them
-beside the case count (for example `0 + 1 guard check`).
+`failed_guard_checks`, not in `failed_cases`; the Results table and the live
+stream both call them state checks, after the state they read (for example
+`0 + 1 state check`).
 
 The check sees only what it reads. It catches a leaked firmware change or
 reflash, a board answering as another serial, a changed bootloader, and any

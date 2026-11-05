@@ -1062,7 +1062,9 @@ def _results_table(run: _Run) -> list[str]:
             # case count, so a test that failed on one of them does not read
             # as a failure with nothing failed.
             for count, what in (
-                (fd.get("failed_guard_checks", 0), "guard"),
+                # "state", as the live stream says it: one vocabulary for
+                # the one recorded number, `failed_guard_checks` (#342).
+                (fd.get("failed_guard_checks", 0), "state"),
                 (fd.get("failed_watchdog_checks", 0), "watchdog"),
             ):
                 if count:
@@ -1511,18 +1513,21 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "step_finished":
             # The same phase label and verdict the live stream says, so a
             # reader moving between the two reads one vocabulary (#342).
+            # Each piece on one line: one record is one timestamped line
+            # here, and a recorded value may carry a line ending (#342).
             text = (
                 f"[S] {stage_label(details.get('stage', 'step'))} "
-                f"{verdict(status)}: {details.get('step_name', '')}"
+                f"{verdict(status)}: {inline(details.get('step_name', ''))}"
             )
             if details.get("attempt"):
                 text += f" (attempt {details['attempt']})"
             if details.get("expected") is not None:
-                text += f" (expected {details.get('expected')}, observed {details.get('observed')})"
+                text += (f" (expected {inline(details['expected'])}, "
+                         f"observed {inline(details.get('observed'))})")
             elif details.get("observed") is not None:
-                text += f" (recorded {details.get('observed')})"
+                text += f" (recorded {inline(details['observed'])})"
             if details.get("reason"):
-                text += f": {details['reason']}"
+                text += f": {inline(details['reason'])}"
             line(event, text)
         elif kind == "flash_run_started":
             boards = details.get("serials") or [details.get("serial")]
@@ -2048,16 +2053,24 @@ def _host_tools_version(run: _Run) -> str:
         ),
         "",
     )
-    output = "".join(
-        str((e.get("details") or {}).get("text", ""))
-        for e in run.events
-        if e["event_type"] == "command_output"
-        and (e.get("details") or {}).get("check_id") == check_id
-        and check_id
-    )
-    printed = _TOOLS_VERSION_LINE.search(output)
-    if printed:
-        return printed[0].strip()
+    # One string per stream: the chunks of each arrive in order, and joining
+    # the two would splice a line of one into a line of the other.
+    streams: dict[str, list[str]] = {}
+    for event in run.events:
+        details = event.get("details") or {}
+        if (
+            event["event_type"] != "command_output"
+            or not check_id
+            or details.get("check_id") != check_id
+        ):
+            continue
+        streams.setdefault(str(details.get("stream", "")), []).append(
+            str(details.get("text", ""))
+        )
+    for name in ("stdout", "stderr"):
+        printed = _TOOLS_VERSION_LINE.search("".join(streams.get(name, ())))
+        if printed:
+            return printed[0].strip()
     matched = ""
     for event in run.events:
         details = event.get("details") or {}
@@ -2143,16 +2156,21 @@ def _summary_rows(run: _Run) -> list[tuple[str, str]]:
         ))
     summary = run.finished["details"] if run.finished else {}
     if summary:
-        rows.append((
-            "preflight",
-            f"{summary.get('completed_preflight_checks', 0)}/"
-            f"{summary.get('requested_preflight_checks', 0)} checks passed",
-        ))
-        rows.append((
-            "tests",
-            f"{summary.get('completed_tests', 0)}/"
-            f"{summary.get('requested_tests', 0)} passed",
-        ))
+        # A run closed before it reached preflight records no counts at all
+        # (cli._finish_failed_run), and `0/0 checks passed` would read as a
+        # run that asked for none, so those rows are left out instead.
+        if "requested_preflight_checks" in summary:
+            rows.append((
+                "preflight",
+                f"{summary.get('completed_preflight_checks', 0)}/"
+                f"{summary['requested_preflight_checks']} checks passed",
+            ))
+        if "requested_tests" in summary:
+            rows.append((
+                "tests",
+                f"{summary.get('completed_tests', 0)}/"
+                f"{summary['requested_tests']} passed",
+            ))
         counted = (
             ("skipped_cases", "skipped case", "skipped cases"),
             ("not_applicable_cases", "case not applicable", "cases not applicable"),
@@ -2210,8 +2228,11 @@ def write_console_summary(output_dir: Path | str, stream=None) -> None:
             # Nothing was recorded (an empty or unreadable first line): there
             # is nothing to identify the run by, so say nothing.
             return
+        # Named only when it is there: write_report warns and returns None
+        # when it could not write one.
+        written = Path(output_dir) / REPORT
         out.write("\n" + console_summary(
-            events, report=Path(output_dir) / REPORT
+            events, report=written if written.exists() else None
         ))
         out.flush()
     except Exception:  # noqa: BLE001 - a summary must not mask the run result
