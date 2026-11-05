@@ -2011,6 +2011,8 @@ def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, ti
 _SUMMARY_LABEL = 18
 # The rule the console summary is drawn with, the width of a test banner.
 _SUMMARY_RULE = "=" * BANNER_WIDTH
+
+
 def _plain(text: str) -> str:
     """One row of the console summary, on one line.
 
