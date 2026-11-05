@@ -783,12 +783,16 @@ python -m ubertooth_harness run-suite \
 
 The generic sequencer executes `Host version`, `Help smoke`, grouped `Host CLI
 surface`, `Ubertooth count`, and grouped `Ubertooth identity` command cases.
-The host surface runs help/parser checks for all eleven always-built
-executables and retains each tool's result. It also runs `-h` on the BlueZ-only
-`ubertooth-scan` and `ubertooth-follow`, which are not applicable (left out
-before the run, see [Host requirements](#host-requirements)) where they are not
-built, and checks the host version line of `-V` on `ubertooth-util`,
-`ubertooth-rx`, `ubertooth-tx`, and `ubertooth-afh`. `Ubertooth count` checks that `ubertooth-util -N` equals the
+The host surface runs `-h` and `-V` on every host tool the build installs,
+retaining each tool's result: the eleven always-built executables, and the
+BlueZ-only `ubertooth-scan` and `ubertooth-follow`, whose two cases are not
+applicable (left out before the run, see
+[Host requirements](#host-requirements)) where they are not built. Both
+questions come from one list of tools, so a tool the fork adds is asked both
+with the build rather than when somebody edits a second list; `-V` used to be
+asked of four of the thirteen
+([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
+`Ubertooth count` checks that `ubertooth-util -N` equals the
 registered Ubertooths on the host (the selected board plus its guards), so an
 unregistered or missing board fails it. Because it uses guards, the fast and
 release plans need every registered board attached and readable, like the
@@ -953,8 +957,8 @@ Linux host they are on; it carries `required hardware: true`, so a bench
 without them runs the rest of the plan and the run fails on it rather than
 passing with that gate unmeasured (see
 [Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
-It runs the `smoke` profile there, about 520 s of the plan's roughly 1175 s.
-A target that is not the host it names plans about 655 s of the suite, which
+It runs the `smoke` profile there, about 520 s of the plan's roughly 1182 s.
+A target that is not the host it names plans about 662 s of the suite, which
 is what run setup shows for that target, with this step named as one it does
 not run — and it holds Run there, because such a run could not measure the
 gate whatever that bench has (see [Run setup](#web-gui)). Run this plan on
@@ -3113,7 +3117,7 @@ word and symbol (colour only reinforces it).
   one the target's own platform does not run (`Exclusive Ubertooth topology`
   on a macOS target), is left out of the figure and then named, with the
   time it takes on the host that does run it: the release suite is about
-  654.5 s on a target that step does not name, and 1174.5 s counting it.
+  662.2 s on a target that step does not name, and 1182.2 s counting it.
   Choosing another target reloads the list and keeps the plan and suite you
   had chosen. A suite no step of which runs on the chosen target says that
   instead of a time. Estimates learned on the target are used wherever it

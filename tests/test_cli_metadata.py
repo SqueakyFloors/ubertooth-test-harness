@@ -6,7 +6,9 @@ from pathlib import Path
 
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
-from ubertooth_harness.hostneeds import HostCapabilities
+from ubertooth_harness.hostneeds import (
+    ALWAYS_BUILT_TOOLS, BLUEZ_TOOLS, HostCapabilities,
+)
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.sequencer import NamedTestSequencer
 from tests.test_sequencer import CollectSink, run_contract
@@ -78,19 +80,38 @@ def finished(events):
 
 class HostCliSurfaceTests(unittest.TestCase):
 
-    def test_version_cases_and_optional_bluez_help(self):
+    def test_every_host_tool_is_asked_its_usage_and_its_version(self):
+        # Every one of the fork's host tools answers -V through the one
+        # libubertooth function and ends the command; four of the thirteen
+        # used to be asked (#347). The tools come from the build's own list,
+        # so a tool the fork adds gets both cases without a second list to
+        # edit: that is the drift this asserts, rather than a copy of the
+        # names.
         cases = builtin_catalog().get("Host CLI surface").command_cases({}, {}, {})
         by_id = {case.case_id: case for case in cases}
-        for tool in ("ubertooth-util", "ubertooth-rx", "ubertooth-tx",
-                     "ubertooth-afh"):
-            case = by_id[f"{tool}-version"]
-            self.assertEqual((tool, "-V"), case.argv)
-            self.assertTrue(re.search(case.output_patterns[0], VERSION))
-            # A board that cannot be read makes -V exit 1 after printing the
-            # host line, and may not even be a board this run uses.
-            self.assertEqual((0, 1), case.expected_returncodes)
-        for tool in ("ubertooth-scan", "ubertooth-follow"):
-            self.assertEqual((tool,), by_id[f"{tool}-help"].needs.bluez_tools)
+        tools = ALWAYS_BUILT_TOOLS + BLUEZ_TOOLS
+
+        self.assertEqual(
+            [f"{tool}-help" for tool in tools] + [f"{tool}-version" for tool in tools],
+            [case.case_id for case in cases],
+        )
+        for tool in tools:
+            with self.subTest(tool):
+                self.assertEqual((tool, "-h"), by_id[f"{tool}-help"].argv)
+                version = by_id[f"{tool}-version"]
+                self.assertEqual((tool, "-V"), version.argv)
+                self.assertTrue(re.search(version.output_patterns[0], VERSION))
+                # A board that cannot be read makes -V exit 1 after printing
+                # the host line, and may not even be a board this run uses.
+                self.assertEqual((0, 1), version.expected_returncodes)
+        # Both cases of a BlueZ-only tool carry the need, so a host without
+        # BlueZ leaves out its help and its version together.
+        for tool in BLUEZ_TOOLS:
+            for case_id in (f"{tool}-help", f"{tool}-version"):
+                self.assertEqual((tool,), by_id[case_id].needs.bluez_tools)
+        for tool in ALWAYS_BUILT_TOOLS:
+            for case_id in (f"{tool}-help", f"{tool}-version"):
+                self.assertFalse(by_id[case_id].needs)
 
     def test_a_board_that_cannot_be_read_does_not_fail_the_version_cases(self):
         class BusyBoard(SurfaceTools):
@@ -114,11 +135,14 @@ class HostCliSurfaceTests(unittest.TestCase):
 
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertEqual(0, summary.skipped_cases)
-        self.assertEqual(2, summary.not_applicable_cases)
+        # Help and version for each of the two tools macOS has not got.
+        self.assertEqual(4, summary.not_applicable_cases)
         results = finished(events)
         left_out = [e for e in events if e.event_type == "not_applicable"]
         self.assertEqual(["ubertooth-scan help (BlueZ builds)",
-                          "ubertooth-follow help (BlueZ builds)"],
+                          "ubertooth-follow help (BlueZ builds)",
+                          "ubertooth-scan -V (BlueZ builds)",
+                          "ubertooth-follow -V (BlueZ builds)"],
                          [e.details["case_name"] for e in left_out])
         for event in left_out:
             self.assertEqual("not_applicable", event.status)
@@ -127,9 +151,10 @@ class HostCliSurfaceTests(unittest.TestCase):
         for tool in ("ubertooth-scan", "ubertooth-follow"):
             # Never started: no check, no command.
             self.assertNotIn(f"{tool}-help", results)
+            self.assertNotIn(f"{tool}-version", results)
             self.assertFalse([c for c in executor.commands if c[0] == tool])
         test = next(e for e in events if e.event_type == "test_finished")
-        self.assertEqual(("passed", 2, 0), (test.status, test.details["not_applicable_cases"],
+        self.assertEqual(("passed", 4, 0), (test.status, test.details["not_applicable_cases"],
                                             test.details["skipped_cases"]))
 
     def test_a_linux_run_without_one_bluez_tool_leaves_out_only_that_case(self):
@@ -138,12 +163,18 @@ class HostCliSurfaceTests(unittest.TestCase):
         summary, events = run_surface(SurfaceTools(missing=("ubertooth-follow",)), capabilities)
 
         self.assertTrue(summary.passed, summary.failure_reason)
-        self.assertEqual(1, summary.not_applicable_cases)
+        # Its help and its version; the tool that is there keeps both.
+        self.assertEqual(2, summary.not_applicable_cases)
         results = finished(events)
         self.assertEqual("passed", results["ubertooth-scan-help"].status)
-        (left_out,) = [e for e in events if e.event_type == "not_applicable"]
-        self.assertIn("ubertooth-follow is not in this run's tools (installed tools)",
-                      left_out.details["reason"])
+        self.assertEqual("passed", results["ubertooth-scan-version"].status)
+        left_out = [e for e in events if e.event_type == "not_applicable"]
+        self.assertEqual(["ubertooth-follow-help", "ubertooth-follow-version"],
+                         [e.details["case_id"].rsplit("surface-", 1)[-1]
+                          for e in left_out])
+        for event in left_out:
+            self.assertIn("ubertooth-follow is not in this run's tools (installed tools)",
+                          event.details["reason"])
 
     def test_a_declared_bluez_tool_that_is_missing_fails(self):
         # The capabilities say the run has it; a missing file is a failure.

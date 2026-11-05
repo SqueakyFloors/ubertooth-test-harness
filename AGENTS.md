@@ -63,8 +63,14 @@
   commit and SHA-256). Reviewers check for it.
 - Keep `docs/tests.md` current: a PR that adds a catalog test, removes one, or
   changes what a test checks updates that test's section in the same PR.
-  Section headings are the catalog names exactly, so a missing section is easy
-  to spot. The one exception is the trailing `Out of scope: ...` section, which
+  Section headings are the catalog names exactly, in catalog order, so a
+  missing or misplaced section is easy to spot. Each section carries the same
+  six fields, one of which is **Commands**: every command form the test
+  sends, naming the executable, with a named placeholder for anything a run
+  substitutes. `tests/test_tests_document.py` checks the headings, their
+  order, the fields, and that every executable a test's cases really run is
+  named in its section or in "What every test shares"; it builds the cases
+  from the catalog, so there is no second list of commands to maintain. The one exception is the trailing `Out of scope: ...` section, which
   records what the harness has decided not to test so that a missing catalog
   entry is not mistaken for an oversight; the file's own intro says so.
   Reviewers check for it.

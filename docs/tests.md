@@ -8,9 +8,9 @@ writes, so a test without a section here is easy to spot. The last section,
 not to test, so a missing catalog entry is not mistaken for an oversight.
 
 Each section says what the test does, how it produces a known answer, what
-hardware and arguments it needs, what passes and fails, and what it cannot
-tell you. Plan membership is deliberately absent: any test can go in any plan,
-so which plans use a test belongs in
+hardware and arguments it needs, the commands it sends, what passes and fails,
+and what it cannot tell you. Plan membership is deliberately absent: any test
+can go in any plan, so which plans use a test belongs in
 [`testplans/`](../testplans), not here.
 
 Companions: [`COVERAGE.md`](../COVERAGE.md) is the same ground organized by CLI
@@ -20,7 +20,8 @@ firmware they run; [`DESIGN.md`](../DESIGN.md) describes the harness itself.
 
 [`ubertooth_harness/test_info.yaml`](../ubertooth_harness/test_info.yaml) is
 the short form of this file, one entry per test under the same name, with the
-same five parts as its fields. It is what the GUI shows beside a test name, so
+same five prose parts as its fields (the commands below are this file's
+alone). It is what the GUI shows beside a test name, so
 a reader does not have to open this document to learn why a test exists, and
 `/api/plans` serves it. The two are kept in step together: a change to what a
 test checks updates both, in the same change (AGENTS.md).
@@ -34,6 +35,22 @@ tautology: what makes the answer knowable in advance.
 
 **Hardware and arguments** lists the roles the test binds and the arguments
 worth setting. It leaves out the three arguments every test takes (below).
+
+**Commands** is every command form the test sends, naming the executable. A
+command that is the same on every bench is written out; everything a run
+substitutes is a named placeholder in angle brackets: `<serial>` is a board's
+full 32-hex-digit serial, `<case dir>` the per-case directory under the run's
+`captures/`, `<duration>` the plan's `duration:` argument in whole seconds,
+and anything else is named where it appears. One form stands for every case
+built from it, so `ubertooth-btle -U <serial> -n -A<channel> -q <case dir>/le.pcap`
+is one line however many channels the profile runs. A harness driver the test
+runs is written as the module it is, `esp32peer.py stream ... -- <tool ...>`,
+with the tool it wraps; the interpreter in front of it is the harness's own
+environment and is left out. The commands every transition case shares (the
+idle stop, the reads it records, the restores, and the guard reads) are in
+"What every test shares" below rather than repeated in each section.
+`tests/test_tests_document.py` checks that every executable a test's cases
+really run is named in its section or there.
 
 **Expected outcome** says what passes, what fails, what is only reported, and
 how many cases the test generates. Case counts are for one invocation with one
@@ -220,12 +237,60 @@ always fails the case. The settings read and restored this way are the channel
 `-l`), and, for BLE cases, the CRC verify flag (`ubertooth-btle -k`) and the
 access address (`-a`).
 
+These are the commands, which every such case sends and no section below
+repeats; `<serial>` is the selected board's full serial:
+
+```text
+ubertooth-util -U <serial> -S                 # return to idle, first and last
+ubertooth-util -U <serial> -C                 # read the channel, in MHz
+ubertooth-util -U <serial> -a                 # read the PA level
+ubertooth-util -U <serial> -z                 # read the squelch
+ubertooth-util -U <serial> -d                 # read all three LEDs
+ubertooth-util -U <serial> -s                 # confirm the registered serial
+ubertooth-btle  -U <serial> -k                # read the CRC verify flag
+ubertooth-util -U <serial> -c<MHz>            # restore the channel
+ubertooth-util -U <serial> -a<level>          # restore the PA level
+ubertooth-util -U <serial> -z<dBm>            # restore the squelch
+ubertooth-util -U <serial> -d<state> -l<state>  # restore the LEDs
+ubertooth-btle  -U <serial> -k<0|1>           # restore the CRC verify flag
+ubertooth-util -U <serial> -w                 # read the firmware watchdog record
+```
+
+A case that sets a value writes it as `-c2426`, attached, and a case that is
+about the next-word form says so where it does.
+
+**Mandatory preflight.** Before the first test, every run runs checks the
+harness generates from the resources it bound, not from the plan. They are
+reported under their own names, and no catalog test carries them:
+
+```text
+ubertooth-util -V                             # "Host version", once per host
+ubertooth-util -U <serial> -v                  # "Firmware version", per board
+ubertooth-util -U <serial> -V                  # "Firmware compile info", per board
+ubertooth-util -U <serial> -s                  # "Device serial", per board
+ubertooth-util -U <serial> -v                  # "Guard firmware API", guard-only board
+ubertooth-util -U <serial> -B                  # "Bootloader identity", per board
+```
+
+The host version line must name the resolved Ubertooth commit and the libbtbb
+the tools are linked against; `-v` and `-V` must report the resolved firmware
+revision, and `-s` the serial the registry holds. A board whose firmware a
+test establishes itself gets the serial read only, a guard-only board gets the
+serial read and the API read, and the bootloader read is governed by
+`--bootloader` ("Bootloader identity", below). `Host version` and `Ubertooth
+identity` are the catalog tests that ask the same questions as plan steps; the
+five standalone catalog names that used to shadow the per-board reads
+(`Firmware version`, `Firmware compile info`, `Device serial`, `Part ID`,
+`Board ID`) were removed, because each was a case of `Ubertooth identity` with
+the same command and the same check
+([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
+
 **Guard Ubertooths.** A guarded test binds every other registered Ubertooth on
 the host as a `guard Ubertooth N` resource and reads each one before the test
 and after every case, with queries only and one command per read:
-`ubertooth-util -v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, then
-`ubertooth-btle -k` (`-V` ends the command, so it could not share one with the
-others anyway). Every read must match the baseline taken before the
+`ubertooth-util -U <serial>` with `-v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z` and
+`-d`, then `ubertooth-btle -U <serial> -k` (`-V` ends the command, so it could
+not share one with the others anyway). Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
 is refused, which fails the check, unless that board's firmware API is the
@@ -307,6 +372,12 @@ tools under test are the ones the manifest names.
 **Hardware and arguments.** No board role. `hosts:` only. The command runs
 with a 20 s timeout.
 
+**Commands.**
+
+```text
+ubertooth-util -V
+```
+
 **Expected outcome.** One case. The line
 `Host tools version: libubertooth <v> (<id>), libbtbb <v> (<id>)` must appear.
 Exit 0 and exit 1 both pass: the command goes on to read every attached board
@@ -326,6 +397,12 @@ the cheapest proof that the build under test produced a runnable tool.
 
 **Hardware and arguments.** No board role. `hosts:` only.
 
+**Commands.**
+
+```text
+ubertooth-util -h
+```
+
 **Expected outcome.** One case: exit 0. No output pattern is required.
 
 **Known limits.** It proves almost nothing beyond "the binary runs".
@@ -334,8 +411,7 @@ required in the output.
 
 ## Host CLI surface
 
-**What it does.** Runs `-h` on every always-built host tool and `-V` on the
-four tools that report the host version.
+**What it does.** Runs `-h` and `-V` on every host tool the build installs.
 
 **Theory of operation.** Each tool's usage text names the tool, so requiring
 the tool's own name in the output distinguishes a working parser from a
@@ -344,20 +420,59 @@ which was not always so: `ubertooth-btle` and then `ubertooth-dfu`,
 `ubertooth-scan`, and `ubertooth-follow` used to exit 1. Pinning exit 0 per
 tool keeps that fixed.
 
-**Hardware and arguments.** No board role. `hosts:` only. The two BlueZ-only
-tools declare that they need BlueZ, so on a host without it (every macOS host)
-those cases are left out before the run as not applicable, rather than failing
-or being skipped at run time.
+`-V` is the other command every tool answers. Each one calls the same
+libubertooth function, `ubertooth_print_versions()`, and ends the command
+there, so the host tools version line is the right answer from all thirteen
+and a tool that stopped printing it is a regression in that tool alone. Four
+of the thirteen used to be asked. Read at Ubertooth `2026-11-DEV1`, every one
+of the thirteen sources carries `-V` in its `getopt` string and a `case 'V'`
+that sets `do_version`, and the eleven tools a macOS build produces answer
+it identically there: the host version line, the libbtbb path, and
+`Firmware version: no Ubertooth attached` with exit 0 on a host with no board
+([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
+Both cases of a tool come from one list, the list of tools the build
+installs, so a tool the fork adds is asked both questions with the build
+rather than when somebody remembers a second list.
 
-**Expected outcome.** 17 cases on a Linux host, 15 on macOS. `-h` on
-`ubertooth-util`, `-debug`, `-specan`, `-rx`, `-tx`, `-dump`, `-btle`, `-dfu`,
-`-ego`, `-afh`, and `-ducky`, each exit 0 with its own name in the output;
-`-h` on `ubertooth-scan` and `-follow` where BlueZ is present; and the host
-version line from `ubertooth-util -V`, `-rx -V`, `-tx -V`, and `-afh -V`. A
-case failure does not stop the others.
+**Hardware and arguments.** No board role. `hosts:` only. `-V` reads whatever
+boards are attached, which may include boards this run does not use, so a
+board another program holds makes the command exit 1 without failing the
+case. The two BlueZ-only tools declare that they need BlueZ for both of their
+cases, so on a host without it (every macOS host) they are left out before
+the run as not applicable, rather than failing or being skipped at run time.
+The `-V` cases run with a 20 s timeout.
+
+**Commands.** Two per tool, for `ubertooth-util`, `-debug`, `-specan`, `-rx`,
+`-tx`, `-dump`, `-btle`, `-dfu`, `-ego`, `-afh` and `-ducky`, and for
+`ubertooth-scan` and `-follow` where BlueZ is present:
+
+```text
+ubertooth-util   -h      ubertooth-util   -V
+ubertooth-debug  -h      ubertooth-debug  -V
+ubertooth-specan -h      ubertooth-specan -V
+ubertooth-rx     -h      ubertooth-rx     -V
+ubertooth-tx     -h      ubertooth-tx     -V
+ubertooth-dump   -h      ubertooth-dump   -V
+ubertooth-btle   -h      ubertooth-btle   -V
+ubertooth-dfu    -h      ubertooth-dfu    -V
+ubertooth-ego    -h      ubertooth-ego    -V
+ubertooth-afh    -h      ubertooth-afh    -V
+ubertooth-ducky  -h      ubertooth-ducky  -V
+ubertooth-scan   -h      ubertooth-scan   -V      # BlueZ builds
+ubertooth-follow -h      ubertooth-follow -V      # BlueZ builds
+```
+
+**Expected outcome.** 26 cases on a Linux host, 22 on macOS: every `-h` exits
+0 with its own tool's name in the output, and every `-V` prints
+`Host tools version: libubertooth <v> (<id>), libbtbb <v> (<id>)`, with exit
+0 or 1. A case failure does not stop the others.
 
 **Known limits.** It checks that help works and that the version line is
-present, not what any option does.
+present, not what any option does, and not that the versions are the ones you
+wanted: `Host version` and preflight compare them with the resolved sources.
+The firmware lines `-V` prints under that line are `Ubertooth identity`'s, not
+checked here, because this test binds no board and cannot know which board
+answered.
 
 ## Ubertooth count
 
@@ -373,62 +488,20 @@ would also break the no-selector and `-U all` behavior other tests rely on.
 
 **Hardware and arguments.** One `Ubertooth`. Guarded.
 
+**Commands.**
+
+```text
+ubertooth-util -N
+```
+
+No `-U`: the count is of every attached board, so naming one would defeat it.
+
 **Expected outcome.** One case: the output is the expected number on a line of
 its own.
 
 **Known limits.** It depends on the registry being right. An unregistered
 board attached to the host fails this test, correctly, but the message says
 only that the count differed.
-
-## Firmware version
-
-**What it does.** Nothing yet: a catalog entry for reading the firmware
-revision from one board.
-
-**Theory of operation.** Not established. `Ubertooth identity` already reads
-and checks the firmware revision (`ubertooth-util -v`), and preflight reads it
-for every selected board on every run.
-
-**Hardware and arguments.** One `Ubertooth`.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Covered in practice by `Ubertooth identity` and preflight.
-
-## Firmware compile info
-
-**What it does.** Nothing yet: a catalog entry for reading the firmware's
-compile identity from one board.
-
-**Theory of operation.** Not established. `Ubertooth identity` checks the
-whole `ubertooth-util -V` answer, the compile-info pattern among it, and the
-guard readback uses the same `Firmware build:` line, whose build timestamp
-also catches a reflash of the same revision.
-
-**Hardware and arguments.** One `Ubertooth`.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Covered in practice by `Ubertooth identity`.
-
-## Device serial
-
-**What it does.** Nothing yet: a catalog entry for reading the
-microcontroller serial from one board.
-
-**Theory of operation.** Not established. `Ubertooth identity` checks
-`ubertooth-util -s` against the registered serial, and every transition case's
-cleanup ends with the same read, which is how a case proves it talked to the
-board it selected.
-
-**Hardware and arguments.** One `Ubertooth`.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Covered in practice by `Ubertooth identity`.
 
 ## Bootloader identity
 
@@ -478,10 +551,29 @@ unrelated commit and ask for a physical write to every board on most days, for
 no change in behavior. The harness reads the bootloader's own makefile and
 refuses a pin whose paths no longer cover a source the image is built from.
 
+It is the one identity read left in the catalog as a name with no cases, and
+it stays because no case could do it: a case cannot tell whether the commit
+under test has `-B` at all, and against one that has not it would fail a
+board that is perfectly set up. The five other identity names
+(`Firmware version`, `Firmware compile info`, `Device serial`, `Part ID`,
+`Board ID`) had no such reason — each was a case of `Ubertooth identity` with
+the same command and the same check — so they were removed rather than
+implemented twice
+([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
+
 **Hardware and arguments.** One `Ubertooth` per check, selected by full
 serial. `update` also needs a `Debug programmer` paired with the board, with a
 `serial device`, plus `lpc21isp` and `arm-none-eabi-gcc` on the host; see
 "Installing a bootloader through it" in [`hardware.md`](hardware.md).
+
+**Commands.** None as a plan entry. As preflight, one read per board, and for
+`update` the write and the reads around it:
+
+```text
+ubertooth-util -U <serial> -B                     # every --bootloader setting
+lpc21isp -control -bin <bootloader.bin> <serial device> 115200 12000
+ubertooth-util -U <serial> -v                     # the application came back
+```
 
 **Expected outcome.** No implementation as a plan entry; only a
 `runnable: false` plan may name it. As a preflight check: one `-B` per
@@ -502,36 +594,6 @@ There is no one factory hash to compare against: shipped boards each report a
 different one, so a board's own hash is worth recording and another board's
 says nothing about it.
 
-## Part ID
-
-**What it does.** Nothing yet: a catalog entry for reading the
-microcontroller part ID from one board.
-
-**Theory of operation.** Not established. `Ubertooth identity` checks
-`ubertooth-util -p` against the part ID pattern.
-
-**Hardware and arguments.** One `Ubertooth`.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Covered in practice by `Ubertooth identity`.
-
-## Board ID
-
-**What it does.** Nothing yet: a catalog entry for reading the Ubertooth board
-ID from one board.
-
-**Theory of operation.** Not established. `Ubertooth identity` checks
-`ubertooth-util -b` against the board ID pattern.
-
-**Hardware and arguments.** One `Ubertooth`.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Covered in practice by `Ubertooth identity`.
-
 ## Ubertooth identity
 
 **What it does.** Reads the identity reports from one board, each on its own
@@ -550,6 +612,22 @@ own.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial. Not
 guarded (every command is read-only and selects by serial).
+
+**Commands.**
+
+```text
+ubertooth-util -U <serial> -v        # firmware image, revision and API
+ubertooth-util -U <serial> -V        # the whole version answer
+ubertooth-util -U <serial> -s        # the registered serial
+ubertooth-util -U <serial> -p        # microcontroller part ID
+ubertooth-util -U <serial> -b        # Ubertooth board ID
+ubertooth-util -U <serial> -vspb     # the four that compose, in one command
+```
+
+Those five reads are the whole of the harness's identity readback: the
+catalog named each of them as a test of its own once, with the same command
+and the same check, and the names were removed rather than run twice
+([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
 
 **Expected outcome.** Six cases: firmware version, the whole `-V` answer (its
 four lines in the fork's order: host version, libbtbb path, firmware version,
@@ -577,6 +655,12 @@ any register.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 `register:` takes an integer or `0x00`-`0xff` and defaults to 0 (MAIN).
 
+**Commands.**
+
+```text
+ubertooth-debug -U <serial> -r 0x<register>
+```
+
 **Expected outcome.** One case: exit 0 with one `%<name> = 0x<four hex>` line.
 
 **Known limits.** It does not check the value, only that a register read
@@ -602,6 +686,20 @@ hide every query behind it.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
+
+**Commands.** Every command is `ubertooth-util -U <serial>` with the queries
+under test:
+
+```text
+ubertooth-util -U <serial> -V -s                     # and -s -V: the version answer, no serial line
+ubertooth-util -U <serial> -v -s -p -b -a -C -z -l -d  # every composable report at once
+ubertooth-util -U <serial> -<query> -<query>          # each compatible pair, comprehensive
+ubertooth-util -U 99 -U <serial> -s                   # a repeated -U, refused
+```
+
+The nine composable queries are `-v`, `-s`, `-p`, `-b`, `-a`, `-C`, `-z`,
+`-l` and `-d`; `-V` ends the command, so it is only ever paired with one
+other option to show that the other one prints nothing.
 
 **Expected outcome.** Smoke runs 3 cases: `-V -s` and `-s -V`, each
 answering the version alone, and all nine composable read-only queries in one
@@ -637,6 +735,43 @@ any board is opened, so leaving the selector out takes nothing away.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded, which is what catches the two `-U all` cases if a regression let them
 reach every attached board. `coverage:`.
+
+**Commands.** One command per rejected argument, each selected by serial. One
+line per option here stands for the values the two profiles give it:
+
+```text
+ubertooth-util   -U <serial> -c2401        # and -c 2481, -C79, -C-1, -Cabc
+ubertooth-util   -U <serial> -a8           # and -a 8, -aa, -a 7x
+ubertooth-util   -U <serial> -z19          # and -z183, -q19, -q121, -l2, -d2
+ubertooth-util   -U <serial> -z -I         # and -z -q, -z -x
+ubertooth-util   -U <serial> -U all -<setter or mode>
+ubertooth-btle   -U <serial> -x33          # and -A36, -A40, -k 2, -k stray
+ubertooth-btle   -U <serial> -a zzzz       # and -a -, -tnot-a-mac
+ubertooth-ego    -U <serial> -l0           # and -l49, -a zz
+ubertooth-ducky  -U <serial> -A36          # and -A40, -anot-an-address
+ubertooth-rx     -U <serial> -u 12         # -u without -l
+ubertooth-rx     -U <serial> -z -l 123456  # -z with -l
+ubertooth-specan -U <serial> -l 2401       # and -u 2481, -l 2480 -u 2402
+```
+
+and a stray word on every built tool, which is the fork's one argument rule:
+
+```text
+ubertooth-afh    -U <serial> stray
+ubertooth-btle   -U <serial> stray
+ubertooth-debug  -U <serial> -r 0x00 stray
+ubertooth-dfu    -U <serial> stray
+ubertooth-ducky  -U <serial> stray
+ubertooth-dump   -U <serial> stray
+ubertooth-ego    -U <serial> stray
+ubertooth-rx     -U <serial> stray
+ubertooth-specan -U <serial> -l 2402 stray
+ubertooth-tx     -U <serial> stray
+ubertooth-util   -U <serial> -a 7x
+```
+
+Every case then reads the board back with the shared setting reads, so a
+refusal that changed something is caught.
 
 **Expected outcome.** Smoke runs 11 cases, one per tool family: a frequency
 below the band, a bad BLE error allowance, a bad E-GO length, a bad ducky
@@ -676,6 +811,25 @@ before anything changes rather than fail.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
 
+**Commands.** `ubertooth-util -U <serial>` throughout, with the mode starts
+and the CRC read that a case needs:
+
+```text
+ubertooth-util -U <serial> -c2426          # and -c 2426, the next-word form
+ubertooth-util -U <serial> -C24            # and -C 24: the channel as an index
+ubertooth-util -U <serial> -a3             # and -a 6, -a0, -a 0: the PA level
+ubertooth-util -U <serial> -z-60           # the squelch, in dBm
+ubertooth-util -U <serial> -l1 -d1         # USR alone, then all three LEDs
+ubertooth-util -U <serial> -c2426 -a0 -z-60 -d1   # several setters in one command
+ubertooth-util -U <serial> -c 2426 -a 6 -z -60 -d 1 -l 0   # the same as next words
+ubertooth-util -U <serial> -c2426 -c       # a set and a read of one value
+ubertooth-util -U <serial> -c2450 -c2426   # a repeated setter, refused
+ubertooth-util -U <serial> -C48 -c2426     # the channel given twice, refused
+ubertooth-util -U <serial> -a9 -v          # out of range before the report
+ubertooth-util -U <serial> -x              # an active mode, for the stop
+ubertooth-util -U <serial> -r              # the full reset, to the boot defaults
+```
+
 **Expected outcome.** Smoke runs 5 cases: channel, PA level, and squelch
 across a mode stop, `-c <MHz>` with the value as the next word, and `-a0`
 setting PA level 0. Comprehensive runs 28, adding the USR LED, repeated-option
@@ -709,6 +863,21 @@ what it names.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`. Each mode runs for 4 s and is stopped by the harness.
+
+**Commands.** The CRC is set and read with `ubertooth-btle`, applied by a
+bounded sniffing mode, and each capture file is walked by `capturefile.py`:
+
+```text
+ubertooth-btle -U <serial> -k<0|1>                     # and -k 0, -k 1 as next words
+ubertooth-btle -U <serial> -k0 -k1                     # repeated, refused
+ubertooth-btle -U <serial> -n -A<37|38|39> -k<0|1>     # and -f, for both modes
+ubertooth-btle -U <serial> -n -A37 -k<0|1> -r <case dir>/capture.pcapng
+ubertooth-btle -U <serial> -n -A37 -k<0|1> -q <case dir>/capture.pcap
+ubertooth-btle -U <serial> -n -A37 -k<0|1> -c <case dir>/capture-ppi.pcap
+ubertooth-btle -U <serial> -n -A37 -q <case dir>/capture.pcap -c <case dir>/capture-ppi.pcap
+capturefile.py <case dir>/capture.pcapng               # the header and link type
+capturefile.py --absent <case dir>/capture-ppi.pcap    # the file that must not exist
+```
 
 **Expected outcome.** Smoke runs 5 cases: CRC enabled during no-follow and
 follow mode on advertising channel 37, and one capture case per output format
@@ -744,6 +913,21 @@ confirmation lines and leave the target cleared.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
 
+**Commands.**
+
+```text
+ubertooth-btle -U <serial> -a                       # read the access address
+ubertooth-btle -U <serial> -a12345678               # and -a 12345678, the next word
+ubertooth-btle -U <serial> -azzzz                   # refused, nothing changed
+ubertooth-btle -U <serial> -a -k                    # both reports in one command
+ubertooth-btle -U <serial> -t22:44:66:88:aa:cc      # set the follow target
+ubertooth-btle -U <serial> -t22:44:66:88:aa:cc/24   # masked
+ubertooth-btle -U <serial> -tnone                   # cleared
+ubertooth-btle -U <serial> -x0 -k                   # and -x32: the error allowance
+ubertooth-btle -U <serial> -p                       # a bounded receive-only run
+ubertooth-util -U <serial> -r                       # resets the address to 8e89bed6
+```
+
 **Expected outcome.** Smoke runs 3 cases: set and read back the access
 address, set it with the value as the next word, and set, mask, and clear the
 follow target. Comprehensive runs 8, adding that `-r` resets the access
@@ -776,6 +960,17 @@ passing a read that ends on a register whose low byte is 0.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
 
+**Commands.**
+
+```text
+ubertooth-debug -U <serial> -r 0x02,0x01,0x00   # a list, in the order given
+ubertooth-debug -U <serial> -r 0x00-0x03        # a range, and 0x03-0x00 reversed
+ubertooth-debug -U <serial> -r 0x01             # one register, for the exit status
+ubertooth-debug -U <serial> -r 0x00 -v<0|1|2>   # each verbosity
+ubertooth-debug -U <serial> -r 0x00 -v3         # refused
+ubertooth-debug -U <serial> -r 0x100            # refused
+```
+
 **Expected outcome.** Smoke runs 1 case: the list `0x02,0x01,0x00` must
 report FSDIV, FSCTRL, and MAIN in that order. Comprehensive runs 9, adding the
 range `0x00-0x03`, the reversed range `0x03-0x00`, the exit-status case, the
@@ -805,6 +1000,20 @@ must say so rather than print values or fail.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
+
+**Commands.** The modes, the stop, and the LED sampler that watches `-I`
+blink (`ledblink.py`, which runs `ubertooth-util -d` at jittered intervals
+until both phases appear, at most 60 samples or 10 s):
+
+```text
+ubertooth-util -U <serial> -I                  # identify, and -s -I
+ubertooth-util -U <serial> -q120               # and -q20 and a bare -q: the LED spectrum
+ubertooth-util -U <serial> -m                  # the range-test result, after -r
+ledblink.py ubertooth-util <serial> --max-samples 60 --deadline 10 --interval 0.05
+```
+
+A failed LED read is retried once inside the sampler, and the retry is
+recorded.
 
 **Expected outcome.** Smoke runs 3 cases: `-I` blinks until `-S`, `-q120`
 lights every LED, and `-m` reports no range-test result after a reset.
@@ -836,6 +1045,19 @@ passing the pattern.
 **Hardware and arguments.** One `Ubertooth` plus at least one guard board.
 Guarded. `coverage:`. On a host with one registered board the test skips
 itself at run time rather than failing planning.
+
+**Commands.** Needs two or more registered boards; every command here is
+about which board answers, so most carry no `-U`:
+
+```text
+ubertooth-util -U all -s          # and -s with no selector: the listing
+ubertooth-util -N                 # the count
+ubertooth-util -U<index> -s       # each board at the index the listing gave
+ubertooth-util -U all -bvps       # and -bvps with no selector: four lines a board
+ubertooth-util -U all -V          # and -V with no selector: every board, indexed
+ubertooth-util -C                 # refused with several boards and no -U
+ubertooth-util -U<past the last>  # refused: no Ubertooth at index
+```
 
 **Expected outcome.** With two boards, smoke runs 3 cases and comprehensive 9;
 the index case's step count grows with the number of boards. Smoke: `-U all
@@ -875,6 +1097,15 @@ changed.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. No `coverage:` argument: the case list is fixed.
 
+**Commands.**
+
+```text
+ubertooth-btle -U <serial> -f -n      # every pair, and all three
+ubertooth-btle -U <serial> -f -p
+ubertooth-btle -U <serial> -n -p
+ubertooth-btle -U <serial> -f -n -p
+```
+
 **Expected outcome.** Four cases: `-f -n`, `-f -p`, `-n -p`, and all three
 together. Each must print `error: choose one of -f, -n or -p` and exit 1, with
 every setting restored.
@@ -900,6 +1131,16 @@ Guarded. `allow RF transmission: true` is required: three of the six modes
 (range test, repeater, TX test) transmit, so a regression that accepted a pair
 would put the board on the air. The explicit allowance is the plan's consent
 to that risk, not a statement that the test transmits when it passes.
+
+**Commands.** Every pair of the six continuous modes, in the order the fork
+lists them:
+
+```text
+ubertooth-util -U <serial> -<mode> -<mode>   # -q -n -e -t -x -I, each pair
+```
+
+`-i` is left out on purpose: an accepted pair there would leave the board
+outside its application firmware.
 
 **Expected outcome.** 15 cases, one per pair of `-q`, `-n`, `-e`, `-t`, `-x`,
 and `-I`. Each must be a usage error with the board left idle and every
@@ -950,6 +1191,20 @@ named by an explicit alias or chosen by RF placement, and both needing a full
 rather than `each`. `allow RF transmission: true` is required: both boards
 transmit, the sender at every PA level up to 0 dBm. `maximum PA level:` (0-7,
 default 7) is the highest level the plan accepts for a pass. Guarded.
+
+**Commands.** Two boards: `<sender>` and `<responder>`, each read and reset
+first, with the result polled by a shell loop until it appears or the 10 s
+deadline passes:
+
+```text
+ubertooth-util -U <sender>    -r      # and the responder: no stale result
+ubertooth-util -U <sender>    -c2410  # and the responder, onto one channel
+ubertooth-util -U <responder> -e      # the repeater
+ubertooth-util -U <responder> -v      # it still answers USB
+ubertooth-util -U <sender>    -n      # the round trip
+ubertooth-util -U <sender>    -m      # polled until the result is there
+ubertooth-util -U <responder> -S      # stop the repeater
+```
 
 **Expected outcome.** One case of 35 steps. It passes when the sender's `-n`
 completes the round trip and reports it, and its `-m` reports those same four
@@ -1075,6 +1330,8 @@ is the whole test as it is everywhere else rather than a time per level — the
 catalog's wall-time estimate reads it that way. `weak link: {receiver: 20}`
 is how a plan puts the attenuated board on the receiving side.
 
+**Commands.** None: no implementation yet.
+
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. What it would judge is the RSSI difference between consecutive
 levels, and nothing has measured that at any attenuation, so the figure is not
@@ -1136,6 +1393,8 @@ one named `host:`, a required `allow RF transmission: true`, one `PA level:`
 `duration:`. `weak link: {receiver: 20}` puts the attenuated board on the
 receiving side.
 
+**Commands.** None: no implementation yet.
+
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. The figure it would judge — the level at which packets stop arriving,
 or a floor on the signal — has not been measured from a held transmitter at
@@ -1159,6 +1418,8 @@ version of this would need now exists
 is used by `Capture known BLE advertiser`.
 
 **Hardware and arguments.** One `Ubertooth` and a required `duration:`.
+
+**Commands.** None: no implementation yet.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it.
@@ -1184,6 +1445,19 @@ samples is caught.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:` and a required `duration:`, which is how long each sweep
 runs before the harness stops it.
+
+**Commands.** `ubertooth-specan`, with `specandump.py` reading the binary
+files it writes:
+
+```text
+ubertooth-specan -U <serial>                           # the full band
+ubertooth-specan -U <serial> -l <MHz> -u <MHz>         # a narrow, single, top-of-band range
+ubertooth-specan -U <serial> -v -l 2402 -u 2420        # and -g and -G
+ubertooth-specan -U <serial> -l 2430 -u 2440 -d <case dir>/specan.bin
+ubertooth-specan -U <serial> -l 2430 -u 2440 -d -x.bin # the file named -x.bin
+ubertooth-specan -U <serial> -d /dev/full              # Linux only
+specandump.py <case dir>/specan.bin 2430 2440
+```
 
 **Expected outcome.** Smoke runs 1 case: a full-band sweep over 2402-2480 MHz
 in the default format. Comprehensive runs 11, adding a narrow range right
@@ -1218,6 +1492,15 @@ least one of those.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. A required `duration:`.
+
+**Commands.**
+
+```text
+ubertooth-specan -U <serial>
+```
+
+One bounded full-band sweep of the plan's `duration`, stopped by the harness;
+the readings are checked in the harness rather than by a helper.
 
 **Expected outcome.** One case. It passes when every frequency's lowest
 reading is between -115 and -80 dBm, with up to five of the 79 frequencies
@@ -1254,6 +1537,24 @@ a BR/EDR PCAPNG or PCAP header with link type 255, or whole 68-byte records.
 Guarded. `coverage:` and a required `duration:`, which becomes the `-t`
 value. The Ubertooth defaults to needing an ordinary link (antenna attached,
 no attenuation), so the planner keeps these cases off an attenuated board.
+
+**Commands.** `ubertooth-rx` and `ubertooth-afh` with no piconet in range,
+`<duration>` being the plan's duration in whole seconds, and the files read by
+`capturefile.py` and `rxdump.py`:
+
+```text
+ubertooth-rx  -U <serial> -t <duration> -z             # the survey
+ubertooth-rx  -U <serial> -t <duration>                # no target
+ubertooth-rx  -U <serial> -t <duration> -c 39          # one channel, and -s, -s -c 39
+ubertooth-rx  -U <serial> -t <duration> -e <0|4>       # the error allowance
+ubertooth-rx  -U <serial> -t <duration> -r <case dir>/rx.pcapng
+ubertooth-rx  -U <serial> -t <duration> -q <case dir>/rx.pcap
+ubertooth-rx  -U <serial> -t <duration> -d <case dir>/rx.dump
+ubertooth-afh -U <serial> -l <LAP> -u <UAP> -t <duration>   # and -e 2, and -r
+ubertooth-afh -U <unknown serial> -l <LAP> -u <UAP> -t 1    # exits 1
+capturefile.py <case dir>/rx.pcapng
+rxdump.py <case dir>/rx.dump full --min-records 0 --types br
+```
 
 **Expected outcome.** Smoke runs 3 cases: a survey (`-z -t`) that ends by
 itself and lists its results, with the `Survey Results` heading on standard
@@ -1310,6 +1611,22 @@ from the mode before it is a direct check for leftover buffered packets.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:` and a required `duration:`. The Ubertooth defaults to
 needing an ordinary link.
+
+**Commands.** `ubertooth-dump` and `ubertooth-ego`, with `ubertooth-debug`
+reading the modulation back, `rxdump.py` checking the records, and
+`stalecheck.py` comparing the five rounds of the stale-packet case:
+
+```text
+ubertooth-dump  -U <serial> -d <case dir>/dump-full.bin
+ubertooth-dump  -U <serial> -b -d <case dir>/dump-bitstream.bin
+ubertooth-dump  -U <serial> -c -d <case dir>/dump-classic.bin   # and -l
+ubertooth-debug -U <serial> -r 0x03 -v0                         # MDMCTRL, for -c and -l
+ubertooth-ego   -U <serial> -r -c 2440                          # and -l 1, -l 48, -a 630f9ffe
+ubertooth-ego   -U <serial> -r -c 2440 -a zz                    # refused
+ubertooth-btle  -U <serial> -n -A37                             # and -q <case dir>/stale-N.pcap
+rxdump.py <case dir>/dump-full.bin full --min-records 150 --types br,keep-alive
+stalecheck.py --dumps <case dir>/stale-N.bin ... --captures <case dir>/stale-N.pcap ... --channel 0
+```
 
 **Expected outcome.** Smoke runs 3 cases: full records to a file, the `-b`
 bitstream to a file, and an E-GO receive run on 2440 MHz. Comprehensive runs
@@ -1384,6 +1701,22 @@ capture found it, and the board reported leaving it inside the wait.
 Guarded. A required `duration:`, which bounds the dump. No RF peer,
 no firmware write, and nothing is transmitted.
 
+**Commands.** `killedcapture.py` kills a capture and keeps what it wrote, the
+next tool then runs on the board that capture left behind, and
+`ubertooth-debug` reads the modulation the mode request did not reset:
+
+```text
+killedcapture.py kill   --capture <case dir>/killed-specan.bin \
+    --record <case dir>/killed-specan.json \
+    -- ubertooth-specan -U <serial> -l 2440 -u 2444 -d <case dir>/killed-specan.bin
+killedcapture.py verify --capture <case dir>/killed-specan.bin \
+    --record <case dir>/killed-specan.json
+ubertooth-dump  -U <serial> -l -d <case dir>/after-killed-specan.bin
+ubertooth-debug -U <serial> -r 0x03 -v0
+rxdump.py <case dir>/after-killed-specan.bin full --min-records 150 \
+    --types br,keep-alive --max-stale 0
+```
+
 **Expected outcome.** One case: a symbol dump after a killed spectrum sweep.
 It resets the board and reads back the documented boot defaults (2441 MHz, PA
 level 7, squelch -120, LEDs off), kills the sweep, runs the dump, checks the
@@ -1438,6 +1771,117 @@ wedged is a real finding, not a flake, and on a switchable port a power cycle
 recovers it. Nothing here is checked about captured content: the dump is judged
 on record structure, packet type, and clock, never on what the symbols mean.
 
+## Interrupting a capture
+
+**What it does.** Sends a real SIGINT to a running capture tool and requires
+that one Ctrl-C ends it promptly, leaves a capture file a reader can open,
+leaves no process behind and nothing still streaming, and leaves a board that
+answers the next command at once.
+
+**Theory of operation.** Ctrl-C is how a capture normally ends, so what it
+leaves behind is what an operator meets every time. The fork's handler only
+raises a flag; the capture loop reads it on its own thread, ends the stream,
+stops the mode, closes the capture files, and exits 0. The handlers go on
+before the board is opened, so a signal arriving while one is being found is
+not thrown away. Nothing in the harness asserted any of that before this.
+Bounded modes are stopped with SIGTERM; the one place a fork tool met a SIGINT
+is the no-selector follow case, where `timeout -s INT` is a deadline and the
+expected outcome is status 124 with SIGKILL behind it; and the cases that do
+check a SIGINT send it to tshark.
+
+The signal has to reach the tool itself, so
+[`captureinterrupt.py`](../ubertooth_harness/captureinterrupt.py) starts it
+directly, with no shell and no `timeout` wrapper (which would be signalled
+instead), sends one SIGINT to that process's own pid, then waits for it and
+reaps it. It starts the tool in a process group of its own, which is what lets it say
+whether the run left a process behind, and take it down afterwards: the group
+goes down on the way out, and a SIGTERM, SIGINT or SIGHUP to the helper —
+which is what a canceled run or a step deadline sends — takes it down and
+then re-raises, so a tool with a mode started cannot outlive its step. The
+verdict is reached before any of that, so a process the run left is a finding
+and not something the helper tidied away before looking.
+
+For the two cases that can wait for evidence, the moment is chosen by it, not
+by a clock. `ubertooth-dump -d` and `ubertooth-specan -d` stream whether or
+not there is traffic, so the capture file growing past a floor is proof that
+the mode is running. `ubertooth-dump` flushes each record, so its file grows a
+record at a time; `ubertooth-specan` does not, so its file grows a stdio
+buffer at a time and the floor is a buffer's worth rather than a few samples.
+A capture that never gets there, and a tool that exits on its own before the
+signal, both fail the case: these streams do not depend on the air, so neither
+is something the bench decides, and no case here can pass by skipping.
+
+**Hardware and arguments.** One `Ubertooth` role, no peer, no firmware write,
+no transmission, and every other registered board is read as a guard.
+`hosts:`, `coverage:`. No RF placement requirement: none of the cases needs
+traffic, so an attenuated board will do.
+
+**Commands.** `captureinterrupt.py` starts the tool with no shell and no
+`timeout` wrapper, waits for the capture to grow, sends one SIGINT to that
+process, and reaps it; the file is then read again by the checker it belongs
+to:
+
+```text
+captureinterrupt.py interrupt --grow <case dir>/dump.bin --min-bytes 1360 \
+    --settle 1.5 --ready-deadline 20 --exit-deadline 5 --expect-status 0 \
+    --teardown-says <pattern> -- ubertooth-dump -U <serial> -d <case dir>/dump.bin
+captureinterrupt.py interrupt --grow <case dir>/le.pcapng --min-bytes 28 ... \
+    -- ubertooth-btle -U <serial> -n -r <case dir>/le.pcapng -q <case dir>/le.pcap
+captureinterrupt.py interrupt --grow <case dir>/specan.bin --min-bytes 4096 ... \
+    -- ubertooth-specan -U <serial> -d <case dir>/specan.bin
+rxdump.py      <case dir>/dump.bin full --min-records 20
+capturefile.py --packets <case dir>/le.pcapng       # and le.pcap
+specandump.py  <case dir>/specan.bin 2402 2480
+```
+
+**Expected outcome.** Smoke runs 2 cases: `ubertooth-dump -d` interrupted once
+it has written 20 whole records, and `ubertooth-btle -n -r -q` interrupted
+1.5 s after its PCAPNG appears. Comprehensive runs 3, adding `ubertooth-specan
+-d` interrupted once it has written a buffer's worth of samples. Every case
+requires: exit 0 within 5 s of the one signal and not death by that signal;
+nothing left in the process group the tool ran in; the capture file read again
+after the exit and not grown, so no mode is still streaming into it; no
+`error:`, `warning:` or progress line on standard output — `note:` is not one
+of those, because `ubertooth-btle` prints its undecoded-packet note on the
+report stream, which is standard output for a capture written to a file, and
+the fork puts it there deliberately; for the two tools that report
+unconditionally, their own line on standard error, so a quiet or misdirected
+teardown is caught (`rx block timestamp ...` for the dump, `Ubertooth stopped`
+for the sweep, while `ubertooth-btle` and `ubertooth-rx` print on their error
+and note paths only, so their cases ask for none); the file itself readable
+(whole 68-byte records for the dump, whole 3-byte in-band samples for the
+sweep, a walkable PCAPNG and PCAP for the two LE writers); the channel and the
+squelch back at the 2441 MHz and -120 a mode stop leaves, read before the
+cleanup's own stop, so a board still carrying the mode's settings is seen;
+`ubertooth-util -v` answered within 5 s; and then the usual cleanup restoring
+the channel, the squelch, and the LEDs, with the identity read again. The tool's own two streams are kept beside the capture, as
+`<capture>.stdout.log` and `.stderr.log`, so a failed run keeps its
+evidence.
+
+**Known limits.** The `ubertooth-btle` case's moment is a settling time, not
+evidence: the tool creates both capture files after the board is open and
+before the mode requests, and libbtbb sizes a PCAPNG in pages, so the file
+reaches its floor as soon as it appears. That case therefore rests on the exit
+and the teardown, not on having caught a running mode. For the same two
+writers "the capture stopped growing" is weak, because a quiet LE capture
+would not grow in the half second after the exit either; and the no-orphan
+check cannot fail for any of these tools, since none of them forks, so it is
+a guard rather than a measurement. What that case really rests on is the
+prompt exit 0, the readable capture files, and the board's state afterwards. A stop that lands inside an *unanswered* poll, which is
+where the fork drops the retries still to come
+([ubertooth#856](https://github.com/SqueakyFloors/ubertooth/pull/856)), cannot
+be produced here: it needs a board that has stopped answering, which is the
+board-lost-mid-capture work and its hub power control
+([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
+A signal aimed at the board-open window is out of reach from here, so no case
+claims it. A lookup finishes in 10 to 20 ms on the bench host, so landing
+inside it would take many tries; and on a build from before the handlers moved
+ahead of the open ([ubertooth#839](https://github.com/SqueakyFloors/ubertooth/pull/839),
+fork `3311ce36`) a signal that landed there killed the tool outright, which is
+indistinguishable from one that arrived before the handler was installed on a
+build that has the fix. There is no outcome that separates the two, so a case
+built on it would either fail a correct build or retry a broken one away. Nothing here checks a second Ctrl-C, because one is meant to be enough.
+
 ## Raw receive replay
 
 **What it does.** Decodes a synthetic capture file with `ubertooth-rx -i`,
@@ -1453,6 +1897,28 @@ packets reach a capture file. That makes it possible to check decode behavior
 that no live run can pin down, and to run the whole thing in CI.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
+
+**Commands.** No board. `rxreplay.py` writes the synthetic input and checks
+what came back, `stdoutdest.py` runs a command with its standard output and
+extra descriptors pointed where the case needs them, and `capturefile.py` and
+`rxdump.py` read the capture files:
+
+```text
+rxreplay.py fixture <case dir>/replay.bin --variant <full|empty|truncated> --base-time <epoch>
+ubertooth-rx -i <case dir>/replay.bin                      # the bare decode
+ubertooth-rx -i <case dir>/replay.bin -l <LAP>             # and -l -u <UAP>, -e 0, -s, -z
+ubertooth-rx -i <case dir>/replay.bin -r <case dir>/replay.pcapng
+ubertooth-rx -i <case dir>/replay.bin -q <case dir>/replay.pcap
+ubertooth-rx -i <case dir>/replay.bin -d <case dir>/replay.dump
+ubertooth-rx -i <case dir>/a-directory                      # and a missing file
+ubertooth-rx -h
+stdoutdest.py run --stdout <case dir>/stdout.pcap -- ubertooth-rx -i <case dir>/replay.bin -q -
+stdoutdest.py run --fd 3=<case dir>/fd3.pcap -- ubertooth-rx -i <case dir>/replay.bin -q /dev/fd/3
+stdoutdest.py seed|link|unlink|check <case dir> ...         # the destinations, before and after
+rxreplay.py dump-check <case dir>/replay.dump <case dir>/replay.bin
+rxdump.py      <case dir>/replay.dump full --min-records 11 --types br
+capturefile.py --packets <case dir>/replay.pcap
+```
 
 **Expected outcome.** Smoke runs 12 cases (11 where there is no `/proc`): decode every LAP in the fixture,
 derive the UAP with `-l`, replay into PCAPNG and into PCAP (link type 255, the
@@ -1534,99 +2000,6 @@ descriptor unless the descriptor filesystem answers for it; and the backstop
 inside `take_stdout`, which no case reaches because the command-line check
 refuses such a pair first.
 
-## Interrupting a capture
-
-**What it does.** Sends a real SIGINT to a running capture tool and requires
-that one Ctrl-C ends it promptly, leaves a capture file a reader can open,
-leaves no process behind and nothing still streaming, and leaves a board that
-answers the next command at once.
-
-**Theory of operation.** Ctrl-C is how a capture normally ends, so what it
-leaves behind is what an operator meets every time. The fork's handler only
-raises a flag; the capture loop reads it on its own thread, ends the stream,
-stops the mode, closes the capture files, and exits 0. The handlers go on
-before the board is opened, so a signal arriving while one is being found is
-not thrown away. Nothing in the harness asserted any of that before this.
-Bounded modes are stopped with SIGTERM; the one place a fork tool met a SIGINT
-is the no-selector follow case, where `timeout -s INT` is a deadline and the
-expected outcome is status 124 with SIGKILL behind it; and the cases that do
-check a SIGINT send it to tshark.
-
-The signal has to reach the tool itself, so
-[`captureinterrupt.py`](../ubertooth_harness/captureinterrupt.py) starts it
-directly, with no shell and no `timeout` wrapper (which would be signalled
-instead), sends one SIGINT to that process's own pid, then waits for it and
-reaps it. It starts the tool in a process group of its own, which is what lets it say
-whether the run left a process behind, and take it down afterwards: the group
-goes down on the way out, and a SIGTERM, SIGINT or SIGHUP to the helper —
-which is what a canceled run or a step deadline sends — takes it down and
-then re-raises, so a tool with a mode started cannot outlive its step. The
-verdict is reached before any of that, so a process the run left is a finding
-and not something the helper tidied away before looking.
-
-For the two cases that can wait for evidence, the moment is chosen by it, not
-by a clock. `ubertooth-dump -d` and `ubertooth-specan -d` stream whether or
-not there is traffic, so the capture file growing past a floor is proof that
-the mode is running. `ubertooth-dump` flushes each record, so its file grows a
-record at a time; `ubertooth-specan` does not, so its file grows a stdio
-buffer at a time and the floor is a buffer's worth rather than a few samples.
-A capture that never gets there, and a tool that exits on its own before the
-signal, both fail the case: these streams do not depend on the air, so neither
-is something the bench decides, and no case here can pass by skipping.
-
-**Hardware and arguments.** One `Ubertooth` role, no peer, no firmware write,
-no transmission, and every other registered board is read as a guard.
-`hosts:`, `coverage:`. No RF placement requirement: none of the cases needs
-traffic, so an attenuated board will do.
-
-**Expected outcome.** Smoke runs 2 cases: `ubertooth-dump -d` interrupted once
-it has written 20 whole records, and `ubertooth-btle -n -r -q` interrupted
-1.5 s after its PCAPNG appears. Comprehensive runs 3, adding `ubertooth-specan
--d` interrupted once it has written a buffer's worth of samples. Every case
-requires: exit 0 within 5 s of the one signal and not death by that signal;
-nothing left in the process group the tool ran in; the capture file read again
-after the exit and not grown, so no mode is still streaming into it; no
-`error:`, `warning:` or progress line on standard output — `note:` is not one
-of those, because `ubertooth-btle` prints its undecoded-packet note on the
-report stream, which is standard output for a capture written to a file, and
-the fork puts it there deliberately; for the two tools that report
-unconditionally, their own line on standard error, so a quiet or misdirected
-teardown is caught (`rx block timestamp ...` for the dump, `Ubertooth stopped`
-for the sweep, while `ubertooth-btle` and `ubertooth-rx` print on their error
-and note paths only, so their cases ask for none); the file itself readable
-(whole 68-byte records for the dump, whole 3-byte in-band samples for the
-sweep, a walkable PCAPNG and PCAP for the two LE writers); the channel and the
-squelch back at the 2441 MHz and -120 a mode stop leaves, read before the
-cleanup's own stop, so a board still carrying the mode's settings is seen;
-`ubertooth-util -v` answered within 5 s; and then the usual cleanup restoring
-the channel, the squelch, and the LEDs, with the identity read again. The tool's own two streams are kept beside the capture, as
-`<capture>.stdout.log` and `.stderr.log`, so a failed run keeps its
-evidence.
-
-**Known limits.** The `ubertooth-btle` case's moment is a settling time, not
-evidence: the tool creates both capture files after the board is open and
-before the mode requests, and libbtbb sizes a PCAPNG in pages, so the file
-reaches its floor as soon as it appears. That case therefore rests on the exit
-and the teardown, not on having caught a running mode. For the same two
-writers "the capture stopped growing" is weak, because a quiet LE capture
-would not grow in the half second after the exit either; and the no-orphan
-check cannot fail for any of these tools, since none of them forks, so it is
-a guard rather than a measurement. What that case really rests on is the
-prompt exit 0, the readable capture files, and the board's state afterwards. A stop that lands inside an *unanswered* poll, which is
-where the fork drops the retries still to come
-([ubertooth#856](https://github.com/SqueakyFloors/ubertooth/pull/856)), cannot
-be produced here: it needs a board that has stopped answering, which is the
-board-lost-mid-capture work and its hub power control
-([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
-A signal aimed at the board-open window is out of reach from here, so no case
-claims it. A lookup finishes in 10 to 20 ms on the bench host, so landing
-inside it would take many tries; and on a build from before the handlers moved
-ahead of the open ([ubertooth#839](https://github.com/SqueakyFloors/ubertooth/pull/839),
-fork `3311ce36`) a signal that landed there killed the tool outright, which is
-indistinguishable from one that arrived before the handler was installed on a
-build that has the fix. There is no outcome that separates the two, so a case
-built on it would either fail a correct build or retry a broken one away. Nothing here checks a second Ctrl-C, because one is meant to be enough.
-
 ## Refused command lines
 
 **What it does.** Refuses a command line that names output files and requires
@@ -1645,6 +2018,28 @@ and that note is forbidden in a refusal.
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`. The
 `ubertooth-follow` and `ubertooth-scan` cases declare that they need BlueZ, so
 they are left out on a host without it.
+
+**Commands.** No board: every tool runs as
+`env UBERTOOTH_TEST_NO_DEVICES=1 <tool> ...`, so a command that got past its
+own checks finds no board instead of opening one, and `refusal.py` states the
+directory before and after:
+
+```text
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle   -r <case dir>/new.pcapng <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle   -q <case dir>/new.pcap <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle   -c <case dir>/new.pcap <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx     -r|-q|-d <case dir>/new.<ext> <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump   -d <case dir>/new.dump <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-specan -d <case dir>/new.bin <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu    -s|-u <case dir>/<file> <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-scan   stray        # BlueZ builds, no file
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow stray        # BlueZ builds, no file
+refusal.py check <case dir> --absent <files> --kept <files>
+```
+
+`<refusal>` is what the case refuses the command with: a stray word, `-h`, a
+bad later value (`-A 40`, `-l 9999`, `-U` with no value), the same file option
+twice, `-f -n`, a bare `-`, or `--`.
 
 **Expected outcome.** On a Linux host, smoke runs 45 cases and comprehensive
 67; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
@@ -1696,6 +2091,29 @@ a case does leave stays in the run directory under the name of the attempt
 that wrote it.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
+
+**Commands.** No board. A command that is accepted and then stopped at the
+board lookup must create no file; a replay really writes one. `dfuimage.py`
+states the directory and makes the links and read-only directory the cases
+need, and `capturefile.py` reads what was kept:
+
+```text
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -r <case dir>/new.pcapng \
+    -q <case dir>/new.pcap -d <case dir>/new.dump
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -r <case dir>/new.pcapng -q <case dir>/kept.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -c <case dir>/new-ppi.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump -d <case dir>/new.dump      # and a seeded file
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/no-record.bin -q <destination>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -q <case dir>/gone/x.pcap
+dfuimage.py state <case dir> --before <directory before> --allow <files>
+dfuimage.py symlink <case dir>/link.pcap --to target.pcap
+chmod 555|755 <case dir>/ro
+refusal.py seed|probe|check <case dir> ...
+capturefile.py --packets <case dir>/new.pcap
+```
+
+`<destination>` is each one the cases try: a new file, a seeded file, `-`,
+`/dev/null`, a symbolic link, a directory, and a read-only directory.
 
 **Expected outcome.** Smoke runs 6 cases: `ubertooth-rx -r -q -d`,
 `ubertooth-btle -n -r -q`, and `ubertooth-dump -d` stopped at the board lookup
@@ -1757,6 +2175,20 @@ note is forbidden, so an accepted combination is visible.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
+**Commands.** No board, and `refusal.py` states the directory afterwards:
+
+```text
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -i -<mode>     # and -<mode> -i
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -i -z          # and -z-60, both orders
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -f             # and -f -i
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -N -i          # and -i -N
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -U all -i
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V             # the cleanup, needs no board
+refusal.py check <case dir> --absent --kept
+```
+
+`-<mode>` is each of `-q -n -e -t -x -I`.
+
 **Expected outcome.** Smoke runs 8 cases: `-i` with each of `-q`, `-n`, `-e`,
 `-t`, `-x`, and `-I` (each in both orders), `-z` with `-i`, which must be
 refused by the `-z` rule, and `-f`, which must be refused as an unrecognized
@@ -1793,6 +2225,30 @@ needs the firmware build, so a run without `--build --with-firmware` or a test
 build artifact leaves it out as not applicable. A run started through the
 controller or the GUI asks for the image with its own `with_firmware` option,
 which the GUI ticks for a suite holding this test.
+
+**Commands.** No board, and a synthetic image rather than a firmware build
+(CI has no ARM toolchain). `dfuimage.py` makes each bad image from it and
+states the directory, and `refusal.py` confirms nothing was left behind:
+
+```text
+dfuimage.py synth <case dir>/synthetic.dfu
+dfuimage.py make <variant> <case dir>/synthetic.dfu <case dir>/<variant>.dfu
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -d <case dir>/<variant>.dfu -r
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -d <case dir>/synthetic.dfu -r   # reaches the lookup
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.bin
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.dfu          # refused
+dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <reference> \
+    --reference-name <name>
+dfuimage.py copy|state|symlink ...
+chmod 555|755 <case dir>/ro
+refusal.py check <case dir> --absent <files> --kept <files>
+```
+
+`<variant>` is each image the check must refuse: a wrong CRC, a truncated
+file, a binary with no suffix, a text file, a suffix without `UFD`, another
+vendor, another product, and, comprehensive, an empty file, 15 bytes, a
+suffix with no firmware, an over-long suffix length, DFU 2.0, and an image
+with no firmware info block.
 
 **Expected outcome.** Smoke runs 13 cases: `-d` refusing a wrong CRC, a
 truncated image, a binary with no suffix, a text file, a suffix without the
@@ -1837,6 +2293,25 @@ GUI, its `with_python` option) leaves them out as not applicable; they
 are additionally skipped at run time when the interpreter cannot import numpy,
 qtpy, and a Qt binding, which only running it can tell.
 
+**Commands.** No board. `pytools.py` runs the installed
+`ubertooth-specan-ui` with no display, and `btle-extcap.py` exactly as it is
+in the resolved commit:
+
+```text
+pytools.py specan-ui -h
+pytools.py extcap -h                  # and -h extra
+pytools.py extcap --extcap-dlts       # and --extcap-interface=<interface> --extcap-dlts
+pytools.py extcap --extcap-config     # with each interface the cases try
+pytools.py extcap --extcap-interface=<interface> --capture      # no --fifo
+pytools.py extcap --extcap-interface=<interface> --capture --fifo=unused.fifo --channel=40
+pytools.py extcap --extcap-bogus      # and Wireshark's other options
+pytools.py extcap --extcap-version=4.2.0 ...                    # and 4.4.1 as a next word
+pytools.py extcap-failing-util --extcap-interfaces
+```
+
+`<interface>` is `ubertooth<serial>`, the older `ubertooth0`, and a
+non-Ubertooth name.
+
 **Expected outcome.** Smoke runs 4 cases: `ubertooth-specan-ui -h` listing its
 real options, `btle-extcap -h` naming its real options, `--extcap-dlts`
 listing DLT 256, and `--extcap-config` offering channels 37-39 with 37 as the
@@ -1868,6 +2343,16 @@ rather than a particular order.
 
 **Hardware and arguments.** One `Ubertooth` plus every other registered board
 as guards. Guarded. `coverage:`.
+
+**Commands.** `btle-extcap.py`, through `pytools.py`, which opens every
+attached board:
+
+```text
+pytools.py extcap --extcap-interfaces
+pytools.py extcap --extcap-interfaces --extcap-version=4.2.0
+pytools.py extcap --extcap-version 4.4.1 --extcap-interfaces
+pytools.py extcap --extcap-interfaces extra        # refused, no listing
+```
 
 **Expected outcome.** Smoke runs 3 cases: the listing has one line per
 attached board, each line carries its board's serial, and the listing is
@@ -1906,6 +2391,21 @@ through the board rather than the output, since the channel reaches
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:` and a required `duration:`. The Ubertooth defaults to
 needing an ordinary link.
+
+**Commands.** `extcapcapture.py` does what Wireshark does: it creates the
+FIFO, reads it, and stops the script with SIGTERM after `duration`:
+
+```text
+extcapcapture.py --seconds <duration> --fifo <case dir>/extcap.fifo \
+    --board <serial> --channel 37 \
+    -- --capture --extcap-interface=ubertooth<serial> --fifo=<case dir>/extcap.fifo
+```
+
+and the same with `--channel=37|38|39` passed on to the script, with
+`--extcap-capture-filter <filter>`, with `--close` (the FIFO closed after the
+first record), and with `--refused` for a serial no board has and for
+`--channel=40`. The script itself runs
+`ubertooth-btle -f -U <serial> -q <fifo> -A <channel>`.
 
 **Expected outcome.** Smoke runs 1 case: a DLT 256 PCAP stream on the FIFO
 until SIGTERM, with no process left behind, on the default advertising channel
@@ -1970,6 +2470,20 @@ busy or not. Only when that check passes and the boards another program holds
 are ones this run never had does the case skip, saying how many they were; the
 run leases the board under test and every other registered board on the host,
 so a board it does hold and cannot open is a failure, not a skip.
+
+**Commands.** `nrfdk.py` drives the advertiser and `tsharkcapture.py`
+installs the plugin in a Wireshark configuration of its own and runs the real
+`tshark` against it:
+
+```text
+nrfdk.py identify|ensure|advertise|stop|idle --jlink <jlink serial> --alias <alias> ...
+tsharkcapture.py capture --interface ubertooth<serial> --seconds <duration> \
+    --address <DK address> --min-packets 1 --held ubertooth<serial>
+```
+
+and the same capture with `--filter <filter>` and with `--interrupt-after
+<seconds>`. `tshark -i ubertooth<serial>` is what the driver runs, with
+`-T fields -e btle.advertising_address -e btle.advertising_header.pdu_type`.
 
 **Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
 pinned firmware at its registered address, then the plugin's listing names
@@ -2036,6 +2550,23 @@ elsewhere, and follows with `-f` — so what carries those cases is the margin
 above the floor rather than a like-for-like figure. See "What attenuating a
 receiver is for" above for what the attenuation is and is not.
 
+**Commands.** `nrfdk.py` brings the DK up and reads its counter either side
+of the capture, `ubertooth-btle` takes it, and `advcapture.py` decodes it:
+
+```text
+nrfdk.py identify  --jlink <jlink serial> --alias <alias>
+nrfdk.py ensure    --jlink <jlink serial> --alias <alias> --address <DK address>
+nrfdk.py advertise --jlink <jlink serial> --alias <alias> --chmap <channel> \
+    --interval <ms> --payload <tag> --type <nonconn|conn>
+nrfdk.py status|stop|idle --jlink <jlink serial> --alias <alias>
+ubertooth-btle -U <serial> -n -A<channel> -q <case dir>/capture.pcap
+ubertooth-btle -U <serial> -f -A<channel> -r <case dir>/capture.pcapng
+advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel> \
+    --payload <tag> --chmap <channel> --type <type> \
+    --counter-min <counter before> --counter-max <counter after> --min-packets <n>
+advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel> --absent
+```
+
 **Expected outcome.** Smoke runs 6 cases: the DK is confirmed to run the
 pinned firmware at its registered address; `ubertooth-btle -n -q` sees it on
 each of channels 37, 38, and 39; listening on 37 while it advertises on 38
@@ -2087,6 +2618,21 @@ for, default 60 ms). The duration is constrained: it must be longer than the
 5 s reconnection cycle and shorter than twice it, so the capture spans exactly
 one reconnection. The Ubertooth defaults to needing an ordinary link. Writes
 DK firmware, so the run holds the host lock.
+
+**Commands.** Two DKs, one capture, and `conncapture.py` reading the file:
+
+```text
+nrfdk.py identify   --jlink <jlink serial> --alias <alias>
+nrfdk.py ensure     --jlink <jlink serial> --alias <alias> --address <address> --role <role>
+nrfdk.py peripheral --jlink <jlink serial> --alias <alias> --dle on --chmap 37
+nrfdk.py central    --jlink <jlink serial> --alias <alias> --peer <address> \
+    --interval <ms> --dle on --payload 244 --period 50 --cycle 5000 --autoupdate <ms>
+nrfdk.py status|idle --jlink <jlink serial> --alias <alias>
+ubertooth-btle -U <serial> -f -A37 -r <case dir>/capture-<n>.pcapng
+ubertooth-btle -U <serial> -f -A37 -q <case dir>/capture-<n>.pcap
+conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <address> \
+    --interval-units <n> --latency 0 --timeout-units 400 --min-data-packets 5 ...
+```
 
 **Expected outcome.** Smoke runs 2 cases: both DKs confirmed on the pinned
 firmware at their registered addresses, and `ubertooth-btle -f -r` holding the
@@ -2202,6 +2748,17 @@ at most 30 s, so one case does not hold the boards for long. The same entry
 is in the `connection` suite and in `ble-comprehensive`, because there is one
 capture case either way. The Ubertooth needs an ordinary link. Writes DK
 firmware, so the run holds the host lock.
+
+**Commands.** The same pair and the same bring-up as the test above
+(`nrfdk.py identify|ensure|peripheral|central|status|idle`), with one capture
+across the whole window and `conncapture.py` reading it:
+
+```text
+ubertooth-btle -U <serial> -f -A37 -r <case dir>/capture-<n>.pcapng
+conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <address> \
+    --connections 2 --min-packets-per-connection 3 ...
+ubertooth-util -U <serial> -s -C      # the board answers at once, read back in idle mode
+```
 
 **Expected outcome.** 2 cases: both DKs confirmed on the pinned firmware at
 their registered addresses, and the capture across the window. The capture
@@ -2325,6 +2882,20 @@ packet carried the target LAP with none carrying another. A peer on
 `utesp-1.6.0` or later also has its bridge framed, which no case requires:
 an older image is driven without it.
 
+**Commands.** `esp32peer.py stream` holds the pair's link for one whole
+session and runs the tool under test inside it, because opening a peer's
+bridge resets the board:
+
+```text
+esp32peer.py stream --acceptor <peer port> --acceptor-address <BD_ADDR> \
+    --acceptor-alias <alias> --initiator <peer port> --initiator-address <BD_ADDR> \
+    --initiator-alias <alias> --min-seconds <n> --timeout <n> --period 20 \
+    --payload 200 --min-writes 50 -- ubertooth-rx -U <serial> -t <duration> [-z] \
+    [-r <case dir>/survey.pcapng]
+esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
+capturefile.py <case dir>/survey.pcapng --packets
+```
+
 **Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
 central's LAP in its survey results, and a run with no target reports at least
 ten packet lines carrying it. Comprehensive runs 4, adding the survey into
@@ -2371,6 +2942,19 @@ required `duration:`, Linux only, and an ordinary link for the Ubertooth by
 default. `classic-weak-link` points it at the 20 dB receiver, where a 25 s
 window decoded 1793 packets at `-e 0` and 2692 at `-e 2`, all of the target
 LAP, with the clock acquired.
+
+**Commands.** The same `esp32peer.py stream` session, with `ubertooth-rx`
+given the central's address:
+
+```text
+esp32peer.py stream <peer options> -- ubertooth-rx -U <serial> -t <duration> \
+    -l <central LAP> [-u <central UAP>] [-q <case dir>/follow.pcap]
+esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
+capturefile.py <case dir>/follow.pcap --packets
+```
+
+`<peer options>` is the acceptor and initiator ports, addresses, aliases and
+stream settings of the session above.
 
 **Expected outcome.** Smoke runs 2 cases: `-l <central LAP> -u <central UAP>`
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
@@ -2541,6 +3125,18 @@ required `duration:`, Linux only. The comprehensive profile's audio case needs
 the peers on `utesp-1.5.0` or a later 1.x image: `sco type` arrived in
 `utesp-1.4.0` and the two link counters in `utesp-1.5.0`. Preflight reports
 the version either way, and the case fails naming it on anything older.
+
+**Commands.** The same pair, with `bredrrecord.py` decoding every record of
+the capture files:
+
+```text
+esp32peer.py stream <peer options> -- ubertooth-rx -U <serial> -t <duration> \
+    -l <central LAP> -u <central UAP> -q <case dir>/records.pcap -r <case dir>/records.pcapng
+esp32peer.py audio  <peer options> --sco-type ev3 -- ubertooth-rx ...   # comprehensive
+esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
+bredrrecord.py <case dir>/records.pcapng --min-packets 10 --max-access-code-errors 2 \
+    --lap <central LAP> --reference-lap <central LAP> --reference-uap <central UAP> ...
+```
 
 **Expected outcome.** Smoke runs 2 cases. `-l <central LAP> -u <central UAP>`
 with both `-q` and `-r`, after which each file must hold at least ten records,
@@ -2877,6 +3473,25 @@ and holds for a suite holding this test
 ([#257](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/257),
 [#279](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/279)).
 
+**Commands.** `btbrconsole.py` writes the alternate image, drives the
+prompt, and puts the application image back; `ubertooth-dfu` and
+`ubertooth-util` are the writes and reads around it:
+
+```text
+btbrconsole.py options                                   # the command line, no board
+ubertooth-dfu  -U <serial> -d <btbr image> -r
+ubertooth-util -U <serial> -v                            # it reports btbr at the revision
+ubertooth-util -U <serial> -V
+btbrconsole.py session --serial <serial> --peer <BD_ADDR> --peer-name <name> \
+    --peer-reset esp32peer.py --peer-device <peer port> --inquiry-seconds <n> \
+    --page-seconds <n> ...
+ubertooth-dfu  -U <serial> -d <application image> -r     # the cleanup, always
+esp32peer.py reset --device <peer port> --address <BD_ADDR> --role acceptor --alias <alias>
+```
+
+The session's own `ubertooth-btbr` command line, and the twenty checks it
+decides down the prompt, are `btbrconsole.py`'s.
+
 **Expected outcome.** One case per session. The option-value step comes first:
 four command lines refused with the line each value earns, one control run
 that reaches the board stage, and nothing on standard output. Then the writes
@@ -3044,10 +3659,26 @@ carries `required hardware: true`, so the naming costs the other benches
 nothing and hides nothing either: a registry without those peers, or without
 that host, runs every other release test and records this one as blocked, and
 the run finishes failed rather than passing with the recovery unmeasured. Its
-smoke estimate is about 520 s, which takes the release suite to about 1175 s
+smoke estimate is about 520 s, which takes the release suite to about 1182 s
 (roughly 20 minutes) on the host it names; a target without the peers plans
-about 655 s of the suite and fails on this step. The third, `-t` case stays in the
+about 662 s of the suite and fails on this step. The third, `-t` case stays in the
 `classic-comprehensive` suite, which a release runs alongside the gate.
+
+**Commands.** `esp32peer.py stream` holds the piconet to a chosen channel map
+and reports the map the live link is hopping over; `afhmap.py` compares that
+with the one `ubertooth-afh` worked out:
+
+```text
+esp32peer.py stream <peer options> --map <20 hex digits> \
+    --map-report <case dir>/afh-peer-report-<n>.json \
+    --command-output <case dir>/afh-maps-<n>.txt --interrupt-after <seconds> \
+    -- ubertooth-afh -U <serial> -l <central LAP> -u <central UAP> -e 0 -r
+esp32peer.py stream <peer options> ... -- ubertooth-afh ... -t <duration>  # comprehensive
+esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
+afhmap.py --peer-report <case dir>/afh-peer-report-<n>.json \
+    --maps <case dir>/afh-maps-<n>.txt --min-found-share 0.9 --max-stray-share 0.7 \
+    --min-dropped-channels 10
+```
 
 **Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and
 channels 30 to 49, the twenty the spec allows at least and the firmware's own
@@ -3210,6 +3841,17 @@ unprivileged process cannot do on a raw HCI socket is page —
 `hostneeds.Needs` has no way to express a capability, so nothing checks this
 before the run.
 
+**Commands.** The adapter is read before the tool and first thing in the
+cleanup, and the pair's link is held across `ubertooth-scan`:
+
+```text
+hciconfig <hci device>                    # up, and at the registered address
+hcitool -i <hci device> con               # no link at all
+esp32peer.py stream <peer options> -- ubertooth-scan -U <serial> -b <hci device> \
+    -t <duration> [-s]
+esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
+```
+
 **Expected outcome.** Two cases, in smoke and comprehensive alike: `-s`
 alone, where the inquiry must report both peers at their registered addresses
 and one of them under its firmware name, and no `-s`, where the scan results
@@ -3284,8 +3926,8 @@ default of two allowed access-code bit errors.
 **Why the `hci` plan is still not in the release gate.** Both suites pass:
 smoke in 300 to 407 seconds over seven runs, comprehensive in 390, 400 and
 526. Its smoke
-estimate is 345 s, which would take the release suite from about 1174 s to
-about 1519 s — roughly 25 minutes — on the one host that has an adapter, the
+estimate is 345 s, which would take the release suite from about 1182 s to
+about 1527 s — roughly 25 minutes — on the one host that has an adapter, the
 way `Recover AFH map` already names a bench host. What holds it back is not
 the adapter but the peers. Two faults were measured while running it, both
 peer-side:
@@ -3379,6 +4021,21 @@ the length of the command: the driver adds the setup allowance to the window
 it interrupts at, so a tool whose page was answered at once captures for most
 of that allowance as well. Measured on the bench, a `duration: 25s` follow
 case runs the tool for about 83 seconds and captures for most of them.
+
+**Commands.** The same adapter reads, and `ubertooth-follow` pages the
+piconet's leader from it; the driver interrupts it, since its `-t` is the
+target address rather than a timeout:
+
+```text
+hciconfig <hci device>
+hcitool -i <hci device> con
+esp32peer.py stream <peer options> --interrupt-after <seconds> \
+    -- ubertooth-follow -U <serial> -b <hci device> -t <central address> \
+    [-a] [-q <case dir>/follow.pcap]
+esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
+capturefile.py <case dir>/follow.pcap --packets
+bredrrecord.py <case dir>/follow.pcap --min-packets 10 --lap <central LAP> ...
+```
 
 **Expected outcome.** Smoke runs two cases: `-t <central>`, where the tool
 must report following that piconet, say it is not using AFH, and print at
@@ -3474,6 +4131,8 @@ paths.
 
 **Hardware and arguments.** No board role. `hosts:` only.
 
+**Commands.** None: no implementation yet.
+
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it.
 
@@ -3491,6 +4150,8 @@ any of the three soak entries.
 **Hardware and arguments.** One `Ubertooth`, a required `duration:`, and a
 required `sample every:`.
 
+**Commands.** None: no implementation yet.
+
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it.
 
@@ -3506,6 +4167,8 @@ with periodic sampling.
 **Hardware and arguments.** One `Ubertooth`, a required `duration:`, and a
 required `sample every:`.
 
+**Commands.** None: no implementation yet.
+
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it.
 
@@ -3520,6 +4183,8 @@ with periodic sampling.
 
 **Hardware and arguments.** One `Ubertooth`, a required `duration:`, and a
 required `sample every:`.
+
+**Commands.** None: no implementation yet.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it.
@@ -3557,6 +4222,19 @@ Ubertooth cannot alternate anything, so the step is blocked there and the run
 fails rather than passing without it (see "Hardware a step is about"). The test establishes the firmware it
 verifies, so preflight checks only the board's serial and not its revision,
 and the test must be the last one on that board in the suite.
+
+**Commands.** Per write, with the image alternating between the labels the
+plan's `image sequence:` names:
+
+```text
+ubertooth-dfu  -U <serial> -d <image> -r      # one write at a time, 25 s each
+ubertooth-util -U <serial> -v                 # the revision, after every write
+ubertooth-util -U <serial> -s                 # every other registered board, before and after
+ubertooth-util -U <serial> -w                 # the watchdog record, between writes
+```
+
+The flash runner assembles these per write rather than as plan steps, so
+`<serial>` is each board in turn when `alternate Ubertooths:` is set.
 
 **Expected outcome.** One case, run by the flash runner rather than as a
 command line. Because it is one case however many flashes it runs, the run's
@@ -3662,6 +4340,20 @@ holds ticked for a suite that names this test). Writes
 firmware and establishes it, so preflight checks only the board's serial and
 the test must be the last one on that board.
 
+**Commands.** `dfuimage.py` makes the images, strips and signs them, and
+reads the flash back; `ubertooth-dfu` is the tool under test:
+
+```text
+ubertooth-dfu -U <serial> -d <test image> -r
+ubertooth-dfu -U <serial> -u <case dir>/readback.bin -r
+ubertooth-dfu -U <serial> -s <case dir>/image.bin        # and a .dfu, refused
+ubertooth-dfu -U <serial> -d <case dir>/<variant>.dfu -r # each bad image, refused
+dfuimage.py make|strip|copy|same|absent ...
+dfuimage.py check-readback <case dir>/readback.bin <test image> --reported <read-back range>
+dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <test image>
+dfuimage.py answers|after-reject|restore --serial <serial> --image <test image> ...
+```
+
 **Expected outcome.** Smoke runs 2 cases: `-u` reads back the image `-d`
 wrote, and `-s` suffixes a binary identically to the build's `.dfu`.
 Comprehensive runs 12, adding the bad-image refusals with a read-back after
@@ -3697,6 +4389,15 @@ the expected timeout.
 other registered board on the host. Required: `platforms:` and `exclusive
 Ubertooth: true`. `capture duration:` defaults to 5 s and may be at most 10
 minutes, since every other board stays powered off for the whole capture.
+
+**Commands.** No `-U` at all: that is the point. The capture is wrapped so a
+long run's output does not have to be kept:
+
+```text
+ubertooth-util -s
+ubertooth-util -v
+ubertooth-btle -f                 # under timeout --foreground -k 2 -s INT <seconds>
+```
 
 **Expected outcome.** Three cases: the no-selector serial is the selected
 board's, the no-selector firmware query reaches one board, and the
@@ -3737,6 +4438,8 @@ timeout:`, `empty buckets restart after:`, `restart suppression:`, `restart
 timeout extension:`, `post-restart wait:`, `search timeout:`, `maximum
 consecutive misses:`, and `maximum restarts:`.
 
+**Commands.** None: no implementation yet.
+
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. Its resource and power manifest already compiles, including every
 required power-off action. On a host where another registered board is on no
@@ -3756,6 +4459,8 @@ eero setup beacon.
 **Theory of operation.** Not established.
 
 **Hardware and arguments.** One `Ubertooth` and a required `eero:` resource.
+
+**Commands.** None: no implementation yet.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it.
@@ -3794,6 +4499,8 @@ one; `coverage:` and a `duration:`. The pair would run with `conn cycle off`,
 because `-p` needs a connection that stays up, and the board's squelch has to
 be raised from its default −120 dBm first: the access-address hunt is gated by
 it, and at the default the hunt latches onto noise.
+
+**Commands.** None: no implementation yet.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. The outcome it is meant to check is all four of the lines `-p`
@@ -3898,6 +4605,22 @@ guard carrying the alternate `btbr` image is not in that position — it answers
 all four — and it is guarded by what it answers, not reflashed to make it
 answer more.
 
+**Commands.** `invalidapp.py` makes the image the bootloader must refuse to
+start, switches the board's registered hub port, and puts the board back:
+
+```text
+invalidapp.py make --image <test image> --output <case dir>/unstartable.dfu
+invalidapp.py port --hardware <hardware registry> --board <alias> \
+    --controller <alias> --expect-port <port> --allow-power-changes
+ubertooth-dfu  -U <serial> -d <case dir>/unstartable.dfu -r
+invalidapp.py cycle --hardware <hardware registry> --board <alias> \
+    --controller <alias> --expect-port <port> --allow-power-changes \
+    --serial <serial> --guard <serial>
+invalidapp.py recover --serial <serial> --guard <serial> --image <test image> \
+    --revision <expected revision>
+ubertooth-util -U <serial> -v
+```
+
 **Expected outcome.** One case. The write must reach the flash and must not
 report a verified revision afterwards: the board stays in its bootloader, so
 `ubertooth-dfu -d <image> -r` ends with an error and exit 1, and that is the
@@ -3989,6 +4712,8 @@ firmware build.
 **Theory of operation.** Not established.
 
 **Hardware and arguments.** One `Ubertooth`.
+
+**Commands.** None: no implementation yet.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it.
