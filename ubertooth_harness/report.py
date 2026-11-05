@@ -27,16 +27,19 @@ from ubertooth_harness.leases import (
 from ubertooth_harness import outputfiles
 from ubertooth_harness.outputfiles import CHECKS_EVENT, output_file_list
 from ubertooth_harness.rawlog import (
+    BANNER_WIDTH,
     NOTE,
     RECORD_OUTPUT_BYTES,
     RECORD_OUTPUT_EVENTS,
     RECORD_TAIL_BYTES,
     RECORD_TAIL_EVENTS,
+    RESULT_TAG,
     TAGS,
     Chunk,
     CommandCapture,
     format_command_record,
     line_shape,
+    verdict,
 )
 from ubertooth_harness.rf import describe as describe_placement
 from ubertooth_harness.watchdog import wait_counts
@@ -57,7 +60,8 @@ LEGACY_OUTPUT_TAIL_CHARS = RECORD_TAIL_BYTES
 LEGACY_OUTPUT_TAIL_RECORDS = RECORD_TAIL_EVENTS
 LEGEND = (
     "Times are elapsed since the run started (UTC start in Time above). "
-    "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[R]` command result, "
+    "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[X]` the execution "
+    "result (exit code and duration, never a verdict), "
     "`[S]` state step, `[I]` power isolation, `[M]` harness record, "
     "`[<alias> >]` a line sent to that known target's serial shell and "
     "`[<alias> <]` a line it answered. "
@@ -372,6 +376,61 @@ def _compared_libbtbb(run: _Run, check_id: str) -> bool:
     return False
 
 
+def _devices(run: _Run) -> dict[str, dict]:
+    """Every device preflight read, by registry alias: the serial that names
+    it and the firmware the run established for it.
+
+    Preflight binds each selected and guard device, so this is what the run
+    was measured on. The firmware is the revision the check required and how
+    it went; a flash test writes the firmware it verifies, so its own record
+    replaces that with what the board was left on.
+    """
+    devices: dict[str, dict] = {}
+    started = {
+        e["details"].get("check_id"): e["details"]
+        for e in run.events if e["event_type"] == "check_started"
+        and e["details"].get("phase") == "preflight"
+    }
+    for check in run.preflight:
+        details = check.get("details", {})
+        start = started.get(details.get("check_id"), {})
+        alias = start.get("resource")
+        if not alias:
+            continue
+        identity = start.get("resource_identity", {})
+        device = devices.setdefault(alias, {
+            "serial": _identity_serial(identity),
+            "firmware": "",
+        })
+        if details.get("check_name") == "Firmware version":
+            state = "verified" if check["status"] == "passed" else check["status"]
+            device["firmware"] = f"{start.get('expected_revision', '')} ({state})"
+    for event in run.events:
+        if event["event_type"] == "flash_run_finished":
+            details = event["details"]
+            finals = {
+                str(serial).lower(): revision
+                for serial, revision in (details.get("final_revisions") or {}).items()
+            }
+            if "final_revisions" not in details and details.get("serial"):
+                finals = {str(details["serial"]).lower(): details.get("final_revision")}
+            attempted = details.get("attempted_flashes_by_serial")
+            if attempted is None:  # records from before per-board counts
+                attempted = {str(details.get("serial", "")): details.get("attempted_flashes", 0)}
+            attempted = {str(serial).lower(): count for serial, count in attempted.items()}
+            for device in devices.values():
+                serial = device["serial"].lower()
+                if attempted.get(serial):
+                    device["firmware"] = (
+                        f"written by this run; final {finals.get(serial) or 'unknown'}"
+                    )
+                elif serial in finals:
+                    device["firmware"] = (
+                        f"not written by this run; read {finals[serial] or 'unknown'}"
+                    )
+    return devices
+
+
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     manifest = run.manifest
     rows = []
@@ -482,49 +541,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     if python:
         deps = ", ".join(f"{k} {v}" for k, v in sorted(environment.get("dependencies", {}).items()))
         rows.append(("Python", f"{python.get('version')} (pip {environment.get('pip')}; {deps})"))
-    devices = {}
-    started = {
-        e["details"].get("check_id"): e["details"]
-        for e in run.events if e["event_type"] == "check_started"
-        and e["details"].get("phase") == "preflight"
-    }
-    for check in run.preflight:
-        details = check.get("details", {})
-        start = started.get(details.get("check_id"), {})
-        alias = start.get("resource")
-        if not alias:
-            continue
-        identity = start.get("resource_identity", {})
-        device = devices.setdefault(alias, {
-            "serial": _identity_serial(identity),
-            "firmware": "",
-        })
-        if details.get("check_name") == "Firmware version":
-            state = "verified" if check["status"] == "passed" else check["status"]
-            device["firmware"] = f"{start.get('expected_revision', '')} ({state})"
-    for event in run.events:
-        if event["event_type"] == "flash_run_finished":
-            details = event["details"]
-            finals = {
-                str(serial).lower(): revision
-                for serial, revision in (details.get("final_revisions") or {}).items()
-            }
-            if "final_revisions" not in details and details.get("serial"):
-                finals = {str(details["serial"]).lower(): details.get("final_revision")}
-            attempted = details.get("attempted_flashes_by_serial")
-            if attempted is None:  # records from before per-board counts
-                attempted = {str(details.get("serial", "")): details.get("attempted_flashes", 0)}
-            attempted = {str(serial).lower(): count for serial, count in attempted.items()}
-            for device in devices.values():
-                serial = device["serial"].lower()
-                if attempted.get(serial):
-                    device["firmware"] = (
-                        f"written by this run; final {finals.get(serial) or 'unknown'}"
-                    )
-                elif serial in finals:
-                    device["firmware"] = (
-                        f"not written by this run; read {finals[serial] or 'unknown'}"
-                    )
+    devices = _devices(run)
     if devices:
         rows.append((
             "Devices",
@@ -1312,7 +1329,10 @@ def _command_record(
     record = format_command_record(result, capture, stopped=stopped, stamp=stamp)
     if finished is None:
         tool = Path(result.argv[0]).name if result.argv else "command"
-        record += f"{stamp(_time(outputs[-1] if outputs else started))} [R] {tool} did not finish\n"
+        record += (
+            f"{stamp(_time(outputs[-1] if outputs else started))} "
+            f"{RESULT_TAG} {tool} did not finish\n"
+        )
     return record
 
 
@@ -1968,6 +1988,214 @@ def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, ti
         )
     serials = set().union(*(run.serials() for run in runs)) if runs else set()
     return _redact(text, serials) if redact_serials else text
+
+
+# How wide the label column of the console summary is.
+_SUMMARY_LABEL = 18
+# The rule the console summary is drawn with, the width of a test banner.
+_SUMMARY_RULE = "=" * BANNER_WIDTH
+_MARKUP = re.compile(r"\*\*|`")
+
+
+def _plain(text: str) -> str:
+    """One of the report's cells as plain terminal text."""
+    return _one_line(_MARKUP.sub("", str(text)))
+
+
+# The line every host tool prints its own and its libbtbb's version and
+# commit on, with or without the label older fork commits leave off
+# (preflight.HOST_VERSION_LABEL).
+_TOOLS_VERSION_LINE = re.compile(
+    r"(?m)^(?:Host tools version: )?libubertooth[ \t].*$"
+)
+
+
+def _host_tools_version(run: _Run) -> str:
+    """The version line the run's host tools printed, as they printed it.
+
+    Both versions are on it, libbtbb's second, and the commit in each pair of
+    brackets is what that library's own build stamped in: for libbtbb it is
+    the only thing that says which library the tools load (#294). It is read
+    from the output of preflight's host version check, so what the summary
+    shows is what the tools said.
+
+    Where that output is not in the record, the check's own notes are: it
+    records every pattern it read and what matched (outputfiles.py), and the
+    longest of those matches is as much of the line as it compared. A run
+    that built its tools recorded the line in its build, which is the last
+    fallback.
+    """
+    check_id = next(
+        (
+            str((e.get("details") or {}).get("check_id", ""))
+            for e in run.events
+            if e["event_type"] == "check_started"
+            and (e.get("details") or {}).get("phase") == "preflight"
+            and (e.get("details") or {}).get("check_name") == "Host version"
+        ),
+        "",
+    )
+    output = "".join(
+        str((e.get("details") or {}).get("text", ""))
+        for e in run.events
+        if e["event_type"] == "command_output"
+        and (e.get("details") or {}).get("check_id") == check_id
+        and check_id
+    )
+    printed = _TOOLS_VERSION_LINE.search(output)
+    if printed:
+        return printed[0].strip()
+    matched = ""
+    for event in run.events:
+        details = event.get("details") or {}
+        if event["event_type"] != CHECKS_EVENT:
+            continue
+        for check in details.get("checks") or []:
+            name = str((check or {}).get("name", ""))
+            if name == "Host version" or name.startswith("Host version "):
+                found = str((check or {}).get("matched", ""))
+                if len(found) > len(matched):
+                    matched = found
+    if matched:
+        return matched
+    return str((run.manifest.get("build") or {}).get("host_version", ""))
+
+
+def _device_roles(run: _Run) -> dict[str, str]:
+    """The hardware roles each alias was bound as, from the manifest."""
+    roles: dict[str, list[str]] = {}
+    for invocation in run.manifest.get("invocations") or []:
+        for role, alias in (invocation.get("resources") or {}).items():
+            named = roles.setdefault(str(alias), [])
+            if role not in named:
+                named.append(str(role))
+    return {alias: ", ".join(named) for alias, named in roles.items()}
+
+
+def _summary_rows(run: _Run) -> list[tuple[str, str]]:
+    manifest = run.manifest
+    started = run.started.get("details", {})
+    rows = [("run", run.run_id)]
+    if run.events:
+        rows.append((
+            "started (UTC)",
+            f"{run.events[0]['timestamp']} "
+            f"(ran {_duration(run.events[0], run.events[-1])})",
+        ))
+    plan = manifest.get("plan_name") or started.get("plan_name", "")
+    suite = manifest.get("suite") or started.get("suite", "")
+    rows.append(("plan / suite", f"{plan} / {suite}"))
+    environment = manifest.get("environment", {})
+    os_info = environment.get("os", {})
+    host = manifest.get("host") or started.get("host", "")
+    platform = " ".join(
+        str(item) for item in (
+            os_info.get("system"),
+            os_info.get("macos_version") or os_info.get("distribution"),
+            os_info.get("release"),
+            os_info.get("architecture"),
+        ) if item
+    )
+    rows.append(("host", f"{host} ({platform})" if platform else host))
+    for source in manifest.get("sources") or started.get("sources", []):
+        # The name the commit was chosen by, then the commit itself in full:
+        # a tailed run has to identify exactly what was tested.
+        ref_name = source.get("ref_name")
+        if ref_name and ref_name != source.get("requested_ref"):
+            ref = f"{ref_name} at {source.get('commit')}"
+        else:
+            ref = f"{source.get('requested_ref')} = {source.get('commit')}"
+        rows.append((
+            str(source.get("name", "source")),
+            f"{ref} ({source.get('expected_revision')})",
+        ))
+    tools = _host_tools_version(run)
+    if tools:
+        rows.append(("host tools", tools))
+    loaded = _libbtbb_in_the_tools(run)
+    if loaded:
+        rows.append(("libbtbb in tools", _plain(loaded)))
+    roles = _device_roles(run)
+    for alias, device in _devices(run).items():
+        where = roles.get(alias)
+        rows.append((
+            f"device {alias}",
+            (f"{where}, " if where else "")
+            + f"serial {device['serial']}"
+            + (f": firmware {device['firmware']}" if device["firmware"] else ""),
+        ))
+    summary = run.finished["details"] if run.finished else {}
+    if summary:
+        rows.append((
+            "preflight",
+            f"{summary.get('completed_preflight_checks', 0)}/"
+            f"{summary.get('requested_preflight_checks', 0)} checks passed",
+        ))
+        rows.append((
+            "tests",
+            f"{summary.get('completed_tests', 0)}/"
+            f"{summary.get('requested_tests', 0)} passed",
+        ))
+        counted = (
+            ("skipped_cases", "skipped cases"),
+            ("not_applicable_cases", "cases not applicable"),
+            ("not_applicable_tests", "tests not applicable"),
+            ("blocked_tests", "tests blocked"),
+            ("watchdog_resets", "board self-resets"),
+        )
+        also = [
+            f"{summary[key]} {name}" for key, name in counted if summary.get(key)
+        ]
+        if also:
+            rows.append(("also", ", ".join(also)))
+        if summary.get("failure_reason"):
+            rows.append(("reason", _plain(summary["failure_reason"])))
+    return rows
+
+
+def console_summary(events: Sequence[Mapping], *, report: Path | str | None = None) -> str:
+    """The block a tailed ``run-suite`` ends with (#342).
+
+    Everything a reader needs to say what was tested and how it went without
+    opening ``report.md``: when the run started in UTC, the ref and exact
+    commit of each source, the version line the host tools printed, the
+    firmware each device was verified on with its alias and serial, the
+    totals, and the verdict. It is compiled from the same records the report
+    is, so the two cannot disagree.
+    """
+    run = _Run(list(events))
+    rows = _summary_rows(run)
+    if report is not None:
+        rows.append(("report", str(report)))
+    lines = [_SUMMARY_RULE, "RUN SUMMARY", _SUMMARY_RULE]
+    lines.extend(f"  {label:<{_SUMMARY_LABEL}} {value}" for label, value in rows)
+    lines.extend([_SUMMARY_RULE, f"VERDICT: {verdict(run.status)}", _SUMMARY_RULE])
+    return "\n".join(lines) + "\n"
+
+
+def write_console_summary(output_dir: Path | str, stream=None) -> None:
+    """Print the console summary of a finished run; never raises.
+
+    The run's result stands whatever happens here, and the terminal may be
+    gone already (a dropped SSH session), so every failure is swallowed:
+    ``run.jsonl`` and ``report.md`` hold the same facts.
+    """
+    out = stream if stream is not None else sys.stderr
+    try:
+        run_log = Path(output_dir) / RUN_LOG
+        if not run_log.exists():
+            return
+        events = load_events(run_log)
+        if not events:
+            # Nothing was recorded (an empty or unreadable first line): there
+            # is nothing to identify the run by, so say nothing.
+            return
+        out.write("\n" + console_summary(
+            events, report=Path(output_dir) / REPORT
+        ))
+        out.flush()
+    except Exception:  # noqa: BLE001 - a summary must not mask the run result
+        pass
 
 
 def write_report(output_dir: Path | str) -> Path | None:

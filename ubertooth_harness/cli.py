@@ -77,7 +77,11 @@ from ubertooth_harness.power import (
     snapshot_ports,
 )
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
-from ubertooth_harness.report import render_runs, write_report
+from ubertooth_harness.report import (
+    render_runs,
+    write_console_summary,
+    write_report,
+)
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import guard_boards, ubertooth_roles
@@ -1491,6 +1495,10 @@ def _run_leased(
             signal.signal(signum, handler)
         if isolation is not None:
             isolation.close()
+    # On stderr, with the live stream a reader is tailing: what was tested,
+    # on which board and firmware, and how it went (#342). stdout keeps the
+    # summary JSON alone, so a caller parsing it is unaffected.
+    write_console_summary(run_dir)
     try:
         print(json.dumps(asdict(summary), indent=2, sort_keys=True))
     except OSError:

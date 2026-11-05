@@ -20,6 +20,7 @@ from ubertooth_harness.plan import load_plan
 from ubertooth_harness.cases import guard_roles
 from ubertooth_harness.planner import PlanCompiler, TestInvocation
 from ubertooth_harness.preflight import PreflightPolicy
+from ubertooth_harness.rawlog import STAGE_BASELINE, STAGE_STATE
 from ubertooth_harness.resources import FileResourceRegistry
 from ubertooth_harness.sequencer import NamedTestSequencer
 from ubertooth_harness.stateful import StateCaseError
@@ -447,11 +448,28 @@ GUARD_CHANGES = {
 }
 
 
+# The two stages a read of a board the test must leave alone is recorded
+# under: the baseline snapshot, and every later check of it (#342).
+GUARD_STAGES = (STAGE_BASELINE, STAGE_STATE)
+
+
+def is_guard_read(event) -> bool:
+    return (
+        event.event_type == "step_finished"
+        and event.details["stage"] in GUARD_STAGES
+    )
+
+
+def read_name(details) -> str:
+    """One read's name without the suffix a later check's name carries, so a
+    baseline and the checks of it are looked up under one key (#342)."""
+    return str(details["step_name"]).removesuffix(" unchanged")
+
+
 def failed_guard_reads(events):
     return [
-        e.details["step_name"] for e in events
-        if e.event_type == "step_finished" and e.details["stage"] == "guard"
-        and e.status == "failed"
+        read_name(e.details) for e in events
+        if is_guard_read(e) and e.status == "failed"
     ]
 
 
@@ -496,8 +514,17 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertEqual(1 + len(cases), len(checks))
         self.assertEqual("Guard Ubertooths baseline", checks[0].details["case_name"])
         self.assertTrue(all(check.status == "passed" for check in checks))
-        reads = [e for e in events if e.event_type == "step_finished"
-                 and e.details["stage"] == "guard"]
+        reads = [e for e in events if is_guard_read(e)]
+        # The baseline is recorded under its own stage, every later check of
+        # it under the other, and a later check says it found it unchanged.
+        self.assertEqual(
+            [STAGE_BASELINE] * READS_PER_GUARD,
+            [e.details["stage"] for e in reads[:READS_PER_GUARD]],
+        )
+        self.assertTrue(all(e.details["stage"] == STAGE_STATE
+                            for e in reads[READS_PER_GUARD:]))
+        self.assertTrue(all(e.details["step_name"].endswith(" unchanged")
+                            for e in reads[READS_PER_GUARD:]))
         baseline = {
             e.details["step_name"]: e.details["observed"] for e in reads[:READS_PER_GUARD]
         }
@@ -514,7 +541,7 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
             "guard Ubertooth 1 crc": before["crc"],
         }, baseline)
         for read in reads[READS_PER_GUARD:]:
-            self.assertEqual(baseline[read.details["step_name"]], read.details["expected"])
+            self.assertEqual(baseline[read_name(read.details)], read.details["expected"])
             self.assertEqual(read.details["expected"], read.details["observed"])
         # Every guard command is in the run record with output, exit code, and duration.
         guard_ids = {
@@ -554,10 +581,11 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertEqual("failed", checks[-1].status)
         self.assertIn("guard Ubertooth 1 channel", checks[-1].details["reason"])
         self.assertIn("expected", checks[-1].details["reason"])
-        failed = [e for e in events if e.event_type == "step_finished"
-                  and e.details["stage"] == "guard" and e.status == "failed"]
-        self.assertEqual(["guard Ubertooth 1 channel"],
+        failed = [e for e in events if is_guard_read(e) and e.status == "failed"]
+        # A check of the baseline, so the read says it found it unchanged.
+        self.assertEqual(["guard Ubertooth 1 channel unchanged"],
                          [e.details["step_name"] for e in failed])
+        self.assertEqual([STAGE_STATE], [e.details["stage"] for e in failed])
         self.assertEqual("2470", failed[0].details["expected"])
         # The test stopped at the first case that disturbed the guard.
         self.assertEqual(1, len(state_cases(events)))
@@ -652,8 +680,7 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertIn("its API check may stop the guard", reason)
         self.assertEqual([f"guard Ubertooth 1 {transitions.GUARD_CRC_KEY}"],
                          failed_guard_reads(events))
-        (refused,) = [e for e in events if e.event_type == "step_finished"
-                      and e.details["stage"] == "guard" and e.status == "failed"]
+        (refused,) = [e for e in events if is_guard_read(e) and e.status == "failed"]
         self.assertIsNone(refused.details["argv"])
         # Every util query still ran; only the btle read was refused.
         self.assertEqual(READS_PER_GUARD - 1, len(bench.commands_for(B)))
@@ -819,9 +846,8 @@ def image_guard(image, serial=B, stalls=(), revision="git-test"):
 def guard_reads(events, board="guard Ubertooth 1"):
     """``board``'s guard reads in order; the first check is its baseline."""
     return [
-        e for e in events if e.event_type == "step_finished"
-        and e.details["stage"] == "guard"
-        and e.details["step_name"].startswith(f"{board} ")
+        e for e in events
+        if is_guard_read(e) and e.details["step_name"].startswith(f"{board} ")
     ]
 
 
@@ -913,8 +939,7 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
 
         self.assertEqual("failed", summary.status)
         self.assertEqual(["guard Ubertooth 1 channel"], failed_guard_reads(events))
-        (failed,) = [e for e in events if e.event_type == "step_finished"
-                     and e.details["stage"] == "guard" and e.status == "failed"]
+        (failed,) = [e for e in events if is_guard_read(e) and e.status == "failed"]
         self.assertEqual(transitions.GUARD_UNSUPPORTED, failed.details["expected"])
 
     def test_the_crc_read_is_refused_by_the_board_image_not_skipped(self):

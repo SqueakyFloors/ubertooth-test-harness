@@ -2036,18 +2036,27 @@ def guard_boards(
     return boards
 
 
+def _guard_name(board: GuardBoard, setting: str, expected) -> str:
+    """What one read of a board the case must leave alone is called.
+
+    A baseline read records the value; a later read has to find the same one,
+    and says so, so neither needs reading the stage to be understood (#342).
+    """
+    return f"{board.role} {setting}" + ("" if expected is None else " unchanged")
+
+
 def _guard_step(board: GuardBoard, setting, option, pattern, convert, key, expected):
     if setting in GUARD_STRICT_KEYS:
         return Step(
             f"{board.slug}-{setting}",
-            f"{board.role} {setting}",
+            _guard_name(board, setting, expected),
             _util(board.serial, option),
             observe=Observation(key, pattern, expected, convert=convert),
         )
     tolerant, value = _tolerant(pattern, convert)
     return Step(
         f"{board.slug}-{setting}",
-        f"{board.role} {setting}",
+        _guard_name(board, setting, expected),
         _util(board.serial, option),
         # A board that cannot answer the request says so and exits 1; that
         # reading is recorded and compared like any other.
@@ -2112,7 +2121,7 @@ def _guard_crc_step(board: GuardBoard, key, expected, firmware_key):
     tolerant, value = _tolerant(CRC_PATTERN, None, CRC_VALUES)
     return Step(
         f"{board.slug}-{GUARD_CRC_KEY}",
-        f"{board.role} {GUARD_CRC_KEY}",
+        _guard_name(board, GUARD_CRC_KEY, expected),
         _btle(board.serial, "-k"),
         expected_returncodes=(0, 1),
         observe=Observation(key, tolerant, expected, convert=value),

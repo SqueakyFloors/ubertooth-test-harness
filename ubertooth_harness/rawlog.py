@@ -6,18 +6,23 @@ elapsed time since the run started) and a tag::
     [C] command sent (shell-quoted)
     [O] a line the command wrote to stdout
     [E] a line the command wrote to stderr
-    [R] the result: command name, exit code, duration, and any timeout or
-        cancellation
+    [X] the execution result: command name, exit code, duration, and any
+        timeout or cancellation
     [<alias> >] a line sent to that known target's serial shell, and
     [<alias> <] a line it answered (targets.shell_line)
 
 A command that printed one line is two lines; the response follows the result::
 
     2026-10-23T23:49:01.114 [C] ubertooth-util -V
-    2026-10-23T23:49:01.155 [R] ubertooth-util exit 0 in 0.040s; [O] Host tools version: libubertooth 1.1 (git-f81348f)
+    2026-10-23T23:49:01.155 [X] ubertooth-util exit 0 in 0.040s; [O] Host tools version: libubertooth 1.1 (git-f81348f)
 
 Longer output stamps each line when it arrived, in arrival order, then the
 result line. Timestamps use the same clock and format as ``run.jsonl``.
+
+The same module holds the words the terminal stream and the report say a
+result in: the banners that open a test, the verdict of a check, the phase
+label of a state step, and the aligned expected/observed lines (#342). They
+live here so the live view and ``report.md`` cannot drift apart.
 """
 
 import collections
@@ -436,14 +441,118 @@ def record_output(
     return result, finished
 
 
+# The tag a command's result line carries. It is the execution result and
+# not a verdict: a command the harness expects to exit nonzero passes, and
+# one that exits 0 can still fail the checks its output is read for, so this
+# line never says PASS or FAIL (#342).
+RESULT_TAG = "[X]"
+
+# How wide a banner's rule is drawn.
+BANNER_WIDTH = 72
+# The rule a test's banner is drawn with, and a case's inside it.
+TEST_RULE = "#"
+CASE_RULE = "-"
+
+
+def banner(label: str, name: str, *, rule: str = TEST_RULE,
+           width: int = BANNER_WIDTH) -> str:
+    """A full-width banner, so a test start is easy to find in a tailed run.
+
+    Returns the three lines with a trailing newline, and nothing else: the
+    caller decides what blank line goes before it.
+    """
+    bar = rule * width
+    return f"{bar}\n{label}: {name}\n{bar}\n"
+
+
+# What each status reads as where a line states a verdict. The words are
+# short and upper case so `[PASS]` and `[FAIL]` stand out in a tail (#342).
+VERDICTS = {
+    "passed": "PASS",
+    "failed": "FAIL",
+    "skipped": "SKIP",
+    "canceled": "CANCELED",
+    "stopped": "STOPPED",
+    "running": "RUNNING",
+    "not_applicable": "N/A",
+    "blocked": "BLOCKED",
+    "warning": "WARNING",
+    "unchecked": "UNCHECKED",
+}
+
+
+def verdict(status: str) -> str:
+    """The word a status is stated as, for example 'passed' as ``PASS``."""
+    return VERDICTS.get(status, str(status).replace("_", " ").upper())
+
+
+# The stages a state step is recorded under: a case's own actions
+# (``transition``), its restoration (``cleanup``), the first read of a board
+# or setting the case must leave alone (``baseline``), and a later read of
+# that same thing (``state``).
+STAGE_TRANSITION = "transition"
+STAGE_CLEANUP = "cleanup"
+STAGE_BASELINE = "baseline"
+STAGE_STATE = "state"
+# The stage runs recorded before the two state reads were named apart used
+# for both of them; it still renders as a state check.
+STAGE_GUARD = "guard"
+
+# What each stage is called where a reader sees it. The recorded stage is the
+# plain word above; these are the labels, so a baseline snapshot, a
+# restoration, and a later unchanged-state check are told apart without
+# knowing the harness's own vocabulary (#342).
+STAGE_LABELS = {
+    STAGE_TRANSITION: "STEP",
+    STAGE_BASELINE: "BASELINE",
+    STAGE_CLEANUP: "CLEANUP",
+    STAGE_STATE: "STATE",
+    STAGE_GUARD: "STATE",
+}
+
+
+def stage_label(stage: str) -> str:
+    """The plain label of one state step's stage."""
+    return STAGE_LABELS.get(stage, str(stage).replace("_", " ").upper())
+
+
+# How far the value lines below are indented under their step.
+VALUE_INDENT = "    "
+
+
+def _value_text(value) -> str:
+    """One value on one line: a line ending would break the alignment."""
+    text = str(value)
+    for ending in ("\r\n", "\n", "\r"):
+        text = text.replace(ending, " ")
+    return text
+
+
+def value_lines(expected, observed, *, indent: str = VALUE_INDENT) -> list[str]:
+    """``expected:`` and ``observed:`` on their own aligned lines (#342).
+
+    A step that only read a value gets one ``recorded:`` line; a step with
+    neither gets none. The three labels are the same width, so the values
+    line up under one another.
+    """
+    if expected is not None:
+        return [
+            f"{indent}expected: {_value_text(expected)}",
+            f"{indent}observed: {_value_text(observed)}",
+        ]
+    if observed is not None:
+        return [f"{indent}recorded: {_value_text(observed)}"]
+    return []
+
+
 def result_text(result: CommandResult, *, stopped: bool = False) -> str:
-    """'[R] <tool> exit <code> in <seconds>s', plus timeout or cancellation.
+    """'[X] <tool> exit <code> in <seconds>s', plus timeout or cancellation.
 
     ``stopped`` marks a continuous mode that reached its planned deadline,
     which is the expected end rather than a timeout.
     """
     tool = Path(result.argv[0]).name if result.argv else "command"
-    text = f"[R] {tool} exit {result.returncode} in {result.duration_s:.3f}s"
+    text = f"{RESULT_TAG} {tool} exit {result.returncode} in {result.duration_s:.3f}s"
     if result.timed_out:
         text += ", stopped at its planned deadline" if stopped else ", TIMED OUT"
     if result.cancelled:
