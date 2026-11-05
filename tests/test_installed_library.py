@@ -58,9 +58,31 @@ class ConfigureIdentityTests(unittest.TestCase):
         self.assertIn("built from", str(caught.exception))
 
     def test_a_modified_tree_still_names_its_commit(self):
-        text = AGREED.replace("commit 52b2afc,", "commit 52b2afc* with "
-                              "uncommitted changes,")
-        self.assertIn("52b2afc*", self.identity(OTHER_LINES + text))
+        # FindBTBB strips libbtbb's "*" and says so in words instead.
+        text = AGREED.replace("built from commit 52b2afc,",
+                              "built from commit 52b2afc with uncommitted "
+                              "changes;")
+        self.assertIn("uncommitted changes", self.identity(OTHER_LINES + text))
+
+    def test_a_sibling_whose_name_begins_with_the_prefix_is_refused(self):
+        text = AGREED.replace("/tmp/build/prefix/lib",
+                              "/tmp/build/prefix-old/lib")
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.identity(OTHER_LINES + text)
+        self.assertIn("not in", str(caught.exception))
+
+    def test_the_pin_is_compared_with_the_tree_s_own(self):
+        pin = "52b2afcb0c4b8b03412dac759aad88debdfb18e2"
+        self.assertIn(pin, configure_identity(OTHER_LINES + AGREED, PREFIX, pin))
+        self.assertIn(pin.upper(),
+                      configure_identity(
+                          OTHER_LINES + AGREED.replace(pin, pin.upper()),
+                          PREFIX, pin))
+        with self.assertRaises(InstalledLibraryError) as caught:
+            configure_identity(OTHER_LINES + AGREED, PREFIX,
+                               "7e1cdf0336857a714da1af8c7496fe32453ac6d0")
+        self.assertIn("where its own FindBTBB.cmake sets",
+                      str(caught.exception))
 
     def test_an_overlong_commit_or_pin_is_not_one(self):
         for old, new in (("built from commit 52b2afc,",
@@ -93,7 +115,7 @@ class ConfigureIdentityTests(unittest.TestCase):
         text = AGREED.replace("/tmp/build/prefix", "/usr/local")
         with self.assertRaises(InstalledLibraryError) as caught:
             self.identity(OTHER_LINES + text)
-        self.assertIn("outside", str(caught.exception))
+        self.assertIn("not in", str(caught.exception))
 
     def test_a_line_without_the_found_commit_is_refused(self):
         text = AGREED.replace("built from commit 52b2afc, which is", "which is")
@@ -196,6 +218,11 @@ class PathTests(unittest.TestCase):
                          under_prefix(log, str(self.prefix),
                                       "-- Found LIBUBERTOOTH: "))
 
+    def test_under_prefix_refuses_the_prefix_itself(self):
+        log = f"-- Found LIBUBERTOOTH: {self.prefix}\n"
+        with self.assertRaises(InstalledLibraryError):
+            under_prefix(log, str(self.prefix), "-- Found LIBUBERTOOTH: ")
+
     def test_under_prefix_refuses_a_path_outside(self):
         log = "-- Found LIBUBERTOOTH: /usr/lib/libubertooth.so\n"
         with self.assertRaises(InstalledLibraryError) as caught:
@@ -208,6 +235,29 @@ class PathTests(unittest.TestCase):
                 with self.assertRaises(InstalledLibraryError) as caught:
                     under_prefix(log, str(self.prefix), "-- Found LIBUBERTOOTH: ")
                 self.assertIn("expected exactly one", str(caught.exception))
+
+
+class ForkPinTests(unittest.TestCase):
+
+    def test_the_pin_is_read_out_of_the_module(self):
+        text = ('set(LIBBTBB_PINNED_REPO "SqueakyFloors/libbtbb")\n'
+                'set(LIBBTBB_PINNED_REF "7e1cdf0336857a714da1af8c7496fe32453ac6d0")\n')
+        self.assertEqual("7e1cdf0336857a714da1af8c7496fe32453ac6d0",
+                         installedlib.fork_pin(text))
+
+    def test_a_module_that_sets_none_is_refused(self):
+        with self.assertRaises(InstalledLibraryError) as caught:
+            installedlib.fork_pin("set(LIBBTBB_PINNED_REPO \"x\")\n")
+        self.assertIn("LIBBTBB_PINNED_REF", str(caught.exception))
+
+    def test_the_fork_s_own_module_is_read(self):
+        # The fork tree is not always here; where it is, the real file has to
+        # be readable by this, since the build step reads it.
+        module = Path("/tmp/ut-main/host/cmake/modules/FindBTBB.cmake")
+        if not module.is_file():
+            self.skipTest("no fork checkout to read")
+        self.assertRegex(installedlib.fork_pin(module.read_text()),
+                         r"^[0-9a-fA-F]{7,40}$")
 
 
 class AgeHeadersTests(unittest.TestCase):
@@ -248,6 +298,18 @@ class AgeHeadersTests(unittest.TestCase):
         with self.assertRaises(InstalledLibraryError) as caught:
             age_headers(self.directory)
         self.assertIn("FindUBERTOOTH.cmake", str(caught.exception))
+
+    def test_a_longer_name_beginning_with_it_is_left_alone(self):
+        # cmd_get_bootloader_info_quiet sits beside the default in the fork's
+        # own header; renaming it as well would make the aged install miss
+        # more than the step says.
+        self.header("ubertooth_control.h",
+                    "int cmd_get_bootloader_info(void);\n"
+                    "int cmd_get_bootloader_info_quiet(void);\n")
+        self.assertEqual(["ubertooth_control.h"], age_headers(self.directory))
+        text = (self.directory / "ubertooth_control.h").read_text()
+        self.assertIn("cmd_get_bootloader_info_quiet(void)", text)
+        self.assertIn("cmd_absent_bootloader_info(void)", text)
 
     def test_another_function_can_be_named(self):
         self.header("ubertooth.h", "int ubertooth_start_select(void);\n")
@@ -325,7 +387,10 @@ class BuildStepTests(unittest.TestCase):
             "installedlib consumer-identity",
             "installedlib same-path",
             "installedlib under-prefix",
+            "installedlib fork-pin",
+            "--expected-pin",
             "EXACT REQUIRED",
+            "--variable=includedir",
         ):
             with self.subTest(fragment):
                 self.assertIn(fragment, self.text)

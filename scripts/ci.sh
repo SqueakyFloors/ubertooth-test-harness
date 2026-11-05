@@ -182,16 +182,21 @@ check_installed_library() {
     il_work=$WORK/installed
     rm -rf "$il_work"
     mkdir -p "$il_work"
-    # Which of lib and lib64 this install used, decided once: the library,
-    # the pkgconfig directory, the CMake package and the loader path are all
-    # under it (host/CMakeLists.txt chooses by system).
+    # Which of lib and lib64 this install used, for the loader path and the
+    # rpath (host/CMakeLists.txt chooses by system). Both go on the
+    # pkg-config and loader paths, because the two libraries choose
+    # independently -- libubertooth follows CMAKE_INSTALL_LIBDIR and libbtbb
+    # its own LIB_SUFFIX -- so an install can hold one in each.
     il_libdir=$il_prefix/lib
-    [ -d "$il_prefix/lib64/pkgconfig" ] && il_libdir=$il_prefix/lib64
+    [ -d "$il_prefix/lib64" ] && il_libdir=$il_prefix/lib64
+    il_libpath=$il_prefix/lib:$il_prefix/lib64
     # Prepended, not replaced: libubertooth.pc has "Requires: libbtbb
     # libusb-1.0", and libusb's own file is the system's. The install's
-    # directory comes first, and the checks below require the answers to be
-    # this install's rather than trusting the order.
-    PKG_CONFIG_PATH=$il_libdir/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
+    # directories come first, and the checks below require the answers to be
+    # this install's rather than trusting the order. Kept, so the steps after
+    # this function see the value the job had.
+    il_saved_pkg_config_path=${PKG_CONFIG_PATH:-}
+    PKG_CONFIG_PATH=$il_prefix/lib/pkgconfig:$il_prefix/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
     export PKG_CONFIG_PATH
     UBERTOOTH_TEST_NO_DEVICES=1
     export UBERTOOTH_TEST_NO_DEVICES
@@ -223,19 +228,27 @@ EOF
 $(pkg-config --variable=prefix libubertooth)"
     pkg-config --cflags --libs libubertooth
     # The file that answered is this install's, whatever else is on the
-    # search path: its prefix variable and its include directory both have
-    # to be here. Compared as resolved paths, since the file works its
-    # prefix out from where it is (${pcfiledir}/../..) and /tmp is a link to
-    # /private/tmp on macOS.
+    # search path: the prefix it reports, and the include directory the
+    # consumer will compile against, both have to be here. Compared as
+    # resolved paths, since the file works its prefix out from where it is
+    # (${pcfiledir}/../..) and /tmp is a link to /private/tmp on macOS.
     .venv/bin/python -m ubertooth_harness.installedlib same-path \
         "$(pkg-config --variable=prefix libubertooth)" "$il_prefix" \
         --what "the prefix libubertooth.pc reports"
+    .venv/bin/python -m ubertooth_harness.installedlib under-prefix \
+        /dev/stdin --prefix "$il_prefix" --marker 'includedir: ' \
+        <<EOF
+includedir: $(pkg-config --variable=includedir libubertooth)
+EOF
+    # Deliberately word-split, which is how a compiler takes pkg-config's
+    # answer; a prefix holding a space would need an array and this is sh.
+    # shellcheck disable=SC2086
     cc $(pkg-config --cflags libubertooth) "$il_work/consumer.c" \
         -o "$il_work/pc-consumer" $(pkg-config --libs libubertooth)
     # The .pc names no run path, as a distribution's does not: the loader is
     # told where the library is, which is what a packaged program's own
     # install would do.
-    DYLD_LIBRARY_PATH=$il_libdir LD_LIBRARY_PATH=$il_libdir \
+    DYLD_LIBRARY_PATH=$il_libpath LD_LIBRARY_PATH=$il_libpath \
         "$il_work/pc-consumer" > "$il_work/pc-consumer.txt" 2>&1
     cat "$il_work/pc-consumer.txt"
     .venv/bin/python -m ubertooth_harness.installedlib consumer-identity \
@@ -291,15 +304,23 @@ EOF
     # The configure says which libbtbb it found and which one the tree pins,
     # so a measurement taken from a build can be read back to a libbtbb
     # (installedlib.py, which the unit tests exercise).
+    # Against the pin the fork's own FindBTBB.cmake sets, so the line is
+    # read back to the tree rather than only being well formed. The configure
+    # prints that variable, so the two agree unless the message stops
+    # reporting the tree's own pin -- which is the thing a reader of a
+    # measurement relies on.
+    il_pin=$(.venv/bin/python -m ubertooth_harness.installedlib fork-pin \
+        "$il_source/host/cmake/modules/FindBTBB.cmake")
     .venv/bin/python -m ubertooth_harness.installedlib configure-identity \
-        "$il_work/tools-configure.txt" --prefix "$il_prefix"
+        "$il_work/tools-configure.txt" --prefix "$il_prefix" \
+        --expected-pin "$il_pin"
     cmake --build "$il_work/tools-build" --target ubertooth-util \
         > "$il_work/tools-util.txt" 2>&1 || {
             cat "$il_work/tools-util.txt"; return 1; }
     # Where the standalone build writes it, named rather than searched for,
     # so a build that wrote nothing is this step's failure and not a later
     # grep's.
-    DYLD_LIBRARY_PATH=$il_libdir LD_LIBRARY_PATH=$il_libdir \
+    DYLD_LIBRARY_PATH=$il_libpath LD_LIBRARY_PATH=$il_libpath \
         "$il_work/tools-build/src/ubertooth-util" -V \
         > "$il_work/tools-version.txt" 2>&1
     cat "$il_work/tools-version.txt"
@@ -314,7 +335,11 @@ EOF
     cp -R "$il_prefix" "$il_work/old-prefix"
     .venv/bin/python -m ubertooth_harness.installedlib age-headers \
         "$il_work/old-prefix/include"
-    if cmake -S "$il_source/host/ubertooth-tools" -B "$il_work/old-build" \
+    # pkg-config pointed at the aged copy too, so which headers the probe
+    # reads does not rest on CMake preferring CMAKE_PREFIX_PATH to the
+    # hints pkg-config gave it.
+    if PKG_CONFIG_PATH=$il_work/old-prefix/lib/pkgconfig:$il_work/old-prefix/lib64/pkgconfig \
+        cmake -S "$il_source/host/ubertooth-tools" -B "$il_work/old-build" \
             -DCMAKE_PREFIX_PATH="$il_work/old-prefix" \
             > "$il_work/old-configure.txt" 2>&1
     then
@@ -323,15 +348,27 @@ EOF
              "the tools call" >&2
         return 1
     fi
-    # The log either way, so a configure that failed for another reason says
-    # why instead of leaving a silent grep as the whole report.
-    grep -E 'is older than these tools|cmd_get_bootloader_info' \
-        "$il_work/old-configure.txt" || {
-            cat "$il_work/old-configure.txt"
-            echo "error: the configure refused the aged install for some other" \
-                 "reason than the function it is missing" >&2
-            return 1; }
+    # Both on one line: a refusal that said the install is older while
+    # naming some other function would be a different failure, and the name
+    # appearing anywhere in the log would not be the refusal at all. The
+    # message wraps, so the log is read with its line endings squeezed out.
+    tr '\n' ' ' < "$il_work/old-configure.txt" | tr -s ' ' \
+        | grep -qE 'is older than these tools: it does not have [^.]*cmd_get_bootloader_info' \
+        || { cat "$il_work/old-configure.txt"
+             echo "error: the configure refused the aged install for some" \
+                  "other reason than the function it is missing" >&2
+             return 1; }
+    # The refusal as the user would read it, which is three wrapped lines of
+    # a log the rest of which is an ordinary configure.
+    grep -A 2 'is older than these tools' "$il_work/old-configure.txt"
     unset UBERTOOTH_TEST_NO_DEVICES
+    # Put back what the job had, so the steps after this one see it.
+    if [ -n "$il_saved_pkg_config_path" ]; then
+        PKG_CONFIG_PATH=$il_saved_pkg_config_path
+        export PKG_CONFIG_PATH
+    else
+        unset PKG_CONFIG_PATH
+    fi
 }
 
 run_build() {

@@ -3705,23 +3705,25 @@ that their `-h` cases passed.
 The build job then reads the install the way something outside the fork's own
 tree would, with every program it runs given `UBERTOOTH_TEST_NO_DEVICES=1`, so
 the steps are about the install and not about which boards are attached.
-`pkg-config` is asked for `libubertooth`, the prefix its file reports has to be
-the install's, and a small C program is compiled and linked with what it
+`pkg-config` is asked for `libubertooth`, the prefix and the include directory
+its file reports have to be the install's, and a small C program is compiled and linked with what it
 answered and then run: it calls `ubertooth_print_versions()`, which needs no
 board, and what it prints has to be the version line the build's own tools
 printed (so a library from elsewhere that answered is caught), a libbtbb loaded
 from inside the prefix, and the no-board line the switch asks for. A CMake
 project of the same program is configured with
 `find_package(ubertooth <version> EXACT REQUIRED)`, the version being the one
-`libubertooth.pc` gave, so `ubertoothConfigVersion.cmake` is read and the three
-files the build writes have to agree; the imported target's location has to be
-inside the prefix, and the program's output has to be byte for byte the
-`pkg-config` consumer's. Then `host/ubertooth-tools` is configured on its own
+`libubertooth.pc` gave, so `ubertoothConfigVersion.cmake` is read and has to
+answer for that version; the imported target's location has to be inside the
+prefix, and the program's output has to be byte for byte the `pkg-config`
+consumer's, which is where the two files are really held to describing one
+install. Then `host/ubertooth-tools` is configured on its own
 against that prefix, which is how a packager builds the tools and the one path
 `FindUBERTOOTH.cmake` is read on (a whole-tree build uses the libubertooth
 beside it); the libubertooth it found has to be the install's, the configure has
-to name the libbtbb it found and the commit the tree pins, so a measurement
-taken from a build can be read back to a libbtbb, and `ubertooth-util` is built
+to name the libbtbb it found, which has to be the install's, and the commit the
+fork's own `FindBTBB.cmake` pins, so a measurement taken from a build can be
+read back to a libbtbb, and `ubertooth-util` is built
 and run from that build and has to print the same version line. Last, the same
 configure is repeated against a copy of the prefix with one of the functions
 `FindUBERTOOTH.cmake` probes for taken out of the headers -- what an install

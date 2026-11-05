@@ -7,6 +7,8 @@ reads that install the way something outside the tree would: with
 a shell comparison, and they live here so a unit test can run them:
 
     python -m ubertooth_harness.installedlib configure-identity LOG --prefix P
+                                             [--expected-pin REF]
+    python -m ubertooth_harness.installedlib fork-pin FINDBTBB.cmake
     python -m ubertooth_harness.installedlib consumer-identity OUT --prefix P
                                              --version-line LINE
     python -m ubertooth_harness.installedlib under-prefix LOG --prefix P
@@ -37,6 +39,10 @@ pin may differ from the fork's on purpose, and `scripts/ci.sh` warns about
 that separately, so this does not judge which commit it is -- only that both
 ends are named.
 
+`--expected-pin` is the pin the fork's own `FindBTBB.cmake` sets, which
+`fork-pin` reads out of it, so the step compares the configure's pin with the
+tree's rather than only checking that it is a commit.
+
 The wordings that name no commit are a failure here. FindBTBB prints one when
 it cannot read a commit out of the library, which a libbtbb built from a
 source archive or with git's abbreviation set very short would be; CI builds
@@ -65,12 +71,17 @@ LIBBTBB_LINE = "-- libbtbb: "
 # commit with something after it. libbtbb appends "*" for a tree with
 # uncommitted changes, which FindBTBB reports as its own wording and is still
 # a commit named.
-_BUILT_FROM = re.compile(r"built from commit (?![0-9a-fA-F]{41})[0-9a-fA-F]{7,40}"
-                         r"\*?(?![0-9a-fA-F])")
+_BUILT_FROM = re.compile(r"built from commit (?![0-9a-fA-F]{41})"
+                         r"(?P<commit>[0-9a-fA-F]{7,40})(?![0-9a-fA-F])")
 # The pin, which is written in full wherever it is named, in whichever case
 # the fork writes it (FindBTBB's btbb_pin_is_commit reads either).
-_PINNED = re.compile(r"built against \(?(?<![0-9a-fA-F])[0-9a-fA-F]{40}"
-                     r"(?![0-9a-fA-F])\)?")
+_PINNED = re.compile(r"built against \(?(?<![0-9a-fA-F])"
+                     r"(?P<pin>[0-9a-fA-F]{40})(?![0-9a-fA-F])\)?")
+# Where the library it found is named in that line: the first field, between
+# the prefix of the line and the comma before what it says about the commit.
+_LIBRARY_IN_LINE = re.compile(r"^-- libbtbb: (?P<library>[^,]+),")
+# The pin the fork's own FindBTBB.cmake sets.
+_FORK_PIN = re.compile(r'set\(LIBBTBB_PINNED_REF\s+"?(?P<pin>[0-9a-fA-F]{7,40})"?\s*\)')
 # What a program built against the install prints: libubertooth's own version
 # line, the libbtbb it loaded, and, with the no-devices switch set, that there
 # is no board (ubertooth_print_versions).
@@ -89,7 +100,8 @@ class InstalledLibraryError(RuntimeError):
     """The install does not describe itself the way the checks require."""
 
 
-def configure_identity(text: str, prefix: str) -> str:
+def configure_identity(text: str, prefix: str,
+                       expected_pin: str | None = None) -> str:
     """The configure's libbtbb line, or raise InstalledLibraryError.
 
     ``prefix`` is the install the build wrote, which the line has to name:
@@ -103,18 +115,40 @@ def configure_identity(text: str, prefix: str) -> str:
             f"the configure printed {len(lines)} '{LIBBTBB_LINE.strip()}' lines, "
             "expected exactly one")
     line = lines[0]
-    if prefix not in line:
+    library = _LIBRARY_IN_LINE.match(line)
+    if library is None:
         raise InstalledLibraryError(
-            f"the configure found a libbtbb outside {prefix}: {line}")
+            f"the configure's libbtbb line names no library: {line}")
+    # The path, resolved, and inside the prefix: a sibling directory whose
+    # name merely begins with the prefix's text is another install.
+    found, root = resolved(library["library"].strip()), resolved(prefix)
+    if root not in found.parents:
+        raise InstalledLibraryError(
+            f"the configure found a libbtbb at {found}, which is not in {root}")
     if not _BUILT_FROM.search(line):
         raise InstalledLibraryError(
             f"the configure does not name the commit the libbtbb it found was "
             f"built from: {line}")
-    if not _PINNED.search(line):
+    pinned = _PINNED.search(line)
+    if pinned is None:
         raise InstalledLibraryError(
             f"the configure does not name the commit the tree is built "
             f"against: {line}")
+    if expected_pin is not None and (
+            pinned["pin"].lower() != expected_pin.lower()):
+        raise InstalledLibraryError(
+            f"the configure says the tree is built against {pinned['pin']}, "
+            f"where its own FindBTBB.cmake sets {expected_pin}")
     return line
+
+
+def fork_pin(text: str) -> str:
+    """The pin the fork's FindBTBB.cmake sets (LIBBTBB_PINNED_REF)."""
+    found = _FORK_PIN.search(text)
+    if found is None:
+        raise InstalledLibraryError(
+            "FindBTBB.cmake sets no LIBBTBB_PINNED_REF this can read")
+    return found["pin"]
 
 
 def resolved(path: str) -> Path:
@@ -142,7 +176,9 @@ def under_prefix(text: str, prefix: str, marker: str) -> Path:
         raise InstalledLibraryError(
             f"{len(found)} lines carry {marker!r}, expected exactly one")
     path, root = resolved(found[0]), resolved(prefix)
-    if path != root and root not in path.parents:
+    # Inside the prefix, not the prefix itself: the marked line names a file
+    # the install holds.
+    if root not in path.parents:
         raise InstalledLibraryError(
             f"{marker.strip()} {path}, which is not in {root}")
     return path
@@ -186,11 +222,17 @@ def age_headers(directory: Path, function: str = DEFAULT_FUNCTION) -> list[str]:
     or removed function in the fork would otherwise leave the step passing
     for the wrong reason.
     """
+    # On identifier boundaries, as FindUBERTOOTH.cmake searches the headers:
+    # a plain substring would also rename the functions whose names begin
+    # with this one (cmd_get_bootloader_info_quiet sits beside the default),
+    # so the aged install would be missing more than the step says.
+    name = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(function)}(?![A-Za-z0-9_])")
     edited = []
     for path in sorted(directory.glob(_HEADERS)):
         text = path.read_text()
-        if function in text:
-            path.write_text(text.replace(function, _ABSENT))
+        replaced, count = name.subn(_ABSENT, text)
+        if count:
+            path.write_text(replaced)
             edited.append(path.name)
     if not edited:
         raise InstalledLibraryError(
@@ -207,6 +249,9 @@ def main(argv: list[str] | None = None) -> int:
         "configure-identity", help="the configure names both libbtbb commits")
     identity.add_argument("log", type=Path)
     identity.add_argument("--prefix", required=True)
+    identity.add_argument("--expected-pin", default=None)
+    pin = sub.add_parser("fork-pin", help="the pin FindBTBB.cmake sets")
+    pin.add_argument("module", type=Path)
     consumer = sub.add_parser(
         "consumer-identity", help="what a program built against it printed")
     consumer.add_argument("output", type=Path)
@@ -230,7 +275,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "configure-identity":
             print(configure_identity(args.log.read_text(errors="replace"),
-                                     args.prefix))
+                                     args.prefix, args.expected_pin))
+        elif args.command == "fork-pin":
+            print(fork_pin(args.module.read_text(errors="replace")))
         elif args.command == "consumer-identity":
             print(consumer_identity(args.output.read_text(errors="replace"),
                                     args.prefix, args.version_line))
