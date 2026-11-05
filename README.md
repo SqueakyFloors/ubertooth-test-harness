@@ -1526,7 +1526,7 @@ reproduction of a fork regression ([#294](https://github.com/SqueakyFloors/ubert
 
 So mandatory preflight holds the host tools to one libbtbb. Every tool prints
 it on its own version line (`Host tools version: libubertooth 1.07
-(git-6a917ec), libbtbb 1.3 (git-52b2afc)`), where the revision in the second
+(git-6a917ec), libbtbb 1.3 (git-7e1cdf0)`), where the revision in the second
 pair of brackets is what libbtbb's own build stamped into
 `btbb_get_release()`: the commit the installed library was built from. That
 string comes from a function in libbtbb, so it describes the library the tools

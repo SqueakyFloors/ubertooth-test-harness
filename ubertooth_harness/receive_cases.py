@@ -645,11 +645,17 @@ _REPLAY = str(Path(rxreplay.__file__).resolve())
 _FIXTURE = "replay.bin"
 _A, _B = f"{rxreplay.LAP_A:06x}", f"{rxreplay.LAP_B:06x}"
 # libbtbb's UAP and CLK6 progress lines; with the fixture's clocks the
-# receiver clock is the central's clock, so the CLK1-6 offset is 0. A CLK6
-# note is the address-part search reporting a clock for a UAP it was already
-# holding, which is a UAP the caller stated with -u: a UAP the library works
-# out for itself is reported as the UAP note instead, in the same place
-# (btbb_uap_from_header).
+# receiver clock is the central's clock, so the CLK1-6 offset is 0. Which of
+# the two notes the address-part search prints is decided by BTBB_UAP_VALID:
+# the CLK6 note where the flag was already set, the UAP note where this
+# search is what sets it (btbb_uap_from_header). On a command line that
+# states no UAP that means the UAP note, and only that, because the flag is
+# never set when the search runs: a settled UAP sets CLK6_VALID with it, so
+# the search is not asked again, and the one thing that clears CLK6_VALID is
+# reset(), which clears BTBB_UAP_VALID too and whose keep_stated_uap() puts
+# back only a UAP the caller stated. So the forbidden pattern below cannot
+# fire on a discovery restart either; what would print it again is a library
+# that went back to re-running the search after a UAP it found itself.
 _CLK6_ZERO = r"CLK6 = 0x0 found after \d+ total packets"
 # Any clock that search reports, whatever its value: what replay-lap-uap
 # forbids, where the note it must print is the UAP one.
@@ -1222,7 +1228,10 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
         # never reached CLK1-27 -- so it is forbidden rather than merely
         # unexpected, and a revert fails this case in CI with no board. The
         # CLK6 note belongs to the command that states the UAP, which
-        # replay-uap-given is.
+        # replay-uap-given is, and so does the settled CLK1-6 value: this
+        # command line prints no figure that names the offset, and the
+        # candidate count is matched as a number rather than as the
+        # library's own, which would break on any honest change to it.
         _replay_case("replay-lap-uap", "-i -l <LAP> derives the UAP", (
             _fixture_step(base),
             _replay_step(f"ubertooth-rx -i <fixture> -l {_A}", ("-l", _A),

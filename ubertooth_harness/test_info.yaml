@@ -1665,10 +1665,12 @@ Classic capture record fields:
     records are rare here. A record naming no transport passes, and that is a
     real gap rather than only backward compatibility: at the libbtbb the fork
     pins, a payload-bearing record always names one, so a library that stopped
-    filling the field in would pass here. It is accepted because the harness's
-    own pin predates that change and names no transport at all, so a strict
-    default would fail every payload-bearing record of a run built at the
-    harness's own pin; harness #339 tightens it once the pin moves. The survey
+    filling the field in would pass here. What it is accepted for is a run
+    that names an older libbtbb of its own, from before that change, which
+    names no transport at all; the harness's own pin reached it with harness
+    #341, so a default run no longer needs the escape. Harness #339 drops it,
+    and is left to decide that because requiring a named transport changes
+    what a run on the bench accepts. The survey
     case
     cannot assert whose records it reads. The flag rules assume the libbtbb
     this harness pins. The error flags do fire, on a clear board as well as an

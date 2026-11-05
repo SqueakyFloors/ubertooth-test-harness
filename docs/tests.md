@@ -1475,9 +1475,16 @@ packet, reported CLK1-6 over and over, and reached no clock
 the fork in
 [ubertooth#1135](https://github.com/SqueakyFloors/ubertooth/pull/1135)).
 Comprehensive's correct `-u` is the other half: there the CLK6 note is
-required, at offset 0, with the candidates after it. Both run with no board,
-so a return to the earlier behavior fails this test in CI
+required, at offset 0, with the candidates after it. The `-l` case is the one
+that guards against a return to the earlier behavior, and it is in smoke, so
+it runs with no board in CI; the `-u` case prints the same notes under either
+library and could not tell them apart
 ([harness#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341)).
+What the `-l` case can no longer pin is the settled CLK1-6 itself: nothing it
+prints names that offset, since the note that carried it is the one this
+command line does not print, and the candidate count is matched as `<n>`
+rather than as a figure of the library's own. The `-u` case is where offset 0
+is still required.
 
 Six of the smoke cases are about where a capture goes
 ([`stdoutdest.py`](../ubertooth_harness/stdoutdest.py) puts the descriptors
@@ -2477,14 +2484,16 @@ count of the room rather than of the decoder.
 pins, a payload-bearing record always names a transport — the library names
 one whenever it produced a payload, and an abandoned trial clock clears the
 transport and the payload together — so a libbtbb that stopped filling the
-field in would pass here. It is accepted because the *harness's* own
-`LIBBTBB_PIN` still predates
-[libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133) and names no
-transport at all, so a strict default would fail every payload-bearing record
-of a run built at the harness's own pin, and a floor is no substitute at 11
-payload-bearing records in 2620. Tightening it is
+field in would pass here. What it is accepted for now is a run that names an
+older `--libbtbb-ref` of its own, one from before
+[libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133), which names
+no transport at all: the *harness's* own `LIBBTBB_PIN` reached that change
+with [#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341),
+so a default run no longer needs the escape. A floor is no substitute either
+way, at 11 payload-bearing records in 2620. Dropping it is
 [#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339),
-which waits on that pin rather than on a decision.
+whose one precondition, that pin, is now met; it is left there because
+requiring a named transport changes what a run on the bench accepts.
 
 On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the
