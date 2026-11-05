@@ -56,7 +56,7 @@ OTHER_NAME = "Example Device"
 #   stray-packet        a warning on the progress stream renders a packet
 #   takes-bad-tx        a length the format will not carry is transmitted
 #   wrong-tx-payload    the payload printed is not the one the format gives
-#   slot-not-sent       the board reports a transmit it did not put on the air
+#   slot-not-sent       the board reports one transmit it did not put on the air
 #   scheduler-storm     it reports that transmit over and over
 #   tx-already-waiting  it refuses a tx this session sent
 #   dead-link           the connection carries nothing after the transmit runs
@@ -104,7 +104,16 @@ def prompt():
 HIGHEST = {"-f": 63, "-b": 3}
 
 def board_stage(selector, leaving=True):
-    """The refusal a selector naming no board gives, at the device stage."""
+    """The refusal a selector naming no board gives, at the device stage.
+
+    An interpreter without the libusb1 package stops one step earlier, where
+    the tool imports what a session needs, so it never reaches this stage.
+    """
+    if "no-libusb1" in FAULTS:
+        err("error: could not start the session: No module named 'usb1'")
+        err('note: a session needs the Python libusb1 package, which ships '
+            'the usb1 module; install it with "pip install libusb1"')
+        sys.exit(1)
     err("error: no Ubertooth at index %s (6 attached)" % selector)
     err("note: indexes change when boards are added or removed; select a "
         "board by serial with -U<serial>")
@@ -172,6 +181,9 @@ def payload_of(name, data):
 def byte_count(n):
     return "%d byte%s" % (n, "" if n == 1 else "s")
 
+# Whether the one-off "not sent" line has been printed.
+SAID_NOT_SENT = []
+
 def do_tx(rest, connected):
     """Answer one `tx` command line, in the order the tool checks it."""
     words = rest.split()
@@ -221,7 +233,9 @@ def do_tx(rest, connected):
     payload = payload_of(name, data)
     if "wrong-tx-payload" in FAULTS:
         payload = payload[:-1] + bytes([payload[-1] ^ 0xff]) if payload else b"\\x00"
-    if "slot-not-sent" in FAULTS:
+    if "slot-not-sent" in FAULTS and not SAID_NOT_SENT:
+        # Once: one exceptional condition, which the firmware survives.
+        SAID_NOT_SENT.append(True)
         err("TX: cannot schedule transmit, packet not sent")
     if "scheduler-storm" in FAULTS:
         for _ in range(5):

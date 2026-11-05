@@ -243,6 +243,23 @@ class SessionTests(unittest.TestCase):
                 self.assertIn(expected, report)
                 self.assertIn("session failed: ", report)
 
+    def test_one_refusal_the_board_met_is_reported_and_allowed(self):
+        # Each of those lines is an exceptional condition the firmware is
+        # built to survive, so one of them is not a fault: it is reported, and
+        # the checks around it say whether the session came through it. The
+        # same fault repeated fails, which the fault matrix above covers.
+        status, _captured, report = self.run_session(faults=("slot-not-sent",))
+        self.assertEqual(0, status, report)
+        self.assertIn("check scheduler-reports: the board met an exceptional "
+                      "condition and the session came through it: "
+                      "'TX: cannot schedule transmit, packet not sent' 1",
+                      report)
+        # The transmit check names it too, and passes on the packet that
+        # followed.
+        self.assertIn("check tx-link: the link carried a packet ", report)
+        self.assertIn("the board had reported 'TX: cannot schedule transmit",
+                      report)
+
     def test_a_peer_that_cannot_be_reset_fails_the_repeat_page(self):
         # The repeat page is only a page of the peer if the peer has forgotten
         # the last one, so a reset that did not happen is not a page it can
@@ -517,6 +534,19 @@ class OptionValueTests(unittest.TestCase):
         self.assertEqual(1, status)
         self.assertIn("refused the value and went looking for the board as "
                       "well", report)
+
+    def test_a_host_that_cannot_show_the_order_skips(self):
+        # The tool looks for the board after it imports the package a session
+        # needs, so on such a host the control run shows nothing about the
+        # order the values are refused in. Nothing on the bench is wrong, so
+        # the step skips rather than passing on a control that proved nothing.
+        status, captured, report = self.run_options(faults=("no-libusb1",))
+        self.assertEqual(SKIP_EXIT, status)
+        self.assertIn("SKIP: the interpreter ubertooth-btbr runs has no "
+                      "libusb1 package", captured)
+        self.assertIn("the order the option values are refused in cannot be "
+                      "shown", captured)
+        self.assertIn("stopped at the import a session needs", report)
 
     def test_without_a_python_tool_build_the_step_skips(self):
         status, captured, _report = self.run_options(tools=False)

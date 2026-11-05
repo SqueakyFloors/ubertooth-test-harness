@@ -1649,8 +1649,9 @@ Classic btbr console:
     the count of the board's own refusal lines, no hang-up on a peer that took
     the connection, and the split between the capture on standard output and
     the progress on standard error. Comprehensive decides 21: paging an address nothing answers must
-    end in a paging timeout with no connection, and it also transmits five
-    more formats and pages the peer once more. The report says how many checks
+    end in a paging timeout with no connection, and it also makes five more
+    transmit runs, covering three more formats, and pages the peer once
+    more. The report says how many checks
     passed, failed, and never ran. The cleanup always writes the application
     image back, reads it, and resets the peer; a cleanup failure fails the
     case, so the board cannot be left on btbr quietly.
@@ -1672,9 +1673,10 @@ Classic btbr console:
     gate, and what this test adds is the observable end result -- the page
     completing every time it is asked, the link carrying packets after the
     transmit runs, no connection reported and then given up, and a count of
-    every refusal line the board can print. The count allows one: each line is
-    an exceptional condition the firmware is built to survive, so one is
-    reported and a run of the same line fails. Those strings are the board's
+    every refusal line the board can print. The count allows a few: each line
+    is an exceptional condition the firmware is built to survive, so up to
+    three of one line are reported and more than three of the same line
+    fails. Those strings are the board's
     own console wording, which the tool's man page does not promise, so a fork
     that rewords one leaves the count reading zero. A connection the peer declines is out of
     reach: the registered peer accepts and its shell cannot make it refuse, so

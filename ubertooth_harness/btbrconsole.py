@@ -58,9 +58,10 @@ What the session checks, and why each answer is knowable in advance:
   counted fill, the payload header the host writes, and a `dv`'s voice field,
   whose fill starts at `0xa0` so the boundary between the two fields is
   visible in the bytes alone.
-- **tx-link**: the connection carries on after those runs. New capture
-  records arrive, and none of the board's own "packet not sent" lines appeared
-  while the runs were on the air.
+- **tx-link**: the connection carries on after those runs: a new capture
+  record arrives. Whether the board reported a slot it could not put on the
+  air is counted by scheduler-reports below, and named in this check's report
+  line where there was one.
 - **page-idle**: the connection is held, then `idle` ends it.
 - **page-repeat**: the peer is reset, paged again, and the page completes and
   exchanges its name again. A pager that reported a connection its page
@@ -390,10 +391,6 @@ TX_RUNS_COMPREHENSIVE = (
     # counted bytes that are there are the voice field and nothing else.
     "dv 3 1 aabbcc",
 )
-# The most slots a run may ask for, so the count a format allows is this over
-# the slots one of its packets fills (ubertooth-btbr.md: 400 of a one-slot
-# format, 80 of a five-slot `dh5`).
-TX_MAX_SLOTS = 400
 # How long the slots of a run may take before the next `tx` is sent. The
 # longest run allowed is 400 slots at 625 us, about 250 ms.
 TX_SETTLE_S = 0.4
@@ -526,8 +523,13 @@ OPTION_CONTROL = ("-U", NO_SUCH_INDEX)
 OPTION_CONTROL_LINES = (
     f"error: no Ubertooth at index {NO_SUCH_INDEX}",
     "error: no Ubertooth devices found",
-    "error: could not start the session: No module named 'usb1'",
 )
+# The tool looks for the board after it imports the package a session needs,
+# so on a host without that package the control run stops one step earlier and
+# shows nothing about the order. Nothing here can decide that, and nothing on
+# the bench is wrong, so the step is skipped with this as its reason -- the
+# same answer the session gives for the same host.
+OPTION_NO_LIBUSB1 = "error: could not start the session: " + NO_LIBUSB1
 # One command line of this kind, which prints one line and exits.
 OPTION_TIMEOUT_S = 20.0
 
@@ -1749,8 +1751,12 @@ def _recover(session: Session, label: str, report) -> None:
                f"({error})")
         return
     if match is None:
-        report(f"after {label}: the board did not come back to the prompt, so "
-               "the checks after it may fail for that reason")
+        # The prompt comes back after any line, so this is the tool having
+        # stopped answering rather than a board left in a mode; a board that
+        # is still running something shows up as the `Not idle` the checks
+        # after this one would meet.
+        report(f"after {label}: the tool did not answer the stop, so the "
+               "checks after it may fail for that reason")
 
 
 def _start(console: Console, report) -> None:
@@ -1871,6 +1877,16 @@ def run_options(out, err, environment) -> int:
         if expected is None:
             # The control: this selector must reach the stage that looks for
             # the board, so that the refusals above are refusals of the value.
+            if OPTION_NO_LIBUSB1 in printed:
+                report(f"check option control: {label} stopped at the import "
+                       "a session needs, so the order was not shown")
+                out.write(f"SKIP: the interpreter {TOOL} runs has no libusb1 "
+                          "package, so the stage that looks for a board is "
+                          "never reached and the order the option values are "
+                          'refused in cannot be shown; install it with "pip '
+                          'install libusb1"\n')
+                out.flush()
+                return SKIP_EXIT
             if not any(line in printed for line in OPTION_CONTROL_LINES):
                 failures.append(
                     f"{label}: said {printed[:120]!r}, none of the lines a "

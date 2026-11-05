@@ -2617,7 +2617,10 @@ and a control run shows that same selector reaching the stage that looks for
 one, so what the step checks is the order and not only the message. An index
 is used rather than a serial because matching a serial has to open every
 attached board to read its own, and an index names a board without reading
-any.
+any. One host cannot show the order at all: the tool looks for the board after
+it imports the Python `libusb1` package, so on a host without that package the
+control run stops a step earlier, and the step then skips with that as its
+reason rather than passing on a control that showed nothing.
 
 The mechanisms this bench cannot produce honestly. A transmit the board could
 not put on the air, a scan window the scheduler had no room for, and a page
@@ -2631,8 +2634,11 @@ its acknowledgment back), `test_btbr_tx_hop_phase.c` (which phase a transmit
 moves, including the four ways one is dropped),
 `test_btbr_connection_end.c` (the report reaching the link layer),
 `test_btbr_page_response.c` (a dropped page response starts no connection; a
-page answer that did not go out goes back to scanning) and
-`test_btbr_inquiry_response.c` (the same for an inquiry response) — and by
+page answer that did not go out goes back to scanning),
+`test_btbr_inquiry_response.c` (the same for an inquiry response), and the
+scheduling tests beside them (`test_btbr_scan_schedule.c`,
+`test_btbr_rx_schedule.c`, `test_btbr_tx_schedule.c`,
+`test_btbr_tx_untuned.c`) — and by
 `host/python/ubtbr/tests/test_ubtbr.py` for a peer that declines the
 connection. What this test adds is the other half: the observable end result
 on a real bench. The page completes and exchanges the peer's name every time
@@ -2644,10 +2650,10 @@ nothing); this end hangs up on nobody who took the connection; and every
 refusal line the board can print is counted.
 
 Counted, not forbidden: each of those eleven lines is an exceptional condition
-the firmware is *built* to survive, so one of them is reported and allowed —
-the checks around it say whether the session came through it — and more than
-three of the same line fails, because that is no longer an exceptional
-condition. The two lines the board prints about a `tx` this session sent (a
+the firmware is *built* to survive, so up to three of one line are reported and
+allowed — the checks around it say whether the session came through it — and
+more than three of the same line fails, because that is no longer an
+exceptional condition. The two lines the board prints about a `tx` this session sent (a
 second run while one was still waiting for a slot, a full queue) are not
 exceptional and either one fails. A pass therefore says those mechanisms did
 not misfire here. It does not say the firmware handles them correctly — that
@@ -2696,8 +2702,8 @@ before it, the two scan modes, the count of the board's own refusal lines, no
 hang-up on a peer that took the connection, and the split between the capture
 on standard output and the progress on standard error (`idle` is checked inside the inquiry, the page and
 each scan). Comprehensive decides 21: paging an address nothing answers must
-end in `paging timeout` with no connection, and it also transmits five more
-formats and pages the peer once more. The report says how many checks passed,
+end in `paging timeout` with no connection, and it also makes five more
+transmit runs, covering three more formats, and pages the peer once more. The report says how many checks passed,
 how many failed, and how many never ran, so a session that stopped early is not
 read as a pass. The cleanup always writes the application image back, reads it,
 and resets the peer; a cleanup failure fails the case, so the board cannot be
