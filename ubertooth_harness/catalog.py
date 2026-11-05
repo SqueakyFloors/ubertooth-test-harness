@@ -1098,14 +1098,21 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Classic capture record fields": _profiles(
         Estimate(45.0, per_duration=2), Estimate(95.0, per_duration=4)
     ),
-    # Per flash-and-session cycle, measured on the lab bench: two firmware
-    # writes of about 4 s, the version reads, the peer reset, and a console
-    # session whose radio checks end as soon as their answer arrives.
-    # Comprehensive adds the page nothing answers, which costs the firmware's
-    # whole 45 s page attempt.
+    # Per flash-and-session cycle, measured on the lab bench (the first
+    # figures at fork b2cd6c68, the work #332 added at 80123099): the option
+    # values, two firmware writes of about 4 s, the version reads, the peer
+    # reset, and a console session whose radio checks end as soon as their
+    # answer arrives. The sessions themselves were 27 s and 40 s for smoke
+    # and 89 s and 95 s for comprehensive, over two runs; what varies between
+    # them is how long the inquiry and each page train take, 2.1 to 6.4 s for
+    # the inquiry and 0.3 to 17.4 s for a page, so there is room above the
+    # measurement here rather than a figure a slow page would overrun. The session also transmits the chosen packet types on
+    # the connection, pages the peer again, and runs the two scan modes.
+    # Comprehensive adds five more transmit runs, another page, and the page
+    # nothing answers, which costs the firmware's whole 45 s page attempt.
     "Classic btbr console": _profiles(
-        Estimate(0, per_count=("sessions", 60.0)),
-        Estimate(0, per_count=("sessions", 115.0)),
+        Estimate(0, per_count=("sessions", 80.0)),
+        Estimate(0, per_count=("sessions", 140.0)),
     ),
     # ESTIMATE_PENDING_HW
     # Each case brings the pair up, sets the channel map, captures for the
@@ -1733,11 +1740,15 @@ def builtin_catalog() -> TestCatalog:
         ),
         TestDefinition(
             "Classic btbr console",
-            "ubertooth-btbr on the separate btbr firmware image: the board "
-            "reports that image by name, the prompt answers its refusals, an "
-            "inquiry hears a registered ESP32 Classic peer by address and by "
-            "name, a page connects to it and completes the LMP exchange, and "
-            "the cleanup always writes the application image back",
+            "ubertooth-btbr on the separate btbr firmware image: an option "
+            "value outside the radio's field is refused before a board is "
+            "looked for, the board reports that image by name, the prompt "
+            "answers its refusals, an inquiry hears a registered ESP32 "
+            "Classic peer by address and by name, a page connects to it and "
+            "completes the LMP exchange, the chosen packet types go out on "
+            "that connection, the page completes again, the two scan modes "
+            "run and return, and the cleanup always writes the application "
+            "image back",
             MappingProxyType({
                 "hosts": HOSTS, "Ubertooth": UBERTOOTH,
                 "acceptor": ArgumentRule(_selector, default="default"),
