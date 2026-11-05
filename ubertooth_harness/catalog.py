@@ -1013,6 +1013,10 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # more cases: comprehensive 8.0 s of command time against 6.2 s for the
     # same run without them, so +1.8 more, and smoke unchanged, those three
     # being comprehensive-only. 0.9 + 1.9 = 2.8 and 3.9 + 3.3 + 1.8 = 9.0.
+    # Smoke then gained the /proc case, which a macOS run leaves out and so
+    # cannot be measured here; the three commands of a case like it cost
+    # about 0.3 s on the hosts above, hence 2.8 + 0.3 = 3.1. A Linux
+    # measurement should replace that estimate rather than this reasoning.
     # 12 cases and 51 commands in smoke, 30 and 127 comprehensive (11 and 48,
     # and 29 and 124, where there is no /proc and the one case about it is not
     # applicable); the smoke figure carries that case, so a macOS run comes

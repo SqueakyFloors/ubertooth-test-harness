@@ -1463,7 +1463,7 @@ goes to that file and the report stays on standard output. `-q` and `-r`
 naming one file are refused before either is opened, naming both options, and
 a `-d` that names the dump `-i` is replaying is refused as
 `error: -d would write over the dump -i is replaying (<name>)`. Each of the
-five ends by stating the whole directory, with the input's SHA-256, so a
+six ends by stating the whole directory, with the input's SHA-256, so a
 refusal that truncated or rewrote the file it was reading fails.
 
 Comprehensive runs 30 (29 where there is no `/proc`), adding the survey
@@ -1477,7 +1477,7 @@ records), a missing file, the recorded systime on every packet line, a
 directory passed as `-i` (exit 1 with the read error), and `-u` without `-l`
 refused before any record is decoded.
 
-Comprehensive also adds four more capture-destination cases.
+Comprehensive also adds five more capture-destination cases.
 One file under two spellings is refused as
 `error: -q and -d cannot both write to one file (<first> and <second>)`, while
 `/dev/null` twice is accepted and decodes, since nothing is kept there. The
@@ -1489,7 +1489,7 @@ ask for that stream belong to the one-capture-on-standard-output rule instead
 and are refused by it (`error: -q and -d cannot both write to standard
 output`). `-r` refuses every
 destination that reaches standard output while the command line is read, `-`,
-`/dev/stdout`, and a link to it alike, with
+`/dev/stdout`, `/dev/fd/1`, and a link to one of them alike, with
 `error: PCAPNG capture to stdout is not supported; use -q -`, because PcapNG
 seeks back over what it has written. A symbolic link and a hard link to the
 `-i` input are both refused, naming the link the user wrote, with the links
@@ -1500,19 +1500,22 @@ names and nothing can refuse by then, exits 0 with
 lost` and leaves the fixture's own records at the start of the file. That
 last case reads its own standard output back as a file, so it holds while the
 tool's standard output stays buffered until it exits, which it does for the
-fixture's 15 packet lines; a report long enough to flush part-way through
-would be read as a record cut short and the run would exit 1 instead of 0.
+eleven packet lines the fixture decodes to; a report long enough to flush
+part-way through would be read as a record cut short and the run would exit 1
+instead of 0.
 
 **Known limits.** The fixture is synthetic, never an over-the-air capture, so
 this covers the decode path and not the receive path. There is no LE
 equivalent: no tool calls libbtbb's LE file replay. The capture-destination
 cases are `ubertooth-rx`'s; the same checks in `ubertooth-btle` and
 `ubertooth-follow` are not covered, and nor is a capture written to a
-terminal, which no run has. Four more things the fork's own code calls out go
+terminal, which no run has. Five more things the fork's own code calls out go
 uncovered: `/dev/stdin` and `/dev/stderr`, which are not standard output but
 are still identified as the descriptors they name (so
 `-d /dev/stderr 2>>cap.bin` reaches a replay's own dump); the BSD leading-zero
 spelling `/dev/fd/01`, which is descriptor 1 there and names nothing on Linux;
+`/proc/self/fd/1` as an `-r` destination, which the `-q` cases cover and the
+`-r` case does not;
 a destination whose last element is a number, which is a file and not a
 descriptor unless the descriptor filesystem answers for it; and the backstop
 inside `take_stdout`, which no case reaches because the command-line check

@@ -272,7 +272,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        tool = [word for word in args.tool if word != "--"]
+        # Only the separator argparse left at the front: a "--" later on
+        # belongs to the tool, which is how a tool is told that what follows
+        # is not an option.
+        tool = list(args.tool)
+        if tool and tool[0] == "--":
+            tool.pop(0)
         if not tool:
             print("Stdout destination problem: no tool to run")
             return 2

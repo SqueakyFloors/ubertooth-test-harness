@@ -983,7 +983,7 @@ Raw receive replay:
     -l, replay into PCAPNG and into PCAP (link type 255, the fixture's packet
     count), a -d file that cannot be opened (exit 1, one error line, no usage
     text, nothing created or changed anywhere in the directory), and -s
-    decoding the same as without it. Five smoke cases are about where a
+    decoding the same as without it. Six smoke cases are about where a
     capture goes: -q - writes a readable PCAP to the redirected stream with
     the packet report printed on neither stream, /dev/stdout and /dev/fd/1
     mean that stream too and so does /proc/self/fd/1 on Linux, /dev/fd/3 is
@@ -996,14 +996,14 @@ Raw receive replay:
     the fixture, a filtered PCAP, an empty file, a file whose last record is
     cut short, a missing file, the recorded systime on every packet line, a
     directory passed as -i, and -u without -l refused before any record is
-    decoded. Four more are about capture destinations: one file under two
+    decoded. Five more are about capture destinations: one file under two
     spellings refused while /dev/null
     twice is accepted; a symbolic link, a hard link, - beside the name the
     shell pointed that stream at, and /dev/fd/3 beside the file the case
     opened there, each refused as one destination pair that is one file, while
     two captures that both ask for that stream are refused by the
-    one-capture-on-standard-output rule instead; -r
-    refusing every destination that reaches standard output, since PcapNG
+    one-capture-on-standard-output rule instead; -r refusing -, /dev/stdout,
+    /dev/fd/1 and a link to one of them, since PcapNG
     seeks; a symbolic and a hard link to the input both refused; and standard
     output pointed at the input, where a capture option is refused and the
     bare decode warns that the capture is lost.
@@ -1013,12 +1013,13 @@ Raw receive replay:
     tool calls libbtbb's LE file replay. The capture-destination cases are
     ubertooth-rx's; the same checks in ubertooth-btle and ubertooth-follow are
     not covered, and nor is a capture written to a terminal, which no run has.
-    Four things the fork's own code calls out are uncovered too: /dev/stdin
+    Five things the fork's own code calls out are uncovered too: /dev/stdin
     and /dev/stderr, which are not standard output but are still identified
-    as the descriptors they name; the BSD leading-zero spelling /dev/fd/01; a
-    destination whose last element is a number; and the backstop inside
-    take_stdout, which no case reaches because the command-line check refuses
-    such a pair first.
+    as the descriptors they name; the BSD leading-zero spelling /dev/fd/01;
+    /proc/self/fd/1 as an -r destination, which the -q cases cover and the -r
+    case does not; a destination whose last element is a number; and the
+    backstop inside take_stdout, which no case reaches because the
+    command-line check refuses such a pair first.
   related:
     - ubertooth#782
     - ubertooth#1203

@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from hashlib import sha256
 from pathlib import Path
 
@@ -169,8 +169,14 @@ class RunTests(unittest.TestCase):
         self.assertLessEqual(len(os.listdir("/dev/fd")), before)
 
     def test_a_standard_stream_is_refused_as_an_extra_descriptor(self):
-        with self.assertRaises(SystemExit):
-            run(["run", "--fd", "1=/tmp/x", "--", "true"])
+        # argparse writes its usage and reason to standard error, which is
+        # the suite's own here, so it is redirected rather than printed in
+        # the middle of a test run.
+        with open(self.directory / "argparse.err", "w") as handle:
+            with redirect_stderr(handle), self.assertRaises(SystemExit):
+                run(["run", "--fd", "1=/tmp/x", "--", "true"])
+        self.assertIn("descriptor 1 is a standard stream",
+                      (self.directory / "argparse.err").read_text())
 
     def test_no_tool_is_a_usage_failure(self):
         status, printed = run(["run", "--"])

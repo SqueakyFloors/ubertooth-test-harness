@@ -672,10 +672,14 @@ def _replay_case(case_id, name, steps, expected_state, *, needs=NO_NEEDS,
                          lambda context: (sys.executable, _STDOUTDEST, "unlink",
                                           require(context, CAPTURE_DIR_KEY),
                                           *remove),
-                         # Every name, not "some of them": a link to a
-                         # standard stream left behind is what this prevents.
-                         output_patterns=(rf"Removed: {len(remove)} of "
-                                          rf"{len(remove)} name",)),)
+                         # Of how many it was asked for, so a link left
+                         # behind is caught by the count in the line, while
+                         # a case cancelled before it made any still has a
+                         # cleanup that can succeed: a cleanup failure
+                         # leaves the case unverified, which stops the run,
+                         # and there is no device state here to lose.
+                         output_patterns=(rf"Removed: \d+ of {len(remove)} "
+                                          r"name",)),)
     return StateCase(
         case_id,
         name,
@@ -788,7 +792,7 @@ def _dest_seed_step(names) -> Step:
         "seed", "Seed " + ", ".join(names) + " with known contents",
         lambda context: (sys.executable, _STDOUTDEST, "seed",
                          require(context, CAPTURE_DIR_KEY), *names),
-        output_patterns=(r"Seeded: \d+ file",),
+        output_patterns=(rf"Seeded: {len(names)} file",),
     )
 
 
@@ -806,7 +810,8 @@ def _dest_link_step(symlinks=(), hardlinks=()) -> Step:
                  require(context, CAPTURE_DIR_KEY)) + tuple(words))
 
     return Step("link", "Link " + "; ".join(what), argv,
-                output_patterns=(r"Linked: \d+ symbolic, \d+ hard,",))
+                output_patterns=(rf"Linked: {len(symlinks)} symbolic, "
+                                 rf"{len(hardlinks)} hard,",))
 
 
 def _dest_check_step(name, *, unchanged=(), prefix=(), absent=(), kept=(),
@@ -1114,6 +1119,7 @@ def _stdout_destination_comprehensive(base, count, digest, size):
                            forbidden=(_PACKET_LINE_PATTERN,))
             for index, (shown, value) in enumerate(
                 (("-", "-"), ("/dev/stdout", "/dev/stdout"),
+                 ("/dev/fd/1", "/dev/fd/1"),
                  ("<dir>/to-stdout", ("file", "to-stdout"))))
         ) + (
             # Each refusal's own standard output has to be empty: a run that
@@ -1122,7 +1128,7 @@ def _stdout_destination_comprehensive(base, count, digest, size):
             _dest_check_step("Verify nothing was created or written",
                              unchanged=((_FIXTURE, digest),)
                                        + tuple((f"{index}.out", _EMPTY_SHA256)
-                                               for index in range(3)),
+                                               for index in range(4)),
                              symlinks=(("to-stdout", "/dev/stdout"),)),
         ), "each refused (exit 1) with 'PCAPNG capture to stdout is not "
            "supported; use -q -'; nothing created and the link left alone",
