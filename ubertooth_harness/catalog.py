@@ -1085,11 +1085,11 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # figures at fork b2cd6c68, the work #332 added at 80123099): the option
     # values, two firmware writes of about 4 s, the version reads, the peer
     # reset, and a console session whose radio checks end as soon as their
-    # answer arrives. The sessions themselves were 27 s and 89 s, and what
-    # varies between runs is how long the inquiry and each page train take:
-    # 2.1 to 6.4 s for the inquiry and 0.3 to 17.4 s for a page, so there is
-    # room above the measurement here rather than a figure a slow page would
-    # overrun. The session also transmits the chosen packet types on
+    # answer arrives. The sessions themselves were 27 s and 40 s for smoke
+    # and 89 s and 95 s for comprehensive, over two runs; what varies between
+    # them is how long the inquiry and each page train take, 2.1 to 6.4 s for
+    # the inquiry and 0.3 to 17.4 s for a page, so there is room above the
+    # measurement here rather than a figure a slow page would overrun. The session also transmits the chosen packet types on
     # the connection, pages the peer again, and runs the two scan modes.
     # Comprehensive adds five more transmit runs, another page, and the page
     # nothing answers, which costs the firmware's whole 45 s page attempt.
