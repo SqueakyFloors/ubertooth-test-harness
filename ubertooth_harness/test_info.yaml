@@ -795,8 +795,10 @@ Classic Bluetooth receive:
     With no piconet on the bench, what is knowable is the behavior of the tool
     rather than the content of the air. ubertooth-rx -t N must stop itself at
     about N seconds and exit 0, and every packet line must match the
-    documented format, which is where a change in the record shape or a
-    malformed signal-and-noise pair shows up. Where the command fixes a
+    documented format, which is where a change in the record shape, or a
+    power column out of step with the two beside it, shows up: each of the
+    level and noise columns is a figure or the word none, and the ratio is a
+    figure exactly when both of them are. Where the command fixes a
     channel, every packet reported must be on it; where it caps access-code
     errors, no packet may exceed the cap. ubertooth-afh -t N has a known
     answer in the other direction: with nothing from the named piconet it must
@@ -1548,8 +1550,11 @@ Follow Classic Bluetooth piconet:
     packet lines and none of another LAP, and -l/-u for the peer that is not
     the central reports no packet at all. Comprehensive runs 4, adding -l
     without -u and -l -u -q into PCAP, where the file must hold packets as
-    well as a header. Both peers are reset and the Ubertooth restored
-    afterwards.
+    well as a header. Every case also refuses a clock reported with no score,
+    or with a score only equal to the next best candidate's, which is the
+    same pair of guards Classic capture record fields carries. Nothing here
+    requires a clock to be reached. Both peers are reset and the Ubertooth
+    restored afterwards.
   limitations: >-
     Same floors and the same bench dependence as Capture known Classic device.
     The absence case asserts an exact zero over a live capture: an access code
@@ -1578,11 +1583,32 @@ Classic capture record fields:
     the reference UAP the record carries; and the payload's CRC recomputed
     with that UAP must match the one carried. A record that mixed one packet's
     header with another's metadata fails all three. The rest are flag-to-field
-    agreements of the same kind. On top of those the bench contributes what it
-    knows -- the piconet's LAP, the reference LAP and UAP the capture was
-    given, and the address recorded in a PCAPNG interface option. The
-    role-swapped case keeps the address checks honest: a decoder reading a
+    agreements of the same kind, and the transport nibble is held to the same
+    standard: libbtbb names the logical transport of the payload it produced,
+    so a record with no payload must name none and a record with one must name
+    its own type's -- ACL for the data types, SCO for the voice types, eSCO for
+    the extended ones, and either for the one code an HV3 and an EV3 share,
+    which is the case nothing else in a record settles. On top of those the
+    bench contributes what it knows -- the piconet's LAP, the reference LAP and
+    UAP the capture was given, and the address recorded in a PCAPNG interface
+    option. A reference UAP of 0x00 is an address like any other and is
+    compared like one; 0xff is the one value that means the capture had none.
+    The role-swapped case keeps the address checks honest: a decoder reading a
     constant passes one case and fails the other.
+
+    The record times are held to the run that wrote them. Following a piconet
+    puts the board's clock on the piconet's, which moves it by up to its
+    327.68 s period in either direction, and a reconstruction that read that
+    move as time passing gave times that did not measure the run at all. So
+    the records must span no longer than the capture's own -t plus the slack a
+    tool is allowed for its exit, and no record may be timed more than 2000 us
+    before the record ahead of it, which leaves ordinary reordering inside a
+    slot bank alone. Every case also refuses a clock reported with no score,
+    or with a score only equal to the next best candidate's: a clock is
+    accepted on the hops it explains, and where the hops cannot tell the
+    candidates apart the search is meant to end with no clock rather than a
+    wrong one. Neither guard can match a capture that reaches no clock, which
+    most here do, so they cost a run nothing where no clock is searched for.
   hardware: >-
     One Ubertooth and the same two ESP32 Classic peers as acceptor and
     initiator. The peers transmit; the Ubertooth receives. Linux only. The
@@ -1602,7 +1628,12 @@ Classic capture record fields:
     audio link, whose records must include at least one HV3/EV3/3-EV3 packet
     and whose session must report one unbroken link with both applications'
     and both controllers' counters, and a survey, whose records must include
-    at least one carrying a UAP the survey recovered for itself.
+    at least one carrying a UAP the survey recovered for itself. Every case,
+    over every capture file it writes, also requires each record's transport
+    to agree with its own payload and the record times to span no longer than
+    the capture ran and to step backwards no further than 2000 us, and
+    refuses a clock reported with no score or with a score only equal to the
+    next best candidate's.
   limitations: >-
     The packet floors are floors, for the same reason as the other Classic
     tests. The payload length and CRC checks do not fire on the bench's own
@@ -1611,9 +1642,27 @@ Classic capture record fields:
     and never entered follow mode, so they are exercised deterministically by
     the unit tests and the synthetic fixture instead. A malformed record
     cannot be produced on purpose here, so what this proves is that the fields
-    agree on real traffic, not that the decoder rejects a bad one. Nothing
-    here asserts a clock: a BR/EDR record has no clock field and the two
-    figures the tool prints are already masked into range. The survey case
+    agree on real traffic, not that the decoder rejects a bad one. No clock
+    value is asserted and none can be: a BR/EDR record has no clock field and
+    the two figures the tool prints are already masked into range. The record
+    times are bounded instead, and a clock move cannot be ordered on this
+    bench -- the capture locks a piconet's clock on about one run in nine, and
+    the size of the move is whatever the two clocks happen to be apart -- so
+    what the hardware cases show is the live wiring, and both move directions
+    are covered by unit tests over synthetic captures. One thing could fail a
+    good capture: the firmware latches the clock and its period count with
+    separate reads, so a packet caught as the count ticks over carries a time
+    a whole period out; no bench capture has shown one, and the summary names
+    the size of what it saw. No case requires a clock to be reached at all.
+    No floor is put on records that name a transport, because payload-bearing
+    records are rare here. A record naming no transport passes, and that is a
+    real gap rather than only backward compatibility: at the libbtbb the fork
+    pins, a payload-bearing record always names one, so a library that stopped
+    filling the field in would pass here. It is accepted because the harness's
+    own pin predates that change and names no transport at all, so a strict
+    default would fail every payload-bearing record of a run built at the
+    harness's own pin; harness #339 tightens it once the pin moves. The survey
+    case
     cannot assert whose records it reads. The flag rules assume the libbtbb
     this harness pins. The error flags do fire, on a clear board as well as an
     attenuated one, and attenuation does not order the rate: a weaker link is

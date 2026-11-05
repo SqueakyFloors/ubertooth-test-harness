@@ -147,14 +147,28 @@ def _dump_check(step_id, name, file_name, fmt, *, min_records=0, types="br,keep-
 # reported. -r/-q create BR/EDR PCAPNG/PCAP files (link type 255) at start;
 # -d writes one full 68-byte record per packet found (possibly none).
 #
-# The noise figure and the signal-to-noise ratio beside it are either both
-# figures or both the word `none`: a record says whether the board had a
-# background estimate for its channel, and a mode that has none prints `none`
-# for both rather than a number derived from the packet itself (fork
-# 532adc19). The ratio comes from the noise, so a line with one of each is
-# malformed. The signal is always a figure, since a record without the board's
-# own measurement falls back to the strongest reading it carries.
-_NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
+# The three power columns, and the one rule that ties them together: the
+# ratio is a figure exactly when both the figures it comes from are.
+#
+# A level column reads `none` where the board's reading is at or above the
+# top of the scale the host models, which says no more than "at least this
+# loud" and is not a measurement of this packet (fork
+# SqueakyFloors/ubertooth#1192). The noise column reads `none` where the
+# board had no background estimate for the channel (fork 532adc19). Either
+# one missing leaves the ratio `none`, so the four combinations below are
+# all of them, and a line with a ratio beside a missing figure is malformed.
+#
+# Both words are the same `none` a capture record has no room for: a record
+# still carries 0 dBm there, which is why the record decoder's own dBm range
+# accepts it and only these printed lines read the word.
+_POWERS = (
+    # Both figures measured, so the ratio is a figure too.
+    r"(?:s=-?\d+ n=-?\d+ snr=-?\d+"
+    # No level, whatever the noise did: no ratio either.
+    r"|s=none n=(?:-?\d+|none) snr=none"
+    # A level but no background to compare it with: likewise.
+    r"|s=-?\d+ n=none snr=none)"
+)
 
 # The packet line and the survey result line, with the fields a check reads
 # picked out. classic_cases.py reads the LAP from the same two patterns, so a
@@ -162,7 +176,7 @@ _NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
 PACKET_LINE = re.compile(
     rf"^systime=\d+ ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{{6}}) "
     rf"err=(?P<err>\d+) clkn=(?P<clkn>\d+) clk_offset=(?P<offset>\d+) "
-    rf"s=-?\d+ {_NOISE_AND_SNR}$"
+    rf"{_POWERS}$"
 )
 # The clock and the slot offset a packet line carries. Nothing checks their
 # range: the fork masks the clock with CLKN_MASK and takes the offset modulo
