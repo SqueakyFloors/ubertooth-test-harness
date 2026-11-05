@@ -188,10 +188,16 @@ MIN_HEC_VALID_RECORDS = 5
 # and only while no other candidate explains them nearly as well; where the
 # hops cannot tell the candidates apart the search ends with no clock, which
 # for a caller is better than a wrong one (libbtbb#125, which the fork picked
-# up in SqueakyFloors/ubertooth#1088). Neither of these can match a capture
-# that reaches no clock, which most of this bench's do, so they cost a run
-# nothing and bite only on the two outcomes that change would have to be
-# undone to produce:
+# up in SqueakyFloors/ubertooth#1088).
+#
+# Every capture case of `Follow Classic Bluetooth piconet` and
+# `Classic capture record fields` carries these, rather than only the ones
+# that target a piconet: a clock reported unscored or tied is wrong in any
+# capture, and neither pattern can match a capture that reaches no clock,
+# which most of this bench's do -- including a survey, which runs no clock
+# search at all. So they cost a run nothing wherever they sit, and narrowing
+# them to the targeted cases would drop coverage to no end. They bite only on
+# the two outcomes that change would have to be undone to produce:
 #
 # - the bare line the elimination search printed, which accepted whichever
 #   candidate outlived the others however little it had explained;

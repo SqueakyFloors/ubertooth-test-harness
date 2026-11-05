@@ -706,18 +706,23 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
                 #   `ubertooth-rx -l -u` on this same pair passes a fifth to
                 #   a third of them, and
                 #
-                #   35 of them carrying `transport 3`, ACL, which is the
-                #   transport of a payload decoded at a trial clock.
+                #   35 of them carrying `transport 3`, ACL.
                 #
-                # Both fields come from the header, so they are one
-                # observation: the access code is found and the header does
-                # not decode, which is about the clock `ubertooth-follow`
-                # hops on. That is what fork #518 is open about, and it is a
-                # fault of the capture rather than of a record, so the HEC
-                # floor is 0 here and the transport nibble is let be --
-                # the transport is checked against the packet type, and a
-                # header that did not decode gives no type to check it
-                # against. The
+                # Both observations are about the same thing: the access code
+                # is found and the header does not decode, which is about the
+                # clock `ubertooth-follow` hops on. That is what fork #518 is
+                # open about, and it is a fault of the capture rather than of
+                # a record, so the HEC floor is 0 here and the transport
+                # nibble is let be. A transport is checked against the packet
+                # type, and a header that did not decode leaves no type to
+                # check it against.
+                #
+                # What those 35 records would carry today is **not
+                # established**: that sweep ran against a different libbtbb
+                # than the one now pinned, and at the pinned commit an
+                # abandoned trial clock clears the transport and the payload
+                # together. The figures are kept as measured rather than
+                # re-explained. The
                 # header fields of a capture whose headers do decode are
                 # `Classic capture record fields`' business. docs/tests.md
                 # carries the figures.

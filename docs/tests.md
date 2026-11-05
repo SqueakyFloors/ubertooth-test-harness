@@ -2315,8 +2315,12 @@ LAP, with the clock acquired.
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
 the peer that is not the central reports no packet at all. Comprehensive runs
 4, adding `-l` without `-u` and `-l -u -q` into PCAP, where the file must hold
-packets as well as a header. The cleanup is the same: both peers reset, the
-Ubertooth restored.
+packets as well as a header. Every case also refuses a clock reported with no
+score, or with a score only equal to the next best candidate's — see **A
+clock that is reported is a clock that was scored** under
+`Classic capture record fields`, which carries the same two guards and the
+reason they sit on every capture case. Nothing here requires a clock to be
+reached. The cleanup is the same: both peers reset, the Ubertooth restored.
 
 **Known limits.** Same floors and the same bench dependence as
 `Capture known Classic device`. The absence case asserts an exact zero over a
@@ -2480,8 +2484,8 @@ include at least one carrying a UAP the survey recovered for itself.
 Every case, over every capture file it writes, also requires each record's
 transport nibble to agree with its own payload, and the file's record times
 to span no longer than the capture ran and to step backwards no further than
-2000 us. The two targeted cases additionally refuse a clock reported with no
-score, or with a score only equal to the next best candidate's. Each case
+2000 us. Every case also refuses a clock reported with no score, or with a
+score only equal to the next best candidate's. Each case
 keeps its capture files in the run directory. The cleanup is the same as the
 other two Classic tests: both peers reset to their boot state, the Ubertooth's
 channel, squelch, and LEDs restored.
@@ -2620,8 +2624,8 @@ times a capture carried, over what span, and the largest step backwards — so
 a run record holds them for a person to read.
 
 **A clock that is reported is a clock that was scored.** A capture given a
-piconet to follow searches for its clock, and the two targeted cases refuse
-two outcomes of that search. Candidates are scored on the hops they explain
+piconet to follow searches for its clock, and every case here refuses two
+outcomes of that search. Candidates are scored on the hops they explain
 and a clock is accepted only while no other candidate explains them nearly as
 well; where the hops cannot tell the candidates apart the search ends with no
 clock, which for a caller is better than a wrong one
@@ -2633,11 +2637,18 @@ that was not the device's). So a lock line carrying no score at all is
 refused, which is the form the elimination search printed when it accepted
 whichever candidate outlived the others, and so is a lock whose score only
 equals the next best candidate's, which is the coin toss between equally good
-clocks. Neither can match a capture that reaches no clock, which most of this
-bench's do, so they cost a run nothing. Neither writes down the margin
-libbtbb enforces: that is its constant to tune, and asking for a clock
-strictly ahead of its runner-up is what these cases need. **Nothing here
-requires a lock**, for the same reason the packet counts are floors.
+clocks. Neither writes down the margin libbtbb enforces: that is its constant
+to tune, and asking for a clock strictly ahead of its runner-up is what these
+cases need. **Nothing here requires a lock**, for the same reason the packet
+counts are floors.
+
+The two guards sit on every capture case of this test and of `Follow Classic
+Bluetooth piconet`, rather than only on the ones that target a piconet.
+Neither can match a capture that reaches no clock — which most of this
+bench's do, and a survey never even starts a clock search — so they cost a
+run nothing wherever they sit, and a clock reported unscored or tied is wrong
+in any capture. Narrowing them to the targeted cases would drop coverage to
+no end.
 
 The flag rules assume this fork's libbtbb, the one the harness pins. It clears
 the HEC and CRC answers for a clock trial it abandons, and drops the payload
@@ -3212,10 +3223,15 @@ is what fork
 The `-q` case wrote 258 records, every one carrying the central's LAP and
 that LAP and UAP as its reference address, and then: **none** of them passed
 a header HEC, where `ubertooth-rx -l -u` on this same pair passes a fifth to
-a third of them, and 35 of them carried `transport 3`, ACL, which a
-basic-rate capture records as 0. Both fields come from the header, and both
-say the same thing — the access code is found and the header does not decode,
-which is about the clock the tool hops on. So the `-q` case checks that the
+a third of them, and 35 of them carried `transport 3`, ACL. Both say the same
+thing — the access code is found and the header does not decode, which is
+about the clock the tool hops on — and a transport is checked against the
+packet type the header carries, so a header that did not decode leaves
+nothing to check it against. What those 35 records would carry today is **not
+established**: that sweep ran against a different libbtbb than the one now
+pinned, and at the pinned commit an abandoned trial clock clears a record's
+transport and its payload together. The figures above are kept as measured.
+So the `-q` case checks that the
 file is a BR/EDR pcap holding the piconet's packets and leaves the records to
 `Classic capture record fields`, which reads a capture from a tool whose
 headers do decode. A bench measurement is what fork #518 was waiting for.

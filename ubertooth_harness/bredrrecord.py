@@ -464,6 +464,14 @@ def _transport_problems(record: Record) -> list[str]:
     which is what a libbtbb from before SqueakyFloors/libbtbb#133 records for
     every packet, so a run against an older ``--libbtbb-ref`` is not failed
     for a field that library never filled in.
+
+    That second escape is a real gap, kept on purpose: at the commit the fork
+    pins, a payload-bearing record always names a transport, so a libbtbb
+    that stopped filling the field in would pass here. The harness's own
+    ``LIBBTBB_PIN`` still predates libbtbb#133, which is what the escape is
+    for, and a floor on payload-bearing records is no alternative because
+    they are rare on the bench. Tightening this is harness #339, which waits
+    on that pin.
     """
     named = transport_name(record.transport)
     if not record.payload:
@@ -485,10 +493,12 @@ def _consistency(record: Record, *, payload_checks: bool,
                  transport_checks: bool = True) -> list[str]:
     """What is wrong inside one record, with nothing else to compare it to.
 
-    ``transport_checks`` off leaves the transport nibble alone. It is derived
-    from the header, so a capture whose headers do not decode carries whatever
-    the bits gave -- which is a fault of the capture, not of a record, and the
-    caller says so once rather than per record.
+    ``transport_checks`` off leaves the transport nibble alone. The nibble
+    names the payload the decoder produced, but which transport that may be
+    is decided by the packet type, which comes from the header -- so a
+    capture whose headers do not decode gives nothing to check it against.
+    That is a fault of the capture, not of a record, and the caller says so
+    once rather than per record.
     """
     problems = []
     if record.rf_channel >= NUM_BREDR_CHANNELS:
@@ -588,11 +598,13 @@ def problems(found: list[Record], *, lap: int | None = None,
     """Everything wrong with these records, worst first; empty when they pass."""
     found = list(found)
     failures = []
+    if len(found) < min_packets:
+        failures.append(f"{len(found)} records, expected at least {min_packets}")
+    # After the count: a capture that recorded nothing has no times to check
+    # either, and "0 records" is the fault a reader needs first.
     failures += _timestamp_problems(
         found, max_span_s=max_span_s,
         max_backward_step_us=max_backward_step_us)
-    if len(found) < min_packets:
-        failures.append(f"{len(found)} records, expected at least {min_packets}")
     if lap is not None:
         wrong = [record for record in found if record.lap != lap]
         if wrong:

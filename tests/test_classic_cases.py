@@ -353,12 +353,21 @@ class RecordFieldCaseTests(unittest.TestCase):
         the candidates apart the search ends with no clock rather than a
         wrong one (libbtbb#125, the fork's #1088). Neither guard can match a
         capture that reaches no clock, which most of this bench's do."""
-        for case_id in ("follow-fields", "swapped-fields"):
-            with self.subTest(case_id):
-                step = self.steps(self.cases()[case_id])["stream-and-receive"]
-                self.assertEqual(
-                    set(CLOCK_GUARDS),
-                    set(step.forbidden_patterns) & set(CLOCK_GUARDS))
+        # Every capture case of both Classic tests that run a capture, not
+        # only the ones that target a piconet: a clock reported unscored or
+        # tied is wrong in any of them, and the guards cost a run nothing
+        # where no clock is reached.
+        for name, builder in (
+                ("Follow Classic Bluetooth piconet", follow_classic_cases),
+                ("Classic capture record fields", record_fields_cases)):
+            for coverage in ("smoke", "comprehensive"):
+                for case in builder(arguments(name, coverage), RESOURCES,
+                                    IDENTITIES):
+                    with self.subTest(test=name, coverage=coverage,
+                                      case=case.case_id):
+                        step = self.steps(case)["stream-and-receive"]
+                        self.assertLessEqual(set(CLOCK_GUARDS),
+                                             set(step.forbidden_patterns))
         # What each guard is for, against the lines the tools really print.
         scored = ("Acquired CLK1-27 = 0x001216c "
                   "(score 15, next best 11, drift 0 slots)")
