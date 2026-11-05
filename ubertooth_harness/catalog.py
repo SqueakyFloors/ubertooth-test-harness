@@ -740,12 +740,20 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
 
     Both run over one list of tools (``HOST_CLI_TOOLS``), so a tool cannot
     be asked its usage and not its version: `-V` used to be asked of four of
-    the thirteen, and the fork has answered it in all of them since well
-    before 2026-11-DEV1, where every tool's `case 'V'` calls
-    ``ubertooth_print_versions()`` and ends the command
+    the thirteen. What was read at Ubertooth 2026-11-DEV1, and no further
+    back: every one of the thirteen sources carries `V` in its `getopt`
+    option string and a `case 'V'` that calls
+    ``ubertooth_print_versions()`` after the option loop and returns its
+    status, so `-V` ends the command in all of them; and the eleven a macOS
+    build produces were built from that tag and run, each printing the same
+    host version line and exiting 0 with no board attached
     ([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
-    The two BlueZ-only tools carry their host need either way, so both of
-    their cases are left out where they are not built.
+    These cases have no `-H` fallback, so against a fork from before the one
+    `-V` answer (ubertooth#813) the nine new cases fail, as preflight's own
+    host version check would not.
+
+    The two BlueZ-only tools carry their host need on both cases, so a host
+    without BlueZ leaves out each one's help and version together.
     """
     cases = []
     for tool, needs in HOST_CLI_TOOLS:
@@ -753,7 +761,7 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         cases.append(
             CommandCase(
                 f"{tool}-help",
-                f"{tool} help{label}",
+                f"{tool} -h{label}",
                 (tool, "-h"),
                 (re.escape(tool),),
                 # -h exits 0 on every tool: btle since fork e4f1dc5 (fork
@@ -977,10 +985,14 @@ def _default(estimate: Estimate) -> Mapping[str, Estimate]:
 ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Host version": _default(Estimate(0.5)),
     "Help smoke": _default(Estimate(0.5)),
-    # 15 cases took 3.6 s on the calibration host, so 0.24 s a case; the
+    # 15 cases took 3.6 s on the calibration host, so 0.24 s a case; asking
     # `-V` of every tool rather than four (#347) makes it 26 cases on a
-    # Linux host and 22 on macOS, scaled here to 6.2 s. A target's own runs
-    # replace it as soon as three of them have measured it (learned.py).
+    # Linux host and 22 on macOS, scaled here to 6.2 s. It is a rate from
+    # one mix of cases applied to another: the nine new ones are all `-V`,
+    # which reads every attached board, so expect it to run low on a bench
+    # with several boards and high on a macOS host, which has four fewer
+    # cases. A target's own runs replace it as soon as three of them have
+    # measured it (learned.py), which is what the countdown then uses.
     "Host CLI surface": _default(Estimate(6.2)),
     "Ubertooth count": _default(Estimate(0.5)),
     "Ubertooth identity": _default(Estimate(0.4)),

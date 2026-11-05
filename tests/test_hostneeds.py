@@ -436,11 +436,11 @@ class DryRunTests(unittest.TestCase):
         self.assertIn("nothing is built or run", text)
         self.assertIn("host: Host_Local (", text)
         for tool in BLUEZ_TOOLS:
-            self.assertIn(f"    not applicable on Host_Local: {tool} help (BlueZ builds): {tool}",
+            self.assertIn(f"    not applicable on Host_Local: {tool} -h (BlueZ builds): {tool}",
                           text)
         self.assertIn("not applicable on Host_Local: -s of the test build's binary gives the "
                       "build's .dfu: needs a firmware build", text)
-        self.assertIn("    run: ubertooth-util help", text)
+        self.assertIn("    run: ubertooth-util -h", text)
         self.assertRegex(text, r"total: 2 test\(s\), \d+ case\(s\) to run, 5 case\(s\) and 0 "
                                r"test\(s\) not applicable")
 

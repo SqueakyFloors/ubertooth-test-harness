@@ -264,7 +264,9 @@ harness generates from the resources it bound, not from the plan. They are
 reported under their own names, and no catalog test carries them:
 
 ```text
-ubertooth-util -V                             # "Host version", once per host
+ubertooth-util -V                              # "Host version", once per host
+ubertooth-util -H                              # the same, on a fork before the one
+                                               # -V answer (ubertooth#813)
 ubertooth-util -U <serial> -v                  # "Firmware version", per board
 ubertooth-util -U <serial> -V                  # "Firmware compile info", per board
 ubertooth-util -U <serial> -s                  # "Device serial", per board
@@ -447,19 +449,32 @@ The `-V` cases run with a 20 s timeout.
 `ubertooth-scan` and `-follow` where BlueZ is present:
 
 ```text
-ubertooth-util   -h      ubertooth-util   -V
-ubertooth-debug  -h      ubertooth-debug  -V
-ubertooth-specan -h      ubertooth-specan -V
-ubertooth-rx     -h      ubertooth-rx     -V
-ubertooth-tx     -h      ubertooth-tx     -V
-ubertooth-dump   -h      ubertooth-dump   -V
-ubertooth-btle   -h      ubertooth-btle   -V
-ubertooth-dfu    -h      ubertooth-dfu    -V
-ubertooth-ego    -h      ubertooth-ego    -V
-ubertooth-afh    -h      ubertooth-afh    -V
-ubertooth-ducky  -h      ubertooth-ducky  -V
-ubertooth-scan   -h      ubertooth-scan   -V      # BlueZ builds
-ubertooth-follow -h      ubertooth-follow -V      # BlueZ builds
+ubertooth-util   -h
+ubertooth-debug  -h
+ubertooth-specan -h
+ubertooth-rx     -h
+ubertooth-tx     -h
+ubertooth-dump   -h
+ubertooth-btle   -h
+ubertooth-dfu    -h
+ubertooth-ego    -h
+ubertooth-afh    -h
+ubertooth-ducky  -h
+ubertooth-scan   -h          # BlueZ builds
+ubertooth-follow -h          # BlueZ builds
+ubertooth-util   -V
+ubertooth-debug  -V
+ubertooth-specan -V
+ubertooth-rx     -V
+ubertooth-tx     -V
+ubertooth-dump   -V
+ubertooth-btle   -V
+ubertooth-dfu    -V
+ubertooth-ego    -V
+ubertooth-afh    -V
+ubertooth-ducky  -V
+ubertooth-scan   -V          # BlueZ builds
+ubertooth-follow -V          # BlueZ builds
 ```
 
 **Expected outcome.** 26 cases on a Linux host, 22 on macOS: every `-h` exits
@@ -2032,8 +2047,12 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx     -r|-q|-d <case dir>/new.<ext> <
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump   -d <case dir>/new.dump <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-specan -d <case dir>/new.bin <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu    -s|-u <case dir>/<file> <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow -r|-q|-d <case dir>/new.<ext> <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-scan   stray        # BlueZ builds, no file
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow stray        # BlueZ builds, no file
+refusal.py probe <tool>                   # opens every case: can the switch be used
+refusal.py seed <case dir> <names>        # the files a case must find unchanged
+refusal.py files <case dir>               # the directory before the refusal
 refusal.py check <case dir> --absent <files> --kept <files>
 ```
 
@@ -2093,9 +2112,10 @@ that wrote it.
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
 **Commands.** No board. A command that is accepted and then stopped at the
-board lookup must create no file; a replay really writes one. `dfuimage.py`
-states the directory and makes the links and read-only directory the cases
-need, and `capturefile.py` reads what was kept:
+board lookup must create no file; a replay really writes one, from an input
+`rxreplay.py` builds. `dfuimage.py` states the directory and makes the links
+and read-only directory the cases need, and `capturefile.py` reads what was
+kept:
 
 ```text
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -r <case dir>/new.pcapng \
@@ -2105,10 +2125,14 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -c <case dir>/new-ppi.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump -d <case dir>/new.dump      # and a seeded file
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/no-record.bin -q <destination>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -q <case dir>/gone/x.pcap
+rxreplay.py fixture <case dir>/replay.bin --variant <full|empty> --base-time <epoch>
+rxreplay.py dump-check <case dir>/replay.dump <case dir>/replay.bin
 dfuimage.py state <case dir> --before <directory before> --allow <files>
 dfuimage.py symlink <case dir>/link.pcap --to target.pcap
+dfuimage.py not-root
 chmod 555|755 <case dir>/ro
-refusal.py seed|probe|check <case dir> ...
+refusal.py probe <tool>
+refusal.py seed <case dir> <names>
 capturefile.py --packets <case dir>/new.pcap
 ```
 
@@ -2175,16 +2199,18 @@ note is forbidden, so an accepted combination is visible.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
-**Commands.** No board, and `refusal.py` states the directory afterwards:
+**Commands.** No board. Every case opens with the probe, which reads the
+built libubertooth and runs no tool, and these create no files, so there is
+no directory to state afterwards:
 
 ```text
+refusal.py probe ubertooth-util
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -i -<mode>     # and -<mode> -i
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -i -z          # and -z-60, both orders
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -f             # and -f -i
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -N -i          # and -i -N
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -U all -i
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V             # the cleanup, needs no board
-refusal.py check <case dir> --absent --kept
 ```
 
 `-<mode>` is each of `-q -n -e -t -x -I`.
@@ -2228,10 +2254,11 @@ which the GUI ticks for a suite holding this test.
 
 **Commands.** No board, and a synthetic image rather than a firmware build
 (CI has no ARM toolchain). `dfuimage.py` makes each bad image from it and
-states the directory, and `refusal.py` confirms nothing was left behind:
+states the directory before and after, and `refusal.py probe` opens every
+case by reading whether the built libubertooth has the no-devices switch:
 
 ```text
-dfuimage.py synth <case dir>/synthetic.dfu
+dfuimage.py synth <case dir>/synthetic.bin <case dir>/synthetic.dfu
 dfuimage.py make <variant> <case dir>/synthetic.dfu <case dir>/<variant>.dfu
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -d <case dir>/<variant>.dfu -r
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -d <case dir>/synthetic.dfu -r   # reaches the lookup
@@ -2239,9 +2266,9 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.bin
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.dfu          # refused
 dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <reference> \
     --reference-name <name>
-dfuimage.py copy|state|symlink ...
+dfuimage.py copy|strip|same|regular|state|not-root ...
 chmod 555|755 <case dir>/ro
-refusal.py check <case dir> --absent <files> --kept <files>
+refusal.py probe ubertooth-dfu     # opens every case: can the switch be used
 ```
 
 `<variant>` is each image the check must refuse: a wrong CRC, a truncated
@@ -2749,11 +2776,12 @@ is in the `connection` suite and in `ble-comprehensive`, because there is one
 capture case either way. The Ubertooth needs an ordinary link. Writes DK
 firmware, so the run holds the host lock.
 
-**Commands.** The same pair and the same bring-up as the test above
-(`nrfdk.py identify|ensure|peripheral|central|status|idle`), with one capture
-across the whole window and `conncapture.py` reading it:
+**Commands.** The same pair and the same bring-up as the test above, with
+one capture across the whole window and `conncapture.py` reading it:
 
 ```text
+nrfdk.py identify|ensure|peripheral|central|status|idle --jlink <jlink serial> \
+    --alias <alias> ...
 ubertooth-btle -U <serial> -f -A37 -r <case dir>/capture-<n>.pcapng
 conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <address> \
     --connections 2 --min-packets-per-connection 3 ...
@@ -4127,7 +4155,8 @@ sees short captures should widen `BOARD_SETUP_S` rather than the duration.
 paths.
 
 **Theory of operation.** Not established. `Host CLI surface` covers `-h` and
-`-V` on every always-built tool, and `Help smoke` covers the single-tool case.
+`-V` on every tool the build installs, and `Help smoke` covers the
+single-tool case.
 
 **Hardware and arguments.** No board role. `hosts:` only.
 

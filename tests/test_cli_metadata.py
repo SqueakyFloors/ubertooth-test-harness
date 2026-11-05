@@ -139,8 +139,8 @@ class HostCliSurfaceTests(unittest.TestCase):
         self.assertEqual(4, summary.not_applicable_cases)
         results = finished(events)
         left_out = [e for e in events if e.event_type == "not_applicable"]
-        self.assertEqual(["ubertooth-scan help (BlueZ builds)",
-                          "ubertooth-follow help (BlueZ builds)",
+        self.assertEqual(["ubertooth-scan -h (BlueZ builds)",
+                          "ubertooth-follow -h (BlueZ builds)",
                           "ubertooth-scan -V (BlueZ builds)",
                           "ubertooth-follow -V (BlueZ builds)"],
                          [e.details["case_name"] for e in left_out])
@@ -157,7 +157,7 @@ class HostCliSurfaceTests(unittest.TestCase):
         self.assertEqual(("passed", 4, 0), (test.status, test.details["not_applicable_cases"],
                                             test.details["skipped_cases"]))
 
-    def test_a_linux_run_without_one_bluez_tool_leaves_out_only_that_case(self):
+    def test_a_linux_run_without_one_bluez_tool_leaves_out_only_its_cases(self):
         capabilities = HostCapabilities("Host_Linux", "linux", frozenset({"ubertooth-scan"}),
                                         basis="installed tools")
         summary, events = run_surface(SurfaceTools(missing=("ubertooth-follow",)), capabilities)

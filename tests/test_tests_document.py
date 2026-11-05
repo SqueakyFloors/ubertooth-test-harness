@@ -1,5 +1,5 @@
 """`docs/tests.md` against the catalog: one section per test, and every
-executable a test really runs named in its section.
+executable a test really runs named in that section's **Commands** block.
 
 No hardware, no network, nothing built: the document is read from the
 repository, and the commands are the ones the catalog compiles for the
@@ -8,23 +8,43 @@ is not a second catalog -- there is nothing here to keep in step with
 ``catalog.py`` -- it is the catalog asked what it would run and the document
 asked whether it says so (#347).
 
-What it cannot see: a few steps build their command from values an earlier
-step recorded, and a ``FlashCase`` is argv the flash runner assembles rather
-than a step. Those are skipped, and ``UNCOLLECTED`` names the tests they
-leave uncovered, so a test that stops being covered at all is a failure here
-rather than a silence.
+It is checked both ways round. Forward: every executable a test's cases run
+is named in its **Commands** block, or in the shared block that states the
+commands every transition case sends. Backward: every executable a
+**Commands** block names is one that test runs, so a command form nobody
+sends cannot sit there looking authoritative. Only the fenced blocks are
+read, never the prose around them: a tool mentioned in a sentence is a
+cross-reference, not a command this test sends.
+
+What it cannot see:
+
+- a ``FlashCase``, which is argv the flash runner assembles per write rather
+  than a step. ``UNCOLLECTED`` names the tests that leaves uncovered, so one
+  that stops being covered at all fails here rather than passing quietly;
+- a tool a driver finds for itself rather than taking on its command line
+  (``pytools.py`` runs ``ubertooth-specan-ui`` and ``btle-extcap.py``,
+  ``extcapcapture.py`` runs ``ubertooth-btle``, ``nrfdk.py`` runs
+  ``nrfutil``). ``BY_A_DRIVER`` lists those, so the backward check does not
+  call them invented;
+- a step whose command is built from a value an earlier step recorded, where
+  the stand-in context below cannot produce a usable value.
+
+A tool inside a shell string *is* seen: ``_words`` splits the argument of
+``sh -c``/``bash -c``, which is how ``Exclusive Ubertooth topology`` runs
+``ubertooth-btle -f``.
 """
 
 from pathlib import Path
 import re
+import shlex
 import tempfile
 import unittest
 
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.cases import CommandCase, FlashCase
 from ubertooth_harness.hostneeds import HOST_TOOLS
-from ubertooth_harness.plan import load_plan
-from ubertooth_harness.planner import PlanCompiler
+from ubertooth_harness.plan import PlanError, load_plan
+from ubertooth_harness.planner import PlanCompiler, PlanningError
 from ubertooth_harness.resources import FileResourceRegistry
 from ubertooth_harness.stateful import StateCase
 from ubertooth_harness import transitions
@@ -50,10 +70,28 @@ UNCOLLECTED = {
     # flash runner assembles per write rather than as steps (flash.py).
     "Flash reliability": "its case is a FlashCase, not argv",
 }
+# Programs a driver runs itself, so they are in no argv the catalog builds.
+# The forward check cannot ask for them and the backward check must not call
+# them invented.
+BY_A_DRIVER = frozenset({
+    "ubertooth-specan-ui",  # pytools.py specan-ui
+    "btle-extcap.py",       # pytools.py extcap, from the resolved commit
+    "ubertooth-btle",       # extcapcapture.py, and the btbr console's own
+    "ubertooth-btbr",       # btbrconsole.py
+    "nrfutil",              # nrfdk.py
+    "tshark",               # tsharkcapture.py
+    "lpc21isp",             # bootloader.py, over a programmer
+    "ubertooth-dfu",        # flash.py per write, and bootloader.py
+    "ubertooth-util",       # flash.py per write
+})
 # Shell and file utilities a case runs around the tool under test; naming
-# them in a section would say nothing about the fork's CLI.
+# them in a Commands block would say nothing about the fork's CLI.
 UTILITIES = frozenset({"env", "sh", "bash", "chmod", "ln", "mkdir", "python",
-                       "python3", "timeout"})
+                       "python3", "timeout", "date", "printf", "echo", "sleep",
+                       "tail", "exit", "tr", "cat"})
+# Words a Commands block writes that look like a program and are not: a
+# placeholder, and the two shell builtins the blocks quote.
+NOT_A_PROGRAM = re.compile(r"^<.*>$")
 
 
 def _registry(directory):
@@ -100,17 +138,45 @@ def _context():
     return Recorded()
 
 
+# The harness's own driver modules, by file name: a Commands block writes
+# one bare (`esp32peer.py stream ...`) and an argv carries its full path.
+# Read from the package, so a driver added later is recognized.
+HARNESS_MODULES = frozenset(
+    path.name for path in (REPOSITORY / "ubertooth_harness").glob("*.py")
+) | {"btle-extcap.py"}
+
+
 def program(token: str) -> str:
     """The program a command-line word names, or "" for anything else."""
     name = token.rsplit("/", 1)[-1]
+    if NOT_A_PROGRAM.match(name):
+        return ""
     if name.startswith("ubertooth-") and not name.endswith((".dfu", ".bin")):
         return name
-    if name in HOST_TOOLS or name == "lpc21isp":
+    if name in HOST_TOOLS or name in ("lpc21isp", "nrfutil"):
         return name
-    if name.endswith(".py") and ("/ubertooth_harness/" in token
-                                 or name == "btle-extcap.py"):
+    if name in HARNESS_MODULES:
         return name
     return ""
+
+
+def _words(argv) -> list[str]:
+    """Every word of a command, including the words inside a shell string.
+
+    ``sh -c '<script>'`` and ``bash -c '<script>'`` carry the tool they run
+    inside one argument, so the script is split too.
+    """
+    words = []
+    previous = ""
+    for word in argv:
+        words.append(word)
+        if previous == "-c" and word:
+            try:
+                words.extend(shlex.split(word))
+            except ValueError:
+                words.extend(word.split())
+        previous = word
+    return words
 
 
 def programs_by_test():
@@ -121,16 +187,18 @@ def programs_by_test():
         registry = _registry(directory)
         compiler = PlanCompiler(catalog, registry)
         invocations = []
+        skipped = []
         for path in sorted(PLANS.glob("*.yaml")):
             plan = load_plan(path, catalog)
             for suite in plan.suites:
                 try:
                     invocations.extend(compiler.compile_suite(plan, suite).invocations)
-                except Exception:  # noqa: BLE001 - the weak-link suites
-                    # A suite the example bench cannot compile (it carries no
-                    # attenuated board); its tests are in another plan's
-                    # suite, which is where they are collected from.
-                    continue
+                except (PlanningError, PlanError) as error:
+                    # A suite the example bench cannot compile: the weak-link
+                    # suites, which ask for an attenuated board that registry
+                    # carries commented out. Their tests are in another
+                    # plan's suite, which is where they are collected from.
+                    skipped.append((f"{path.name}:{suite}", str(error)))
     for invocation in invocations:
         definition = catalog.get(invocation.test_name)
         if not definition.implemented:
@@ -142,7 +210,7 @@ def programs_by_test():
         found = used.setdefault(invocation.test_name, set())
         for case in cases:
             for argv in _argvs(case):
-                found.update(filter(None, (program(word) for word in argv)))
+                found.update(filter(None, (program(w) for w in _words(argv))))
     # A test no committed plan names (`Host version` and `Help smoke`, whose
     # question every run asks in preflight instead) still has commands: ask
     # it for them with nothing but a host.
@@ -154,8 +222,8 @@ def programs_by_test():
         found = used.setdefault(name, set())
         for case in definition.command_cases(arguments, {}, {}):
             for argv in _argvs(case):
-                found.update(filter(None, (program(word) for word in argv)))
-    return {name: found - UTILITIES for name, found in used.items()}
+                found.update(filter(None, (program(w) for w in _words(argv))))
+    return {name: found - UTILITIES for name, found in used.items()}, skipped
 
 
 def _argvs(case):
@@ -175,20 +243,55 @@ def _argvs(case):
 
 
 def sections():
-    """Each `## ` section of the document, in order, with its body."""
-    found: dict[str, str] = {}
+    """Each `## ` section of the document, in order, with its body.
+
+    A duplicate heading is kept as its own entry, so the structural check
+    below sees it rather than one quietly replacing the other.
+    """
+    found: list[tuple[str, str]] = []
     name = None
     body: list[str] = []
     for line in DOCUMENT.read_text(encoding="utf-8").splitlines():
         if line.startswith("## "):
             if name is not None:
-                found[name] = "\n".join(body)
+                found.append((name, "\n".join(body)))
             name, body = line[3:].strip(), []
         elif name is not None:
             body.append(line)
     if name is not None:
-        found[name] = "\n".join(body)
+        found.append((name, "\n".join(body)))
     return found
+
+
+def fences(text: str) -> list[str]:
+    """The lines inside every fenced block of some text."""
+    lines, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            inside = not inside
+        elif inside:
+            lines.append(line)
+    return lines
+
+
+def commands_of(body: str) -> list[str]:
+    """The lines of every fenced block in the **Commands** field of a body."""
+    field = body.split("**Commands.**", 1)
+    if len(field) == 1:
+        return []
+    return fences(field[1].split("**Expected outcome.**", 1)[0])
+
+
+def programs_named(lines) -> set[str]:
+    """The programs the lines of a Commands block name."""
+    named = set()
+    for line in lines:
+        text = line.split("#", 1)[0]
+        for word in text.replace("|", " ").split():
+            name = program(word.strip(",;`"))
+            if name:
+                named.add(name)
+    return named - UTILITIES
 
 
 class DocumentStructureTests(unittest.TestCase):
@@ -196,14 +299,17 @@ class DocumentStructureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.catalog = builtin_catalog()
-        cls.sections = sections()
+        cls.order = sections()
+        cls.sections = dict(cls.order)
 
     def test_the_test_sections_are_the_catalog_names_in_catalog_order(self):
         # A test added without a section, a section left behind by a removed
-        # test, and a heading that drifted from its catalog name all fail
-        # here. The two leading sections explain the document; the last one
-        # records what is deliberately not tested.
-        headings = list(self.sections)
+        # test, a heading that drifted from its catalog name, and a heading
+        # written twice all fail here. The two leading sections explain the
+        # document; the last one records what is deliberately not tested.
+        headings = [name for name, _body in self.order]
+        self.assertEqual(sorted(set(headings)), sorted(headings),
+                         "a heading is written twice")
         self.assertEqual(["How to read a section", SHARED], headings[:2])
         self.assertEqual(OUT_OF_SCOPE, headings[-1])
         self.assertEqual(list(self.catalog.names), headings[2:-1])
@@ -228,19 +334,37 @@ class DocumentStructureTests(unittest.TestCase):
             if self.catalog.get(name).implemented:
                 continue
             with self.subTest(name):
-                commands = self.sections[name].split("**Commands.**", 1)[1]
-                commands = commands.split("**Expected outcome.**", 1)[0]
-                self.assertIn("None", commands)
+                field = self.sections[name].split("**Commands.**", 1)[1]
+                self.assertTrue(
+                    field.lstrip().startswith("None"),
+                    f"{name}: the Commands field must open with None",
+                )
 
 
 class DocumentedCommandTests(unittest.TestCase):
-    """Every executable a test runs is named where a reader looks for it."""
+    """The Commands blocks against the commands the catalog really builds."""
 
     @classmethod
     def setUpClass(cls):
         cls.catalog = builtin_catalog()
-        cls.sections = sections()
-        cls.used = programs_by_test()
+        cls.sections = dict(sections())
+        cls.used, cls.skipped = programs_by_test()
+        cls.named = {
+            name: programs_named(commands_of(body))
+            for name, body in cls.sections.items()
+        }
+
+    def test_only_the_weak_link_suites_are_left_out_of_the_comparison(self):
+        # Those ask for an attenuated board the example registry carries
+        # commented out. Any other planning failure would quietly shrink
+        # what is compared, so it is a failure here.
+        self.assertEqual(
+            ["ble.yaml:ble-weak-link", "classic.yaml:classic-weak-link",
+             "range.yaml:range-weak-link"],
+            sorted(suite for suite, _reason in self.skipped
+                   if not suite.startswith("weak-link.yaml:")),
+            [reason for _suite, reason in self.skipped],
+        )
 
     def test_every_implemented_test_has_commands_to_check(self):
         # Otherwise the check below passes by having nothing to compare: a
@@ -257,29 +381,57 @@ class DocumentedCommandTests(unittest.TestCase):
             name for name in UNCOLLECTED if not self.used.get(name)
         ))
 
-    def test_every_executable_a_test_runs_is_named_in_its_section(self):
-        shared = self.sections[SHARED]
+    def test_every_executable_a_test_runs_is_in_its_commands_block(self):
+        # The shared section has no **Commands** field of its own: its
+        # fenced blocks are the preflight reads and the commands every
+        # transition case sends, and only those blocks count here, never the
+        # prose around them.
+        shared = programs_named(fences(self.sections[SHARED]))
+        self.assertEqual({"ubertooth-util", "ubertooth-btle"}, shared)
         for name, used in sorted(self.used.items()):
-            body = self.sections[name]
             with self.subTest(name):
                 undocumented = sorted(
                     item for item in used
-                    if item not in body and item not in shared
+                    if item not in self.named[name] and item not in shared
                 )
                 self.assertEqual(
                     [], undocumented,
-                    f"{name} runs these and its section does not name them",
+                    f"{name} runs these and its Commands block does not name them",
                 )
 
-    def test_the_program_reader_takes_the_tool_out_of_a_wrapped_command(self):
-        # The check is only as good as this: a driver's own argv carries the
-        # tool it wraps, and an image path is not a program.
+    def test_every_executable_a_commands_block_names_is_one_that_test_runs(self):
+        # The other way round: a command form nobody sends must not sit in
+        # the field a reader trusts. A tool a driver finds for itself is in
+        # no argv the catalog builds, so those are allowed by name.
+        for name in self.catalog.names:
+            used = self.used.get(name, set())
+            with self.subTest(name):
+                invented = sorted(
+                    item for item in self.named[name]
+                    if item not in used and item not in BY_A_DRIVER
+                )
+                self.assertEqual(
+                    [], invented,
+                    f"{name}'s Commands block names these and it runs none of them",
+                )
+
+    def test_the_program_reader_finds_the_tool_a_command_runs(self):
+        # Including one inside a shell string, which is how `Exclusive
+        # Ubertooth topology` runs ubertooth-btle. An image path and a
+        # placeholder are not programs.
         self.assertEqual("ubertooth-rx", program("ubertooth-rx"))
         self.assertEqual("esp32peer.py", program("/x/ubertooth_harness/esp32peer.py"))
         self.assertEqual("tshark", program("tshark"))
         self.assertEqual("", program("/x/build/bluetooth_rxtx.dfu"))
         self.assertEqual("", program("-U"))
         self.assertEqual("", program("/usr/bin/env"))
+        self.assertEqual("", program("<serial>"))
+        self.assertEqual(
+            ["ubertooth-btle"],
+            [p for p in (program(w) for w in
+                         _words(("bash", "-c", "timeout 5 ubertooth-btle -f | tail")))
+             if p],
+        )
 
 
 if __name__ == "__main__":
