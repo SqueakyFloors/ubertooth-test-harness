@@ -251,13 +251,19 @@ def _build(
 def _finish_failed_run(
     publisher, output_dir: Path, reason: str, status: str = "failed"
 ) -> None:
-    """Close a run that stopped before its tests started, then write report.md."""
+    """Close a run that stopped before its tests started, then write report.md.
+
+    The console summary goes out here too, so a run that failed in its build,
+    its flash stage, or preflight still ends with the block that says which
+    commits and boards it was about (#342).
+    """
     try:
         publisher.emit(
             "run_finished", status, {"status": status, "failure_reason": reason}
         )
     finally:
         write_report(output_dir)
+        write_console_summary(output_dir)
 
 
 FORK_PIN = libbtbbpin.FORK_PIN

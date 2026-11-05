@@ -481,9 +481,13 @@ VERDICTS = {
 }
 
 
-def verdict(status: str) -> str:
-    """The word a status is stated as, for example 'passed' as ``PASS``."""
-    return VERDICTS.get(status, str(status).replace("_", " ").upper())
+def verdict(status) -> str:
+    """The word a status is stated as, for example 'passed' as ``PASS``.
+
+    Taken as text first: a record written by another version of the harness
+    may carry anything, and a display must not be what ends a run.
+    """
+    return VERDICTS.get(str(status), str(status).replace("_", " ").upper())
 
 
 # The stages a state step is recorded under: a case's own actions
@@ -511,19 +515,35 @@ STAGE_LABELS = {
 }
 
 
-def stage_label(stage: str) -> str:
+def stage_label(stage) -> str:
     """The plain label of one state step's stage."""
-    return STAGE_LABELS.get(stage, str(stage).replace("_", " ").upper())
+    return STAGE_LABELS.get(str(stage), str(stage).replace("_", " ").upper())
+
+
+def count_text(count, one: str, many: str) -> str:
+    """'1 skipped case' or '3 skipped cases', and nothing for a zero.
+
+    A count a record carries as something other than a whole number is left
+    out: True is not one skipped case.
+    """
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return ""
+    return f"{count} {one if count == 1 else many}"
 
 
 # How far the value lines below are indented under their step.
 VALUE_INDENT = "    "
 
 
-def _value_text(value) -> str:
-    """One value on one line: a line ending would break the alignment."""
+def inline(value) -> str:
+    """One value or reason on one line.
+
+    A line ending inside it would break the alignment of the lines below and
+    leave the rest of a reason looking like output nobody tagged, so every
+    kind of line ending becomes a space.
+    """
     text = str(value)
-    for ending in ("\r\n", "\n", "\r"):
+    for ending in ("\r\n", "\n", "\r", "\v", "\f", "\u2028", "\u2029"):
         text = text.replace(ending, " ")
     return text
 
@@ -537,11 +557,11 @@ def value_lines(expected, observed, *, indent: str = VALUE_INDENT) -> list[str]:
     """
     if expected is not None:
         return [
-            f"{indent}expected: {_value_text(expected)}",
-            f"{indent}observed: {_value_text(observed)}",
+            f"{indent}expected: {inline(expected)}",
+            f"{indent}observed: {inline(observed)}",
         ]
     if observed is not None:
-        return [f"{indent}recorded: {_value_text(observed)}"]
+        return [f"{indent}recorded: {inline(observed)}"]
     return []
 
 

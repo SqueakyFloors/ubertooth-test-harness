@@ -14,6 +14,8 @@ from ubertooth_harness.rawlog import (
     CASE_RULE,
     TEST_RULE,
     banner,
+    count_text,
+    inline,
     line_tag,
     stage_label,
     value_lines,
@@ -138,21 +140,22 @@ def _test_context(details: Mapping) -> str:
 
 
 def _test_counts(details: Mapping) -> str:
-    """What a finished test counted, leaving out every zero."""
+    """What a finished test counted, leaving out every zero.
+
+    ``watchdog_warnings`` counts warning lines rather than resets: a new
+    processor fault is one too (watchdog.py), so it is named as report.md
+    names it.
+    """
     counted = (
         ("failed_cases", "failed case", "failed cases"),
         ("failed_guard_checks", "failed state check", "failed state checks"),
         ("failed_watchdog_checks", "failed watchdog check", "failed watchdog checks"),
         ("skipped_cases", "skipped case", "skipped cases"),
         ("not_applicable_cases", "case not applicable", "cases not applicable"),
-        ("watchdog_warnings", "board self-reset", "board self-resets"),
+        ("watchdog_warnings", "watchdog warning", "watchdog warnings"),
     )
-    parts = []
-    for key, one, many in counted:
-        count = details.get(key)
-        if isinstance(count, int) and count > 0:
-            parts.append(f"{count} {one if count == 1 else many}")
-    return ", ".join(parts)
+    counts = (count_text(details.get(key), one, many) for key, one, many in counted)
+    return ", ".join(count for count in counts if count)
 
 
 class TerminalEventSink:
@@ -237,12 +240,12 @@ class TerminalEventSink:
             if context:
                 self.stream.write(f"[M] {context}\n")
         elif event.event_type == "test_finished":
-            name = str(details.get("test_name", ""))
+            name = inline(details.get("test_name") or "")
             line = f"[{verdict(event.status)}] TEST {name}"
             counts = _test_counts(details)
             if counts:
                 line += f" ({counts})"
-            reason = str(details.get("reason", ""))
+            reason = inline(details.get("reason") or "")
             if event.status != "passed" and reason:
                 # The reason opens with the test's own name, which this line
                 # has already said.
@@ -258,27 +261,28 @@ class TerminalEventSink:
             else:
                 self.stream.write(f"\n[{phase}] {name}\n")
         elif event.event_type == "check_finished":
-            name = str(details.get("check_name", details.get("case_name", "check")))
-            reason = str(details.get("reason", ""))
+            name = inline(
+                details.get("check_name") or details.get("case_name") or "check"
+            )
             line = f"[{verdict(event.status)}] {name}"
+            reason = inline(details.get("reason") or "")
             if event.status != "passed" and reason:
                 # A case's reason opens with the case's own name, so it is
                 # said once: the verdict, then why.
-                line = (
-                    f"[{verdict(event.status)}] {reason}"
-                    if reason.startswith(f"{name}: ") else f"{line}: {reason}"
-                )
+                line += f": {reason.removeprefix(f'{name}: ')}"
             self.stream.write(line + "\n")
         elif event.event_type == "step_finished":
+            name = inline(details.get("step_name") or "step")
             line = (
-                f"[{stage_label(str(details.get('stage', 'step')))} "
-                f"{verdict(event.status)}] "
+                f"[{stage_label(details.get('stage', 'step'))} "
+                f"{verdict(event.status)}] {name}"
             )
-            line += str(details.get("step_name", "step"))
             if details.get("attempt"):
                 line += f" (attempt {details['attempt']})"
-            if details.get("reason"):
-                line += f": {details['reason']}"
+            reason = inline(details.get("reason") or "")
+            if reason:
+                # Said once here too: a step's reason opens with its name.
+                line += f": {reason.removeprefix(f'{name}: ')}"
             self.stream.write(
                 "\n".join(
                     [line, *value_lines(details.get("expected"), details.get("observed"))]

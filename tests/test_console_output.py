@@ -20,6 +20,7 @@ from unittest import mock
 from ubertooth_harness import cli, rawlog, report
 from ubertooth_harness.events import RunEvent, TerminalEventSink
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness.flash import HarnessError
 from ubertooth_harness.rawlog import (
     RESULT_TAG,
     STAGE_BASELINE,
@@ -34,6 +35,9 @@ from tests.test_transitions import FakeUbertooth, patch_host_api
 
 def setUpModule():
     patch_host_api()
+
+
+SKIPPED = ("skipped case", "skipped cases")
 
 
 def event(sequence, kind, status="running", **details):
@@ -94,6 +98,21 @@ class SharedWordsTests(unittest.TestCase):
         # Runs recorded before the two reads were named apart still read as
         # what they were: a check of a board's state.
         self.assertEqual("STATE", rawlog.stage_label("guard"))
+
+    def test_a_count_is_written_with_its_own_plural_and_a_zero_is_left_out(self):
+        self.assertEqual("1 skipped case", rawlog.count_text(1, *SKIPPED))
+        self.assertEqual("3 skipped cases", rawlog.count_text(3, *SKIPPED))
+        for nothing in (0, -1, None, "2", 2.0, True, False):
+            # True is not one skipped case, and neither is a count a record
+            # carries as something other than a whole number.
+            self.assertEqual("", rawlog.count_text(nothing, *SKIPPED), nothing)
+
+    def test_a_value_is_put_on_one_line_whatever_break_it_carries(self):
+        for break_character in ("\n", "\r\n", "\r", "\v", "\f", "\u2028"):
+            self.assertEqual(
+                "one two", rawlog.inline(f"one{break_character}two"),
+                repr(break_character),
+            )
 
     def test_expected_and_observed_are_separate_aligned_lines(self):
         self.assertEqual(
@@ -192,8 +211,7 @@ class LiveStreamTests(unittest.TestCase):
             step(STAGE_BASELINE, "passed", observed="2470"),
         )
         self.assertEqual(
-            "[STATE FAIL] guard Ubertooth 1 channel unchanged: "
-            "guard Ubertooth 1 channel unchanged: observed 2441\n"
+            "[STATE FAIL] guard Ubertooth 1 channel unchanged: observed 2441\n"
             "    expected: 2470\n"
             "    observed: 2441\n",
             rendered(event(
@@ -212,6 +230,44 @@ class LiveStreamTests(unittest.TestCase):
         )
         # A step the harness ran again says which try this was.
         self.assertIn("(attempt 2)", step(STAGE_TRANSITION, "passed", attempt=2))
+
+    def test_a_name_in_a_reason_is_said_once_and_a_reason_stays_one_line(self):
+        # Every reason a case, step, or test records opens with its own name
+        # (stateful.py, sequencer.py), which the verdict line has said.
+        text = rendered(event(
+            1, "step_finished", "failed", stage=STAGE_TRANSITION,
+            step_name="Verify channel after set",
+            reason="Verify channel after set: expected channel=2426,\nobserved 2441",
+            expected="2426", observed="2441",
+        ))
+        self.assertEqual(
+            "[STEP FAIL] Verify channel after set: expected channel=2426, "
+            "observed 2441\n"
+            "    expected: 2426\n"
+            "    observed: 2441\n",
+            text,
+        )
+        # A reason that names something else is kept whole.
+        self.assertIn(
+            "[FAIL] Guard Ubertooths baseline: guard Ubertooth 1 squelch was "
+            "not reported\n",
+            rendered(event(1, "check_finished", "failed",
+                           case_name="Guard Ubertooths baseline",
+                           reason="guard Ubertooth 1 squelch was not reported")),
+        )
+
+    def test_a_record_from_another_version_cannot_end_the_run_from_here(self):
+        # A live display failure must never interrupt hardware work, and
+        # every sink failure reaches the run (CompositeEventSink), so a
+        # status or a count this code did not expect is still only text.
+        text = rendered(
+            event(1, "step_finished", "wedged", stage=7, step_name=None,
+                  reason=None, expected=None, observed=0),
+            event(2, "test_finished", "failed", test_name="Raw receive",
+                  failed_cases=True, skipped_cases="2", reason=None),
+        )
+        self.assertIn("[7 WEDGED] step\n    recorded: 0\n", text)
+        self.assertIn("[FAIL] TEST Raw receive\n", text)
 
     def test_what_a_host_or_a_bench_cannot_run_states_that_as_a_verdict(self):
         self.assertIn("[N/A] Host CLI surface / follow -h:", rendered(event(
@@ -345,7 +401,7 @@ class ConsoleSummaryTests(unittest.TestCase):
         text = self.summary()
         self.assertIn("preflight          2/2 checks passed", text)
         self.assertIn("tests              1/1 passed", text)
-        self.assertIn("also               1 skipped cases", text)
+        self.assertIn("also               1 skipped case", text)
         self.assertIn("report             runs/demo/report.md", text)
         self.assertTrue(text.rstrip().endswith("=" * rawlog.BANNER_WIDTH), text)
         self.assertIn("VERDICT: PASS", text)
@@ -361,7 +417,7 @@ class ConsoleSummaryTests(unittest.TestCase):
         text = self.summary(events)
         self.assertIn("VERDICT: FAIL", text)
         self.assertIn("tests              0/1 passed", text)
-        self.assertIn("1 tests blocked", text)
+        self.assertIn("also               1 skipped case, 1 test blocked", text)
         self.assertIn("reason             BLE settings: the access address "
                       "read back 8e89bed6", text)
 
@@ -375,6 +431,46 @@ class ConsoleSummaryTests(unittest.TestCase):
         text = report.console_summary(events)
         self.assertIn(f"Ubertooth          HEAD = {'c' * 40}", text)
         self.assertIn("VERDICT: INCOMPLETE (NO RUN FINISHED RECORD)", text)
+
+    def test_a_long_alias_does_not_cost_the_block_its_alignment(self):
+        events = summary_events()
+        manifest = events[1]["details"]["manifest"]
+        manifest["invocations"][0]["resources"] = {"Ubertooth": "UT_Bench_Spare0"}
+        for item in events:
+            if item["details"].get("resource") == "UT_0":
+                item["details"]["resource"] = "UT_Bench_Spare0"
+        rows = [
+            line for line in self.summary(events).splitlines()
+            if line.startswith("  ")
+        ]
+        self.assertTrue(any("device UT_Bench_Spare0" in line for line in rows))
+        # Every row's value starts in the same column: one past the longest
+        # label this run has.
+        column = len("  device UT_Bench_Spare0 ")
+        for line in rows:
+            self.assertEqual(" ", line[column - 1], line)
+            self.assertNotEqual(" ", line[column], line)
+
+    def test_a_reason_that_carries_a_newline_stays_on_its_own_row(self):
+        events = summary_events()
+        events[-1]["status"] = "failed"
+        events[-1]["details"].update(
+            status="failed", passed=False,
+            failure_reason="BLE settings: output was\n  Access address: 8e89bed6",
+        )
+        text = self.summary(events)
+        self.assertIn("  reason             BLE settings: output was   "
+                      "Access address: 8e89bed6\n", text)
+
+    def test_a_record_with_no_plan_or_host_leaves_those_rows_out(self):
+        # A failed `build` command records a run of its own, with no plan and
+        # no host: a row saying " / " would say nothing.
+        events = summary_events()[:1]
+        events[0]["details"] = {"sources": []}
+        text = self.summary(events)
+        self.assertNotIn("plan / suite", text)
+        self.assertNotIn("host", text)
+        self.assertIn("VERDICT:", text)
 
     def test_writing_it_never_raises_and_never_touches_stdout(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -554,6 +650,52 @@ class WholeRunTests(unittest.TestCase):
                 self.assertIn(line, text)
             self.assertIn(f"{RESULT_TAG} ubertooth-util exit 0", text)
             self.assertNotIn("[R] ", text)
+            # The transcript says the same phase label and verdict the live
+            # stream said, so the two read as one vocabulary.
+            self.assertIn("[S] BASELINE PASS: guard Ubertooth 1 firmware", text)
+            self.assertIn("[S] STATE PASS: guard Ubertooth 1 firmware unchanged",
+                          text)
+            self.assertIn("[S] CLEANUP PASS: ", text)
+            self.assertIn("[S] STEP PASS: ", text)
+            self.assertNotIn("[S] transition passed", text)
+
+    def test_a_run_that_stops_before_its_tests_still_closes_with_the_block(self):
+        # A build, flash, or bootloader failure ends the run before the
+        # sequencer: the block still has to say which commits it was about.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _short = source_repo(root)
+            (root / "hardware.yaml").write_text(hardware((A, B)))
+            (root / "plan.yaml").write_text(
+                step_plan("Radio setting transitions",
+                          extra="        coverage: smoke\n")
+            )
+            live, out = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.object(cli, "_detected_platform", return_value="linux"),
+                mock.patch.object(cli, "_prepare_run",
+                                  side_effect=HarnessError("the build failed")),
+                redirect_stderr(live),
+                redirect_stdout(out),
+            ):
+                code = cli.main([
+                    "run-suite", "--plan", str(root / "plan.yaml"),
+                    "--suite", "fast", "--hardware", str(root / "hardware.yaml"),
+                    "--host", "Host_Linux", "--ubertooth-source", str(source),
+                    "--ubertooth-ref", "HEAD", "--libbtbb-source", str(source),
+                    "--libbtbb-ref", "HEAD", "--build",
+                    "--run-id", "failed-build", "--output", str(root / "runs"),
+                ])
+
+            printed = live.getvalue()
+            self.assertEqual(2, code)
+            self.assertIn("VERDICT: FAIL", printed)
+            self.assertIn("reason             the build failed", printed)
+            self.assertIn("Ubertooth          HEAD = ", printed)
+            self.assertIn(str(root / "runs" / "failed-build" / "report.md"),
+                          printed)
+            # One block, not two: the run did not reach the sequencer.
+            self.assertEqual(1, printed.count("RUN SUMMARY"))
 
 
 if __name__ == "__main__":  # pragma: no cover - renders the sample by hand

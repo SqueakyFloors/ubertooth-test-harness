@@ -37,8 +37,11 @@ from ubertooth_harness.rawlog import (
     TAGS,
     Chunk,
     CommandCapture,
+    count_text,
     format_command_record,
+    inline,
     line_shape,
+    stage_label,
     verdict,
 )
 from ubertooth_harness.rf import describe as describe_placement
@@ -1506,7 +1509,12 @@ def _transcript(run: _Run) -> list[str]:
             )
             line(event, f"[M] watchdog {status}: self-resets by board: {counts}")
         elif kind == "step_finished":
-            text = f"[S] {details.get('stage', 'step')} {status}: {details.get('step_name', '')}"
+            # The same phase label and verdict the live stream says, so a
+            # reader moving between the two reads one vocabulary (#342).
+            text = (
+                f"[S] {stage_label(details.get('stage', 'step'))} "
+                f"{verdict(status)}: {details.get('step_name', '')}"
+            )
             if details.get("attempt"):
                 text += f" (attempt {details['attempt']})"
             if details.get("expected") is not None:
@@ -1998,8 +2006,13 @@ _MARKUP = re.compile(r"\*\*|`")
 
 
 def _plain(text: str) -> str:
-    """One of the report's cells as plain terminal text."""
-    return _one_line(_MARKUP.sub("", str(text)))
+    """One row of the console summary: no markup, and one line.
+
+    A reason comes from a run record and may carry anything, including a
+    newline; one would leave the rest of it looking like output nobody
+    tagged, under a label that is no longer there.
+    """
+    return inline(_one_line(_MARKUP.sub("", str(text))))
 
 
 # The line every host tool prints its own and its libbtbb's version and
@@ -2084,7 +2097,10 @@ def _summary_rows(run: _Run) -> list[tuple[str, str]]:
         ))
     plan = manifest.get("plan_name") or started.get("plan_name", "")
     suite = manifest.get("suite") or started.get("suite", "")
-    rows.append(("plan / suite", f"{plan} / {suite}"))
+    if plan or suite:
+        # A failed `build` command has no plan: its record is a run of its
+        # own, and a row saying " / " would say nothing.
+        rows.append(("plan / suite", f"{plan} / {suite}"))
     environment = manifest.get("environment", {})
     os_info = environment.get("os", {})
     host = manifest.get("host") or started.get("host", "")
@@ -2096,7 +2112,8 @@ def _summary_rows(run: _Run) -> list[tuple[str, str]]:
             os_info.get("architecture"),
         ) if item
     )
-    rows.append(("host", f"{host} ({platform})" if platform else host))
+    if host or platform:
+        rows.append(("host", f"{host} ({platform})" if platform else host))
     for source in manifest.get("sources") or started.get("sources", []):
         # The name the commit was chosen by, then the commit itself in full:
         # a tailed run has to identify exactly what was tested.
@@ -2137,15 +2154,15 @@ def _summary_rows(run: _Run) -> list[tuple[str, str]]:
             f"{summary.get('requested_tests', 0)} passed",
         ))
         counted = (
-            ("skipped_cases", "skipped cases"),
-            ("not_applicable_cases", "cases not applicable"),
-            ("not_applicable_tests", "tests not applicable"),
-            ("blocked_tests", "tests blocked"),
-            ("watchdog_resets", "board self-resets"),
+            ("skipped_cases", "skipped case", "skipped cases"),
+            ("not_applicable_cases", "case not applicable", "cases not applicable"),
+            ("not_applicable_tests", "test not applicable", "tests not applicable"),
+            ("blocked_tests", "test blocked", "tests blocked"),
+            ("watchdog_resets", "board self-reset", "board self-resets"),
         )
-        also = [
-            f"{summary[key]} {name}" for key, name in counted if summary.get(key)
-        ]
+        also = (count_text(summary.get(key), one, many)
+                for key, one, many in counted)
+        also = [count for count in also if count]
         if also:
             rows.append(("also", ", ".join(also)))
         if summary.get("failure_reason"):
@@ -2167,8 +2184,11 @@ def console_summary(events: Sequence[Mapping], *, report: Path | str | None = No
     rows = _summary_rows(run)
     if report is not None:
         rows.append(("report", str(report)))
+    # Wide enough for the longest label this run has, so a long device alias
+    # does not cost the block the alignment it is read by.
+    width = max([_SUMMARY_LABEL, *(len(label) for label, _value in rows)])
     lines = [_SUMMARY_RULE, "RUN SUMMARY", _SUMMARY_RULE]
-    lines.extend(f"  {label:<{_SUMMARY_LABEL}} {value}" for label, value in rows)
+    lines.extend(f"  {label:<{width}} {value}" for label, value in rows)
     lines.extend([_SUMMARY_RULE, f"VERDICT: {verdict(run.status)}", _SUMMARY_RULE])
     return "\n".join(lines) + "\n"
 

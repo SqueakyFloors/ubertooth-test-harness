@@ -1219,7 +1219,8 @@ its expected and observed values, under stage `baseline` for the first read
 of a board and `state` for every later check of it, and each command is
 recorded like any other. A later check's step name says it found the value
 unchanged, so neither the record nor the terminal needs the stage read to be
-understood (see [Reading a run as it goes](#reading-a-run-as-it-goes)). A guard that differs is never restored: the failure
+understood (see [Reading a run as it goes](#reading-a-run-as-it-goes)).
+A guard that differs is never restored: the failure
 reason names it (role, alias, and serial) so the operator can check and
 restore it by hand. `test_finished` counts failed guard checks in
 `failed_guard_checks`, not in `failed_cases`; the Results table shows them
@@ -2567,10 +2568,11 @@ page when the GUI opens one (`GET /api/runs/{run_id}/file` below).
 ### Reading a run as it goes
 
 The live stream on stderr is written for somebody watching with `tail -F`, so
-what a reader looks for is never a tag among the output ([#342](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/342)). Each test opens
-with a banner, each of its cases with a lighter one inside it, a verdict is
-stated in words of its own, and each state step says which phase it belongs
-to and lines its values up:
+what a reader looks for is never a tag among the output
+([#342](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/342)).
+Each test opens with a banner, each of its cases with a lighter one inside it,
+a verdict is stated in words of its own, and each state step says which phase
+it belongs to and lines its values up:
 
 ```text
 ########################################################################
@@ -2606,9 +2608,11 @@ CASE: Guard Ubertooths baseline
   the labels of the stage each step is recorded under, so the record and the
   terminal say the same thing.
 - A verdict is `PASS`, `FAIL`, `SKIP`, `CANCELED`, `N/A` (the host or the
-  bench cannot run it, see [Host requirements](#host-requirements)) or
-  `BLOCKED` ([Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
-  A failed case or test says why on the same line; the whole reason is in its
+  bench cannot run it, see [Host requirements](#host-requirements)), or
+  `BLOCKED` (see [Hardware a step is
+  about](#hardware-a-step-is-about-blocked-not-left-out)). A failed case,
+  step, or test says why on the same line, once, since the recorded reason
+  opens with the name that line has already said; the whole reason is in its
   own record either way.
 - `[X]` stays the execution result and never a verdict, and every line of
   output a command printed is shown as it arrives: the captures the fast plan
@@ -2636,7 +2640,7 @@ RUN SUMMARY
   device UT_0        Ubertooth, serial aaaa...aaaa: firmware git-9903b42 (verified)
   preflight          6/6 checks passed
   tests              12/12 passed
-  also               1 skipped cases
+  also               1 skipped case
   report             runs/20261105T091233Z-abcdef123456/report.md
 ========================================================================
 VERDICT: PASS
@@ -2646,8 +2650,14 @@ VERDICT: PASS
 It is compiled from the run's own records, the ones `report.md` is compiled
 from, so the two cannot disagree, and it goes to stderr with the rest of the
 live stream: stdout still holds the summary JSON alone, so a caller parsing
-that is unaffected. A run that failed before its manifest still names its
-sources and its verdict.
+that is unaffected. A run that stopped before its tests ran gets the same
+block, from whatever it had recorded by then: a run that failed in its build
+still names its sources and its verdict.
+
+`report.md`'s transcript says the same words on its own `[S]` line
+(`[S] STATE FAIL: guard Ubertooth 1 channel unchanged (expected 2441,
+observed 2426)`), where one record is one timestamped line, so a reader
+moving between the live stream and the report reads one vocabulary.
 
 ### Checks read the output files
 
