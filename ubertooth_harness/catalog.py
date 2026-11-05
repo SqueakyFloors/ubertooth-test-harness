@@ -1085,13 +1085,17 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # figures at fork b2cd6c68, the work #332 added at 80123099): the option
     # values, two firmware writes of about 4 s, the version reads, the peer
     # reset, and a console session whose radio checks end as soon as their
-    # answer arrives. The session also transmits the chosen packet types on
+    # answer arrives. The sessions themselves were 27 s and 89 s, and what
+    # varies between runs is how long the inquiry and each page train take:
+    # 2.1 to 6.4 s for the inquiry and 0.3 to 17.4 s for a page, so there is
+    # room above the measurement here rather than a figure a slow page would
+    # overrun. The session also transmits the chosen packet types on
     # the connection, pages the peer again, and runs the two scan modes.
     # Comprehensive adds five more transmit runs, another page, and the page
     # nothing answers, which costs the firmware's whole 45 s page attempt.
     "Classic btbr console": _profiles(
-        Estimate(0, per_count=("sessions", 85.0)),
-        Estimate(0, per_count=("sessions", 150.0)),
+        Estimate(0, per_count=("sessions", 80.0)),
+        Estimate(0, per_count=("sessions", 140.0)),
     ),
     # ESTIMATE_PENDING_HW
     # Each case brings the pair up, sets the channel map, captures for the

@@ -2712,10 +2712,17 @@ and not named.
 Measured on the lab bench at fork `b2cd6c68`: each firmware write took 4 s,
 the prompt came up in about 2 s, an inquiry heard the peer in about 2 s, a page
 connected in about 7 s, and a page nothing answers reported its timeout after
-the firmware's whole attempt of about 45 s. The work added for
+the firmware's whole attempt of about 45 s.
+
+The work added for
 [#332](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/332) was
-measured on the same bench at fork `80123099`; the catalog estimate is 85 s per
-session for smoke and 150 s for comprehensive.
+measured on the same bench at fork `80123099`: the option-value step 0.5 s,
+each firmware write 3.5 to 4.1 s, the peer reset 1.7 s, the whole smoke
+session 27.0 s and the whole comprehensive session 88.6 s, every check passing
+in both. What varies between runs is the radio: the inquiry heard the peer in
+2.1 to 6.4 s and a page connected in 0.3 to 17.4 s, so the catalog estimate
+leaves room above the measurement — 80 s per session for smoke and 140 s for
+comprehensive.
 
 **Known limits.** A pass says the image runs, the command line refuses what it
 should, the prompt answers, the board can run an inquiry, hold a connection

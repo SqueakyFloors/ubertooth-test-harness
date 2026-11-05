@@ -108,7 +108,7 @@ suites:
   # The alternate firmware image, end to end. It writes the board's firmware,
   # so it is the only test in this suite: a test after it would run on an
   # image this one put there, which mandatory preflight refuses. One
-  # flash-and-session cycle, about 85 s, and the cleanup always writes
+  # flash-and-session cycle, about 80 s, and the cleanup always writes
   # `bluetooth_rxtx` back. The session holds everything one flash can pay
   # for: the refusals, the inquiry, the page, the chosen packet types on that
   # connection, the page again, and the two scan modes (#332).
@@ -137,7 +137,7 @@ suites:
 
   # Comprehensive adds five more transmit runs, another page, and the page
   # nothing answers, which costs the firmware's whole 45 s page attempt:
-  # about 150 s in all.
+  # about 140 s in all.
   btbr-comprehensive:
     - Classic btbr console:
         hosts: [Host_Linux]
