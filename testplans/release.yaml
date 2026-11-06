@@ -149,7 +149,7 @@ suites:
     # or run a suite that does not hold it.
     #
     # Smoke, two captures of two minutes: 520.0 s, taking the release
-    # estimate from 654.5 s to 1174.5 s (about 20 min), inside the 30-minute
+    # estimate from 664.9 s to 1184.9 s (about 20 min), inside the 30-minute
     # target. The comprehensive profile's third case (`-t`, the detection
     # path) stays in the `classic-comprehensive` suite, which a release runs
     # alongside this plan.

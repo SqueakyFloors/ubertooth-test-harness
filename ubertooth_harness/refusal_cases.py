@@ -47,6 +47,41 @@ used, including
 -s <file.bin> -d <bad image>: since fork f2e06fa (#286) the files that are
 only read are checked first, so the refused image neither creates nor
 replaces <file>.dfu (ubertooth-dfu.md).
+
+ubertooth-btle's replay (fork 04dbe53c, fork #1129) decides four things of
+its own while the command line is read, each before a board is asked for and
+before any file is opened, so they belong here (ubertooth-btle.md, REPLAYING
+A DUMP):
+
+  * -R needs the major mode its dump was recorded with, because a record does
+    not say which mode wrote it and -f/-n and -p stamp their packets from
+    different clocks, so the times a replay reconstructs would be wrong past
+    the first wrap with nothing in the file to say so;
+  * every option that drives, names, or tunes a board (-k, -t, -A, -U, and
+    the interference letters -i, -I, -j, -J) is refused beside -R rather than
+    accepted and dropped without a word;
+  * -A with -p is refused for not going with promiscuous mode at all, which
+    is decided before the replay's own refusals, so the message is about the
+    mode rather than about there being no board to tune;
+  * a -d that would write over the dump -R is replaying is refused with the
+    dump left as it was, since a destination is opened for writing and would
+    empty the file before a record of it was read. It is the file that is
+    compared and not the name. One capture may have standard output, so -q or
+    -c and -d both asking for it is refused as well, as is either pair naming
+    one file.
+
+The link, descriptor and redirected-standard-output forms of that last
+comparison are covered on ubertooth-rx in Raw receive replay: both tools hand
+their names to the same opt_parse.c helpers, so what is checked here is
+ubertooth-btle's own call and its own option letters.
+
+ubertooth-dfu -u writes its read-back through a temporary file renamed over
+the name given, and rewinds to block zero to retry, neither of which a pipe
+can do, so a value naming standard output is refused as the value is read --
+before -h, and before any board (ubertooth-dfu.md, READING FLASH BACK). The
+lone "-" and the names of descriptor 1 are refused; only the lone "-" is the
+stream, so a path whose last component is "-" names a file of that name, and
+that command line is accepted and goes on to look for a board.
 """
 
 from __future__ import annotations
@@ -159,17 +194,40 @@ def _seed(names) -> Step:
     )
 
 
-def _check(absent, kept, step_id="check") -> Step:
+def _link(*, symlinks=(), hardlinks=()) -> Step:
+    """Give a seeded file more names, for the cases about one file under two."""
+    names = [f"{name} -> {target}" for name, target in tuple(symlinks) + tuple(hardlinks)]
+    arguments = [word for name, target in symlinks
+                 for word in ("--symlink", f"{name}={target}")]
+    arguments += [word for name, target in hardlinks
+                  for word in ("--hardlink", f"{name}={target}")]
+    return Step(
+        "link", "Link " + ", ".join(names),
+        lambda context: (sys.executable, _HELPER, "link", _dir(context), *arguments),
+        output_patterns=(r"Linked: \d+ symbolic, \d+ hard, ",),
+    )
+
+
+def _check(absent, kept, step_id="check", *, symlinks=(), hardlinks=()) -> Step:
     what = []
     if absent:
         what.append(", ".join(absent) + " absent")
     if kept:
         what.append(", ".join(kept) + " unchanged")
+    links = tuple(symlinks) + tuple(hardlinks)
+    if links:
+        what.append(", ".join(f"{name} still linked to {target}"
+                              for name, target in links))
+    arguments = ["--absent", *absent, "--kept", *kept]
+    arguments += [word for name, target in symlinks
+                  for word in ("--symlink", f"{name}={target}")]
+    arguments += [word for name, target in hardlinks
+                  for word in ("--hardlink", f"{name}={target}")]
     return Step(
         step_id, "Check " + "; ".join(what) + "; nothing else in the directory"
         if what else "Check that nothing is in the directory",
         lambda context: (sys.executable, _HELPER, "check", _dir(context),
-                         "--absent", *absent, "--kept", *kept),
+                         *arguments),
         output_patterns=(r"Refusal check: ",),
     )
 
@@ -320,6 +378,236 @@ def _repeat_and_extra_cases():
             "file created",
         ))
     return cases
+
+
+# ubertooth-btle's replay input, seeded like any other file here, so every
+# case can require it byte for byte afterwards: a command line refused for
+# naming it as a destination must not have opened it for writing. A seeded
+# file is a line of text rather than records, which the replay cases that
+# reach a decode report as a partial record; none of these reaches one.
+_DUMP = "dump.bin"
+_NEEDS_MODE = (
+    r"(?m)^error: -R needs -f, -n or -p: a dump does not record which mode "
+    r"wrote it, and the modes stamp their packets with different clocks$"
+)
+# The channel refusal that is decided before the replay's own, so that
+# "-p -R <dump> -A 38" is about -p and -A rather than about a replay having no
+# board to tune.
+_CHANNEL_NOT_WITH_PROMISC = (
+    r"(?m)^error: -A does not go with -p: promiscuous mode listens on the "
+    r"channel the board is holding$"
+)
+
+
+def _board_option_with_replay(option: str) -> str:
+    """What btle says about an option that drives a board, beside -R."""
+    return (rf"(?m)^error: -{re.escape(option)} cannot be combined with -R; a "
+            r"replay reads a saved dump rather than driving a board$")
+
+
+def _dump_over_input(shown: str) -> str:
+    """What btle says when -d would write over the dump -R is replaying.
+
+    The name is reported as the user wrote it, which here is a path in the
+    case directory, so ``shown`` is the tail of it as a pattern.
+    """
+    return (r"(?m)^error: -d would write over the dump -R is replaying "
+            rf"\(\S*{shown}\)$")
+
+
+def _two_captures_on_stdout(option: str) -> str:
+    """-q or -c and -d both asking for the one stream standard output is."""
+    return (rf"(?m)^error: -{option} and -d cannot both write to standard "
+            r"output$")
+
+
+def _replay_case(case_id, name, words, patterns, expected, *,
+                 absent=(), forbidden=(NO_BOARD_NOTE,),
+                 seeded=(_DUMP,), kept=(_DUMP,)) -> StateCase:
+    """One refused ubertooth-btle replay command line, over a seeded dump."""
+    steps = [probe_step("ubertooth-btle")]
+    if seeded:
+        steps.append(_seed(seeded))
+    steps += [
+        tool_step("refuse", "ubertooth-btle", words, patterns=patterns,
+                  forbidden=forbidden),
+        _check(absent, kept),
+    ]
+    return _case(case_id, name, steps, expected)
+
+
+def _replay_cases(coverage: str):
+    """btle -R and -d: the decisions made before a board or a file is opened."""
+    cases = [
+        # A replay with no major mode: refused before the dump is opened.
+        _replay_case(
+            "btle-replay-no-mode", "btle -R <dump> with no -f, -n or -p",
+            ("-R", ("file", _DUMP)), (_NEEDS_MODE,),
+            "refused (exit 1) before any board is asked for; the dump "
+            "unchanged; nothing created"),
+        # The dump -R is replaying, named as the destination of -d: opening it
+        # for writing would empty it before a record was read.
+        _replay_case(
+            "btle-replay-dump-over-input", "btle -f -R <dump> -d <the same dump>",
+            ("-f", "-R", ("file", _DUMP), "-d", ("file", _DUMP)),
+            (_dump_over_input(re.escape(_DUMP)),),
+            "refused (exit 1) naming the dump, before it is opened for "
+            "writing; the dump unchanged byte for byte; nothing created"),
+        # Standard output carries one stream, so one capture can have it.
+        _replay_case(
+            "btle-q-d-stdout", "btle -n -q - -d -: one stream, one capture",
+            ("-n", "-q", "-", "-d", "-"), (_two_captures_on_stdout("q"),),
+            "refused (exit 1) before any board is asked for; nothing created",
+            seeded=(), kept=()),
+    ]
+    if coverage != "comprehensive":
+        return tuple(cases)
+    # Every option that drives, names, or tunes a board, beside -R. -f is the
+    # mode throughout: -A is refused with -p for its own reason (below), and
+    # the rest go with any of the three.
+    cases.append(_case(
+        "btle-replay-board-options",
+        "btle -f -R <dump> with each option that drives a board",
+        (
+            probe_step("ubertooth-btle"),
+            _seed((_DUMP,)),
+            *(tool_step(
+                f"refuse-{slug}", "ubertooth-btle",
+                ("-f", "-R", ("file", _DUMP)) + words,
+                patterns=(_board_option_with_replay(option),))
+              for slug, option, words in (
+                  ("crc", "k", ("-k",)),
+                  ("target", "t", ("-t", "11:22:33:44:55:66")),
+                  ("channel", "A", ("-A", "38")),
+                  ("device", "U", ("-U", "1234")),
+                  # The four interference letters are two options and their
+                  # aliases; each must name itself as the user wrote it.
+                  ("interfere-once", "i", ("-i",)),
+                  ("interfere-always", "I", ("-I",)),
+                  ("interfere-once-alias", "j", ("-j",)),
+                  ("interfere-always-alias", "J", ("-J",)),
+              )),
+            _check((), (_DUMP,)),
+        ),
+        "each refused (exit 1) naming the option, before any board is asked "
+        f"for; {_DUMP} unchanged; nothing created"))
+    # -A with -p is about the mode, and is decided first.
+    cases.append(_replay_case(
+        "btle-replay-promisc-channel", "btle -p -R <dump> -A 38: -A is about -p",
+        ("-p", "-R", ("file", _DUMP), "-A", "38"),
+        (_CHANNEL_NOT_WITH_PROMISC,),
+        "refused (exit 1) for -A not going with -p, not for the replay; the "
+        "dump unchanged; nothing created",
+        forbidden=(NO_BOARD_NOTE, _board_option_with_replay("A"))))
+    # It is the file that is compared and not the name, so a second name for
+    # the dump is the dump: a symbolic link, which the destination would be
+    # opened through, and a hard link, which is the file itself under another
+    # name. The redirected-standard-output and descriptor forms of the
+    # comparison are covered on ubertooth-rx in Raw receive replay, which
+    # reaches the same opt_parse.c helpers.
+    cases.append(_case(
+        "btle-replay-dump-over-input-links",
+        "btle -f -R <dump> -d <another name for it>",
+        (
+            probe_step("ubertooth-btle"),
+            _seed((_DUMP,)),
+            _link(symlinks=(("link.bin", _DUMP),), hardlinks=(("hard.bin", _DUMP),)),
+            *(tool_step(f"refuse-{slug}", "ubertooth-btle",
+                        ("-f", "-R", ("file", source), "-d", ("file", destination)),
+                        patterns=(_dump_over_input(re.escape(destination)),))
+              for slug, source, destination in (
+                  ("symlink", _DUMP, "link.bin"),
+                  ("hardlink", _DUMP, "hard.bin"),
+                  # And the other way round: the replay reads the link and
+                  # the destination names the file it points at.
+                  ("through-the-link", "link.bin", _DUMP),
+              )),
+            _check((), (_DUMP,), symlinks=(("link.bin", _DUMP),),
+                   hardlinks=(("hard.bin", _DUMP),)),
+        ),
+        "each refused (exit 1) naming the destination as it was written: it "
+        f"is the file that is compared; {_DUMP} unchanged byte for byte; "
+        "nothing created"))
+    # A destination pair naming one file, with the letter the PCAP option was
+    # given.
+    cases.append(_replay_case(
+        "btle-q-d-same-file", "btle -f -R <dump> -q <file> -d <the same file>",
+        ("-f", "-R", ("file", _DUMP), "-q", ("file", "cap.pcap"),
+         "-d", ("file", "cap.pcap")),
+        (r"(?m)^error: -q and -d cannot both write to \S*cap\.pcap$",),
+        "refused (exit 1) naming both options; cap.pcap not created; the dump "
+        "unchanged", absent=("cap.pcap",)))
+    cases.append(_replay_case(
+        "btle-c-d-stdout", "btle -n -c - -d -: the letter -c was given",
+        ("-n", "-c", "-", "-d", "-"), (_two_captures_on_stdout("c"),),
+        "refused (exit 1) before any board is asked for; nothing created",
+        seeded=(), kept=()))
+    # A replay's input is opened before the board, so a dump that is not
+    # there is reported instead of the board lookup, and creates nothing.
+    cases.append(_replay_case(
+        "btle-replay-missing-input", "btle -f -R <a dump that is not there>",
+        ("-f", "-R", ("file", "missing.bin")),
+        (r"(?m)^error: \S*missing\.bin: No such file or directory$",),
+        "exit 1 at the input, before any board is asked for; missing.bin not "
+        "created; nothing else in the directory",
+        absent=("missing.bin",), seeded=(), kept=()))
+    return tuple(cases)
+
+
+# ubertooth-dfu -u renames a temporary file over the name it was given and
+# rewinds to block zero to retry a block, so standard output is refused as
+# the value is read: before -h, and before any board.
+_UPLOAD_TO_STDOUT = (
+    r"(?m)^error: -u cannot write the read-back to stdout; give a file name$"
+)
+# The spellings of descriptor 1 that every host here has. Linux also answers
+# /proc/self/fd/1; Raw receive replay covers that one, where the case can be
+# left out on a host without /proc.
+_STDOUT_SPELLINGS = (("dash", "-"), ("dev-stdout", "/dev/stdout"),
+                     ("dev-fd-1", "/dev/fd/1"))
+
+
+def _upload_stdout_cases(coverage: str):
+    """dfu -u: standard output is not a file the read-back can be written to."""
+    cases = [_case(
+        "dfu-u-stdout", "dfu -u: the lone - and the names of descriptor 1",
+        (
+            probe_step("ubertooth-dfu"),
+            *(tool_step(f"refuse-{slug}", "ubertooth-dfu", ("-u", spelling),
+                        patterns=(_UPLOAD_TO_STDOUT,))
+              for slug, spelling in _STDOUT_SPELLINGS),
+            _check((), ()),
+        ),
+        "each refused (exit 1) as the value is read, before any board is "
+        "asked for; nothing created")]
+    if coverage != "comprehensive":
+        return tuple(cases)
+    # The value is refused in the option loop, which -h never reaches.
+    dfu = next(item for item in TOOLS if item.name == "ubertooth-dfu")
+    cases.append(_case(
+        "dfu-u-stdout-help", "dfu -u /dev/stdout with -h: no usage text", (
+            probe_step("ubertooth-dfu"),
+            tool_step("refuse", "ubertooth-dfu", ("-u", "/dev/stdout", "-h"),
+                      patterns=(_UPLOAD_TO_STDOUT,),
+                      forbidden=(NO_BOARD_NOTE, dfu.usage)),
+            _check((), ()),
+        ), "refused (exit 1) with no usage text, before any board is asked "
+           "for; nothing created"))
+    # Only the lone "-" is the stream: a path ending in a "-" names a file of
+    # that name, so the command line is accepted and the run goes on to look
+    # for a board. The temporary file comes only once a read-back has
+    # arrived, so a run stopped at the lookup leaves nothing.
+    cases.append(_case(
+        "dfu-u-dash-is-a-file", "dfu -u <dir>/-: a file whose name is -", (
+            probe_step("ubertooth-dfu"),
+            tool_step("accepted", "ubertooth-dfu", ("-u", ("file", "-")),
+                      patterns=(NO_BOARD_NOTE,
+                                r"(?m)^error: no Ubertooth devices found$"),
+                      forbidden=(_UPLOAD_TO_STDOUT,)),
+            _check((), ()),
+        ), "accepted and stopped at the board lookup (exit 1); no file and no "
+           "temporary file created"))
+    return tuple(cases)
 
 
 # A seeded bad.dfu is a line of text, not an image, so what the image check
@@ -492,6 +780,8 @@ def refusal_cases(arguments, _resources, _resource_identities):
             for way in _ways(tool):
                 cases.append(_refusal_case(tool, option, extension, way))
     cases += _repeat_and_extra_cases()
+    cases += _replay_cases(arguments["coverage"])
+    cases += _upload_stdout_cases(arguments["coverage"])
     cases += bluez_stray_cases(arguments["coverage"])
     if arguments["coverage"] == "comprehensive":
         cases += _comprehensive_cases()

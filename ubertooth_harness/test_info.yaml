@@ -1052,8 +1052,9 @@ Refused command lines:
     No board. Nothing transmits. The ubertooth-follow and ubertooth-scan cases
     declare that they need BlueZ, so they are left out on a host without it.
   expected: >-
-    On Linux, smoke runs 45 cases and comprehensive 67; macOS runs 12 fewer in
-    smoke, since the BlueZ-only cases are not applicable. Every file option of
+    On Linux, smoke runs 49 cases and comprehensive 79; macOS runs 12 fewer in
+    smoke and 19 fewer comprehensive, since the BlueZ-only cases are not
+    applicable. Every file option of
     btle, follow, rx, dump, specan, and dfu is refused three ways: with a
     stray word, with -h (which exits 0 and must still create nothing), and
     with a bad option value later on the line. Beyond that: the
@@ -1062,13 +1063,44 @@ Refused command lines:
     in either order is refused naming both options as written, before the dump
     file is opened; and scan and follow refuse a stray word with no usage text
     after the message.
+    ubertooth-btle's replay decides four things before a board or a file is
+    opened: -R needs the major mode its dump was recorded with, because a
+    record does not say which mode wrote it and the modes stamp their packets
+    from different clocks; every option that drives, names, or tunes a board
+    is refused beside -R naming itself; -A with -p is refused for not going
+    with promiscuous mode at all, and that is decided first; and a
+    destination that is the dump -R is replaying is refused with the dump
+    unchanged, by name in smoke and through a symbolic link, a hard link and
+    the link read as the input in comprehensive, since it is the file that is
+    compared. One capture at a time may have standard output, so -q - (and
+    -c -, comprehensive) beside -d - is refused, as is either pair naming one
+    file; a -R input that is not there is reported before any board
+    (comprehensive). ubertooth-dfu -u refuses a value naming standard output,
+    the lone - and the names of descriptor 1, as the value is read -- before
+    -h (comprehensive) and before any board -- while a path whose last
+    component is - is an ordinary file, so that command line is accepted and
+    stopped at the board lookup with no file and no temporary file left
+    (comprehensive).
   limitations: >-
     Forks from before the no-devices switch ignore it, so the first step of
     every case reads the built library's bytes and the case skips when the
     name is absent; that has to be a run-time skip because only the built
     library can tell. The test says nothing about what the tools do once a
     command line is accepted.
-  related: []
+    The replay cases are about ubertooth-btle's own call and its own option
+    letters rather than the comparison behind it: the
+    redirected-standard-output and descriptor forms of "this destination is
+    the file being replayed" are covered on ubertooth-rx in Raw receive
+    replay, and both tools reach the same opt_parse.c helpers. Nothing here
+    replays a dump holding records, so what a replay decodes, and whether it
+    preserves a connection's parameters, is untested; that needs a synthetic
+    BLE dump the harness has not got. /proc/self/fd/1, a fourth name for
+    descriptor 1 on Linux, is not among the dfu -u spellings, because a case
+    left out on a host without /proc belongs where that is already handled.
+  related:
+    - ubertooth#1129
+    - ubertooth-test-harness#333
+    - ubertooth-test-harness#357
 
 Failed capture files:
   purpose: >-
