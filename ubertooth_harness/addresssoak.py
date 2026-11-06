@@ -426,7 +426,11 @@ class Side:
 
     def see(self, at: float, period_start: float, window_s: float) -> None:
         self.packets += 1
-        self.windows.add(int((at - period_start) / window_s))
+        # The window is the run's, not the period's: the one place the two
+        # readers' buffers really do split a packet is a period boundary, and
+        # a period-relative index would make the window before it and the
+        # window after it unrelated numbers in different sets.
+        self.windows.add(int(at / window_s))
         if self.first is None:
             self.first = at
         self.last = at
@@ -566,6 +570,11 @@ class Timings:
     detect_within_s: float
     max_gap_s: float
     sample_every_s: float
+    # How often the advertiser sends, and the rate floor the run is judged
+    # against: both decide verdicts, so both are checked here rather than on
+    # the bench.
+    interval_ms: int = 100
+    min_packets_per_minute: int = 0
 
 
 @dataclass
@@ -602,6 +611,8 @@ class Options:
 
     def timings(self) -> Timings:
         return Timings(
+            interval_ms=self.interval_ms,
+            min_packets_per_minute=self.min_packets_per_minute,
             duration_s=self.duration_s, on_s=self.on_s, off_s=self.off_s,
             window_s=self.window_s, windows_needed=self.windows_needed,
             liveness_timeout_s=self.liveness_timeout_s,
@@ -693,6 +704,24 @@ def check_timings(options: Timings | Options) -> None:
         raise SoakError(
             f"'sample every' ({options.sample_every_s:g}s) is shorter than "
             f"{MIN_SAMPLE_EVERY_S:g}s; each sample is a synced record")
+    # The advertising interval decides two verdicts, so it is checked with
+    # the figures they are judged by: an advertiser sending less often than a
+    # window is wide cannot fill the windows sustained presence needs, and one
+    # whose own interval sends fewer packets a minute than the floor asks for
+    # cannot clear it however well the capture works.
+    interval_s = options.interval_ms / 1000.0
+    if interval_s > options.window_s:
+        raise SoakError(
+            f"the advertiser's {interval_s:g}s interval is longer than the "
+            f"{options.window_s:g}s presence window, so the windows sustained "
+            "presence needs cannot all hold a packet")
+    at_best = 60.0 / interval_s
+    if at_best < options.min_packets_per_minute:
+        raise SoakError(
+            f"an advertiser sending every {interval_s:g}s sends about "
+            f"{at_best:.0f} packets a minute, fewer than the "
+            f"{options.min_packets_per_minute} 'minimum packets per minute' "
+            "asks for")
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +909,7 @@ class Attempt:
     # budget has since taken them away again.
     bytes_kept: int = 0
     files_removed: bool = False
+    partial_tail_bytes: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -903,6 +933,7 @@ class Attempt:
             "found_board_in_a_mode": self.mode_warning,
             "bytes_kept": self.bytes_kept,
             "files_removed": self.files_removed,
+            "partial_tail_bytes": self.partial_tail_bytes,
         }
 
 
@@ -955,14 +986,20 @@ class Capture:
     def poll_records(self) -> list[tuple[float, bytes]]:
         return self.tail.poll()
 
-    def stop(self, reason: str, *, kill: bool = False) -> Attempt:
+    def stop(self, reason: str, *, kill: bool = False,
+             grace_s: float | None = None) -> Attempt:
         """End this attempt: SIGTERM and wait, or SIGKILL when asked.
 
         ``kill`` is the probe's path and the one a lost terminal takes: the
         tool never runs its exit path, so the board is left in its mode and
-        the next attempt has to clear it.
+        the next attempt has to clear it. ``grace_s`` overrides how long the
+        tool is given, which the cancellation path needs: the harness allows
+        about two seconds between its SIGTERM and its SIGKILL, so a teardown
+        that waited the ordinary grace would be killed before it wrote the
+        run's report.
         """
         self.attempt.stop_reason = reason
+        grace = self.options.term_grace_s if grace_s is None else grace_s
         process = self.process
         if process is not None and process.poll() is None:
             if kill:
@@ -972,13 +1009,14 @@ class Capture:
             else:
                 self.attempt.signalled = "SIGTERM"
                 self.signal_tool(signal.SIGTERM)
-                if not self._wait(self.options.term_grace_s):
+                if grace > 0 and not self._wait(grace):
                     self.attempt.forced = True
                     self.attempt.signalled = "SIGTERM then SIGKILL"
                     self.signal_tool(signal.SIGKILL)
         if process is not None:
             try:
-                self.attempt.returncode = process.wait(timeout=30)
+                self.attempt.returncode = process.wait(
+                    timeout=1.0 if grace <= 0 else 30)
             except subprocess.TimeoutExpired:
                 self.attempt.returncode = None
         self.finish()
@@ -1018,7 +1056,7 @@ class Capture:
         if self.process is not None and self.attempt.returncode is None:
             self.attempt.returncode = self.process.poll()
         if self.reader is not None:
-            self.reader.join(timeout=30)
+            self.reader.join(timeout=1 if self.attempt.returncode is None else 30)
             self.attempt.last_error = self.reader.last_error
             self.attempt.error_lines = self.reader.error_lines
             self.attempt.legacy_death_lines = self.reader.legacy_death_lines
@@ -1034,6 +1072,9 @@ class Capture:
             except OSError:
                 pass
         self.attempt.records = self.tail.records
+        # What the tool left half-written: ordinary for a capture that was
+        # killed, so it is reported rather than judged.
+        self.attempt.partial_tail_bytes = len(self.tail._pending)
         kept = 0
         for path in (self.capture_path, self.log_path):
             try:
@@ -1069,11 +1110,14 @@ class Soak:
         self.watchdog_resets = 0
         self.samples = 0
         self.rss_first = None
+        self.attempt_rss_first = None
+        self.attempt_rss_last = None
+        self.rss_growth_max = 0
         self.rss_last = None
         self.rss_max = None
-        self.minute_packets: dict[int, int] = {}
         self.other_packets = 0
         self.attempt_text_packets = 0
+        self.unattributed_packets = 0
         self.capture_errors: list = []
         self.captures_removed = 0
         self.capture_bytes_removed = 0
@@ -1271,6 +1315,12 @@ class Soak:
             period = self.period_at(seen)
             if period is not None:
                 period.text.see(seen, period.started, self.options.window_s)
+            else:
+                # Between two periods: a period ends before the next one's
+                # schedule command and the next begins after it, so the
+                # command's own latency belongs to neither. Counted, so the
+                # per-period totals and the run's can be reconciled.
+                self.unattributed_packets += 1
 
     def read_structural(self) -> None:
         if self.capture is None:
@@ -1309,8 +1359,6 @@ class Soak:
             if packet.address != self.options.address:
                 continue
             self.structural_packets += 1
-            minute = int(max(0.0, at) // 60)
-            self.minute_packets[minute] = self.minute_packets.get(minute, 0) + 1
             found = advcapture.harness_payload(packet.adv_data)
             matched = found is not None and found[2].hex() == self.options.payload
             if matched:
@@ -1320,6 +1368,8 @@ class Soak:
                 period.structural.see(at, period.started, self.options.window_s)
                 if matched:
                     period.payload_matches += 1
+            else:
+                self.unattributed_packets += 1
 
     # -- the capture ------------------------------------------------------
 
@@ -1338,6 +1388,8 @@ class Soak:
         self.capture_index += 1
         self._record_anchor = None
         self.attempt_text_packets = 0
+        self.attempt_rss_first = None
+        self.attempt_rss_last = None
         self.capture = Capture(self.options, self.capture_index, self.sink,
                                clock=self.clock,
                                max_log_bytes=max(0, self.transcript_budget))
@@ -1375,9 +1427,18 @@ class Soak:
         return None
 
     def stop_capture(self, reason: str, *, kill: bool = False,
-                     planned: bool = True) -> Attempt:
+                     planned: bool = True) -> Attempt | None:
+        if self.capture is None:
+            # Nothing is running: a cancellation that arrived inside a
+            # restart, after the old capture was stopped and before the new
+            # one started, reaches the teardown here.
+            return None
         self.note_capture_gap(planned)
-        attempt = self.capture.stop(reason, kill=kill)
+        # A canceled run waits for nothing: the tool was asked to stop in
+        # the signal handler, this process has about two seconds left, and
+        # the group SIGKILL that follows reaches the tool as well.
+        attempt = self.capture.stop(reason, kill=kill,
+                                    grace_s=0.0 if self.canceled else None)
         # Whatever the tool wrote before it went is still the capture's: read
         # the rest of the file before letting go of it.
         self.read_structural()
@@ -1429,6 +1490,12 @@ class Soak:
                     path.unlink()
                 except OSError:
                     continue
+            if not removed:
+                # Nothing could be taken away, so the budget is not helped
+                # by calling this attempt pruned: it stays in the accounting
+                # and the run says nothing it did not do.
+                kept.insert(0, oldest)
+                return
             oldest.files_removed = True
             self.captures_removed += 1
             self.capture_bytes_removed += removed
@@ -1526,10 +1593,17 @@ class Soak:
         if self.capture is not None and self.capture.attempt.pid:
             rss = resident_kb(self.capture.attempt.pid)
         if rss is not None:
-            if self.rss_first is None:
-                self.rss_first = rss
+            # Per attempt: a run that restarted would otherwise subtract one
+            # capture process's memory from another's and report the
+            # difference as growth.
+            if self.attempt_rss_first is None:
+                self.attempt_rss_first = rss
+            self.attempt_rss_last = rss
+            self.rss_first = rss if self.rss_first is None else self.rss_first
             self.rss_last = rss
             self.rss_max = rss if self.rss_max is None else max(self.rss_max, rss)
+            self.rss_growth_max = max(
+                self.rss_growth_max, self.attempt_rss_last - self.attempt_rss_first)
         period = self.period()
         self.record({
             "record": "sample",
@@ -1814,16 +1888,23 @@ class Soak:
         }
 
     def parity(self) -> dict:
-        both = text_only = structural_only = 0
-        disagreements = 0
+        # Over the whole run, not period by period: the windows are the
+        # run's own, so a window at a period boundary has its neighbour in
+        # the set either way, which is where the readers' buffers really do
+        # split a packet.
+        text: set = set()
+        structural: set = set()
         for period in self.periods:
-            both += len(period.text.windows & period.structural.windows)
-            text_only += len(period.text.windows - period.structural.windows)
-            structural_only += len(period.structural.windows - period.text.windows)
-            # Not text_only + structural_only: a window beside one the other
-            # reader had is the two buffers flushing at different moments,
-            # not a reader that missed the advertiser (Period.disagreements).
-            disagreements += period.disagreements()
+            text |= period.text.windows
+            structural |= period.structural.windows
+        both = len(text & structural)
+        text_only = len(text - structural)
+        structural_only = len(structural - text)
+        # Not text_only + structural_only: a window beside one the other
+        # reader had is the two buffers flushing at different moments, not a
+        # reader that missed the advertiser.
+        disagreements = (_lonely_windows(text, structural)
+                         + _lonely_windows(structural, text))
         seen = both + disagreements
         allowance = max(1, math.ceil(seen * self.options.max_disagreement_share))
         return {
@@ -1838,28 +1919,43 @@ class Soak:
         }
 
     def rate(self) -> dict:
-        """Packets a minute, over the minutes the advertiser was on in."""
-        on_minutes = set()
-        for period in self.on_periods():
-            start = int(period.started // 60)
-            end = int(max(period.started, (period.ended or period.started)) // 60)
-            on_minutes.update(range(start, end + 1))
-        counts = [self.minute_packets.get(minute, 0) for minute in sorted(on_minutes)]
-        if not counts:
-            return {"minutes": 0, "mean": 0.0, "min": 0, "max": 0, "median": 0.0}
+        """Packets a minute of the time the advertiser was really on.
+
+        Per judged on period and then over all of them, rather than per
+        wall-clock minute the periods happened to touch: a schedule whose
+        legs cross minute boundaries, or are shorter than a minute, would
+        otherwise pass or fail on where the minutes fell.
+        """
+        periods = self.on_periods()
+        seconds = sum(period.seconds for period in periods)
+        rates = [period.structural.packets / period.seconds * 60.0
+                 for period in periods if period.seconds > 0]
+        packets = sum(period.structural.packets for period in periods)
+        if not rates or seconds <= 0:
+            return {"periods": 0, "on_seconds": 0.0, "packets": 0, "mean": 0.0,
+                    "min": 0.0, "max": 0.0, "median": 0.0}
         return {
-            "minutes": len(counts),
-            "mean": round(statistics.fmean(counts), 1),
-            "min": min(counts),
-            "max": max(counts),
-            "median": round(statistics.median(counts), 1),
+            "periods": len(periods),
+            "on_seconds": round(seconds, 3),
+            "packets": packets,
+            "mean": round(packets / seconds * 60.0, 1),
+            "min": round(min(rates), 1),
+            "max": round(max(rates), 1),
+            "median": round(statistics.median(rates), 1),
         }
 
     def memory(self) -> dict:
-        growth = (None if self.rss_first is None or self.rss_last is None
-                  else self.rss_last - self.rss_first)
+        """What the capture process's memory did, per process and over the run.
+
+        ``growth_kb`` is the largest growth inside one capture process, which
+        is the figure a limit is about: a run that restarted has a new process
+        each time, and the difference between two of them is not growth.
+        """
+        growth = (None if self.rss_first is None
+                  else self.rss_growth_max)
         return {"first_kb": self.rss_first, "last_kb": self.rss_last,
-                "max_kb": self.rss_max, "growth_kb": growth, "samples": self.samples}
+                "max_kb": self.rss_max, "growth_kb": growth,
+                "samples": self.samples}
 
     def probe_outcome(self) -> bool | None:
         """Did the advertiser come back after the probe killed the capture?
@@ -1879,6 +1975,24 @@ class Soak:
             deadline = self.options.detect_within_s + RECOVERY_SLACK_S
             return side.first is not None and side.first - period.started <= deadline
         return None
+
+    def final_exit_problem(self) -> str:
+        """Why the capture's last exit was not a clean stop, if it was not.
+
+        A tool asked to stop is expected to exit 0: a positive exit status
+        after a SIGTERM is the tool reporting a fault on its way out, and
+        nothing else here would notice it, since the restart counters are
+        about attempts that were restarted and this one ended the run.
+        """
+        if not self.attempts:
+            return ""
+        final = self.attempts[-1]
+        if final.returncode is None or final.returncode <= 0:
+            return ""  # it is still gone, or it died of a signal
+        if final.stop_reason.startswith("the run was stopped"):
+            return ""  # a canceled run is its own reason
+        return (f"the capture exited {final.returncode} when it was stopped"
+                + (f": {final.last_error}" if final.last_error else ""))
 
     def judge(self) -> list[str]:
         """Every configured objective this run did not meet."""
@@ -1941,7 +2055,7 @@ class Soak:
                 f"(longest {gaps['structural_max_s']}s structural, "
                 f"{gaps['text_max_s']}s text)")
         rate = self.rate()
-        if rate["minutes"] and rate["mean"] < options.min_packets_per_minute:
+        if rate["periods"] and rate["mean"] < options.min_packets_per_minute:
             problems.append(
                 f"{rate['mean']} advertiser packets a minute, below "
                 f"{options.min_packets_per_minute}")
@@ -1965,6 +2079,8 @@ class Soak:
             problems.append(
                 f"the capture process died {self.unexplained_exits} time(s) with "
                 f"nothing asking it to, more than {options.max_restarts}")
+        if (final_exit := self.final_exit_problem()):
+            problems.append(final_exit)
         if self.forced_stops:
             problems.append(
                 f"{self.forced_stops} capture(s) did not stop on SIGTERM within "
@@ -2010,7 +2126,11 @@ class Soak:
                                     "after": self.counter_after},
             "text": {"advertiser_packets": self.text_packets,
                       "other_packets": self.other_packets,
-                      "other_addresses": len(self.other_addresses)},
+                      "other_addresses": len(self.other_addresses),
+                      # A crowded channel passes this in minutes, and then
+                      # the count is a floor rather than a figure.
+                      "other_addresses_counted_to_the_limit":
+                          len(self.other_addresses) >= MAX_OTHER_ADDRESSES},
             "captures": {"removed": self.captures_removed,
                           "removed_bytes": self.capture_bytes_removed,
                           "budget_bytes": self.options.capture_budget_bytes,
@@ -2030,6 +2150,9 @@ class Soak:
                               "largest_drift_s": round(self.record_drift_max_s, 3),
                               "reanchor_at_s": self.reanchor_s},
             "parity": self.parity(),
+            # Sightings that fell between two periods, which belong to
+            # neither: the schedule command's own latency sits there.
+            "between_periods": self.unattributed_packets,
             "gaps": self.gaps(),
             "rate_per_minute": self.rate(),
             "memory": self.memory(),
@@ -2063,10 +2186,8 @@ class Soak:
                 + [{"record": "attempts_left_out", "count": left_out}]
                 + attempts[-keep:])
 
-    def report(self, final: Attempt) -> int:
+    def report(self, final: Attempt | None) -> int:
         summary = self.summary()
-        (self.options.out / "summary.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         detection = summary["detection"]
         parity = summary["parity"]
         gaps = summary["gaps"]
@@ -2105,8 +2226,9 @@ class Soak:
         say(f"gaps: longest {gaps['structural_max_s']}s structural, "
               f"{gaps['text_max_s']}s text, limit {self.options.max_gap_s:g}s, "
               f"{gaps['periods_over_limit']} period(s) over it")
-        say(f"rate: {rate['mean']} packets a minute over {rate['minutes']} minute(s) "
-              f"(min {rate['min']}, max {rate['max']})")
+        say(f"rate: {rate['mean']} packets a minute over {rate['on_seconds']}s of "
+            f"advertising in {rate['periods']} period(s) (slowest {rate['min']}, "
+            f"fastest {rate['max']})")
         say(f"memory: first {memory['first_kb']} KiB, last {memory['last_kb']} KiB, "
               f"growth {memory['growth_kb']} KiB over {memory['samples']} sample(s)")
         say(f"process: {len(self.attempts)} attempt(s), {self.rotations} planned "
@@ -2130,9 +2252,18 @@ class Soak:
                 else "no whole advertiser on period followed it, so whether it "
                      "recovered is not established"))
         self.problems = self.judge()
+        verdict = "fail" if self.problems else "pass"
+        # Written after the verdict and carrying it: the one machine-readable
+        # artifact of a run of days has to say how it came out.
+        summary["verdict"] = verdict
+        summary["problems"] = list(self.problems)
+        (self.options.out / "summary.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        self.record({"record": "finished", "verdict": verdict,
+                      "problems": list(self.problems)})
         for problem in self.problems:
             say(f"FAIL: {problem}")
-        say(f"SOAK VERDICT: {'fail' if self.problems else 'pass'}")
+        say(f"SOAK VERDICT: {verdict}")
         return EXIT_FAIL if self.problems else EXIT_PASS
 
 

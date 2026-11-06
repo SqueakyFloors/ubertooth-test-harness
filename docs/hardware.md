@@ -94,8 +94,10 @@ role with a default named after the role (`central:`, `peripheral:`, and the
 plain `nRF52840 DK:` for the advertiser).
 
 **Booking the advertiser for a soak.** `BLE address parity soak`
-(`testplans/address-soak.yaml`) holds one Ubertooth and the `advertiser` DK
-for its whole window, which its longest suite makes three days, and it drives
+(`testplans/address-soak.yaml`) holds one Ubertooth, the `advertiser` DK, and
+— because it guards the host's other boards, as every stateful test does —
+every other registered Ubertooth on the host, plus the host lock, for its
+whole window, which its longest suite makes three days, and it drives
 the DK on and off throughout, so nothing else can use either device
 meanwhile. Book it rather than scheduling it beside other bench work, and run
 it from the deployed target runner, which keeps the run going after whatever

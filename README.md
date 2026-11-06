@@ -2429,7 +2429,7 @@ the [host lock](#the-host-lock) for its whole window: on the 72-hour suite no
 other command on that host may write firmware or switch power for three days.
 Book these runs rather than scheduling them beside other bench work.
 
-Four suites, none of them in `fast` or in the non-soak `release` plan: a
+Four suites, none of them in `fast` or in the non-soak `release` plan: an
 `address-parity` run of about a minute for development and a short bench
 check, then `address-soak-4h`, `address-soak-24h`, and `address-soak-72h`,
 the release-candidate soak. Every figure the verdict rests on is a plan

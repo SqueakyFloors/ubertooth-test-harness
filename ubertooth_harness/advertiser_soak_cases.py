@@ -57,11 +57,13 @@ TEST_NAME = "BLE address parity soak"
 _DRIVER = str(Path(addresssoak.__file__).resolve())
 
 # What the step costs outside the capture window: the board read and the
-# watchdog read before it, the advertiser's settings, the closing watchdog
-# read, the board reads afterwards, and the advertiser's final stop. Every
-# one of those is a bounded command (addresssoak.UTIL_TIMEOUT_S each), so
-# this is their sum with room above it rather than a guess.
-SETUP_ALLOWANCE_S = 120.0
+# watchdog read before it, the advertiser's settings, the wait for the
+# capture to open its file, the final stop and the wait for the tool, the
+# closing watchdog read, and the five board reads afterwards. Every one of
+# those is a bounded command, and their worst case is about 140 s
+# (addresssoak.UTIL_TIMEOUT_S each, plus the term grace and the wait after
+# it), so this is that with room above it rather than a guess.
+SETUP_ALLOWANCE_S = 240.0
 # What one restart the plan allows may cost: the stop and its grace, a
 # watchdog read, a board reset and the read after it, and the pause before
 # the next attempt.
@@ -92,6 +94,8 @@ def timings(arguments: Mapping) -> addresssoak.Timings:
         detect_within_s=seconds(arguments["detect within"]),
         max_gap_s=seconds(arguments["maximum gap"]),
         sample_every_s=seconds(arguments["sample every"]),
+        interval_ms=arguments["interval"],
+        min_packets_per_minute=arguments["minimum packets per minute"],
     )
 
 

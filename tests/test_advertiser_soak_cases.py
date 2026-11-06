@@ -199,7 +199,8 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(addresssoak.Timings(
             duration_s=14400.0, on_s=30.0, off_s=30.0, window_s=2.0,
             windows_needed=5, liveness_timeout_s=60.0, detect_within_s=10.0,
-            max_gap_s=15.0, sample_every_s=30.0), found)
+            max_gap_s=15.0, sample_every_s=30.0, interval_ms=100,
+            min_packets_per_minute=10), found)
         addresssoak.check_timings(found)
 
     def test_every_relationship_the_driver_refuses_fails_the_plan(self):
