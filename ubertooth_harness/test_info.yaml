@@ -74,32 +74,43 @@ Help smoke:
   limitations: >-
     It proves almost nothing beyond "the binary runs". Host CLI surface is the
     same idea applied to every tool, with the tool's own name required in the
-    output.
+    output, so this adds no coverage to a suite that holds that one; it is
+    kept as the cheapest step a plan can hold.
   related: []
 
 Host CLI surface:
   purpose: >-
-    Keeps -h working, and exiting 0, on every always-built tool. Several tools
-    in this fork used to exit 1 for -h, which breaks a user's first command
-    and any script that asks a tool what it takes.
+    Keeps -h and -V working on every C host tool the fork builds. Several
+    tools in this fork used to exit 1 for -h, which breaks a user's first
+    command and any script that asks a tool what it takes; -V is how a user
+    reports which host tools they are running, and it is the line preflight
+    holds the run to.
   theory: >-
     Each tool's usage text names the tool, so requiring that name in the
     output tells a working parser from a binary that printed something else.
-    Pinning exit 0 per tool keeps the fixed tools fixed.
+    Pinning exit 0 per tool keeps the fixed tools fixed. Every tool answers
+    -V through the one libubertooth function, so the same host version line
+    is the right answer from all of them, and a tool that stopped answering
+    it is a regression in that tool alone.
   hardware: >-
-    No board. Nothing transmits. The two BlueZ-only tools declare that need,
-    so on a host without BlueZ (every macOS host) those cases are left out
-    before the run as not applicable rather than failing.
+    No board. Nothing transmits. -V reads whatever boards are attached, which
+    may include boards the run does not use, so exit 1 passes too: the line
+    is what is checked. The two BlueZ-only tools declare that need for both
+    of their cases, so on a host without BlueZ (every macOS host) they are
+    left out before the run as not applicable rather than failing.
   expected: >-
-    17 cases on Linux, 15 on macOS: -h on util, debug, specan, rx, tx, dump,
-    btle, dfu, ego, afh, and ducky, each exit 0 with its own name in the
-    output; -h on scan and follow where BlueZ is present; and the host version
-    line from util -V, rx -V, tx -V, and afh -V. A case failure does not stop
-    the others.
+    Two cases per tool, 26 on Linux and 22 on macOS: -h exits 0 with the
+    tool's own name in the output, and -V prints the host tools version line.
+    The tool list is the build's own, so a tool the fork adds gets both cases
+    with the build. A case failure does not stop the others.
   limitations: >-
     It checks that help works and that the version line is present, not what
-    any option does.
-  related: []
+    any option does, and not that the versions are the ones you wanted:
+    preflight compares them with the resolved sources. The firmware lines -V
+    prints under that line are checked by Ubertooth identity, not here.
+  related:
+    - ubertooth-test-harness#347
+    - ubertooth#813
 
 Ubertooth count:
   purpose: >-
@@ -122,56 +133,6 @@ Ubertooth count:
     It depends on the registry being right. An unregistered board attached to
     the host fails this test, correctly, but the message says only that the
     count differed.
-  related: []
-
-Firmware version:
-  purpose: >-
-    A catalog entry for reading the firmware revision from one board. No
-    implementation yet, and covered in practice: Ubertooth identity reads and
-    checks the revision, and preflight reads it for every selected board on
-    every run.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. What the entry would add over Ubertooth identity and
-    preflight is not written down.
-  related: []
-
-Firmware compile info:
-  purpose: >-
-    A catalog entry for reading the firmware's compile identity from one
-    board. No implementation yet. Ubertooth identity already checks the whole
-    ubertooth-util -V answer, including the compile-info line, and the guard
-    readback uses the same line, whose build timestamp also catches a reflash
-    of the same revision.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
-  related: []
-
-Device serial:
-  purpose: >-
-    A catalog entry for reading the microcontroller serial from one board. No
-    implementation yet. Ubertooth identity checks ubertooth-util -s against
-    the registered serial, and every transition case's cleanup ends with the
-    same read, which is how a case proves it talked to the board it selected.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
   related: []
 
 Bootloader identity:
@@ -209,41 +170,15 @@ Bootloader identity:
     - ubertooth-test-harness#298
     - ubertooth#242
 
-Part ID:
-  purpose: >-
-    A catalog entry for reading the microcontroller part ID from one board. No
-    implementation yet. Ubertooth identity checks ubertooth-util -p against
-    the part ID pattern.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
-  related: []
-
-Board ID:
-  purpose: >-
-    A catalog entry for reading the Ubertooth board ID from one board. No
-    implementation yet. Ubertooth identity checks ubertooth-util -b against
-    the board ID pattern.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
-  related: []
-
 Ubertooth identity:
   purpose: >-
     Proves a command reached the board the plan selected rather than whichever
     board USB offered first, and catches a parser that drops a report when
-    several are asked for in one command.
+    several are asked for in one command. It is the whole of the harness's
+    identity readback: the five standalone catalog names for these reads
+    (firmware version, compile info, device serial, part ID, board ID) were
+    the same commands with the same checks and were removed, so this is
+    where they live.
   theory: >-
     The registry already knows the board's serial, so the -s read has a known
     right answer. The other reads are held to the shape the tools print. The
@@ -1961,21 +1896,6 @@ Follow Classic piconet over HCI:
     - ubertooth-test-harness#274
     - ubertooth#518
     - ubertooth#316
-
-CLI usage smoke:
-  purpose: >-
-    A catalog entry for exercising host tool usage paths. No implementation
-    yet, and superseded in practice: Host CLI surface covers -h and -V on
-    every always-built tool, and Help smoke covers the single-tool case.
-  theory: >-
-    Not established.
-  hardware: >-
-    No board. Nothing transmits.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Superseded in practice by Host CLI surface.
-  related: []
 
 BLE soak:
   purpose: >-

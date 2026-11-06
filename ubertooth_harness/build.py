@@ -22,7 +22,7 @@ from ubertooth_harness.preflight import HOST_VERSION_LABEL, host_version_pattern
 from ubertooth_harness.pytools import PYTHON_ENV, PYTHON_TOOLS_ENV
 from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.events import EventPublisher
-from ubertooth_harness.hostneeds import BLUEZ_TOOLS
+from ubertooth_harness.hostneeds import ALWAYS_BUILT_TOOLS, BLUEZ_TOOLS
 
 
 class BuildError(RuntimeError):
@@ -156,12 +156,11 @@ class BuildResult:
 
 # Host tools every build must install into the run prefix (the catalog cases
 # with no host need). A Linux build must also install BLUEZ_TOOLS, and a
-# --with-python build PYTHON_TOOLS; required_tools() is the full rule.
-BUILT_TOOLS = (
-    "ubertooth-util", "ubertooth-debug", "ubertooth-specan", "ubertooth-rx",
-    "ubertooth-tx", "ubertooth-dump", "ubertooth-btle", "ubertooth-dfu",
-    "ubertooth-ego", "ubertooth-afh", "ubertooth-ducky",
-)
+# --with-python build PYTHON_TOOLS; required_tools() is the full rule. The
+# list itself is hostneeds.ALWAYS_BUILT_TOOLS, which the catalog's CLI
+# surface cases read too, so the build and the test cannot disagree about
+# which tools the fork always builds.
+BUILT_TOOLS = ALWAYS_BUILT_TOOLS
 # Installed by ENABLE_PYTHON=ON; their first line names the interpreter.
 PYTHON_TOOLS = ("ubertooth-specan-ui", "ubertooth-btbr")
 BUILD_DEADLINE_S = 3600.0

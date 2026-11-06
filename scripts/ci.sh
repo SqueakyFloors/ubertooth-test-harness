@@ -467,10 +467,17 @@ assert (len(bluez) >= 12) if platform == "macos" else not bluez, bluez
 EOF
 
     step "BlueZ tools: required in a Linux build's prefix, and their cases run"
+    # Both cases of each: the help, and the host version line of -V. A Linux
+    # build is the only place either BlueZ-only tool exists, so this is where
+    # their -V is read from a real binary rather than from the source (#347).
     .venv/bin/python - "$platform" "$WORK/build.json" "$WORK/runs/ci-host/run.jsonl" <<'EOF'
 import json, sys
 platform, build, record = sys.argv[1:]
+# The case IDs end in these; the names a run prints are `<tool> -h
+# (BlueZ builds)` and `<tool> -V (BlueZ builds)`
+# (catalog._host_cli_surface_cases).
 tools = ("ubertooth-scan", "ubertooth-follow")
+cases = ("help", "version")
 names = {item["name"] for item in json.load(open(build))["artifacts"]}
 built = [tool for tool in tools if f"built {tool}" in names]
 results = {}
@@ -479,12 +486,14 @@ for line in open(record):
     case_id = event["details"].get("case_id", "")
     if event["event_type"] == "check_finished":
         for tool in tools:
-            if case_id.endswith(f"-{tool}-help"):
-                results[tool] = event["status"]
-print(f"{platform}: built {built}, help cases {results}")
+            for case in cases:
+                if case_id.endswith(f"-{tool}-{case}"):
+                    results[f"{tool} {case}"] = event["status"]
+print(f"{platform}: built {built}, cases {results}")
 if platform == "linux":
     assert built == list(tools), built
-    assert results == {tool: "passed" for tool in tools}, results
+    expected = {f"{tool} {case}": "passed" for tool in tools for case in cases}
+    assert results == expected, results
 else:
     assert not built and not results, (built, results)
 EOF
