@@ -1,15 +1,21 @@
 """Classic (BR/EDR) cases against the ESP32 peer pair: the cases and the registry."""
 
 from pathlib import Path
+import re
 import tempfile
 import unittest
 
 from ubertooth_harness import esp32peer, leases
+from ubertooth_harness.receive_cases import EXIT_SLACK_S
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.classic_cases import (
     AUDIO_SETUP_S,
     AUDIO_TYPE,
     AUDIO_TYPE_NAME,
+    CLOCK_GUARDS,
+    CLOCK_LOCK_TIED,
+    CLOCK_LOCK_UNSCORED,
+    MAX_BACKWARD_STEP_US,
     MIN_PACKETS,
     PAIR_SETUP_S,
     follow_classic_cases,
@@ -319,6 +325,68 @@ class RecordFieldCaseTests(unittest.TestCase):
             "--following-lap",
             list(steps["verify-pcap"].resolve_argv({CAPTURE_DIR_KEY: "/x"})))
 
+    def test_every_record_check_bounds_the_times_to_the_capture(self):
+        """The record times have to measure the run that wrote them
+        (SqueakyFloors/ubertooth#1195). The span ceiling is the capture's own
+        -t plus the slack a tool is allowed for its exit, so it moves with
+        `duration:` rather than being a constant that silently stops meaning
+        the run."""
+        for coverage, duration, seconds in (("smoke", "25s", 25),
+                                            ("comprehensive", "2m", 120)):
+            for case in record_fields_cases(
+                    arguments("Classic capture record fields", coverage,
+                              duration), RESOURCES, IDENTITIES):
+                for step in case.steps:
+                    if not step.step_id.startswith("verify-"):
+                        continue
+                    with self.subTest(case=case.case_id, step=step.step_id):
+                        checks = list(step.resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+                        self.assertEqual(
+                            str(float(seconds) + EXIT_SLACK_S),
+                            checks[checks.index("--max-span-s") + 1])
+                        self.assertEqual(
+                            str(MAX_BACKWARD_STEP_US),
+                            checks[checks.index("--max-backward-step-us") + 1])
+
+    def test_no_capture_case_accepts_a_clock_it_could_not_score(self):
+        """A clock is accepted on its score, and where the hops cannot tell
+        the candidates apart the search ends with no clock rather than a
+        wrong one (libbtbb#125, the fork's #1088). Neither guard can match a
+        capture that reaches no clock, which most of this bench's do."""
+        # Every capture case of both Classic tests that run a capture, not
+        # only the ones that target a piconet: a clock reported unscored or
+        # tied is wrong in any of them, and the guards cost a run nothing
+        # where no clock is reached.
+        for name, builder in (
+                ("Follow Classic Bluetooth piconet", follow_classic_cases),
+                ("Classic capture record fields", record_fields_cases)):
+            for coverage in ("smoke", "comprehensive"):
+                for case in builder(arguments(name, coverage), RESOURCES,
+                                    IDENTITIES):
+                    with self.subTest(test=name, coverage=coverage,
+                                      case=case.case_id):
+                        step = self.steps(case)["stream-and-receive"]
+                        self.assertLessEqual(set(CLOCK_GUARDS),
+                                             set(step.forbidden_patterns))
+        # What each guard is for, against the lines the tools really print.
+        scored = ("Acquired CLK1-27 = 0x001216c "
+                  "(score 15, next best 11, drift 0 slots)")
+        tied = ("Acquired CLK1-27 = 0x001216c "
+                "(score 15, next best 15, drift 0 slots)")
+        bare = "Acquired CLK1-27 = 0x001216c"
+        self.assertFalse(any(re.search(guard, scored) for guard in CLOCK_GUARDS),
+                         "a scored lock clear of its runner-up must pass")
+        self.assertTrue(re.search(CLOCK_LOCK_TIED, tied))
+        self.assertFalse(re.search(CLOCK_LOCK_TIED, scored))
+        self.assertTrue(re.search(CLOCK_LOCK_UNSCORED, bare))
+        self.assertFalse(re.search(CLOCK_LOCK_UNSCORED, scored),
+                         "the scored form must not read as the bare one")
+        # A capture that never locks says nothing either guard matches.
+        quiet = ("26617 initial CLK1-27 candidates\n"
+                 "note: the clock search has run for 120 s without "
+                 "confirming a clock; it needs enough hops of the piconet\n")
+        self.assertFalse(any(re.search(guard, quiet) for guard in CLOCK_GUARDS))
+
     def test_the_swapped_case_follows_the_other_board(self):
         steps = self.steps(self.cases()["swapped-fields"])
         argv = list(steps["stream-and-receive"].resolve_argv(
@@ -413,6 +481,35 @@ class RecordFieldCaseTests(unittest.TestCase):
                 self.assertEqual(["reset-initiator", "reset-acceptor",
                                   "cleanup-stop"], cleanup[:3])
                 self.assertEqual("restored-device-identity", cleanup[-1])
+
+
+class CaptureFileCheckTests(unittest.TestCase):
+    """The step that reads what a capture file holds (#274).
+
+    A Step.output_check is handed the stdout lines to iterate, not one
+    string, and this check used to search a regex over the object itself:
+    every comprehensive Classic case that writes a capture file raised a
+    TypeError the moment the file was checked. The first bench run of
+    `Follow Classic piconet over HCI`, which reuses the same step, is where
+    that surfaced.
+    """
+
+    def check(self, minimum=MIN_PACKETS):
+        from ubertooth_harness.classic_cases import _written_packets
+        return _written_packets(minimum)
+
+    def test_the_count_is_read_from_the_lines_it_is_given(self):
+        lines = ["Capture format: pcap, link type: 255, packets: 42"]
+        self.assertEqual("", self.check()(lines))
+        self.assertEqual("", self.check()(iter(lines)))
+
+    def test_too_few_packets_is_reported_with_the_count(self):
+        lines = ["Capture format: pcap, link type: 255, packets: 3"]
+        self.assertIn("holds 3 packets", self.check()(lines))
+
+    def test_no_count_line_is_reported(self):
+        self.assertIn("did not report a packet count",
+                      self.check()(["Capture format: pcap, link type: 255"]))
 
 
 class IdentityTests(unittest.TestCase):

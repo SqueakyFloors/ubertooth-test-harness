@@ -8,7 +8,9 @@ excluding each other, which is the whole point of the locks.
 from __future__ import annotations
 
 from ubertooth_harness import leases
-from ubertooth_harness.resources import RegistryError
+from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+
+import _checkout
 
 PEER_TYPE = leases.PEER_TYPE
 PROGRAMMER_TYPE = leases.PROGRAMMER_TYPE
@@ -18,6 +20,22 @@ HELD_TYPES = tuple(leases.LEASED_TYPES)
 # its first four hex digits, and an ambiguous prefix is refused, so a short
 # name can never quietly select the wrong device.
 MIN_PREFIX = 4
+
+
+def load_registry(path):
+    """The registry, or an error that also says which harness refused it.
+
+    A registry a newer harness wrote can be turned down by an older one --
+    a role-named default is the case that happened (#312) -- and the message
+    the older one gives reads like a mistake in the file. The file is fine;
+    what matters is which harness read it, so the error says.
+    """
+    try:
+        return FileResourceRegistry.load(path)
+    except RegistryError as error:
+        raise RegistryError(
+            f"{error} ({_checkout.harness_identity()})"
+        ) from None
 
 
 def lock_key(resource) -> str:
@@ -96,45 +114,18 @@ def resolve(registry, name: str):
     return matches[0]
 
 
-def plain_serial(resource) -> str:
-    """The serial a bench's own scripts may name a device's lock file after.
-
-    An Ubertooth's lease key is its serial, so there is no second name and
-    this is empty. A DK's, a peer's and a programmer's keys are not their
-    serials, so both names exist and both are taken.
-    """
-    if resource.type == PROGRAMMER_TYPE:
-        # As registered, not lowercased: a programmer's serial goes into its
-        # lease key verbatim, and the bench's own lock file is named after
-        # that same string, so another spelling would name another file.
-        return str(resource.identity.get("serial", "") or "").strip()
-    if resource.type not in (leases.DK_TYPE, PEER_TYPE):
-        return ""
-    for key in ("jlink serial", "bridge serial"):
-        value = str(resource.identity.get(key, "") or "").strip().lower()
-        if value:
-            return value
-    return ""
+#: The serial a lab's own scripts name a device's lock file after. The
+#: harness's own rule, so these helpers cannot name a file a run would not.
+plain_serial = leases.plain_serial
 
 
 def board(resource) -> leases.Board:
-    """The device's own lock, for `leases.acquire`."""
-    return leases.Board(resource.alias, lock_key(resource))
+    """The device's own lock, for `leases.acquire`.
 
-
-def bench_lock_board(resource) -> leases.Board | None:
-    """The bench's older lock name for this device, when it has a second one.
-
-    The bench's own file keeps the plain serial, which is the whole point of
-    the second name; the lease file taken beside it is prefixed, because an
-    unprefixed name of 32 hex digits is the lease file of an Ubertooth with
-    that serial and a peer's bridge serial is 32 hex digits (harness #290).
+    Both of its names: the lease key, and the plain serial the lab's own
+    ``flock`` file carries for a DK, a peer or a programmer. These helpers
+    once added the second name themselves, because a run did not take it;
+    a run takes it now (harness #317), so there is one rule for both.
     """
-    serial = plain_serial(resource)
-    if not serial or serial == lock_key(resource):
-        return None
-    return leases.Board(
-        f"{resource.alias} (bench lock)",
-        leases.bench_lock_key(serial),
-        external_key=serial,
-    )
+    lock_key(resource)  # refuse a type these helpers do not hold
+    return leases.board_for_resource(resource)

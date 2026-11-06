@@ -1,13 +1,20 @@
 """Guard Ubertooths: other registered boards stay unchanged during transition tests."""
 
+import re
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from ubertooth_harness import cli, transitions
+from ubertooth_harness import bootloader, cli, transitions
 from ubertooth_harness.cancellation import CancellationToken
-from ubertooth_harness.catalog import builtin_catalog
+from ubertooth_harness.catalog import TestCatalog, builtin_catalog
+from ubertooth_harness.patterns import (
+    APPLICATION_IMAGE,
+    BTBR_IMAGE,
+    RX_ONLY_IMAGE,
+)
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.plan import load_plan
 from ubertooth_harness.cases import guard_roles
@@ -26,7 +33,10 @@ from tests.test_transitions import (
 
 A, B, C = "a" * 32, "b" * 32, "c" * 32
 KGV = "e" * 64
-GUARD_QUERIES = {option for _key, option, _pattern, _convert in transitions.GUARD_READBACK}
+# The query options a guard read may use, written out rather than taken from
+# GUARD_READBACK: a write option added to the read set would satisfy a check
+# derived from that set.
+GUARD_QUERIES = {"-v", "-V", "-s", "-B", "-C", "-a", "-z", "-d"}
 GUARD_KEYS = tuple(key for key, *_rest in transitions.GUARD_READBACK) + (
     transitions.GUARD_CRC_KEY,
 )
@@ -136,13 +146,28 @@ def guarded_invocation(test_name, coverage="smoke", guards=(B,)):
     )
 
 
-def run_guarded(invocation, bench, cancellation=None):
+def destructive_catalog(test_name):
+    """``test_name`` as a destructive test, for the guard rule that adds.
+
+    The destructive test of the catalog needs a bench the fakes here cannot
+    stand in for (a hub to switch, a bootloader to come up in), so the rule
+    is exercised on a test they can run.
+    """
+    return TestCatalog(
+        [replace(builtin_catalog().get(test_name), destructive=True)]
+    )
+
+
+def run_guarded(invocation, bench, cancellation=None, destructive=False):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         manifest, checks = run_contract(root, invocation)
         sink = CollectSink()
         summary = NamedTestSequencer(
-            HostVersionPassthrough(bench), event_sink=sink
+            HostVersionPassthrough(bench), event_sink=sink,
+            catalog=(
+                destructive_catalog(invocation.test_name) if destructive else None
+            ),
         ).run(
             (invocation,),
             root,
@@ -224,17 +249,26 @@ class GuardPlanningTests(unittest.TestCase):
         self.assertEqual(
             ["Firmware version", "Firmware compile info", "Device serial"], by_board["UT_0"]
         )
-        # Guard-only: serial plus an API floor (the host API), not a revision.
+        # Guard-only: serial plus the host tools' own API, not a revision.
         self.assertEqual(["Device serial", "Guard firmware API"], by_board["UT_1"])
         self.assertIn(("ubertooth-util", "-U", B, "-s"), [c.argv for c in checks])
         (api_check,) = [c for c in checks if c.name == "Guard firmware API"]
-        self.assertEqual(HOST_API, api_check.minimum_api)
-        older = transitions.format_api(HOST_API - 1)
-        newer = transitions.format_api(HOST_API + 1)
-        ok = CommandResult(api_check.argv, 0, f"Firmware version: git-x (API:{newer})\n", "", 0.01, False)
-        old = CommandResult(api_check.argv, 0, f"Firmware version: git-x (API:{older})\n", "", 0.01, False)
+        self.assertEqual(HOST_API, api_check.required_api)
+        current = transitions.format_api(HOST_API)
+        ok = CommandResult(api_check.argv, 0,
+                           f"Firmware version: git-x (API:{current})\n", "", 0.01, False)
         self.assertEqual("", api_check.result_failure(ok))
-        self.assertIn("is older than the host tools API", api_check.result_failure(old))
+        # Either way about: ubertooth-btle may refuse any other API and stop
+        # the board, so the guard check does not read its CRC.
+        for api in (HOST_API - 1, HOST_API + 1):
+            other = CommandResult(
+                api_check.argv, 0,
+                f"Firmware version: git-x (API:{transitions.format_api(api)})\n",
+                "", 0.01, False,
+            )
+            with self.subTest(transitions.format_api(api)):
+                self.assertIn("is not the host tools API",
+                              api_check.result_failure(other))
 
     def test_host_api_is_parsed_from_the_resolved_source_and_fails_closed(self):
         from types import SimpleNamespace
@@ -391,6 +425,14 @@ GUARD_CHANGES = {
     "compile-info": lambda board: setattr(
         board, "compile_info", board.compile_info + " rebuilt"
     ),
+    # The serial the board reports, not the one commands select it by: this is
+    # a board answering as somebody else, which is what the read catches.
+    transitions.GUARD_IDENTITY_KEY: lambda board: setattr(
+        board, "reported_serial", "d" * 32
+    ),
+    transitions.GUARD_BOOTLOADER_KEY: lambda board: setattr(
+        board, "bootloader", "2.00 git-test, CRC32:0x33334444"
+    ),
     "channel": lambda board: board.state.update(
         channel=str(int(board.state["channel"]) + 1)
     ),
@@ -418,7 +460,8 @@ def test_finished(events):
     return finished
 
 
-class GuardExecutionTests(unittest.TestCase):
+class ReadOnlyGuardCommands:
+    """Every command a guard was sent is one of the reads, and nothing else."""
 
     def assert_guard_commands_read_only(self, bench, serial):
         commands = bench.commands_for(serial)
@@ -431,6 +474,9 @@ class GuardExecutionTests(unittest.TestCase):
                 self.assertEqual("ubertooth-util", command[0])
                 self.assertEqual(1, len(command[3:]), command)
                 self.assertIn(command[3], GUARD_QUERIES, command)
+
+
+class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
 
     def test_untouched_guard_passes_with_baseline_and_a_check_after_every_case(self):
         guard = FakeUbertooth(serial=B, crc="1")
@@ -459,6 +505,8 @@ class GuardExecutionTests(unittest.TestCase):
             "guard Ubertooth 1 firmware":
                 f"{guard.firmware} (API:{transitions.format_api(guard.api)})",
             "guard Ubertooth 1 compile-info": guard.compile_info,
+            "guard Ubertooth 1 identity": guard.reported_serial,
+            "guard Ubertooth 1 bootloader": f"Bootloader: {guard.bootloader}",
             "guard Ubertooth 1 channel": before["channel"],
             "guard Ubertooth 1 pa-level": before["pa"],
             "guard Ubertooth 1 squelch": before["squelch"],
@@ -543,7 +591,12 @@ class GuardExecutionTests(unittest.TestCase):
         self.assertEqual([], state_cases(events))
         (check,) = guard_checks(events)
         self.assertEqual("failed", check.status)
-        self.assertIn("guard Ubertooth 1 squelch: command exited 1", check.details["reason"])
+        # The command failed for a reason of its own, which is not the board
+        # saying it cannot answer: no reading comes of it, so the read fails.
+        self.assertIn(
+            "guard Ubertooth 1 squelch: guard Ubertooth 1 squelch was not reported",
+            check.details["reason"],
+        )
         self.assertIn("no case ran", check.details["reason"])
         # Every read still ran, so the record holds the whole baseline attempt.
         self.assertEqual(READS_PER_GUARD, len(bench.commands_for(B)))
@@ -574,9 +627,13 @@ class GuardExecutionTests(unittest.TestCase):
         self.assertEqual("passed", checks[-1].status)
         self.assertIn("after crc-enabled-during-no-follow-adv37", checks[-1].details["case_name"])
 
-    def test_guard_with_an_older_api_never_runs_ubertooth_btle(self):
-        older = HOST_API - 1
-        guard = FakeUbertooth(serial=B, api=older)
+    def test_guard_with_another_api_never_runs_ubertooth_btle(self):
+        for api in (HOST_API - 1, HOST_API + 1):
+            with self.subTest(transitions.format_api(api)):
+                self.assert_api_keeps_btle_off_the_guard(api)
+
+    def assert_api_keeps_btle_off_the_guard(self, api):
+        guard = FakeUbertooth(serial=B, api=api)
         bench = Bench(FakeUbertooth(serial=A), guard)
         summary, events, _ = run_guarded(guarded_invocation("BLE CRC transitions"), bench)
 
@@ -588,8 +645,11 @@ class GuardExecutionTests(unittest.TestCase):
         (check,) = guard_checks(events)
         self.assertEqual("failed", check.status)
         reason = check.details["reason"]
-        self.assertIn(f"firmware API {transitions.format_api(older)} is older", reason)
-        self.assertIn("too old to read CRC safely", reason)
+        self.assertIn(
+            f"firmware API {transitions.format_api(api)} is not the host tools API",
+            reason,
+        )
+        self.assertIn("its API check may stop the guard", reason)
         self.assertEqual([f"guard Ubertooth 1 {transitions.GUARD_CRC_KEY}"],
                          failed_guard_reads(events))
         (refused,) = [e for e in events if e.event_type == "step_finished"
@@ -612,9 +672,12 @@ class GuardExecutionTests(unittest.TestCase):
         self.assertIn("not confirmed", crc.refuse({}))
         self.assertIn("differs from its baseline",
                       crc.refuse({transitions.differs_key(firmware_key): "git-other (API:1.06)"}))
-        self.assertIn("unreadable", crc.refuse({firmware_key: "git-test"}))
+        self.assertIn("could not be read", crc.refuse({firmware_key: "git-test"}))
         self.assertEqual("", crc.refuse({firmware_key: f"git-test (API:{current})"}))
-        self.assertEqual("", crc.refuse({firmware_key: f"git-test (API:{newer})"}))
+        # Newer firmware as well: ubertooth-btle may refuse any API that is
+        # not the one the tools were built for, stopping the board as it goes.
+        self.assertIn(f"API {newer} is not the host tools API {current}",
+                      crc.refuse({firmware_key: f"git-test (API:{newer})"}))
 
     def test_each_guard_read_catches_its_own_difference(self):
         invocation = guarded_invocation("Radio setting transitions")
@@ -732,6 +795,440 @@ class GuardExecutionTests(unittest.TestCase):
                     manifest=manifest, preflight_checks=checks,
                 )
             self.assertEqual([], bench.commands)
+
+
+# The reads the alternate btbr image has not got, as the options that ask for
+# them: it implements no channel and no squelch request
+# (firmware/btbr/src/btctl/vendor_request_handler.c). It does answer who it
+# is, which image and revision it runs, what built it, the bootloader under
+# it, the LEDs, and the transmit power level. The CRC read never reaches the
+# board at all: `ubertooth-btle` refuses a board carrying another of this
+# tree's images as it opens it, which is the third reading this host cannot
+# make of such a guard.
+BTBR_STALLS = ("C", "c", "z")
+BTBR_UNANSWERED = ("channel", "squelch", transitions.GUARD_CRC_KEY)
+
+
+def image_guard(image, serial=B, stalls=(), revision="git-test"):
+    """A guard carrying ``image``, refusing the reads ``stalls`` names."""
+    return FakeUbertooth(
+        serial=serial, firmware=f"{image} {revision}", unsupported=stalls
+    )
+
+
+def guard_reads(events, board="guard Ubertooth 1"):
+    """``board``'s guard reads in order; the first check is its baseline."""
+    return [
+        e for e in events if e.event_type == "step_finished"
+        and e.details["stage"] == "guard"
+        and e.details["step_name"].startswith(f"{board} ")
+    ]
+
+
+def guard_readings(events, board="guard Ubertooth 1"):
+    """The baseline reading of each of ``board``'s reads, by setting name."""
+    return {
+        e.details["step_name"][len(board) + 1:]: e.details["observed"]
+        for e in guard_reads(events, board)[:READS_PER_GUARD]
+    }
+
+
+class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
+    """A guard is read and compared whatever image it carries (#275).
+
+    None of these skips a read or writes to a guard: the reads are the same
+    ones every guard gets, and what a board says it cannot answer is recorded
+    as its reading and compared like any other.
+    """
+
+    def test_a_guard_on_the_alternate_image_is_read_and_compared_in_full(self):
+        guard = image_guard(BTBR_IMAGE, stalls=BTBR_STALLS)
+        bench = Bench(FakeUbertooth(serial=A), guard)
+        before = dict(guard.state)
+
+        summary, events, report = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(before, guard.state)
+        self.assert_guard_commands_read_only(bench, B)
+        readings = guard_readings(events)
+        self.assertEqual(
+            {key: transitions.GUARD_UNSUPPORTED for key in BTBR_UNANSWERED},
+            {key: readings[key] for key in BTBR_UNANSWERED},
+        )
+        # What it does answer is a real reading, not a tolerated one.
+        self.assertEqual(f"{BTBR_IMAGE} git-test (API:"
+                         f"{transitions.format_api(guard.api)})",
+                         readings[transitions.GUARD_FIRMWARE_KEY])
+        self.assertEqual(B, readings[transitions.GUARD_IDENTITY_KEY])
+        self.assertEqual(f"Bootloader: {guard.bootloader}",
+                         readings[transitions.GUARD_BOOTLOADER_KEY])
+        self.assertEqual(before["pa"], readings["pa-level"])
+        self.assertEqual("1/0/0", readings["leds"])
+        # Every read ran in every check, including the ones the board
+        # refused, and each later check compared each reading to the baseline.
+        reads = guard_reads(events)
+        checks = guard_checks(events)
+        self.assertEqual(READS_PER_GUARD * len(checks), len(reads))
+        later = reads[READS_PER_GUARD:]
+        self.assertTrue(later)
+        for read in later:
+            self.assertEqual(read.details["expected"], read.details["observed"])
+        self.assertEqual(
+            len(BTBR_UNANSWERED) * (len(checks) - 1),
+            len([r for r in later
+                 if r.details["expected"] == transitions.GUARD_UNSUPPORTED]),
+        )
+        self.assertIn(transitions.GUARD_UNSUPPORTED, report)
+
+    def test_the_alternate_image_guard_still_catches_what_it_does_answer(self):
+        guard = image_guard(BTBR_IMAGE, stalls=BTBR_STALLS)
+        bench = Bench(
+            FakeUbertooth(serial=A), guard,
+            leak=leak_once(B, GUARD_CHANGES["pa-level"]),
+        )
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertEqual("failed", summary.status)
+        self.assertEqual(["guard Ubertooth 1 pa-level"], failed_guard_reads(events))
+
+    def test_a_reading_that_appears_where_the_board_refused_one_fails(self):
+        """btbr cannot answer the channel; a board that starts to is a change."""
+        guard = image_guard(BTBR_IMAGE, stalls=BTBR_STALLS)
+        bench = Bench(
+            FakeUbertooth(serial=A), guard,
+            leak=leak_once(B, lambda board: setattr(
+                board, "unsupported", frozenset(board.unsupported - {"C", "c"})
+            )),
+        )
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertEqual("failed", summary.status)
+        self.assertEqual(["guard Ubertooth 1 channel"], failed_guard_reads(events))
+        (failed,) = [e for e in events if e.event_type == "step_finished"
+                     and e.details["stage"] == "guard" and e.status == "failed"]
+        self.assertEqual(transitions.GUARD_UNSUPPORTED, failed.details["expected"])
+
+    def test_the_crc_read_is_refused_by_the_board_image_not_skipped(self):
+        """The btle read runs and its refusal is the reading it records."""
+        guard = image_guard(BTBR_IMAGE, stalls=BTBR_STALLS)
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, report = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        btle = [c for c in bench.commands_for(B) if c[0] == "ubertooth-btle"]
+        self.assertEqual([("ubertooth-btle", "-U", B, "-k")] * len(guard_checks(events)),
+                         btle)
+        self.assertEqual(0, guard.stops)
+        self.assertEqual(
+            transitions.GUARD_UNSUPPORTED,
+            guard_readings(events)[transitions.GUARD_CRC_KEY],
+        )
+        self.assertIn(f"this tool needs {APPLICATION_IMAGE}", report)
+
+    def test_the_settings_image_must_answer_its_own_settings(self):
+        guard = image_guard(APPLICATION_IMAGE, stalls=("z",))
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertFalse(summary.passed)
+        self.assertEqual([], state_cases(events))
+        self.assertEqual([], bench.commands_for(A))
+        (check,) = guard_checks(events)
+        reason = check.details["reason"]
+        self.assertIn(f"runs {APPLICATION_IMAGE}, which implements squelch", reason)
+        self.assertIn("says it cannot answer it", reason)
+        self.assertIn("no case ran", reason)
+        # The refusal is the reading, so the read itself did not fail.
+        self.assertEqual([], failed_guard_reads(events))
+
+    def test_a_partly_answered_led_read_fails_instead_of_being_recorded(self):
+        """`-d` asks for three LEDs at once, so a stall there is not an answer.
+
+        Were it recorded, this board -- which answered two of the three --
+        would leave all three unguarded for the rest of the run.
+        """
+        self.assertEqual(("leds",), transitions.GUARD_STRICT_KEYS)
+        guard = FakeUbertooth(
+            serial=B, firmware=f"{BTBR_IMAGE} git-test",
+            unsupported=BTBR_STALLS, stalled_leds=("tx",),
+        )
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        # The board did print the two LED lines it could.
+        partial = [c for c in bench.commands_for(B) if c[3:] == ("-d",)]
+        self.assertTrue(partial)
+        answer = guard.run(list(partial[0]), timeout_s=5)
+        self.assertIn("USR LED status: ", answer.stdout)
+        self.assertIn("RX LED status : ", answer.stdout)
+        self.assertNotIn("TX LED status", answer.stdout)
+        self.assertEqual(1, answer.returncode)
+
+        self.assertFalse(summary.passed)
+        self.assertEqual([], state_cases(events))
+        self.assertEqual(["guard Ubertooth 1 leds"], failed_guard_reads(events))
+        (check,) = guard_checks(events)
+        # Strict: the read is not allowed to exit 1 either.
+        self.assertIn("guard Ubertooth 1 leds: command exited 1",
+                      check.details["reason"])
+        self.assertIn("no case ran", check.details["reason"])
+
+    def test_a_board_that_stalls_every_read_fails_the_strict_one_too(self):
+        """What a wedged board looks like: every request stalls."""
+        guard = FakeUbertooth(
+            serial=B, unsupported=("v", "V", "s", "B", "C", "c", "z", "a", "d"),
+        )
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertFalse(summary.passed)
+        self.assertEqual([], state_cases(events))
+        # The LED read fails outright, and the CRC read is refused because
+        # this check could confirm no firmware API.
+        self.assertEqual(
+            ["guard Ubertooth 1 leds", f"guard Ubertooth 1 {transitions.GUARD_CRC_KEY}"],
+            failed_guard_reads(events),
+        )
+        (check,) = guard_checks(events)
+        reason = check.details["reason"]
+        self.assertIn("guard Ubertooth 1 leds", reason)
+        self.assertIn("answered none of", reason)
+        self.assertIn("wedged rather than short of one", reason)
+
+    def test_the_receive_only_build_is_held_to_the_settings_it_has(self):
+        """It answers the same settings bar the transmit power level."""
+        guard = image_guard(RX_ONLY_IMAGE, stalls=("a",))
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(transitions.GUARD_UNSUPPORTED,
+                         guard_readings(events)["pa-level"])
+        # The rest of its settings are its own, so a refusal there is a board
+        # that is not holding them.
+        refusing = image_guard(RX_ONLY_IMAGE, stalls=("a", "z"))
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"),
+            Bench(FakeUbertooth(serial=A), refusing),
+        )
+        self.assertFalse(summary.passed)
+        self.assertIn(f"runs {RX_ONLY_IMAGE}, which implements squelch",
+                      guard_checks(events)[0].details["reason"])
+
+    def test_a_guard_the_run_cannot_observe_is_refused_by_name(self):
+        """A guard that answers none of the stable reads is not a guard.
+
+        Firmware this host can read nothing of, which is what the rule is
+        about; a wedged board reads that way too, and fails the strict LED
+        read as well (above).
+        """
+        guard = image_guard(
+            BTBR_IMAGE, stalls=("v", "V", "s", "B") + BTBR_STALLS
+        )
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench
+        )
+
+        self.assertFalse(summary.passed)
+        self.assertEqual([], state_cases(events))
+        self.assertEqual([], bench.commands_for(A))
+        (check,) = guard_checks(events)
+        reason = check.details["reason"]
+        self.assertIn(f"guard Ubertooth 1 (serial {B}) answered none of "
+                      + ", ".join(transitions.GUARD_PINNING_KEYS), reason)
+        self.assertIn("it runs an image it did not name", reason)
+        self.assertIn("wedged rather than short of one", reason)
+        self.assertIn("no case ran", reason)
+        # The CRC read is the one that does not reach a board whose firmware
+        # this check could not confirm: ubertooth-btle may stop a board
+        # whose API is not the host tools' own, so it is refused and fails
+        # the check.
+        self.assertEqual([], [c for c in bench.commands_for(B)
+                              if c[0] == "ubertooth-btle"])
+        self.assertIn(f"guard Ubertooth 1 {transitions.GUARD_CRC_KEY}",
+                      failed_guard_reads(events))
+
+    def test_the_destructive_test_is_refused_by_the_same_rule(self):
+        guard = image_guard(
+            BTBR_IMAGE, stalls=("v", "V", "s", "B") + BTBR_STALLS
+        )
+        bench = Bench(FakeUbertooth(serial=A), guard)
+
+        summary, events, _ = run_guarded(
+            guarded_invocation("Radio setting transitions"), bench, destructive=True
+        )
+
+        self.assertFalse(summary.passed)
+        self.assertEqual([], state_cases(events))
+        self.assertIn("answered none of", guard_checks(events)[0].details["reason"])
+
+    def test_a_guard_that_pins_one_reading_is_enough(self):
+        board = transitions.GuardBoard("guard Ubertooth 1", B)
+        readings = {
+            board.key(key): transitions.GUARD_UNSUPPORTED
+            for key, *_rest in transitions.GUARD_READBACK
+        }
+        (problem,) = transitions.guard_baseline_problems((board,), readings)
+        self.assertIn("answered none of", problem)
+        readings[board.key(transitions.GUARD_IDENTITY_KEY)] = B
+        readings[board.key(transitions.GUARD_FIRMWARE_KEY)] = (
+            f"{BTBR_IMAGE} git-test (API:1.35)"
+        )
+        self.assertEqual([], transitions.guard_baseline_problems(
+            (board,), readings
+        ))
+        # The same readings under the settings image are a refusal to guard.
+        readings[board.key(transitions.GUARD_FIRMWARE_KEY)] = (
+            f"{APPLICATION_IMAGE} git-test (API:1.35)"
+        )
+        (problem,) = transitions.guard_baseline_problems((board,), readings)
+        self.assertIn(f"runs {APPLICATION_IMAGE}", problem)
+        # The LEDs are not on that list: their read is the strict one, which
+        # every guard is held to whatever it runs.
+        self.assertIn("channel, pa-level, squelch", problem)
+        self.assertNotIn("leds", problem)
+
+    def test_the_bootloader_pattern_reads_every_line_the_tool_prints(self):
+        """Kept in step with bootloader.py, which renders the same line."""
+        for identity in (
+            bootloader.BootloaderIdentity(
+                0x9D2FE1B4, "2.00 git-1a2b3c4", "2.00", "git-1a2b3c4"),
+            bootloader.BootloaderIdentity(
+                0x5F0A73C1, bootloader.NO_VERSION_BLOCK_DETAIL),
+            bootloader.BootloaderIdentity(
+                0x11223344,
+                "the bootloader version block is in a format this host does "
+                "not know"),
+        ):
+            with self.subTest(identity.detail):
+                match = re.search(transitions.GUARD_BOOTLOADER_PATTERN,
+                                  identity.line() + "\n")
+                self.assertIsNotNone(match)
+                self.assertEqual(identity.line(), match["value"])
+
+    def test_only_two_answers_are_read_as_a_reading_this_host_cannot_make(self):
+        """Every other line a failed read prints still fails the read.
+
+        The whole weight of the tolerance rests on this: a line the board or
+        the tool printed for some other reason must not become a value that
+        then compares equal for the rest of the run.
+        """
+        board = transitions.GuardBoard("guard Ubertooth 1", B, host_api=HOST_API)
+        # Every read that tolerates an unanswered request, each read the way
+        # the run reads it: the lines on stderr, through the step's own
+        # observation, which searches stdout first and stderr after.
+        reads = [
+            step for step in transitions.guard_steps((board,))
+            if step.expected_returncodes == (0, 1)
+        ]
+        self.assertEqual(
+            len([key for key, *_rest in transitions.GUARD_READBACK
+                 if key not in transitions.GUARD_STRICT_KEYS]) + 1,
+            len(reads),
+        )
+
+        def readings(text):
+            """What each tolerant read makes of ``text`` on stderr."""
+            return {
+                step.name: step.observe.extract(
+                    CommandResult(step.argv, 1, "", text, 0.01, False)
+                )
+                for step in reads
+            }
+
+        unsupported = (
+            # libubertooth's stall wording, with and without the libusb code.
+            "error: could not read the firmware information: the board's "
+            "firmware does not support it (stalled, libusb -9)\n",
+            "error: could not read the firmware information: the board's "
+            "firmware does not support it (stalled)\n",
+            # The image refusal ubertooth-btle prints as it opens a board.
+            f"error: the Ubertooth is running {BTBR_IMAGE}; this tool needs "
+            f"{APPLICATION_IMAGE}\n",
+        )
+        for text in unsupported:
+            with self.subTest(text.split("\n")[0]):
+                self.assertEqual(
+                    {step.name: transitions.GUARD_UNSUPPORTED for step in reads},
+                    readings(text),
+                )
+
+        # A value the board did print wins over a stall beside it. That is
+        # the `-v` case on firmware older than the info block: the image
+        # request stalls, libubertooth says so on stderr, and the revision
+        # fallback still prints a whole version line on stdout. Without
+        # stdout first, the firmware reading would be unsupported and the
+        # settings requirements would fall away with the image name.
+        firmware = f"2020-12-R1 (API:{transitions.format_api(HOST_API)})"
+        (version_read,) = [
+            step for step in reads
+            if step.name.endswith(transitions.GUARD_FIRMWARE_KEY)
+        ]
+        self.assertEqual(firmware, version_read.observe.extract(CommandResult(
+            version_read.argv, 1, f"Firmware version: {firmware}\n",
+            unsupported[0], 0.01, False,
+        )))
+
+        fails = (
+            # A board that has left the bus stalls requests too, and says so.
+            "error: could not read the firmware information: the board is no "
+            "longer attached\n",
+            "error: could not read the firmware information: the board did "
+            "not answer in time\n",
+            # The tool's own line after any failed read, whatever the cause.
+            "error: firmware information read failed\n",
+            "libUSB Error: Other error:  (4)\n",
+            # The API mismatch, in both the forms the tools print it.
+            "error: Ubertooth firmware API version 1.57 found, libubertooth "
+            "1.1 requires 1.58.\n",
+            "warning: Ubertooth firmware API version 1.57 found, "
+            "libubertooth 1.1 requires 1.58.\n",
+            "",
+        )
+        for text in fails:
+            with self.subTest(text.split("\n")[0] or "no output"):
+                self.assertEqual(
+                    {step.name: None for step in reads}, readings(text)
+                )
+
+    def test_the_image_name_comes_off_the_firmware_reading(self):
+        self.assertEqual(APPLICATION_IMAGE, transitions.guard_image(
+            f"{APPLICATION_IMAGE} git-1c7f06d6 (API:1.35)"
+        ))
+        self.assertEqual(BTBR_IMAGE, transitions.guard_image(
+            f"{BTBR_IMAGE} git-1c7f06d6 (API:1.35)"
+        ))
+        # Firmware older than the info block names no image.
+        self.assertIsNone(transitions.guard_image("2020-12-R1 (API:1.07)"))
+        self.assertIsNone(transitions.guard_image(transitions.GUARD_UNSUPPORTED))
+        self.assertIsNone(transitions.guard_image(None))
+        self.assertIsNone(transitions.guard_image(""))
 
 
 if __name__ == "__main__":

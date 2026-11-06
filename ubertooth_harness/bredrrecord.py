@@ -48,6 +48,15 @@ that records no HEC or CRC answer at all leaves those floors unreachable,
 and one without the clears can write an honest record that these rules call
 inconsistent.
 
+Two more tie a record to its own payload and to the run that wrote it:
+
+- the transport nibble names the payload's own logical transport (ACL, SCO,
+  or eSCO, as the packet type allows) and names none where the record
+  carries no payload;
+- the record times span no more than the run and step backwards no further
+  than two packets of one slot bank, which a caller asks for with
+  ``--max-span-s`` and ``--max-backward-step-us``.
+
 A record whose header never decoded carries eighteen zero bits where the
 header goes, so it is reported as a NULL packet with address 0 and no flags
 set. In a survey that is most of them.
@@ -164,11 +173,49 @@ MIN_DBM, MAX_DBM = -120, 0
 # bytes, which is 183 blocks.
 MAX_CORRECTED_HEADER_BITS = 3
 MAX_CORRECTED_PAYLOAD_BITS = 183
-# Transport and rate nibbles of payload_transport_rate: ubertooth-rx tells
-# libbtbb the transport is unknown (BTBB_TRANSPORT_ANY) and the modulation
-# basic rate (BTBB_MOD_GFSK), which is all a receive-only capture knows.
+# Transport and rate nibbles of payload_transport_rate. The rate is the
+# caller's and ubertooth-rx sets the basic rate (BTBB_MOD_GFSK), which is the
+# only one it receives. The transport is the library's: it names the logical
+# transport the payload it produced decoded on, and leaves "any" where it
+# produced none (libbtbb's record_transport(), SqueakyFloors/libbtbb#133,
+# which the fork picked up in SqueakyFloors/ubertooth#1122).
 TRANSPORT_ANY = 0
+TRANSPORT_SCO = 1
+TRANSPORT_ESCO = 2
+TRANSPORT_ACL = 3
+TRANSPORT_CSB = 4
+TRANSPORT_NAMES = {
+    TRANSPORT_ANY: "any", TRANSPORT_SCO: "SCO", TRANSPORT_ESCO: "eSCO",
+    TRANSPORT_ACL: "ACL", TRANSPORT_CSB: "CSB",
+}
 MOD_GFSK = 0
+
+# The transports libbtbb can name for each packet type, read from its
+# transport_for_type() at the commit the fork pins. One name covers several
+# types because the four header bits do, and code 0111 is the one code whose
+# transport is not settled by the header: an HV3 is 30 voice bytes with no
+# CRC and an EV3 ends in one, so the decoder names SCO or eSCO according to
+# which it read the payload as. Every other code names one transport, so a
+# record disagreeing with its own type holds one packet's header beside
+# another's payload.
+_TYPE_TRANSPORTS = {
+    0: (),                                 # NULL, which carries no payload
+    1: (),                                 # POLL, likewise
+    2: (TRANSPORT_ACL,),                   # FHS
+    3: (TRANSPORT_ACL,),                   # DM1
+    4: (TRANSPORT_ACL,),                   # DH1
+    5: (TRANSPORT_SCO,),                   # HV1
+    6: (TRANSPORT_SCO,),                   # HV2
+    7: (TRANSPORT_SCO, TRANSPORT_ESCO),    # HV3 or EV3
+    8: (TRANSPORT_SCO,),                   # DV
+    9: (TRANSPORT_ACL,),                   # AUX1
+    10: (TRANSPORT_ACL,),                  # DM3
+    11: (TRANSPORT_ACL,),                  # DH3
+    12: (TRANSPORT_ESCO,),                 # EV4
+    13: (TRANSPORT_ESCO,),                 # EV5
+    14: (TRANSPORT_ACL,),                  # DM5
+    15: (TRANSPORT_ACL,),                  # DH5
+}
 # libbtbb's interface option carrying the address a capture was following
 # (PCAPNG_BREDR_OPTION_BD_ADDR), and the length of its value.
 OPTION_BD_ADDR = 0xD340
@@ -402,8 +449,63 @@ def following_address(path: Path | str) -> dict | None:
 # Checks
 
 
-def _consistency(record: Record, *, payload_checks: bool) -> list[str]:
-    """What is wrong inside one record, with nothing else to compare it to."""
+def transport_name(transport: int) -> str:
+    return TRANSPORT_NAMES.get(transport, str(transport))
+
+
+def _transport_problems(record: Record) -> list[str]:
+    """Whether the transport nibble agrees with this record's own payload.
+
+    Two rules, both of which hold whichever libbtbb wrote the record. A
+    record with no payload names no transport, because the library names one
+    only for a payload it produced and clears it again wherever it drops one
+    (a trial clock it abandons, a packet handed new symbols). A record that
+    does carry a payload names that payload's own transport -- or "any",
+    which is what a libbtbb from before SqueakyFloors/libbtbb#133 records for
+    every packet, so a run against an older ``--libbtbb-ref`` is not failed
+    for a field that library never filled in.
+
+    That second escape is a real gap, kept on purpose: at the commit the fork
+    pins, a payload-bearing record always names a transport, so a libbtbb
+    that stopped filling the field in would pass here. What it covers is a
+    run that names a libbtbb from before libbtbb#133 itself. A run that takes
+    the fork's pin, which is what a deployed runner's ``fork-pin`` resolves
+    to, has named transports since that change; the harness's own
+    ``LIBBTBB_PIN`` and the README's example refs named an older one until
+    harness #341 moved them, and those were the runs the escape was written
+    for. A floor on payload-bearing records is no alternative either way,
+    because they are rare on the bench. Dropping the escape is harness #339,
+    whose one precondition, that pin, is now met; it is left to that issue
+    because it changes the rule a live Classic capture is judged by, which is
+    that issue's subject rather than this one's.
+    """
+    named = transport_name(record.transport)
+    if not record.payload:
+        if record.transport != TRANSPORT_ANY:
+            return [f"transport {named} with no payload in the record, and a "
+                    "transport names the payload the decoder produced"]
+        return []
+    if record.transport == TRANSPORT_ANY:
+        return []
+    allowed = _TYPE_TRANSPORTS.get(record.packet_type, ())
+    if record.transport not in allowed:
+        wanted = " or ".join(transport_name(one) for one in allowed) or "none"
+        return [f"transport {named} on a {record.type_name} payload, whose "
+                f"transport is {wanted}"]
+    return []
+
+
+def _consistency(record: Record, *, payload_checks: bool,
+                 transport_checks: bool = True) -> list[str]:
+    """What is wrong inside one record, with nothing else to compare it to.
+
+    ``transport_checks`` off leaves the transport nibble alone. The nibble
+    names the payload the decoder produced, but which transport that may be
+    is decided by the packet type, which comes from the header -- so a
+    capture whose headers do not decode gives nothing to check it against.
+    That is a fault of the capture, not of a record, and the caller says so
+    once rather than per record.
+    """
     problems = []
     if record.rf_channel >= NUM_BREDR_CHANNELS:
         problems.append(f"RF channel {record.rf_channel}, and there are only "
@@ -448,10 +550,11 @@ def _consistency(record: Record, *, payload_checks: bool) -> list[str]:
     if record.has(CRC_CHECKED) and len(record.payload) < 3:
         problems.append(f"a CRC was checked over {len(record.payload)} payload "
                         "bytes, which cannot hold a CRC and a byte for it to cover")
-    if record.transport != TRANSPORT_ANY or record.rate != MOD_GFSK:
-        problems.append(f"transport {record.transport} rate {record.rate}, and a "
-                        f"receive-only basic-rate capture records "
-                        f"{TRANSPORT_ANY}/{MOD_GFSK}")
+    if transport_checks:
+        problems += _transport_problems(record)
+    if record.rate != MOD_GFSK:
+        problems.append(f"rate {record.rate}, and a basic-rate capture records "
+                        f"{MOD_GFSK}")
     if not 0 <= record.corrected_header_bits <= MAX_CORRECTED_HEADER_BITS:
         problems.append(f"{record.corrected_header_bits} corrected header bits")
     if not 0 <= record.corrected_payload_bits <= MAX_CORRECTED_PAYLOAD_BITS:
@@ -494,12 +597,20 @@ def problems(found: list[Record], *, lap: int | None = None,
              min_crc_valid: int = 0, min_channels: int = 0,
              max_access_code_errors: int | None = None,
              types: tuple[str, ...] = (), require_types: tuple[str, ...] = (),
-             payload_checks: bool = True) -> list[str]:
+             payload_checks: bool = True,
+             transport_checks: bool = True,
+             max_span_s: float | None = None,
+             max_backward_step_us: float | None = None) -> list[str]:
     """Everything wrong with these records, worst first; empty when they pass."""
     found = list(found)
     failures = []
     if len(found) < min_packets:
         failures.append(f"{len(found)} records, expected at least {min_packets}")
+    # After the count: a capture that recorded nothing has no times to check
+    # either, and "0 records" is the fault a reader needs first.
+    failures += _timestamp_problems(
+        found, max_span_s=max_span_s,
+        max_backward_step_us=max_backward_step_us)
     if lap is not None:
         wrong = [record for record in found if record.lap != lap]
         if wrong:
@@ -571,7 +682,8 @@ def problems(found: list[Record], *, lap: int | None = None,
     # and the caller shows only the first few: the counts and addresses above
     # are what a reader needs first.
     for record in found:
-        for problem in _consistency(record, payload_checks=payload_checks):
+        for problem in _consistency(record, payload_checks=payload_checks,
+                                    transport_checks=transport_checks):
             failures.append(f"record {record.index}: {problem}")
     return failures
 
@@ -601,6 +713,8 @@ def summary(found: list[Record], label: str) -> list[str]:
         + (f", {min(payloads)} to {max(payloads)} bytes" if payloads else "")
         + (f", {over} declaring more than the packet type carries" if over
            else ""))
+    lines.append("BR/EDR transports: " + _counted(Counter(
+        transport_name(record.transport) for record in found)))
     lines.append(f"BR/EDR signal: {min(signals)} to {max(signals)} dBm")
     lines.append("BR/EDR noise: "
                  + (f"{min(noises)} to {max(noises)} dBm in {len(noises)} records"
@@ -616,28 +730,87 @@ def summary(found: list[Record], label: str) -> list[str]:
     return lines
 
 
-def _times(found: list[Record]) -> str:
-    """What the record timestamps did, reported and not asserted.
+def timestamps(found: list[Record]) -> list[int]:
+    """Every record timestamp, in file order."""
+    return [record.timestamp_ns for record in found
+            if record.timestamp_ns is not None]
 
-    Nothing here fails on them. Each one is built from the capture clock the
-    board reports, and the fork notes that the firmware latches that clock
-    and its period count with separate reads, so a packet caught as the
-    count ticks over carries a time a whole period out, in either direction.
-    Any bound tight enough to mean something would therefore fail a good
-    capture now and then. Small steps backwards are ordinary too: two
-    packets decoded out of one 400 microsecond bank land in either order,
-    and a bench capture of 285 records had one step of 225 us.
+
+def span_s(stamped: list[int]) -> float:
+    return (max(stamped) - min(stamped)) / 1e9 if stamped else 0.0
+
+
+def backward_steps_us(stamped: list[int]) -> list[float]:
+    """How far each step backwards went, in microseconds, worst first."""
+    steps = [after - before for before, after in zip(stamped, stamped[1:])]
+    return sorted((-step / 1000 for step in steps if step < 0), reverse=True)
+
+
+def _timestamp_problems(found: list[Record], *, max_span_s: float | None,
+                        max_backward_step_us: float | None) -> list[str]:
+    """Whether the record times measure the run that wrote them.
+
+    A capture's per-packet times are built from the board's own capture
+    clock. Following a piconet puts that clock on the piconet's, which moves
+    it by however far the two were apart -- up to its 327.68 s period, in
+    either direction -- and a reconstruction that reads the move as time
+    passing gives times that do not measure the run at all. A 15 s follow on
+    the fork's bench wrote records spanning 191.3 s, and where the clock
+    moved back instead, a record's time came out before the record ahead of
+    it (SqueakyFloors/ubertooth#1195, which fixed it host-side).
+
+    So two bounds, which are what that fault shows up as:
+
+    - the records span no more than the run that captured them, and
+    - no step backwards beyond a slot bank or so.
+
+    Both are loose against a working capture and orders of magnitude clear
+    of the fault. The fork measured spans within 2.9 s of the run across
+    nine follow captures with the fix, against 41.3 s short and 176 s long
+    without it; and no step backwards at all in those nine, against steps of
+    41.16 s and 317.68 s. Ordinary reordering is small and stays allowed:
+    two packets decoded out of one 400 us bank land in either order, and a
+    bench capture of 285 records had one step of 225 us.
+
+    One thing could fail a good capture: the firmware latches the clock and
+    its period count with separate reads, so a packet caught as the count
+    ticks over carries a time a whole period out. No bench capture has shown
+    one, and the summary above names the size of what it saw, so a reader
+    can tell a one-off straddle of about 327.68 s from a clock move.
     """
-    stamped = [record.timestamp_ns for record in found
-               if record.timestamp_ns is not None]
+    if max_span_s is None and max_backward_step_us is None:
+        return []
+    stamped = timestamps(found)
+    if not stamped:
+        return ["no record carries a timestamp, so the run's own record "
+                "times cannot be checked"]
+    problems = []
+    if max_span_s is not None:
+        span = span_s(stamped)
+        if span > max_span_s:
+            problems.append(
+                f"the records span {span:.1f} s, more than the {max_span_s:.1f} s "
+                "this capture ran for: a record time that is not the run's")
+    if max_backward_step_us is not None:
+        back = backward_steps_us(stamped)
+        worst = back[0] if back else 0.0
+        if worst > max_backward_step_us:
+            problems.append(
+                f"a record time {worst / 1e6:.3f} s before the record ahead of "
+                f"it, where {max_backward_step_us:.0f} us is allowed for two "
+                f"packets of one slot bank ({len(back)} steps back in all)")
+    return problems
+
+
+def _times(found: list[Record]) -> str:
+    """What the record timestamps did. The bounds are asserted separately."""
+    stamped = timestamps(found)
     if not stamped:
         return "no record carries one"
-    steps = [after - before for before, after in zip(stamped, stamped[1:])]
-    back = [-step for step in steps if step < 0]
-    return (f"{len(stamped)} stamped, spanning "
-            f"{(max(stamped) - min(stamped)) / 1e9:.1f} s, "
-            + (f"{len(back)} stepping back, the largest by "
-               f"{max(back) / 1000:.0f} us" if back else "none stepping back"))
+    back = backward_steps_us(stamped)
+    return (f"{len(stamped)} stamped, spanning {span_s(stamped):.1f} s, "
+            + (f"{len(back)} stepping back, the largest by {back[0]:.0f} us"
+               if back else "none stepping back"))
 
 
 def _counted(counter: Counter) -> str:
@@ -721,6 +894,22 @@ def main(argv: list[str] | None = None) -> int:
         "--no-payload-checks", action="store_true",
         help="skip the payload length and CRC checks, which need a link "
              "whose payloads are not encrypted")
+    parser.add_argument(
+        "--any-transport", action="store_true",
+        help="accept any transport nibble, for a capture whose headers do "
+             "not decode: the type the nibble is checked against comes from "
+             "the header")
+    parser.add_argument(
+        "--max-span-s", type=float,
+        help="the longest the records may span, which is the run that "
+             "captured them: a follow that read a piconet's clock move as "
+             "time passing spans far longer")
+    parser.add_argument(
+        "--max-backward-step-us", type=float,
+        help="the largest step backwards allowed between consecutive "
+             "records, in microseconds; two packets of one slot bank land "
+             "in either order, a clock move read as time sends a record "
+             "whole seconds behind the one ahead of it")
     args = parser.parse_args(argv)
     try:
         types = tuple(_type_name(name)
@@ -753,7 +942,10 @@ def main(argv: list[str] | None = None) -> int:
         max_access_code_errors=args.max_access_code_errors,
         min_crc_valid=args.min_crc_valid, min_channels=args.min_channels,
         types=types, require_types=require_types,
-        payload_checks=not args.no_payload_checks)
+        payload_checks=not args.no_payload_checks,
+        transport_checks=not args.any_transport,
+        max_span_s=args.max_span_s,
+        max_backward_step_us=args.max_backward_step_us)
     wanted = (("LAP", "lap", args.following_lap),
               ("UAP", "uap", args.following_uap),
               ("UAP mask", "uap_mask", args.following_uap_mask))

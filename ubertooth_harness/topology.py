@@ -22,6 +22,7 @@ from ubertooth_harness.enumeration import (
 )
 from ubertooth_harness.power import (
     ACRONAME_DRIVER,
+    SIMULATED_DRIVER,
     PowerController,
     RESTORE_FAILURE_PREFIX,
     PowerControllerError,
@@ -30,11 +31,11 @@ from ubertooth_harness.power import (
     snapshot_ports,
 )
 from ubertooth_harness.resources import (
-    STARTECH_DRIVER,
-    STARTECH_PORTS,
     MissingRequiredHardware,
     RegistryError,
     ResourceRegistry,
+    STARTECH_DRIVER,
+    STARTECH_PORTS,
 )
 
 
@@ -52,6 +53,124 @@ class PowerIsolationAction:
             "port": self.port,
             "power_enabled": self.power_enabled,
         }
+
+
+@dataclass(frozen=True)
+class PowerCycleTarget:
+    """The port a test may switch to power-cycle the board it selected.
+
+    The controller's driver and its own identity are part of it, not just
+    the alias: an alias says which entry in the registry, and a registry
+    edited after the run was planned could point the same alias at another
+    hub. ``describe()`` is what a step checks the registry against, so what
+    is switched is the port the run recorded on the hub it recorded.
+    """
+
+    resource_alias: str
+    controller_alias: str
+    port: int
+    controller_driver: str = ""
+    # The controller's own identity, as one string: the hub's serial, or
+    # the stable serial-device path of a managed hub's controller.
+    controller_identity: str = ""
+
+    def describe(self) -> str:
+        return (f"{self.controller_alias} port {self.port} "
+                f"({self.controller_driver}, {self.controller_identity})")
+
+    def to_dict(self) -> dict:
+        return {
+            "resource": self.resource_alias,
+            "controller": self.controller_alias,
+            "port": self.port,
+            "driver": self.controller_driver,
+            "identity": self.controller_identity,
+        }
+
+
+def controller_identity(resource) -> str:
+    """A controller's own identity as one string, for a target to carry."""
+    identity = resource.identity
+    for key in ("serial", "serial device"):
+        if identity.get(key):
+            return str(identity[key])
+    return ""
+
+
+def plan_power_cycle(
+    registry: ResourceRegistry,
+    host: str,
+    selected_alias: str,
+    controller_alias: str | None = None,
+) -> PowerCycleTarget:
+    """The registered port of the board a test power-cycles.
+
+    The port comes from the board's own ``power:`` mapping, so a test can
+    never cut a port the registry does not give that board.
+    ``controller_alias``, when a plan names one, must be that controller: a
+    plan that names another hub has the bench wrong, and switching the
+    registered port anyway would take down whatever is really on it. The
+    port itself is not in the plan, so a board moved to another port of the
+    same hub is switched where the registry says it is; keeping the registry
+    in step with the bench is the bench's job, and the run records the port
+    it resolved here.
+
+    A board with no power mapping, or one behind a controller that cannot
+    switch VBUS per port, is hardware this test is about rather than a
+    mistake in the plan, so it raises MissingRequiredHardware: the planner
+    records the step as blocked on that bench and leaves it out of the
+    invocations, and the run it belonged to fails rather than passing
+    without it (#269).
+    """
+    selected = registry.get(selected_alias)
+    if selected.type != "Ubertooth" or selected.attached_to != host:
+        raise RegistryError(
+            f"selected resource {selected_alias} is not an Ubertooth on {host}"
+        )
+    if controller_alias is not None and controller_alias not in registry.resources:
+        # The hub is what the test is about, so a bench that has not got the
+        # one the plan names blocks the step rather than leaving it out as
+        # not applicable, which would read as a pass.
+        raise MissingRequiredHardware(
+            f"this registry has no USB power controller '{controller_alias}', "
+            f"which the plan names for {selected_alias}"
+        )
+    mapped = selected.power.get("controller")
+    port = selected.power.get("port")
+    if mapped is None or port is None:
+        raise MissingRequiredHardware(
+            f"Ubertooth {selected_alias} has no power mapping, so its port "
+            "cannot be switched"
+        )
+    if controller_alias is not None and controller_alias != mapped:
+        raise RegistryError(
+            f"{selected_alias} is registered on {mapped} port {port}, not on "
+            f"{controller_alias}; the plan names the wrong controller"
+        )
+    controller = registry.get(mapped)
+    if controller.type != "USB power controller":
+        raise RegistryError(f"resource {mapped} is not a USB power controller")
+    if controller.attached_to != host:
+        raise RegistryError(f"power controller {mapped} is not attached to {host}")
+    if controller.driver == SIMULATED_DRIVER:
+        # A simulated controller reports every write as done and takes no
+        # board off the bus, so a cycle through it would fail at the removal
+        # wait and read as a fault in the board or the hub.
+        raise MissingRequiredHardware(
+            f"controller {mapped} is simulated and cannot power-cycle "
+            f"{selected_alias}"
+        )
+    if "per-port VBUS switching" not in controller.capabilities:
+        raise MissingRequiredHardware(
+            f"controller {mapped} lacks per-port VBUS switching, so "
+            f"{selected_alias} cannot be power-cycled"
+        )
+    if controller.driver == ACRONAME_DRIVER and port not in USBHUB3P_PORTS:
+        raise RegistryError(f"controller {mapped} port must be 0-7")
+    if controller.driver == STARTECH_DRIVER and port not in STARTECH_PORTS:
+        raise RegistryError(f"controller {mapped} port must be 1-3")
+    return PowerCycleTarget(selected_alias, mapped, port, controller.driver or "",
+                            controller_identity(controller))
 
 
 def plan_exclusive_ubertooth(

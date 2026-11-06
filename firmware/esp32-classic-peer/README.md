@@ -41,13 +41,14 @@ The channel is opened with no security (`ESP_SPP_SEC_NONE`), so a link needs
 no pairing and a capture holds only the SDP lookup, the connection, and the
 data.
 
-Firmware version: `utesp-1.5.0` (`UTESP_FW_VERSION` in `main/peer.h`).
+Firmware version: `utesp-1.6.0` (`UTESP_FW_VERSION` in `main/peer.h`).
 
 ## Versions
 
 | Component | Version |
 |---|---|
 | ESP-IDF | v5.5.6 (`IDF_VERSION`) |
+| Baseband links the controller allows | 3 (`CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN`; see below) |
 | Target | `esp32` |
 | Board | ESP32-WROOM-32E, 4 MB flash, ESP32-D0WD-V3 |
 | Bridge | CP2102N USB to UART, 115200 8N1 |
@@ -103,8 +104,9 @@ not part of any answer, so a driver skips them:
 
 | Notice | When |
 |---|---|
-| `utesp: utesp-1.5.0 ready` | after boot, once Bluetooth is up |
-| `utesp: utesp-1.5.0 start failed: <reason>` | after boot, if it is not |
+| `utesp: boot reason <why>` | after every boot, before the two below: why the chip restarted |
+| `utesp: utesp-1.6.0 ready` | after boot, once Bluetooth is up |
+| `utesp: utesp-1.6.0 start failed: <reason>` | after boot, if it is not |
 | `utesp: spp connected <address>` | a link came up, either role |
 | `utesp: spp disconnected` | the link went down |
 | `utesp: sco connected, <packet type>` | the synchronous audio link came up, and the type it uses |
@@ -117,6 +119,59 @@ not part of any answer, so a driver skips them:
 
 ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 `sdkconfig.defaults` keeps the log at that level so nothing else appears.
+
+### Lines that lost bytes, and the frame that catches them
+
+The bridge is not a reliable link. On a host that is also busy — one
+capturing from an Ubertooth over USB, which is what these boards are here
+for — a run of bytes goes missing between this UART and the reading process,
+and the newlines either side of the hole arrive intact. So a line can turn
+up looking whole when it is not: `OK` has been read as `K`, and a status
+line has arrived as valid JSON with a shorter channel map than the
+controller has. There is no flow control to fall back on, because the
+bridge's RTS and CTS lines are wired to EN and IO0 for the auto-program
+circuit.
+
+`frame on` answers that. With it, every line this firmware's own writer
+sends carries its own length and CRC:
+
+```
+#2,f952:OK
+#783,1329:{"role":"acceptor","fw":"utesp-1.6.0",...}
+```
+
+The frame is `#`, the payload's length in bytes, a comma, its
+CRC-16/CCITT-FALSE as four lower-case hex digits, and a colon. A reader
+checks both and knows a line that lost bytes anywhere in it, including one
+that still parses. `frame off` puts it back.
+
+The answer to `frame` itself is in the form that was in force when the
+command arrived, and the new form starts with the line after it, so no
+line's form is unpredictable at the switch. Three kinds of line never carry
+a frame, because they do not come from this firmware's writer: the ROM's
+boot log, ESP-IDF's `W (` and `E (` lines, and whatever a panic prints on
+its way down. A reset clears the setting, since the board that comes back
+has not been asked; `defaults` leaves it alone, because it is about the
+wire and not the board.
+
+The harness asks for it as soon as it has read the boot notice, which is
+how it knows the image has the command
+([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310)).
+
+### Why the chip restarted
+
+`utesp: boot reason <why>` comes before the ready notice on every boot, from
+`esp_reset_reason()`: `power on`, `the reset pin`, `software, which is what
+"reset" does`, `a panic or an abort in the firmware`, `the interrupt
+watchdog`, `the task watchdog`, `the brownout detector, so the supply
+dipped`, and a few more. The ROM prints its own `rst:0x...` line before any
+of this runs, which is the only word from a board that crashed before its
+code started; this is the same news named rather than numbered, and it
+separates a panic from a watchdog where the ROM's number does not.
+
+It is here because a peer restarted under a capture and nothing said so, and
+nothing could say why
+([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)).
 
 | Command | Answer |
 |---|---|
@@ -138,6 +193,7 @@ ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 | `clock` | one JSON line of the native and piconet clocks, then `OK` |
 | `afh <20 hex digits>` | hop over this channel map |
 | `afh off` | hop over every channel again |
+| `frame <on\|off>` | put a length and a CRC in front of every line out |
 | `defaults` | restore every boot setting and zero the counters |
 | `reset` | answer `OK`, then restart the board |
 
@@ -153,7 +209,8 @@ The boot notice comes after the server is listening, so a board that has said
 
 A bad value answers `ERR` and changes nothing. A command with the wrong
 number of words, or an unknown one, answers `ERR` too; `help` is the only
-hint, as there is no usage text.
+hint, as there is no usage text. An image older than `utesp-1.6.0` answers
+`frame` that way, as the unknown command it is there.
 
 Every branch of the shell reads its operands through one accessor that gives
 `""` for a word the line did not carry, so a line shorter than the command
@@ -184,7 +241,7 @@ mistaken for its own.
 `status` reports every field on one line, whichever role is running:
 
 ```json
-{"role":"initiator","fw":"utesp-1.5.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"sco_connects":0,"sco_disconnects":0,"sco_type":"default","sco_link":"none","sco_pkt_type":"none","sco_tx_len":0,"sco_rx_len":0,"sco_interval":0,"sco_retrans_window":0,"sco_types_supported":"003d","afh":"ffffffffff0000000000","afh_used":40,"afh_link":"fefffffeff0000000000","afh_link_used":38,"afh_mode":"on","afh_link_error":""}
+{"role":"initiator","fw":"utesp-1.6.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"sco_connects":0,"sco_disconnects":0,"sco_type":"default","sco_link":"none","sco_pkt_type":"none","sco_tx_len":0,"sco_rx_len":0,"sco_interval":0,"sco_retrans_window":0,"sco_types_supported":"003d","afh":"ffffffffff0000000000","afh_used":40,"afh_link":"fefffffeff0000000000","afh_link_used":38,"afh_mode":"on","afh_link_error":""}
 ```
 
 - `address`: the BD_ADDR, split out as `lap`, `uap` and `nap` as well,
@@ -228,6 +285,32 @@ Both boards are discoverable and connectable from boot, which is what lets
 the initiator find the acceptor's channel and what puts the pair on the air
 for `ubertooth-rx`. Turn it off with `disc off` for a test that needs a
 silent board.
+
+### Room for a second link to the same board
+
+The controller allows two baseband links by default, and a `ubertooth-follow`
+test uses both of them at once: the pair's own link, and the one the host's
+Bluetooth adapter pages the leader with to read its clock offset. That is
+the whole budget, and these boards are connectable, so anything else in the
+room that pages one is asking for a link there is no slot for.
+`sdkconfig.defaults` therefore sets
+`CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=3`, which costs 1.2 KB of DRAM.
+
+That is headroom and nothing more. It was tried because a peer restarting
+under that second link is
+[harness #311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311),
+but 113 second links paged to a streaming initiator on the bench, on this
+image and on `utesp-1.5.0`, gave no restart either way. The cause turned out
+to be a second process taking turns with the bridge rather than anything on
+the air at all
+([harness #317](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/317)),
+so the link budget is not what makes a peer restart and this slot is only a
+spare.
+
+A board with more than one link is in no one piconet, so `clock` and the
+link half of `status` report none rather than guessing which link to answer
+about; see [The clocks](#the-clocks) and
+[The two maps in `status`](#the-two-maps-in-status).
 
 `bt` is false only if Bluetooth failed to come up; the shell still answers
 then, with a zero address, and the boot notice says why.

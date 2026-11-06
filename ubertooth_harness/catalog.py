@@ -25,12 +25,13 @@ from ubertooth_harness.patterns import (
     serial_pattern,
 )
 from ubertooth_harness.outputfiles import output_of
-from ubertooth_harness.resources import ESP32_CLASSIC_PEER
+from ubertooth_harness.resources import BLUETOOTH_ADAPTER, ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, afh_cases, boardstate_cases, btbr_cases,
+    advertiser_cases, afh_cases, bluez_cases, boardstate_cases, btbr_cases,
     capture_failure_cases, classic_cases, connection_cases, dfu_cases,
-    dfu_host_cases, interrupt_cases, python_cases, receive_cases,
+    dfu_host_cases, interrupt_cases, invalidapp_cases, python_cases,
+    receive_cases,
     refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
     util_refusal_cases,
 )
@@ -361,6 +362,17 @@ class TestDefinition:
     # The test writes firmware to a board, so run-suite holds the host lock
     # (leases.py) for the run: no power change or other write may overlap it.
     writes_firmware: bool = False
+    # The test can leave a board that needs someone at the bench: it is run
+    # on purpose, by a person, with `run-suite --allow-destructive`, and
+    # never by a dispatched run (the runner does not pass that option on, so
+    # the GUI cannot start it).
+    destructive: bool = False
+    # A case of the test switches the selected board's USB power off and on
+    # through its registered controller. The planner resolves the port from
+    # the board's own registry mapping (planner.TestInvocation.power_cycle),
+    # run-suite requires --allow-power-changes, and the run holds the host
+    # lock for the whole test, as power isolation does.
+    switches_power: bool = False
     # Cross-argument rule checked on the normalized arguments (no registry).
     check_arguments: Callable[[Mapping], None] | None = None
     # The planner binds every other registered Ubertooth on the host as a
@@ -494,6 +506,19 @@ class TestDefinition:
                 wanted[role] = placement
         return MappingProxyType(wanted)
 
+    def estimate_profile(self, arguments: Mapping) -> str | None:
+        """Which calibrated estimate these normalized arguments select.
+
+        The step's coverage profile, or `DEFAULT_PROFILE` for a test that
+        takes no `coverage:`. None for a test with no calibrated estimates,
+        whose expected time is its duration argument instead. One place,
+        because `estimated_seconds` and the plans listing both have to name
+        the same profile for the same step (#315).
+        """
+        if not self.estimates:
+            return None
+        return arguments.get("coverage", DEFAULT_PROFILE)
+
     def estimated_seconds(self, arguments: Mapping) -> float | None:
         """Expected seconds of one invocation with these normalized arguments.
 
@@ -502,8 +527,9 @@ class TestDefinition:
         an error, when there is no estimate for these arguments (for example
         a per-duration estimate without a duration argument).
         """
-        if self.estimates:
-            estimate = self.estimates.get(arguments.get("coverage", DEFAULT_PROFILE))
+        profile = self.estimate_profile(arguments)
+        if profile is not None:
+            estimate = self.estimates.get(profile)
             return None if estimate is None else estimate.seconds(arguments)
         return _duration_argument_seconds(arguments)
 
@@ -980,7 +1006,24 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # about a dozen board reads around them. Measured on the Linux lab host at
     # fork 166b4f91 with a 3 s duration.
     "Board state between runs": _default(Estimate(15.5, per_duration=1)),
-    "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
+    # The earlier estimates (0.9 and 3.9) plus the measured difference the
+    # capture-destination cases make, taken in two steps on the macOS host at
+    # fork 7cbc191a. First: smoke 2.9-3.1 s against 1.1 s without them, and
+    # comprehensive 6.1-6.7 s against 3.0 s, so +1.9 and +3.3. Then three
+    # more cases: comprehensive 8.0 s of command time against 6.2 s for the
+    # same run without them, so +1.8 more, and smoke unchanged, those three
+    # being comprehensive-only. 0.9 + 1.9 = 2.8 and 3.9 + 3.3 + 1.8 = 9.0.
+    # Smoke then gained the /proc case, which a macOS run leaves out and so
+    # cannot be measured here; the three commands of a case like it cost
+    # about 0.3 s on the hosts above, hence 2.8 + 0.3 = 3.1. A Linux
+    # measurement should replace that estimate rather than this reasoning.
+    # 12 cases and 53 commands in smoke, 30 and 130 comprehensive (11 and 48,
+    # and 29 and 125, where there is no /proc and the one case about it is not
+    # applicable); the smoke figure carries that case, so a macOS run comes
+    # in a little under it. Each pair of command-time figures was taken back
+    # to back, because a busy host takes two to six times longer, which is
+    # why an estimate is a countdown and never a timeout.
+    "Raw receive replay": _profiles(Estimate(3.1), Estimate(9.0)),
     # Two cases and 35 commands in smoke, three and 52 comprehensive.
     # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
     # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three
@@ -1055,14 +1098,21 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Classic capture record fields": _profiles(
         Estimate(45.0, per_duration=2), Estimate(95.0, per_duration=4)
     ),
-    # Per flash-and-session cycle, measured on the lab bench: two firmware
-    # writes of about 4 s, the version reads, the peer reset, and a console
-    # session whose radio checks end as soon as their answer arrives.
-    # Comprehensive adds the page nothing answers, which costs the firmware's
-    # whole 45 s page attempt.
+    # Per flash-and-session cycle, measured on the lab bench (the first
+    # figures at fork b2cd6c68, the work #332 added at 80123099): the option
+    # values, two firmware writes of about 4 s, the version reads, the peer
+    # reset, and a console session whose radio checks end as soon as their
+    # answer arrives. The sessions themselves were 27 s and 40 s for smoke
+    # and 89 s and 95 s for comprehensive, over two runs; what varies between
+    # them is how long the inquiry and each page train take, 2.1 to 6.4 s for
+    # the inquiry and 0.3 to 17.4 s for a page, so there is room above the
+    # measurement here rather than a figure a slow page would overrun. The session also transmits the chosen packet types on
+    # the connection, pages the peer again, and runs the two scan modes.
+    # Comprehensive adds five more transmit runs, another page, and the page
+    # nothing answers, which costs the firmware's whole 45 s page attempt.
     "Classic btbr console": _profiles(
-        Estimate(0, per_count=("sessions", 60.0)),
-        Estimate(0, per_count=("sessions", 115.0)),
+        Estimate(0, per_count=("sessions", 80.0)),
+        Estimate(0, per_count=("sessions", 140.0)),
     ),
     # ESTIMATE_PENDING_HW
     # Each case brings the pair up, sets the channel map, captures for the
@@ -1074,6 +1124,38 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Recover AFH map": _profiles(
         Estimate(40.0, per_duration=4), Estimate(60.0, per_duration=6)
     ),
+    # Measured on the bench at `duration: 25s`: the whole test took 112 s in
+    # one run and 155 s in another, the difference being how many of other
+    # people's devices answered the inquiry and had to be paged for a name.
+    # The estimate carries the slower of the two, so 105 s besides the
+    # durations. That is the pair's own
+    # bring-up and two adapter reads a case, plus what the tool spends
+    # outside the window `-t` names -- for `-s` a whole BlueZ inquiry, since
+    # the alarm is armed only after it, and a name read per device either
+    # half found. The measured commands ran 78 s (`-s`) and 61 s against
+    # windows of 111 s and 100 s: the tool ends its own sweep, so a healthy
+    # run finishes well inside the deadlines it is allowed. The same two
+    # cases in both profiles.
+    "Bluetooth inquiry scan": _profiles(
+        Estimate(105.0, per_duration=2), Estimate(105.0, per_duration=2)
+    ),
+    # Unlike the scan, this tool bounds nothing itself: the driver ends the
+    # command, so a case costs its whole window whatever the page really
+    # took. The window is the duration plus FOLLOW_SETUP_S (52 s), and 3.4 s
+    # more for -a, so the fixed part is the allowance plus the pair's
+    # bring-up. Measured at `duration: 25s`: 189 s for the two smoke cases,
+    # so 139 s besides the durations, with the commands themselves running
+    # 83 s and 87 s. The third case, `-q`, costs what the first does.
+    "Follow Classic piconet over HCI": _profiles(
+        Estimate(140.0, per_duration=2), Estimate(210.0, per_duration=3)
+    ),
+    # Measured on the bench: 49 s for the whole invocation, of which the case
+    # itself was 36 s -- the write, the cycle, the recovery write and the
+    # revision read that confirms it, and the cleanup's checks -- and the
+    # rest the guard baseline
+    # and the check after it, on a host with six other boards. Rounded up for
+    # a bench with more guards to read, or a slower hub.
+    invalidapp_cases.TEST_NAME: _default(Estimate(70.0)),
 })
 
 
@@ -1092,26 +1174,31 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "Capture known BLE connection",
         "Classic btbr console",
         "Follow a BLE connection across its end",
-        # The three Classic peer tests: each one follows a piconet the ESP32
-        # pair holds, and wants an ordinary link for the same reason as the
-        # rest. On a bench whose default board is the attenuated one they
-        # would otherwise select it silently. This list is still not every
-        # test that takes a capture (`Interrupting a capture` and the soaks
-        # carry no default), so it is a list of the tests that declare the
-        # need, not a rule derived from what a test does.
+        # The Classic peer tests: each one captures a piconet the ESP32 pair
+        # holds, and wants an ordinary link for the same reason as the rest.
+        # On a bench whose default board is the attenuated one they would
+        # otherwise select it silently. This list is still not every test
+        # that takes a capture (`Interrupting a capture` and the soaks carry
+        # no default), so it is a list of the tests that declare the need,
+        # not a rule derived from what a test does.
         "Capture known Classic device",
         "Follow Classic Bluetooth piconet",
         "Recover AFH map",
+        # The two that add a host Bluetooth adapter to the same pair.
+        "Bluetooth inquiry scan",
+        "Follow Classic piconet over HCI",
     )
 })
 
 
 def builtin_catalog() -> TestCatalog:
     """Return the fixed catalog; YAML cannot add executable implementations."""
-    def stateful_test(name, description, builder, *, coverage=True, **options):
+    def stateful_test(name, description, builder, *, coverage=True, extra=None,
+                      **options):
         arguments = {"hosts": HOSTS, "Ubertooth": UBERTOOTH}
         if coverage:
             arguments["coverage"] = COVERAGE
+        arguments.update(extra or {})
         return TestDefinition(
             name,
             description,
@@ -1408,7 +1495,9 @@ def builtin_catalog() -> TestCatalog:
         TestDefinition(
             "Raw receive replay",
             "ubertooth-rx -i decodes a synthetic raw capture with no Ubertooth: "
-            "LAP/UAP lines, filters, PCAPNG/PCAP/dump output, bad input files",
+            "LAP/UAP lines, filters, PCAPNG/PCAP/dump output, bad input files, "
+            "the destinations that mean standard output, and the destination "
+            "pairs that are one file",
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=receive_cases.replay_cases,
@@ -1651,11 +1740,15 @@ def builtin_catalog() -> TestCatalog:
         ),
         TestDefinition(
             "Classic btbr console",
-            "ubertooth-btbr on the separate btbr firmware image: the board "
-            "reports that image by name, the prompt answers its refusals, an "
-            "inquiry hears a registered ESP32 Classic peer by address and by "
-            "name, a page connects to it and completes the LMP exchange, and "
-            "the cleanup always writes the application image back",
+            "ubertooth-btbr on the separate btbr firmware image: an option "
+            "value outside the radio's field is refused before a board is "
+            "looked for, the board reports that image by name, the prompt "
+            "answers its refusals, an inquiry hears a registered ESP32 "
+            "Classic peer by address and by name, a page connects to it and "
+            "completes the LMP exchange, the chosen packet types go out on "
+            "that connection, the page completes again, the two scan modes "
+            "run and return, and the cleanup always writes the application "
+            "image back",
             MappingProxyType({
                 "hosts": HOSTS, "Ubertooth": UBERTOOTH,
                 "acceptor": ArgumentRule(_selector, default="default"),
@@ -1708,6 +1801,52 @@ def builtin_catalog() -> TestCatalog:
                 "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
             }),
             command_builder=afh_cases.afh_map_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Bluetooth inquiry scan",
+            "ubertooth-scan drives a host Bluetooth adapter and an Ubertooth "
+            "at once: the adapter's inquiry reports both registered ESP32 "
+            "Classic peers by address and one of them by name, and the "
+            "Ubertooth's sweep reports the piconet the pair holds with the "
+            "channel map it built for it",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                BLUETOOTH_ADAPTER: ArgumentRule(_selector, default="default"),
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                BLUETOOTH_ADAPTER: BLUETOOTH_ADAPTER,
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=bluez_cases.inquiry_scan_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Follow Classic piconet over HCI",
+            "ubertooth-follow pages the piconet's central from a host "
+            "Bluetooth adapter and follows it on the clock it read over HCI; "
+            "with -a it asks that link for its channel map, which this peer "
+            "runs with Adaptive Frequency Hopping off, so the tool says so "
+            "and follows without it",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                BLUETOOTH_ADAPTER: ArgumentRule(_selector, default="default"),
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                BLUETOOTH_ADAPTER: BLUETOOTH_ADAPTER,
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=bluez_cases.follow_over_hci_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),
@@ -1840,23 +1979,42 @@ def builtin_catalog() -> TestCatalog:
                     "peripheral": "nRF52840 DK",
                 }),
             ),
-            TestDefinition(
-                "Bluetooth inquiry scan", "Run inquiry with a Bluetooth adapter",
-                MappingProxyType({
-                    "hosts": HOSTS,
-                    "Bluetooth adapter": ArgumentRule(_required_text, required=True),
-                    "Ubertooth": UBERTOOTH,
-                }),
-                MappingProxyType({"Ubertooth": "Ubertooth"}),
-            ),
-            TestDefinition(
-                "Reset into invalid application", "Verify recovery from an invalid app",
-                MappingProxyType({
-                    "hosts": HOSTS,
-                    "Ubertooth": UBERTOOTH,
+            stateful_test(
+                invalidapp_cases.TEST_NAME,
+                "An image the bootloader must refuse to start, then a power "
+                "cycle: the board has to come up as a DFU bootloader device "
+                "rather than run the image, and the run's own image goes back "
+                "on it",
+                invalidapp_cases.invalid_application_cases,
+                coverage=False,
+                extra={
+                    # The hub the board must be on. It is not a bound role:
+                    # a role the registry has not got is left out as not
+                    # applicable, and a missing hub must block this test
+                    # instead (the planner records it, #269). So the alias
+                    # is an argument, and plan_power_cycle resolves it
+                    # against the board's own `power:` mapping, which is
+                    # where the port comes from.
                     "USB power controller": ArgumentRule(_required_text, required=True),
-                }),
-                MappingProxyType({"Ubertooth": "Ubertooth"}),
+                    # Stated, not inferred, like every other test that
+                    # switches power. The reader of the bus and the hub's
+                    # driver both differ by platform (the managed hub is
+                    # reached through a Linux serial-device path), and a
+                    # test that can leave a board needing the bench is
+                    # aimed at a bench on purpose.
+                    "platforms": ArgumentRule(_platforms, required=True),
+                },
+                # It leaves an unstartable image in the board's flash until
+                # its own recovery step writes the test image back, so it
+                # establishes the firmware it verifies and must be the last
+                # test on its board.
+                establishes_firmware=True,
+                writes_firmware=True,
+                switches_power=True,
+                destructive=True,
+                # Every case writes the run's own image, as DFU images does;
+                # a run without one is refused rather than leaving it out.
+                build_required=Needs(firmware_build=True),
             ),
             _device_test("Receive-only firmware", "Exercise a receive-only build"),
             # No Uberducky or E-GO device test: exercising those fixtures is

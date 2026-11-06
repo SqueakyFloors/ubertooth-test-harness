@@ -167,6 +167,14 @@ MIN_REFERENCE_UAP_RECORDS = 10
 # (ubertooth-rx(1)), and so the most any record of these captures may
 # report. The bench's captures reported 0, 1 and 2.
 DEFAULT_MAX_AC_ERRORS = 2
+# How far a record time may step behind the record ahead of it. Two packets
+# decoded out of one 400 us bank land in either order, so a small step back
+# is ordinary and a bench capture of 285 records had one of 225 us; a slot
+# pair is 1250 us, and this allows a little over one. What it is here to
+# catch is three orders of magnitude bigger: a followed capture that read
+# the piconet's clock move as time passing stepped its records 41.16 s and
+# 317.68 s backwards (fork SqueakyFloors/ubertooth#1195).
+MAX_BACKWARD_STEP_US = 2000.0
 # Records whose header HEC must have passed. A header only passes when it
 # decoded at the piconet's clock and its HEC gave the piconet's UAP, which
 # is what makes the header and reference-UAP checks bite; how many of a
@@ -175,6 +183,32 @@ DEFAULT_MAX_AC_ERRORS = 2
 # 285, 26 of 109, and 112 of 394; its survey, which is not held to this,
 # gave 1 of 235.
 MIN_HEC_VALID_RECORDS = 5
+
+# A clock is accepted on how well it explains the hops it was scored against,
+# and only while no other candidate explains them nearly as well; where the
+# hops cannot tell the candidates apart the search ends with no clock, which
+# for a caller is better than a wrong one (libbtbb#125, which the fork picked
+# up in SqueakyFloors/ubertooth#1088).
+#
+# Every capture case of `Follow Classic Bluetooth piconet` and
+# `Classic capture record fields` carries these, rather than only the ones
+# that target a piconet: a clock reported unscored or tied is wrong in any
+# capture, and neither pattern can match a capture that reaches no clock,
+# which most of this bench's do -- including a survey, which runs no clock
+# search at all. So they cost a run nothing wherever they sit, and narrowing
+# them to the targeted cases would drop coverage to no end. They bite only on
+# the two outcomes that change would have to be undone to produce:
+#
+# - the bare line the elimination search printed, which accepted whichever
+#   candidate outlived the others however little it had explained;
+# - a lock whose score only equals the next best candidate's, which is the
+#   coin toss between equally good clocks. The back-reference is what says
+#   "equal" -- the leader's score cannot be lower than the runner-up's, so
+#   refusing equality is asking for a clock that is strictly ahead, without
+#   writing down the margin libbtbb enforces, which is its constant to tune.
+CLOCK_LOCK_UNSCORED = r"(?m)^Acquired CLK1-27 = 0x[0-9a-f]+$"
+CLOCK_LOCK_TIED = r"\(score (\d+), next best \1, "
+CLOCK_GUARDS = (CLOCK_LOCK_UNSCORED, CLOCK_LOCK_TIED)
 
 _ESP32PEER = str(Path(esp32peer.__file__).resolve())
 _CAPTURE_CHECKER = str(Path(capturefile.__file__).resolve())
@@ -357,14 +391,23 @@ def _capture_path(name):
     return path
 
 
+# The checker's own count line, read per line: a Step.output_check is handed
+# the stdout lines to iterate, not one string, so this used to raise a
+# TypeError the moment a capture file was checked. Found by the first bench
+# run of `Follow Classic piconet over HCI`, which reuses this step (#274).
+_PACKET_COUNT = re.compile(r"^Capture format: .*, packets: (\d+)$")
+
+
 def _written_packets(minimum: int) -> Check:
     """The capture file holds packets, not just a header."""
     def check(output) -> str:
-        match = re.search(r"(?m)^Capture format: .*, packets: (\d+)$", output)
-        if match is None:
+        found = next(
+            (match[1] for match in map(_PACKET_COUNT.match, text_lines(output))
+             if match), None)
+        if found is None:
             return "the checker did not report a packet count"
-        if int(match[1]) < minimum:
-            return (f"the capture holds {match[1]} packets, expected at least "
+        if int(found) < minimum:
+            return (f"the capture holds {found} packets, expected at least "
                     f"{minimum}")
         return ""
     return check
@@ -463,7 +506,7 @@ def _pair_patterns(acceptor, initiator, *, audio=False) -> tuple[str, ...]:
 
 def _capture_case(serial, acceptor, initiator, seconds, *, case_id, name,
                   options, check, expected_state, files=(), verify=(),
-                  audio=False, patterns=()):
+                  audio=False, patterns=(), forbidden=()):
     """One bounded ubertooth-rx run while the pair streams, or carries audio."""
     argv = (_audio_argv if audio else _stream_argv)(
         acceptor, initiator, serial, seconds, options, files)
@@ -484,6 +527,9 @@ def _capture_case(serial, acceptor, initiator, seconds, *, case_id, name,
              # for the survey heading: the tool's stderr is this command's.
              output_patterns=(_pair_patterns(acceptor, initiator, audio=audio)
                               + tuple(patterns)),
+             # ``forbidden`` reads both streams too, which is where the
+             # clock-outcome guards belong: libbtbb's notes go to stderr.
+             forbidden_patterns=tuple(forbidden),
              output_check=check),
         _stop(serial),
         *verify,
@@ -566,7 +612,8 @@ def follow_classic_cases(arguments, resources, resource_identities):
     central, central_uap = initiator["lap"], initiator["uap"]
 
     def capture(**options):
-        return _capture_case(serial, acceptor, initiator, seconds, **options)
+        return _capture_case(serial, acceptor, initiator, seconds,
+                             forbidden=CLOCK_GUARDS, **options)
 
     cases = [
         capture(case_id="follow-lap-uap",
@@ -625,6 +672,7 @@ def _record_step(step_id, name, file_name, checks) -> Step:
 
 
 def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
+                   hec_valid=MIN_HEC_VALID_RECORDS, run_seconds=None,
                    extra=()) -> tuple[str, ...]:  # noqa: C901
     """What the records of a capture must hold.
 
@@ -632,6 +680,16 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
     follow, so every record belongs to it and carries it as the reference
     address. Without one, the capture is a survey: it records whatever is in
     range, and the caller says what to look for instead.
+
+    ``hec_valid`` is the floor on records whose header passed its HEC. A
+    caller lowers it for a capture taken by a tool whose headers are known
+    not to decode, which is a fault of that tool rather than of these
+    records; `bluez_cases` does, and says which tool and why.
+
+    ``run_seconds`` is the capture's own ``-t``, which turns on the two
+    bounds on the record times. A caller that does not know how long its
+    capture ran leaves it out and the times are reported without being
+    held to anything.
     """
     if following and central is None:
         raise StateCaseError("the address a capture was following is the "
@@ -640,6 +698,14 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
     # an access code, and no record may report more.
     checks = ("--min-packets", str(minimum),
               "--max-access-code-errors", str(DEFAULT_MAX_AC_ERRORS))
+    if run_seconds is not None:
+        # The records measure the run that captured them. The ceiling is the
+        # capture's own -t plus the slack the harness already allows a tool
+        # for its exit, because a capture cannot have run longer than that;
+        # a follow that read the piconet's clock move as time passing spanned
+        # 191.3 s of a 15 s run before fork #1195 fixed it.
+        checks += ("--max-span-s", str(float(run_seconds) + EXIT_SLACK_S),
+                   "--max-backward-step-us", str(MAX_BACKWARD_STEP_US))
     if central is not None:
         # A record whose header carries another packet's bits, or none,
         # cannot pass its HEC, so this is the floor that makes the header
@@ -647,7 +713,7 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
         # header when it is working on one piconet's clock, and a survey,
         # which is working on every piconet it hears, decoded one header in
         # 235 records on the bench.
-        checks += ("--min-hec-valid", str(MIN_HEC_VALID_RECORDS),
+        checks += ("--min-hec-valid", str(hec_valid),
                    "--lap", central["lap"],
                    "--reference-lap", central["lap"],
                    # Every record that carries a reference UAP must carry
@@ -677,11 +743,13 @@ def record_fields_cases(arguments, resources, resource_identities):
     follow = ("-l", central, "-u", central_uap)
 
     def capture(**options):
-        return _capture_case(serial, acceptor, initiator, seconds, **options)
+        return _capture_case(serial, acceptor, initiator, seconds,
+                             forbidden=CLOCK_GUARDS, **options)
 
     cases = [
         _capture_case(
             serial, acceptor, initiator, seconds, case_id="follow-fields",
+            forbidden=CLOCK_GUARDS,
             name=f"Every record of a -l {central} -u {central_uap} capture "
                  "holds this piconet's fields, in both formats",
             options=follow,
@@ -696,19 +764,21 @@ def record_fields_cases(arguments, resources, resource_identities):
             verify=(
                 _record_step("verify-pcap",
                              "The PCAP's records hold this piconet's fields",
-                             "records.pcap", _record_checks(initiator)),
+                             "records.pcap",
+                             _record_checks(initiator, run_seconds=seconds)),
                 _record_step("verify-pcapng",
                              "The PCAPNG's records hold this piconet's fields, "
                              "and it names the address followed",
                              "records.pcapng",
-                             _record_checks(initiator,
-                                            following=True)),
+                             _record_checks(initiator, following=True,
+                                            run_seconds=seconds)),
             )),
         # Which board is the central is decided by which one pages, so the
         # LAP and the reference address in the records follow the roles
         # rather than being whatever the decoder had lying around.
         _capture_case(
             serial, initiator, acceptor, seconds, case_id="swapped-fields",
+            forbidden=CLOCK_GUARDS,
             name=f"With the roles swapped the records hold LAP "
                  f"{acceptor['lap']}, not {central}",
             options=("-l", acceptor["lap"], "-u", acceptor["uap"]),
@@ -720,7 +790,8 @@ def record_fields_cases(arguments, resources, resource_identities):
                 "verify-pcapng",
                 f"The records hold LAP {acceptor['lap']}",
                 "swapped.pcapng",
-                _record_checks(acceptor, following=True)),)),
+                _record_checks(acceptor, following=True,
+                               run_seconds=seconds)),)),
     ]
     if arguments["coverage"] == "comprehensive":
         cases.append(capture(
@@ -744,6 +815,7 @@ def record_fields_cases(arguments, resources, resource_identities):
                              "audio.pcapng",
                              _record_checks(
                                  initiator, following=True,
+                                 run_seconds=seconds,
                                  extra=("--require-types", AUDIO_TYPE_NAME))),
             )))
         cases.append(capture(
@@ -767,6 +839,7 @@ def record_fields_cases(arguments, resources, resource_identities):
                              "The survey's records carry the UAP it recovered",
                              "survey.pcapng",
                              _record_checks(
+                                 run_seconds=seconds,
                                  extra=("--min-reference-uap",
                                         str(MIN_SURVEY_UAP_RECORDS)))),
             )))

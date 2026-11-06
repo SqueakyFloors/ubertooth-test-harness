@@ -127,6 +127,33 @@ FAKES = {
 # the pin from the Ubertooth commit it builds (scripts/deploy.sh, #139).
 FORK_PIN = "fork-pin"
 
+# The interpreter deploy.sh bootstraps in the checkout. It runs two scripts on
+# standard input: the registry load, which deploy.sh gives -P, and the active
+# run query, which it does not. Both succeed silently -- no active runs, a
+# registry that loads -- unless a test sets $FAKE_REGISTRY_ERROR, which is the
+# registry this code cannot read (#312).
+VENV_PYTHON_FAKE = textwrap.dedent("""\
+    #!/bin/sh
+    case " $* " in
+        *" -P "*)
+            printf 'argv %s\\nPYTHONPATH %s\\n' "$*" "${PYTHONPATH:-}" \\
+                >> "$FAKE_REGISTRY_LOG"
+            [ -z "${FAKE_REGISTRY_ERROR:-}" ] || {
+                printf '%s\\n' "$FAKE_REGISTRY_ERROR" >&2
+                exit 1
+            } ;;
+    esac
+    exit 0
+    """)
+# A controller fake replaces that interpreter to answer the active-run query.
+# The registry read goes through the same binary and is not that query, so it
+# passes without being logged or answered, and a test asking what the
+# controller was asked still sees only the query.
+REGISTRY_READ_PASSES = (
+    "#!/bin/sh\n"
+    'case " $* " in *" -P "*) exit 0 ;; esac\n'
+)
+
 
 def _write_exe(path: Path, text: str) -> None:
     write_executable(path, text)
@@ -157,6 +184,9 @@ class FakeLab:
         self.log.touch()
         self.git_log = self.root / "git.log"
         self.git_log.touch()
+        # What deploy.sh gave the interpreter it read the registry with.
+        self.registry_log = self.root / "registry.log"
+        self.registry_log.touch()
         for name, text in FAKES.items():
             _write_exe(self.bin / name, text)
         # The checkout deploy.sh installs from is the one it lives in.
@@ -165,7 +195,7 @@ class FakeLab:
         for script in SHELL_FILES:
             shutil.copy2(script, self.checkout / "scripts" / script.name)
         (self.checkout / "bootstrap.py").write_text("# fake\n", encoding="utf-8")
-        _write_exe(self.checkout / ".venv" / "bin" / "python", "#!/bin/sh\n")
+        _write_exe(self.checkout / ".venv" / "bin" / "python", VENV_PYTHON_FAKE)
         (self.checkout / "testplans").mkdir()
         (self.checkout / "hardware.yaml").write_text("{}\n", encoding="utf-8")
         self.ubertooth = self.root / "ubertooth"
@@ -175,6 +205,7 @@ class FakeLab:
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "FAKE_LOG": str(self.log),
             "FAKE_GIT_LOG": str(self.git_log),
+            "FAKE_REGISTRY_LOG": str(self.registry_log),
             "LANG": "C",
             # deploy.sh pins the system ssh by path, for the tunnel agent and
             # for the configuration check that reads the same binary's
@@ -232,6 +263,10 @@ class FakeLab:
 
     def commands(self) -> list[str]:
         return self.log.read_text(encoding="utf-8").splitlines()
+
+    def registry_reads(self) -> list[str]:
+        """What the interpreter was given when deploy read the registry."""
+        return self.registry_log.read_text(encoding="utf-8").splitlines()
 
     def git_commands(self) -> list[str]:
         """git invocations other than reading the checkout's commit."""
@@ -304,7 +339,7 @@ class DeployTest(unittest.TestCase):
         """Make the venv python report an active run, as the controller would."""
         _write_exe(
             self.lab.checkout / ".venv" / "bin" / "python",
-            "#!/bin/sh\ncat >/dev/null\n"
+            REGISTRY_READ_PASSES + "cat >/dev/null\n"
             'printf "python %s\\n" "$*" >> "$FAKE_LOG"\n'
             "echo Host_Linux:run-7\n",
         )
@@ -666,6 +701,104 @@ class DeployTest(unittest.TestCase):
         self.assertIn("does not exist", result.stderr)
         self.assertEqual(_tree(self.lab.home), {})
 
+    def test_reads_the_registry_with_the_code_it_installs(self):
+        """Existence is not enough: this code has to make sense of it (#312).
+
+        A registry an older harness cannot read takes down every run and
+        every by-hand device command on the host, so a deploy is where that
+        is found out. And it has to be *this* code: `-P` keeps the working
+        directory off the import path and PYTHONPATH names the checkout, so
+        a deploy run from inside another checkout cannot ask that one.
+        """
+        result = self.lab.deploy()
+        self.assertOk(result)
+        self.assertIn("loads with this checkout", result.stdout)
+        reads = self.lab.registry_reads()
+        self.assertEqual(
+            [f"argv -P - {self.lab.checkout}/hardware.yaml",
+             f"PYTHONPATH {self.lab.checkout}"],
+            reads,
+        )
+
+    def test_the_registry_check_it_runs_is_the_real_one(self):
+        """The fakes cannot say whether the embedded script works, so it is
+        taken out of the script and run with a real interpreter."""
+        source = DEPLOY.read_text(encoding="utf-8")
+        snippet = re.search(r"-P - \"\$hardware\" 2>&1 <<'PY'\n(.*?)\nPY\n",
+                            source, re.DOTALL)
+        self.assertIsNotNone(snippet, "the registry check's script moved")
+        script = snippet.group(1)
+        good = subprocess.run(
+            [sys.executable, "-P", "-", str(REPO / "hardware.example.yaml")],
+            input=script, capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PYTHONPATH": str(REPO)},
+        )
+        self.assertEqual(0, good.returncode, good.stdout + good.stderr)
+        bad_file = Path(self.lab.root) / "bad.yaml"
+        bad_file.write_text(
+            "resources:\n  Host_Linux:\n    type: Host\n    platform: linux\n"
+            "    roles: [controller]\n    defaults: {Ubertooth: Nobody}\n",
+            encoding="utf-8",
+        )
+        bad = subprocess.run(
+            [sys.executable, "-P", "-", str(bad_file)],
+            input=script, capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PYTHONPATH": str(REPO)},
+        )
+        self.assertNotEqual(0, bad.returncode)
+        # Prefixed, because deploy adds "the registry may be newer" only for
+        # a registry the loader turned down, not for an import that failed.
+        self.assertIn("registry:", bad.stderr)
+
+    def test_refuses_a_registry_this_checkout_cannot_read(self):
+        reason = "default DK1 is neither a central nor declares the central role"
+        result = self.lab.deploy(FAKE_REGISTRY_ERROR=f"registry: {reason}")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not load with this checkout", result.stderr)
+        self.assertIn(reason, result.stderr)
+        # Named, because a registry newer than the code is the likely cause
+        # and updating the checkout is the fix.
+        self.assertIn("newer than this code", result.stderr)
+        # No unit or agent written, so a working runner is not replaced by
+        # one that could not read its own registry. The check runs after
+        # bootstrap.py, so the checkout's .venv may have been created.
+        self.assertEqual(_tree(self.lab.home), {})
+
+    def test_a_failure_that_is_not_the_registry_is_not_blamed_on_it(self):
+        """An import this checkout cannot make is the checkout's problem;
+        telling the reader the registry is too new sends them the wrong way."""
+        result = self.lab.deploy(
+            FAKE_REGISTRY_ERROR="cannot import the harness from this checkout: "
+                                "No module named 'yaml'"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No module named 'yaml'", result.stderr)
+        self.assertNotIn("newer than this code", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
+
+    def test_a_dry_run_reports_an_unreadable_registry_without_refusing(self):
+        result = self.lab.deploy("--dry-run", FAKE_REGISTRY_ERROR="bad default")
+        self.assertOk(result)
+        self.assertIn("would refuse", result.stdout)
+        self.assertEqual(_tree(self.lab.home), {})
+
+    def test_a_checkout_path_pythonpath_cannot_name_skips_the_check(self):
+        """A check that might be reading another checkout's code is worse
+        than none, and the units this writes do not use PYTHONPATH."""
+        moved = self.lab.root / "check:out"
+        shutil.copytree(self.lab.checkout, moved, symlinks=True)
+        result = subprocess.run(
+            ["bash", str(moved / "scripts" / "deploy.sh"),
+             "--runner-host", "Host_Linux",
+             "--ubertooth-source", str(self.lab.ubertooth)],
+            env=self.lab.env, capture_output=True, text=True, timeout=60,
+            check=False,
+        )
+        self.assertOk(result)
+        self.assertIn("cannot be named on PYTHONPATH", result.stdout)
+        self.assertEqual([], self.lab.registry_reads())
+        self.assertTrue((self.lab.unit_dir / CONTROLLER_UNIT).is_file())
+
     def test_rejects_bad_port_and_unquotable_values(self):
         for port in ("0", "65536", "80a", "-1"):
             result = self.lab.deploy("--port", port)
@@ -1003,7 +1136,7 @@ class MacDeployTest(unittest.TestCase):
         """Make the venv python answer as the controller would, logging argv."""
         _write_exe(
             self.lab.checkout / ".venv" / "bin" / "python",
-            "#!/bin/sh\ncat >/dev/null\n"
+            REGISTRY_READ_PASSES + "cat >/dev/null\n"
             'printf "python %s\\n" "$*" >> "$FAKE_LOG"\n'
             + "".join(f"echo {run}\n" for run in runs),
         )

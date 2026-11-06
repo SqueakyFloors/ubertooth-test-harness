@@ -375,10 +375,18 @@ registry in which two leasable resources would take one lease key
 (`leases.resource_key`, which comes from one identity field where the
 duplicate-identity check compares whole mappings), or in which two devices
 are registered with one plain serial, since that is the name the bench's own
-lock files use (`scripts/lab/hold`). That second name takes a lease file of
-its own under a `bench-` prefix, so a 32-hex-digit serial cannot name the
-lease file of an Ubertooth with that serial, while the bench's own file keeps
-the plain serial it was written against.
+lock files use.
+
+A device therefore has two lock names, and `leases.board_for_resource` is the
+one place both are built, so no path can ask for a file another path does
+not. The lease file carries its type's prefix for everything but an
+Ubertooth, which keeps a 32-hex-digit serial off the lease file of an
+Ubertooth with that serial; the external file keeps the plain serial the
+lab's own scripts were written against. A run that asked for its lease key
+alone left those scripts free to drive the same device, which on an ESP32
+peer costs the run its board: taking turns with a peer restarts it, for the
+reasons measured under "Test radios: nRF52840 DKs and ESP32 Classic peers"
+below (#317).
 
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
@@ -432,17 +440,22 @@ was required to be (`placement_requirements`).
 
 `weaklink.unjudgeable` is what a run has to pass: a requirement may leave no
 attenuated link possible (an ordinary board) or pin exactly one attenuation,
-which must be in `weaklink.MEASURED_ATTENUATIONS_DB`. A requirement that
+which must be in `weaklink.MEASURED_ATTENUATIONS_DB` and must be recorded in
+`weaklink.CHECKS` for that test in that role. A requirement that
 leaves a band open above 0 dB, which `rf:` can write and `weak link:` cannot,
 is refused too, because which board it binds depends on what the bench
-happens to hold. `plan.check_runnable` applies that to a whole plan for
+happens to hold. A fourth reason is a figure the bench was taken to where
+nothing could be measured: `weaklink.CHARACTERIZED_UNUSABLE_DB` holds those
+with why, so the refusal gives the reason rather than calling the figure
+unmeasured to somebody about to fit an attenuator a previous session tried. `plan.check_runnable` applies that to a whole plan for
 `validate-plan`, honoring `runnable: false`; `plan.check_suite_runnable`
 applies it to the one suite a `run-suite` is about to run and does not
 consult the flag, since `runnable: false` says a plan may name those entries,
 not that a run may judge them. Both also refuse a test with no
 implementation. `weaklink.CHECKS` is the list of weak-link checks and what
-each one still needs; none is in a runnable plan, and
-`testplans/weak-link.yaml` is where they wait. The requirement
+each one still needs; the ones with nothing left to need sit in the runnable
+plans their test belongs to (`ble.yaml`, `classic.yaml`, `range.yaml`), and
+`testplans/weak-link.yaml` is where the rest wait. The requirement
 narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
 is filtered by the role as well, so a unit that could never take the role is
 not offered as the one that satisfies the placement: `default` prefers the
@@ -623,6 +636,37 @@ takeover of a lease whose command is gone holds that file exclusively
 ([#215](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/215),
 README "Stale leases"); it locks no resource and nothing ever blocks on it,
 so it is in no cycle.
+
+Power-cycling the board under test is the other use of the same boundary, for
+`Reset into invalid application` ([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
+It is not isolation: nothing is switched around the test, and the port goes off
+and on inside one case step. A test definition declares `switches_power`, and
+the planner then resolves a `PowerCycleTarget` (board alias, controller alias,
+port) with `plan_power_cycle` from the selected board's own `power:` mapping,
+refusing a plan that names a different controller from the one the board is
+registered on; `run-suite` requires `--allow-power-changes` before anything is
+built, and such a run holds the host lock for the whole test like an isolating
+one. The step itself runs
+[`ubertooth_harness/invalidapp.py`](ubertooth_harness/invalidapp.py), which
+reads the registry again for the port: the path comes from the case context
+(`stateful.REGISTRY_PATH_KEY`, set by the sequencer from the run's
+`--hardware`), so no port number travels on a command line. The port is
+restored on every exit — a failed check, a controller or bus error, SIGTERM,
+SIGINT, or SIGHUP, each turned into an exception so the restoration unwinds —
+and the command's last act is to read the port back and say whether it is
+powered; a controller that has stopped answering is the one thing that
+defeats it, and then that is what the command reports. `run-suite` also
+refuses the test without `--allow-destructive`, which the runner service
+never passes on, so no dispatched run can start it. Restoration still runs in-process, so the case's first cleanup step reads the
+port and switches it on before the second writes the run's image back; that
+covers the step's own command being killed, which the executor does with
+SIGKILL when a command outlives its deadline. A SIGKILL of the run itself
+leaves the port off and someone switches it on by hand, as for isolation: the
+next run cannot, because preflight reads the board's serial before any case.
+The recovery writes the image rather than comparing the flash, because a
+board that started the unstartable image reports the same revision as the
+test image, and a read-back differs from the file in the bytes ubertooth-dfu
+fills in as it writes (the LPC vector checksum and the image check block).
 
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor
@@ -869,18 +913,41 @@ descriptive literals and generation is deterministic.
 
 Transition and composition tests also bind every other registered Ubertooth
 on the host as a `guard Ubertooth N` resource (planner `_guarded`, mirroring
-`alternated Ubertooth N`). The sequencer records each guard's firmware
-revision and API, firmware compile info, channel, PA level, squelch, LEDs, and
+`alternated Ubertooth N`). The sequencer records each guard's firmware image,
+revision and API, firmware compile info, serial, bootloader identity, channel,
+PA level, squelch, LEDs, and
 CRC with query-only commands before the first case, re-reads them after every
 state-changing case and, if read-only cases ran since the last check, once
 after the test, and fails and stops the test on any difference (even with
-`continue_on_case_failure`). Differences are counted as `failed_guard_checks`,
+`continue_on_case_failure`). Every read is sent to every guard whatever image
+it carries: a request the image has not got is stalled, and a board on another
+of this tree's images is refused by `ubertooth-btle` before it reads anything
+(`ubertooth_check_image`), and either answer is recorded as the reading
+(`transitions.GUARD_UNSUPPORTED`) and compared like any other, so the
+alternate `btbr` image is guarded by what it does answer instead of being
+skipped or reflashed. `guard_baseline_problems` then judges the baseline: a
+guard on `bluetooth_rxtx`, or on the receive-only `bluetooth_rx` build, must
+answer the radio settings that build implements
+(`GUARD_REQUIRED_OF_IMAGE`), and any guarded test is refused when a guard
+answered none of the reads that pin it (`-v`, `-V`, `-s`, `-B`) — a wedged
+board stalls every request and would read that way too. The LED read is taken
+strictly (`GUARD_STRICT_KEYS`), because `-d` makes all three LED requests in
+one command and every image that answers these requests answers those three,
+so tolerating a stall there would accept a board that answered two of them.
+Differences are counted as `failed_guard_checks`,
 apart from `failed_cases`, and the reason names the guard to check and
 restore by hand; guards are never restored automatically. The CRC read uses
-`ubertooth-btle`, whose `ubertooth_check_api` stops firmware older than the
-host API, so it is refused (failing the check) unless the same check's `-v`
-read showed an API no older than the host tools' (`HOST_TOOLS_API_VERSION`,
-the fork's `UBERTOOTH_API_VERSION` 0x0107, since no host tool reports it).
+`ubertooth-btle`, whose `ubertooth_check_api` may refuse any firmware API that
+is not the host tools' own — newer as well as older — and stop that board as
+it goes; whether it refuses or warns and goes on is the host tools' build and
+`UBERTOOTH_ALLOW_API_MISMATCH`, which the run does not set and cannot
+predict. So the
+read is refused (failing the check) unless the same check's `-v`
+read showed an equal API; preflight refuses a guard-only board whose API
+differs, before any test. That version is read from
+the resolved sources' `ubertooth_interface.h` (`UBERTOOTH_API_VERSION`,
+`transitions.host_api_version`), since no host tool reports it, and a run
+whose sources cannot be read that way refuses its guarded tests.
 The reads cannot see a leaked `-S`, `-r`, or mode start on a guard idle at
 boot defaults; modulation, access address, and re-enumeration are not read.
 Guard-only boards get a serial preflight. Guarded runs need every registered
@@ -1013,8 +1080,12 @@ Both speak the same line shell over a serial port — one command line in,
 data lines out, then one `OK` or `ERR <reason>`, with `status` on a single
 JSON line — so a reader of one driver can read the other. Both are leased
 like an Ubertooth, under a prefixed key (`nrf52840dk-<J-Link serial>`,
-`esp32-<bridge serial>`), and both are checked in preflight by asking the
-board to identify itself.
+`esp32-<bridge serial>`) and, where a lab locks its devices with its own
+files, under the plain serial as well, and both are checked in preflight by
+asking the board to identify itself. A third radio, the host's own Bluetooth
+controller, is registered too, but it is driven by the tool under test rather
+than by the harness and has neither a driver nor a serial shell, and no plain
+serial to lock beside its lease; it is section 3f.
 
 They differ in one way that shapes how a case is written. **A DK keeps its
 state when its serial port is closed; an ESP32 does not.** On an ESP32 dev
@@ -1034,11 +1105,100 @@ which keeps the case's checks on the tool's real output
 on RTS leaves the board in the firmware's boot state, which is what every
 Classic case's cleanup does.
 
+That wiring is also why a peer's lock has to be the one a lab's own scripts
+take: holding the port protects the board from the harness and from nothing
+else. What a second session can do to it was measured for #317, one probe at
+a time, while a live session held the port with the link up:
+
+| a second process that | the board |
+|---|---|
+| opens the port, pyserial's defaults, raising DTR and RTS together | keeps running |
+| opens the port asking pyserial for an exclusive lock | cannot open it at all |
+| opens it and pulses RTS with DTR low, which is esptool's hard reset | **restarts**, `boot reason power on` |
+
+So an overlapping open is harmless and the damage comes from two other
+things: the first open of a port nobody held, and any opener that pulses the
+lines. The second of those is what releasing a peer to its boot state does,
+so a second session need only *finish* with the board to restart it under
+another's capture. A peer is therefore leased under both of its names, by a
+run as well as by a manual command (#317, `leases.board_for_resource`).
+
+Why the first open resets the board and a second one does not is **not
+established here**. Both raise the two lines, so it is not simply a matter of
+which of them goes up, and no behavior depends on the distinction: the lock
+has to be held for the whole session either way. The measurements are what
+the table records.
+
+Note also what the pyserial row means for the harness's own `exclusive=True`.
+It is an advisory `flock` on the tty, so it stops another pyserial caller
+that also asks for one, and nothing else. It is not a substitute for the lease.
+
 One consequence is worth stating because it decides what a case can assert:
 in a Classic piconet the LAP on the air is the **central's**, and the central
 is whichever board paged. The initiator pages, so the initiator's LAP and UAP
 are what `ubertooth-rx -l` and `-u` take, and exchanging the two role
 bindings moves the piconet to the other board's address.
+
+Holding both bridges for a session put two properties of the bridge itself in
+the driver's hands, because no case can see them. One, the bridge is not a
+reliable link: on a host that is also capturing over USB it loses runs of
+bytes, and a line that lost some from its middle arrives with its newline, so
+nothing about the line says it is wrong. The peer firmware therefore
+check-sums every line it writes when asked (`frame on`), and a read, or a
+setter whose second application sets the same value, is sent again on a line
+that fails the check; a status line that is not readable is refused either
+way (#310). Two, the board can go away: nothing is asking it anything while
+the capture runs, so a restart used to be read as a pair whose counters were
+all zero. The driver reads both bridges on a cadence inside the command,
+keeps what the board said on its way down and back, and reports the restart
+with the reason the chip gave (#311).
+
+---
+
+### 3f. The host Bluetooth adapter
+
+A third radio is registered, and it is not one the harness drives to make
+traffic: `Bluetooth adapter`, a Bluetooth controller of the host's that BlueZ
+owns. Two of the fork's host tools are built only with libbluetooth and both
+need one — `ubertooth-scan` runs its inquiry, and `ubertooth-follow` reads its
+clock, pages a target for the target's clock offset, and with `-a` reads the
+channel map of the link it made. An Ubertooth has no HCI interface, so it
+cannot stand in.
+
+It differs from the two radios above in every way that matters to the code,
+which is why it has no driver module and no firmware:
+
+- **The tool drives it, not the harness.** The cases pass `-b <hci device>`
+  and let the tool do the HCI work. What the harness does is read the
+  controller's own state around the run, with BlueZ's `hciconfig` and
+  `hcitool` — declared as host tools the harness does not install, so a host
+  without them leaves the cases out rather than failing them.
+- **Its name is not its identity.** `hciN` is the order the kernel attached
+  controllers in. The registry records both the device name and the address,
+  and every case checks the address first, so an adapter that came back as
+  another `hciN` fails naming what was found instead of the test driving
+  whatever took the name.
+- **It is leased anyway**, under `bluez-<address without its colons>`,
+  for the reason above and not under its name: one controller answers
+  one inquiry at a time and holds one link to a target.
+
+The traffic still comes from the ESP32 pair, so `bluez_cases.py` builds its
+cases out of `esp32peer.py stream` exactly as `classic_cases.py` does, and
+adds the adapter reads around it. The pair serves two purposes at once there:
+both boards are discoverable from boot, so the inquiry has a known device to
+report, and the piconet they hold is what the Ubertooth sweeps for and what
+the follow is pointed at.
+
+Those cases have run against a USB adapter on the one bench that has one.
+They live in `testplans/hci.yaml`, which is still not part of `release.yaml`:
+the two faults the runs found are both peer-side — serial bytes lost under
+load
+([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310))
+and peers that would not come back to their boot state
+([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)),
+11 of 91 pair sessions between them, so four more pair-driven cases would
+fail about two gate runs in five. `docs/tests.md` records per case what the runs settled and what
+they left open.
 
 ---
 
@@ -1112,6 +1272,36 @@ step.
   started/finished, a `report.md` link, and the failure summary from
   `GET /api/runs/{id}` (per failed phase or test: reason and last output
   lines; then the run's reason). Soak graphs remain.
+- **What each test is for:** `GET /api/plans` carries a `test_information`
+  map beside the plans — one entry per distinct test name in the listing,
+  with purpose, theory of operation, hardware and traffic, expected outcome,
+  what a pass does not prove, related issues, and a link to the test's
+  `docs/tests.md` section. It is read from
+  `ubertooth_harness/test_info.yaml` by `testinfo.py` and keyed by the exact
+  catalog name, which is the name every test row carries, so a row is looked
+  up rather than carrying its own copy: the repository's own plans list 122
+  steps of 53 distinct tests, and a row-level copy took the response from
+  121 KB to 394 KB where the map takes it to 232 KB. The catalog stays
+  authoritative for what the test binds and takes, which the row reports
+  because it belongs to that step (`hardware_roles`, `arguments`,
+  `estimate_profile`, and the estimate fields), so nothing has two sources.
+  Nothing about it can stop a run: a test with no entry, or a file that is
+  missing or malformed, gives an entry with `available: false` and the
+  reason, and the listing is otherwise unchanged. The answer is held between
+  requests while the file on disk is the same one (its modification time,
+  size and inode, and the catalog it was checked against), because reading
+  and validating every entry takes about 70 ms and the listing is asked for
+  on every page load and change of target; the key is taken again after the
+  read, so a file replaced while it was being read is not held under the
+  identity of the one before it. The prose is data, never markup, and
+  whoever renders it escapes it: entries carry angle brackets and quotation
+  marks on purpose, because they quote the shapes the tools print
+  (`libubertooth <v> (<id>)`), so a renderer that interpolates rather than
+  escapes would drop text silently as well as being a hole. The info button
+  and dialog that show it are the GUI half of
+  [#315](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/315),
+  waiting on the layout review in
+  [#133](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/133).
 
 Security: the GUI is served by the loopback-only controller behind the same
 Host/Origin/Sec-Fetch guard as the API, `POST`s stay JSON-only, every

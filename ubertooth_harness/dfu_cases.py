@@ -37,17 +37,20 @@ every other byte has to match. See dfuimage.readback_problems().
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
-import sys
 
 from ubertooth_harness import dfuimage
 from ubertooth_harness.cases import guard_roles
-from ubertooth_harness.outputfiles import search_lines, text_lines
+from ubertooth_harness.helpersteps import (
+    case_file,
+    helper_argv,
+    helper_step,
+    script_path,
+    tool_argv,
+)
 from ubertooth_harness.patterns import IMAGE_NAME_PATTERN
 from ubertooth_harness.stateful import (
     APPLICATION_IMAGE_LABEL,
-    CAPTURE_DIR_KEY,
     EXPECTED_REVISION_KEY,
     Observation,
     StateCase,
@@ -58,7 +61,7 @@ from ubertooth_harness.stateful import (
 from ubertooth_harness.transitions import _serial, _util
 
 TEST_IMAGE = APPLICATION_IMAGE_LABEL
-_CHECKER = str(Path(dfuimage.__file__).resolve())
+_CHECKER = script_path(dfuimage)
 _REVISION_PATTERN = (
     rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<value>\S+)\s+\(API:"
 )
@@ -79,8 +82,6 @@ _DEVICE_OPENED = r"DFU \+\d+\.\d+s: operation started"
 # guard count), so a slow cleanup is never killed mid-flash.
 WRITE_TIMEOUT_S = 45.0
 READ_TIMEOUT_S = 35.0
-# A line of a command record the helper prints (rawlog format, UTC stamp).
-_RECORD_LINE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3} \[")
 
 
 def _refused(file_name: str, reason: str) -> str:
@@ -99,8 +100,7 @@ def _revision(context):
     return require(context, EXPECTED_REVISION_KEY)
 
 
-def _file(name):
-    return lambda context: str(Path(require(context, CAPTURE_DIR_KEY)) / name)
+_file = case_file
 
 
 def _readback_range(context):
@@ -109,37 +109,16 @@ def _readback_range(context):
 
 def _helper(*parts):
     """A dfuimage.py command; callable parts are resolved from the context."""
-    def argv(context):
-        return (sys.executable, _CHECKER) + tuple(
-            part(context) if callable(part) else part for part in parts
-        )
-    return argv
+    return helper_argv(_CHECKER, *parts)
 
 
-def _tool(*parts):
-    def argv(context):
-        return tuple(part(context) if callable(part) else part for part in parts)
-    return argv
+_tool = tool_argv
 
 
 def _helper_step(step_id, name, *parts, pattern, timeout_s=10.0, mutates=False):
-    """A dfuimage.py step. Its exit 1 is reported with the helper's own lines;
-    ``pattern`` matches only the line it prints when the check holds."""
-    def check(output):
-        if search_lines(output, pattern):
-            return ""
-        # Command records stay in the transcript; the reason keeps the
-        # helper's own lines.
-        lines = [line.strip() for line in text_lines(output)
-                 if line.strip() and not _RECORD_LINE.match(line)]
-        if not lines:
-            return "no output"
-        # The helper prints its verdict last; the earlier lines are evidence.
-        detail = f" ({'; '.join(lines[:-1])})" if len(lines) > 1 else ""
-        return (lines[-1] + detail)[:600]
-
-    return Step(step_id, name, _helper(*parts), timeout_s=timeout_s,
-                expected_returncodes=(0, 1), output_check=check, mutates=mutates)
+    """A dfuimage.py step (helpersteps.helper_step with this helper)."""
+    return helper_step(step_id, name, _CHECKER, *parts, pattern=pattern,
+                       timeout_s=timeout_s, mutates=mutates)
 
 
 def _board_args(serial, guards, readback):

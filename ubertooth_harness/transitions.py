@@ -70,17 +70,21 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 
 from ubertooth_harness import capturefile
 from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, CommandCase, guard_roles
 from ubertooth_harness.patterns import (
+    APPLICATION_IMAGE,
     BOARD_ID_PATTERN,
     FIRMWARE_PATTERN,
     HOST_VERSION_TIMEOUT_S,
     IMAGE_NAME_PATTERN,
     PART_ID_PATTERN,
+    RX_ONLY_IMAGE,
     VERSION_ANSWER,
+    matched_image,
     serial_pattern,
 )
 from ubertooth_harness.stateful import (
@@ -1668,10 +1672,14 @@ def btle_conflict_cases(_arguments, _resources, resource_identities):
 # value of each check is the guard's own baseline read before the test's
 # first case.
 #
-# ubertooth-util never checks the firmware API, but ubertooth-btle calls
-# ubertooth_check_api(), which sends cmd_stop to a board whose firmware API is
-# older than the host's libubertooth. The CRC read therefore runs only when
-# this check's firmware read showed an API no older than the host tools'.
+# None of the ubertooth-util options these reads use checks the firmware API
+# (only -I does, and no guard read passes it), but ubertooth-btle calls
+# ubertooth_check_api(), which may refuse any firmware API that is not the
+# host tools' own -- newer as well as older -- and sends cmd_stop to that
+# board on its way out. Whether it refuses or warns and goes on is the host
+# tools' own build and an environment variable, so the CRC read runs only
+# when this check's firmware read showed the host tools' own API, and is
+# refused otherwise.
 # No host tool reports the host API, so it is read from UBERTOOTH_API_VERSION
 # in the resolved Ubertooth source at the manifest commit.
 HOST_API_HEADER = "host/libubertooth/src/ubertooth_interface.h"
@@ -1719,14 +1727,211 @@ API_PATTERN = r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)"
 _GUARD_API_RE = re.compile(API_PATTERN)
 # Same shape the preflight compile-info check requires.
 GUARD_COMPILE_INFO_PATTERN = r"(?P<value>\bubertooth\s+\S+\s+\([^\n]*\S)"
-GUARD_READBACK = (
+GUARD_IDENTITY_KEY = "identity"
+GUARD_IDENTITY_PATTERN = r"Serial No:\s+(?P<value>[0-9a-fA-F]+)"
+GUARD_BOOTLOADER_KEY = "bootloader"
+# The one line `-B` prints, whatever bootloader a board has (bootloader.py,
+# which renders the same line; tests/test_guards.py keeps the two in step).
+GUARD_BOOTLOADER_PATTERN = (
+    r"(?P<value>Bootloader: .+, CRC32:0x[0-9a-fA-F]{8})"
+)
+
+# What this host could not read of a board, as a reading in its own right.
+#
+# Two answers come to this. A request the firmware has not got is stalled, and
+# libubertooth reports the stall in one wording (ubertooth(7); fork #636
+# replaced three older lines with it, one of which said only "control message
+# unsupported"): the alternate btbr image answers that way for the radio
+# settings, and firmware older than a request does the same. And a tool that
+# needs the application image refuses a board carrying another of this tree's
+# images before it sends anything (libubertooth ubertooth_check_image()),
+# which is how the CRC read ends on a btbr guard.
+#
+# Both say the same thing about the same board: this host cannot read that of
+# this image. Neither says the board changed, so it is recorded as the reading
+# and compared before and after like any value -- a board that starts
+# answering a read it refused, or refuses one it answered, fails the check.
+# Which image a board runs is pinned by the firmware read, so a reflash is
+# caught there. What such a reading is worth is decided by
+# guard_baseline_problems(): it pins nothing.
+GUARD_UNSUPPORTED = "unsupported"
+# Only these two lines are read that way. A board that has left the bus stalls
+# requests too, and says so in its own line, which this does not match -- that
+# read fails the guard as it always did. ubertooth-util's own
+# "error: <what> read failed" is not matched either: it follows every failed
+# read, whatever the cause. One limit of reading this off the output: a
+# command that makes more than one request is recorded as unanswered when one
+# request stalled and the rest answered, because the value pattern no longer
+# matches what was printed. The LED read, which makes three, is held strictly
+# for that reason (GUARD_STRICT_KEYS); `-V` makes two, and firmware too old
+# for the second is the case this tolerance is for.
+GUARD_UNANSWERED_PATTERN = (
+    r"(?P<guard_unsupported>error: [^\n]*: the board's firmware does not "
+    r"support it \(stalled(?:, libusb -9)?\)"
+    r"|error: the Ubertooth is running \S+; this tool needs "
+    rf"{re.escape(APPLICATION_IMAGE)})"
+)
+# A guard running the application image, or the receive-only build of it, has
+# to answer the radio settings that build implements (GUARD_REQUIRED_OF_IMAGE
+# below); any other image may refuse them.
+
+
+def _tolerant(pattern, convert, values=None):
+    """A guard read's pattern and convert, accepting "cannot answer" as well.
+
+    The reading is the value the board reported, or GUARD_UNSUPPORTED when
+    this host could not read it of that image. Nothing else is accepted: a
+    read that failed any other way matches nothing and fails the guard, as it
+    always did. Not used for the reads in GUARD_STRICT_KEYS.
+    """
+    combined = rf"(?:{pattern})|{GUARD_UNANSWERED_PATTERN}"
+
+    def tolerant(match):
+        if match.groupdict().get("guard_unsupported"):
+            return GUARD_UNSUPPORTED
+        if convert is not None:
+            return convert(match)
+        value = match.group("value")
+        return values.get(value, value) if values else value
+
+    return combined, tolerant
+
+
+# What every guard is read for, whatever image it carries: who it is, which
+# image and revision it runs, what built it, and which bootloader is under
+# that. All four are answered by the images a guard is expected to carry --
+# bluetooth_rxtx, its receive-only build, and btbr. A board that answers
+# fewer, as the assembly-test image does (it has the revision and the serial,
+# not the build string or the bootloader), is still pinned by the ones it
+# answers; one that answers none is turned away by the pinning rule below
+# rather than guarded.
+GUARD_STABLE_READBACK = (
     (GUARD_FIRMWARE_KEY, "-v", GUARD_FIRMWARE_PATTERN, None),
     ("compile-info", "-V", GUARD_COMPILE_INFO_PATTERN, None),
-) + tuple(
+    (GUARD_IDENTITY_KEY, "-s", GUARD_IDENTITY_PATTERN, None),
+    (GUARD_BOOTLOADER_KEY, "-B", GUARD_BOOTLOADER_PATTERN, None),
+)
+# The radio settings. They are read of every guard too -- a guard is never
+# skipped -- and a board whose image has not got one of these requests
+# refuses it in the wording above, which is then its reading.
+GUARD_SETTING_READBACK = tuple(
     (setting.key, setting.query, setting.pattern, setting.convert)
     for setting in (CHANNEL, PA_LEVEL, SQUELCH, LEDS)
 )
+GUARD_READBACK = GUARD_STABLE_READBACK + GUARD_SETTING_READBACK
 GUARD_CRC_KEY = "crc"
+# The readings that say something about the board itself. A guard answering
+# none of them has a baseline that pins nothing, which is what turns a
+# guarded test away (guard_baseline_problems).
+GUARD_PINNING_KEYS = tuple(key for key, *_rest in GUARD_STABLE_READBACK)
+# The one read whose answer is taken strictly. `-d` makes all three LED
+# requests in one command, so a board that answered two and stalled the third
+# would be recorded as unable to answer any of them -- and all three would
+# then go unguarded for the rest of the run. A stall there fails the read
+# instead, which costs nothing: every image that answers these requests at
+# all answers the LED reads (bluetooth_rxtx and its receive-only build, btbr,
+# the assembly test), and a board whose firmware answers nothing is turned
+# away by the pinning rule below. Each of the other reads makes one request
+# (`-V` makes two, and firmware too old for the second is exactly the case
+# worth tolerating).
+GUARD_STRICT_KEYS = (LEDS.key,)
+# The reads below are the ones an image may refuse, so they are the only ones
+# an image can be held to here; a strict read is held to by every guard,
+# whatever it runs.
+_GUARD_TOLERATED_SETTINGS = tuple(
+    key for key, *_rest in GUARD_SETTING_READBACK
+    if key not in GUARD_STRICT_KEYS
+)
+# What each image implements and so has to answer. The stable reads above are
+# on no list: a request is only as old as the build that carries it, and a
+# guard refusing one of them is firmware history, not a board that cannot
+# hold its own settings. Nor is btbr listed for the transmit power level, the
+# one tolerated read it does implement: its request handler puts that behind
+# UBERTOOTH_ONE, where bluetooth_rxtx's is behind TX_ENABLE alone, so
+# requiring it would turn away a btbr guard on an Ubertooth Zero.
+GUARD_REQUIRED_OF_IMAGE = MappingProxyType({
+    APPLICATION_IMAGE: _GUARD_TOLERATED_SETTINGS + (GUARD_CRC_KEY,),
+    # The receive-only build is the same sources with the transmit half left
+    # out, and the transmit power level goes with it (the TX_ENABLE block of
+    # firmware/bluetooth_rxtx/bluetooth_rxtx.c answers that request), so a
+    # board carrying it refuses that one read as a matter of its image.
+    RX_ONLY_IMAGE: tuple(
+        key for key in _GUARD_TOLERATED_SETTINGS if key != PA_LEVEL.key
+    ) + (GUARD_CRC_KEY,),
+})
+
+# A recorded firmware reading is the part of the `-v` line after the label,
+# so the image name is read off its front, the same optional name
+# FIRMWARE_VERSION_RE reads off the whole line.
+_GUARD_IMAGE_RE = re.compile(r"\A(?:(?P<image>\S+)\s+)?\S+\s+\(API:")
+
+
+def guard_image(firmware: str | None) -> str | None:
+    """The image name in a recorded guard firmware reading, or None.
+
+    The reading is what `ubertooth-util -v` reported ("<image> <revision>
+    (API:x.yy)"). None covers a guard whose firmware was not read, one that
+    could not answer, and firmware older than the info block, which prints
+    the revision with no image name.
+    """
+    if not firmware or firmware == GUARD_UNSUPPORTED:
+        return None
+    return matched_image(_GUARD_IMAGE_RE.search(firmware))
+
+
+def guard_baseline_problems(boards, context) -> list[str]:
+    """Why this guard baseline is not one the run can rely on ([] when it is).
+
+    Every guard is read and every reading is compared, whatever image the
+    board carries; these are the two things the readings themselves have to
+    satisfy before any case runs (the maintainer's decision on #275).
+
+    First: a board running an image GUARD_REQUIRED_OF_IMAGE lists has to
+    answer the radio settings that build implements. One it says it cannot
+    answer is a
+    board that is not holding those settings, not an image difference, so it
+    fails the baseline exactly as it did before.
+
+    Second: every guard needs at least one reading that pins something about
+    it. A guard that answered none is carrying firmware this host can read
+    nothing of, which is not a guard, so the test is refused by name rather
+    than run against a guarantee that has quietly narrowed to nothing. A
+    wedged board stalls every request and would read that way too, though the
+    strict LED read fails it first.
+    """
+    problems = []
+    for board in boards:
+        image = guard_image(context.get(board.key(GUARD_FIRMWARE_KEY)))
+        readings = {
+            key: context.get(board.key(key))
+            for key in [key for key, *_rest in GUARD_READBACK] + [GUARD_CRC_KEY]
+        }
+        refused = [
+            key for key in GUARD_REQUIRED_OF_IMAGE.get(image, ())
+            if readings.get(key) == GUARD_UNSUPPORTED
+        ]
+        if refused:
+            problems.append(
+                f"{board.role} (serial {board.serial}) runs {image}, which"
+                " implements " + ", ".join(refused)
+                + ", and the board says it cannot answer "
+                + ("them" if len(refused) > 1 else "it")
+                + "; its settings cannot be guarded"
+            )
+        pinned = [
+            key for key in GUARD_PINNING_KEYS
+            if readings.get(key) not in (None, GUARD_UNSUPPORTED)
+        ]
+        if not pinned:
+            problems.append(
+                f"{board.role} (serial {board.serial}) answered none of "
+                + ", ".join(GUARD_PINNING_KEYS)
+                + ", so nothing about it can be compared afterwards; it runs "
+                + (image if image else "an image it did not name")
+                + ". A board that stalls every request is wedged rather than "
+                "short of one; reset it with ubertooth-util -r on that board"
+            )
+    return problems
 
 
 class _AfterTest:
@@ -1832,25 +2037,44 @@ def guard_boards(
 
 
 def _guard_step(board: GuardBoard, setting, option, pattern, convert, key, expected):
+    if setting in GUARD_STRICT_KEYS:
+        return Step(
+            f"{board.slug}-{setting}",
+            f"{board.role} {setting}",
+            _util(board.serial, option),
+            observe=Observation(key, pattern, expected, convert=convert),
+        )
+    tolerant, value = _tolerant(pattern, convert)
     return Step(
         f"{board.slug}-{setting}",
         f"{board.role} {setting}",
         _util(board.serial, option),
-        observe=Observation(key, pattern, expected, convert=convert),
+        # A board that cannot answer the request says so and exits 1; that
+        # reading is recorded and compared like any other.
+        expected_returncodes=(0, 1),
+        observe=Observation(key, tolerant, expected, convert=value),
     )
 
 
 def _btle_api_refusal(board: GuardBoard, firmware_key: str):
-    """Refuse the btle CRC read unless this check confirmed a current API.
+    """Refuse the btle CRC read unless this check confirmed the same API.
 
-    ubertooth-btle sends cmd_stop to firmware older than the host API, so an
-    unread, unparsable, or older API never reaches ubertooth-btle.
+    ubertooth-btle's own check (libubertooth ubertooth_check_api()) may refuse
+    any firmware API that is not the one the tools were built for -- newer as
+    well as older -- and stop the board on its way out (ubertooth_stop(),
+    which sends cmd_stop). Whether it refuses or warns and goes on is the host
+    tools' own build and UBERTOOTH_ALLOW_API_MISMATCH; a run can read neither,
+    and does not set the variable, so it cannot know which it would get. So
+    the read is sent only to a board whose API this check read and found
+    equal. An unread, unparsable, or differing API never reaches
+    ubertooth-btle, and the refusal fails the check: a guard is read, not
+    written to.
     """
     def refusal(context) -> str:
         if board.host_api is None:
             return (
                 f"{board.role}: host tools API not derived; ubertooth-btle not "
-                "run, it would stop firmware older than the host tools"
+                "run, it may stop a board whose firmware API differs"
             )
         host = format_api(board.host_api)
         firmware = context.get(firmware_key)
@@ -1864,27 +2088,34 @@ def _btle_api_refusal(board: GuardBoard, firmware_key: str):
                 )
             return (
                 f"{board.role} firmware API was not confirmed in this check; "
-                "ubertooth-btle not run, it would stop firmware older than "
-                f"the host tools (API {host})"
+                "ubertooth-btle not run, it may stop a board whose firmware "
+                f"API differs from the host tools' (API {host})"
             )
         api = firmware_api(firmware)
-        if api is None or api < board.host_api:
-            found = "unreadable" if api is None else format_api(api)
+        if api is None:
             return (
-                f"{board.role} firmware API {found} is older than the host "
-                f"tools API {host}, too old to read CRC safely; ubertooth-btle "
-                "not run, its API check would stop the guard"
+                f"{board.role} firmware API could not be read from "
+                f"'{firmware}'; ubertooth-btle not run, it may stop a board "
+                f"whose firmware API differs from the host tools' (API {host})"
+            )
+        if api != board.host_api:
+            return (
+                f"{board.role} firmware API {format_api(api)} is not the host "
+                f"tools API {host}; ubertooth-btle not run, its API check may "
+                "stop the guard"
             )
         return ""
     return refusal
 
 
 def _guard_crc_step(board: GuardBoard, key, expected, firmware_key):
+    tolerant, value = _tolerant(CRC_PATTERN, None, CRC_VALUES)
     return Step(
         f"{board.slug}-{GUARD_CRC_KEY}",
         f"{board.role} {GUARD_CRC_KEY}",
         _btle(board.serial, "-k"),
-        observe=Observation(key, CRC_PATTERN, expected, CRC_VALUES),
+        expected_returncodes=(0, 1),
+        observe=Observation(key, tolerant, expected, convert=value),
         refuse=_btle_api_refusal(board, firmware_key),
     )
 
@@ -1901,8 +2132,9 @@ def guard_steps(boards, after=None) -> tuple[Step, ...]:
     With ``after`` unset this records each guard's baseline; otherwise each
     read must equal the baseline (keys are suffixed so each check's observed
     values stay separate in the record). The ubertooth-btle CRC read comes
-    last and is refused unless this check's firmware read recorded an API no
-    older than the host tools'.
+    last and is refused unless this check's firmware read recorded the host
+    tools' own API, which is the only one that tool is sure to work on
+    without stopping the board.
     """
     steps = []
     for board in boards:

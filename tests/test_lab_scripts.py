@@ -137,6 +137,9 @@ hold = load(HOLD)
 hub_port = load(HUB_PORT)
 peer = load(PEER)
 
+import _bench  # noqa: E402  (beside the scripts, reachable from the line above)
+import _checkout  # noqa: E402
+
 
 @dataclass
 class FakeState:
@@ -283,11 +286,11 @@ class HoldLockKeys(Bench):
         # As registered, not lowercased: the bench's own lock file is named
         # after the same string the lease key carries.
         self.assertEqual(PROG_SERIAL, _bench.plain_serial(programmer))
-        second = _bench.bench_lock_board(programmer)
-        # The bench's own file keeps the plain serial; the lease file beside
-        # it is prefixed, so it cannot be an Ubertooth's (harness #290).
-        self.assertEqual(PROG_SERIAL, second.lock_name)
-        self.assertEqual(f"bench-{PROG_SERIAL}", second.key)
+        board = _bench.board(programmer)
+        # The lease file is prefixed, so it cannot be an Ubertooth's
+        # (harness #290); the bench's own file keeps the plain serial.
+        self.assertEqual(PROG_KEY, board.key)
+        self.assertEqual(PROG_SERIAL, board.lock_name)
 
     def test_a_type_this_does_not_hold_is_refused(self):
         from ubertooth_harness.resources import RegistryError
@@ -360,7 +363,9 @@ class HoldArguments(Bench):
             "UT0,DK0", "--", "true",
         ])
         argv = hold.harness_lease_argv(args, ["UT0", "DK0"], command)
-        self.assertEqual([sys.executable, "-m", "ubertooth_harness", "lease"], argv[:4])
+        self.assertEqual(
+            [sys.executable, "-P", "-m", "ubertooth_harness", "lease"], argv[:5]
+        )
         self.assertIn("--host-lock", argv)
         self.assertIn(self.template, argv)
         self.assertIn(str(self.leases), argv)
@@ -427,11 +432,17 @@ class HoldRuns(Bench):
         self.assertEqual(0, status)
         self.assertEqual("busy", marker.read_text())
 
-    def test_both_lock_names_are_taken_for_a_device_whose_key_is_not_its_serial(self):
-        """A bench script using the older plain-serial name must still be excluded."""
+    def test_the_lab_s_own_file_is_the_plain_serial_for_such_a_device(self):
+        """A bench script using the plain-serial name must be excluded.
+
+        That file is the lab's, and the only one its wrappers lock; the
+        device's prefixed name belongs to its lease file, where the prefix
+        keeps it off an Ubertooth's (harness #290). A run takes the same
+        file, so a session held here and a run exclude each other (#317).
+        """
         for device, paths in (
-            ("ESP0", (f"board-esp32-{BRIDGE}.lock", f"board-{BRIDGE}.lock")),
-            ("DK0", (f"board-nrf52840dk-{int(JLINK)}.lock", f"board-{JLINK}.lock")),
+            ("ESP0", (f"board-{BRIDGE}.lock", f"board-esp32-{BRIDGE}.lock")),
+            ("DK0", (f"board-{JLINK}.lock", f"board-nrf52840dk-{int(JLINK)}.lock")),
         ):
             with self.subTest(device=device):
                 checks = "\n".join(
@@ -454,18 +465,20 @@ class HoldRuns(Bench):
                 status, _, err = self.run_hold(device, [sys.executable, "-c", script])
                 self.assertEqual(0, status, err)
                 self.assertEqual(
-                    "busy busy", (self.root / f"{device}.txt").read_text()
+                    "busy free", (self.root / f"{device}.txt").read_text()
                 )
 
     def test_an_ubertooth_needs_only_one_lock_name(self):
         import _bench
 
-        board = self.load_registry().get("UT0")
-        self.assertEqual("", _bench.plain_serial(board))  # no second name
-        self.assertIsNone(_bench.bench_lock_board(board))
+        resource = self.load_registry().get("UT0")
+        self.assertEqual("", _bench.plain_serial(resource))  # no second name
+        self.assertIsNone(_bench.board(resource).external_key)
 
     def test_a_peer_is_held_here_and_its_external_lock_is_taken(self):
-        external = self.locks / f"board-esp32-{BRIDGE}.lock"
+        # The lab's own file, under the plain bridge serial, which is the one
+        # a lab wrapper locks and a run holds too (harness #317).
+        external = self.locks / f"board-{BRIDGE}.lock"
         script = (
             "import fcntl, pathlib\n"
             f"fd = open({str(external)!r}, 'a+')\n"
@@ -518,8 +531,8 @@ class HoldRuns(Bench):
             self.leases / f"{UT3_SERIAL}.lock",
             self.leases / f"{PROG_KEY}.lock",
             self.locks / f"board-{UT3_SERIAL}.lock",
-            self.locks / f"board-{PROG_KEY}.lock",
-            # The bench's older name for the programmer, as registered.
+            # The bench's own name for the programmer, as registered: its
+            # lease file is prefixed, its lock file is not.
             self.locks / f"board-{PROG_SERIAL}.lock",
         )
         for device, expected_note in (
@@ -568,7 +581,7 @@ class HoldRuns(Bench):
             self.leases / f"{UT_SERIAL}.lock",
             self.leases / f"esp32-{BRIDGE}.lock",
             self.locks / f"board-{UT_SERIAL}.lock",
-            self.locks / f"board-esp32-{BRIDGE}.lock",
+            self.locks / f"board-{BRIDGE}.lock",
         )
         status, _, err = self.run_hold(
             "UT0,ESP0",
@@ -863,26 +876,30 @@ class HubPortSwitches(Bench):
         self.assertEqual(f"esp32-{BRIDGE}", hub_port.device_board(peer).key)
 
     def test_a_held_bench_lock_name_also_prevents_switching(self):
-        """A hold of only the older name must be met here too.
+        """A lab script that locks only the plain serial must be met here too.
 
-        That hold takes the bench's own `board-<plain serial>.lock`, which is
-        where a bench script written against the serial meets it, and the
-        prefixed lease file beside it.
+        It holds the bench's own `board-<plain serial>.lock` and nothing of
+        the harness's, so that file is the only place it can be met.
         """
         holder = leases.acquire(
-            [leases.Board(
-                "DK0 (bench lock)", leases.bench_lock_key(JLINK), external_key=JLINK
-            )],
+            [leases.Board("a lab script", "bench-elsewhere", external_key=JLINK)],
             leases.holder_info(run_id=None, owner="bob", purpose="a DK session"),
             directory=self.leases,
             external_template=self.template,
         )
         self.addCleanup(holder.release)
-        # DK0 is mapped to port 5 in the registry below.
-        status, _, err = self.run_hub_port(["Hub0", "cycle", "5"])
+        # DK0 is mapped to port 5 in the registry below. The template is what
+        # tells this run where the lab's own files are; without it there is
+        # nowhere to meet a holder that took nothing of the harness's.
+        status, _, err = self.run_hub_port(
+            ["--external-board-lock", self.template, "Hub0", "cycle", "5"]
+        )
         self.assertEqual(2, status)
         self.assertEqual([], self.controller.calls)
-        self.assertIn("bob", err)
+        # Named by the file, not by a holder: the harness never writes to an
+        # external lock, so all it can report is which file is held.
+        self.assertIn("DK0 is in use: held outside the harness", err)
+        self.assertIn(f"board-{JLINK}.lock", err)
 
     def test_a_programmer_is_held_while_its_board_s_port_is_switched(self):
         """UT_Dbg is on port 2, with Prog0 wired to it.
@@ -1242,6 +1259,581 @@ class PeerArguments(Bench):
         self.assertEqual(Path(module.__file__).resolve(), peer.ESP32PEER)
 
 
+class CheckoutEnvironment(Bench):
+    """The harness a helper uses is its own checkout's (harness #312).
+
+    A wrapper that named another checkout's interpreter, and ran from inside
+    that checkout, is how one `hold` came to read the registry with one
+    version of the harness and lease with a much older one. Each test here
+    closes one of the ways that happened.
+    """
+
+    def decoy_checkout(self) -> Path:
+        """A directory holding a harness that must never be imported.
+
+        Importing it raises, so a test fails with the decoy's own words
+        rather than with whatever an old harness would have done.
+        """
+        decoy = self.root / "decoy"
+        (decoy / "ubertooth_harness").mkdir(parents=True)
+        (decoy / "ubertooth_harness" / "__init__.py").write_text(
+            "raise SystemExit('decoy harness imported')\n", encoding="utf-8"
+        )
+        return decoy
+
+    def test_the_delegate_ignores_a_harness_in_the_working_directory(self):
+        """The regression: `-m` puts the working directory first (#312).
+
+        A bench wrapper that ran `hold` from inside another checkout handed
+        its locks to that checkout's harness, whatever PYTHONPATH said. Run
+        from a directory holding a harness of its own, the hold must still
+        be this checkout's, start to finish.
+        """
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        environment.pop("UBERTOOTH_HARNESS_HARDWARE", None)
+        result = subprocess.run(
+            [
+                sys.executable, str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", sys.executable, "-c", "print('held')",
+            ],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.decoy_checkout()), timeout=120,
+        )
+        self.assertNotIn("decoy harness imported", result.stdout + result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("held", result.stdout)
+
+    def outside_interpreter(self) -> Path:
+        """An interpreter no checkout bootstrapped, as a bench wrapper gives.
+
+        The environment this suite runs in was built from it, so it exists
+        wherever the suite does. Skipped rather than assumed, and checked
+        rather than assumed to be unbootstrapped: a helper succeeding under
+        it is only evidence of a re-run while that holds.
+        """
+        outside = Path(sys.base_prefix) / "bin" / "python3"
+        if not outside.is_file():
+            self.skipTest(f"no interpreter outside the environment at {outside}")
+        asked = subprocess.run(
+            [str(outside), "-c",
+             "import pathlib, sys;"
+             f"print((pathlib.Path(sys.prefix) / {_checkout.VENV_MARKER!r}).is_file())"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if asked.stdout.strip() != "False":
+            self.skipTest(f"{outside} reports itself a harness environment")
+        return outside
+
+    def plain_environment(self) -> dict:
+        """What a shell gives: no PYTHONPATH, no harness variables."""
+        environment = dict(os.environ)
+        for name in ("PYTHONPATH", "UBERTOOTH_HARNESS_HARDWARE"):
+            environment.pop(name, None)
+        return environment
+
+    def test_another_interpreter_starting_a_helper_re_runs_it_under_this_one(self):
+        """Any interpreter may start a helper; only one may finish it.
+
+        A hold that completes when an interpreter nobody bootstrapped
+        started it is a hold the re-run carried, since that interpreter is
+        turned down. What this does not prove on its own is that the call
+        is there at all: on a host whose base interpreter happens to carry
+        the harness's dependencies, deleting it lets the import succeed
+        instead of being refused. `test_what_a_caller_can_arrange_is_a_
+        refusal_at_most` is the one that fails then.
+        """
+        outside = self.outside_interpreter()
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c", "echo held",
+            ],
+            capture_output=True, text=True, env=self.plain_environment(),
+            cwd=str(self.decoy_checkout()), timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("held", result.stdout)
+
+    def test_every_helper_re_runs_itself_not_only_hold(self):
+        """`peer` and `hub-port` carry the same locks and the same risk.
+
+        Read with the note in the test above: this says each of the three
+        completes when started from outside, not by itself that each still
+        asks to be re-run.
+        """
+        outside = self.outside_interpreter()
+        for path in (HOLD, HUB_PORT, PEER):
+            with self.subTest(script=path.name):
+                result = subprocess.run(
+                    [str(outside), str(path), "--help"],
+                    capture_output=True, text=True,
+                    env=self.plain_environment(),
+                    cwd=str(self.root), timeout=120,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("usage:", result.stdout)
+
+    def test_the_re_run_leaves_nothing_in_the_commands_environment(self):
+        """The command under `hold` may be a helper with its own to make,
+        so it must not inherit anything about this one's."""
+        outside = self.outside_interpreter()
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c",
+                "echo \"harness vars: [$(env | grep -c UBERTOOTH_HARNESS_LAB)]\"",
+            ],
+            capture_output=True, text=True, env=self.plain_environment(),
+            cwd=str(self.root), timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("harness vars: [0]", result.stdout)
+
+    def test_a_venv_nobody_bootstrapped_is_not_this_checkouts_environment(self):
+        """`.venv` is a path, not a promise: `python -m venv` makes one too,
+        and running a device helper in one is what bootstrap.py avoids."""
+        plain = self.root / "plain-venv"
+        (plain / "bin").mkdir(parents=True)
+        with unittest.mock.patch.object(_checkout, "VENV", plain):
+            with unittest.mock.patch.object(sys, "prefix", str(plain)):
+                self.assertFalse(_checkout.in_harness_environment())
+                self.assertFalse(_checkout.in_checkout_environment())
+        marked = self.root / "marked-venv"
+        (marked / "bin").mkdir(parents=True)
+        (marked / _checkout.VENV_MARKER).write_text("", encoding="utf-8")
+        with unittest.mock.patch.object(_checkout, "VENV", marked):
+            with unittest.mock.patch.object(sys, "prefix", str(marked)):
+                self.assertTrue(_checkout.in_checkout_environment())
+
+    def test_a_checkout_path_that_cannot_go_on_an_import_path_is_refused(self):
+        """It would arrive as two entries, neither of them this checkout."""
+        colon = self.root / f"check{os.pathsep}out"
+        with unittest.mock.patch.object(_checkout, "CHECKOUT", colon):
+            self.assertFalse(_checkout.importable_checkout_path())
+            with self.assertRaises(SystemExit) as caught:
+                _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        self.assertIn(str(colon), str(caught.exception))
+        self.assertIn("import path", str(caught.exception))
+        self.assertTrue(_checkout.importable_checkout_path())
+
+    def test_unbuffered_output_survives_the_re_run(self):
+        """A hold runs as long as its command; output through a pipe should
+        not start buffering because the script re-ran itself."""
+        with unittest.mock.patch.object(sys, "argv", ["hold", "UT0", "--", "true"]):
+            with unittest.mock.patch.object(_checkout, "unbuffered", lambda: True):
+                self.assertEqual(
+                    ["-P", "-u", str(HOLD)], _checkout.reexec_argv(str(HOLD))[1:4]
+                )
+            with unittest.mock.patch.object(_checkout, "unbuffered", lambda: False):
+                self.assertEqual(
+                    ["-P", str(HOLD)], _checkout.reexec_argv(str(HOLD))[1:3]
+                )
+
+    def test_the_u_flag_is_read_from_what_it_leaves_behind(self):
+        """`sys.flags` has nothing for `-u`; a write-through stdout does.
+
+        Asked of real interpreters, with the output piped, because that is
+        the case the carrying is for and the one an attribute check could
+        get wrong.
+        """
+        for flag, expected in ((["-u"], "True"), ([], "False")):
+            with self.subTest(flag=flag or "none"):
+                probe = subprocess.run(
+                    [sys.executable, *flag, "-c",
+                     f"import sys; sys.path.insert(0, {str(LAB)!r});"
+                     " import _checkout; print(_checkout.unbuffered())"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                self.assertEqual(expected, probe.stdout.strip(), probe.stderr)
+
+    def test_an_unexecutable_environment_is_refused_not_a_traceback(self):
+        """Executable and not an executable image: os.execv raises."""
+        broken = self.root / "broken" / "bin" / "python"
+        broken.parent.mkdir(parents=True)
+        broken.write_text("not an executable image\n", encoding="utf-8")
+        broken.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", broken):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    # Past the probe, which would otherwise answer for this
+                    # file before the exec was reached, so what this
+                    # exercises is the exec's own failure.
+                    with unittest.mock.patch.object(
+                        _checkout, "venv_python_would_arrive", return_value=True
+                    ):
+                        with unittest.mock.patch.object(
+                            _checkout.os, "execv",
+                            side_effect=OSError("exec format"),
+                        ):
+                            with self.assertRaises(SystemExit) as caught:
+                                _checkout.run_in_checkout_environment(
+                                    str(HOLD), "hold"
+                                )
+        self.assertIn("did not confirm", str(caught.exception))
+        # The attempt did not happen, so nothing is left behind to stop a
+        # process that goes on to make one.
+        self.assertNotIn(_checkout.ATTEMPT_ENV, os.environ)
+
+    def test_the_re_run_names_this_checkouts_interpreter_and_the_script(self):
+        given = ["UT0,DK0", "--", "ubertooth-util", "-U", "x", "-v"]
+        with unittest.mock.patch.object(sys, "argv", ["hold", *given]):
+            argv = _checkout.reexec_argv(str(HOLD))
+        self.assertEqual(str(_checkout.VENV_PYTHON), argv[0])
+        # The script's own path, and nothing of the caller's before it.
+        self.assertEqual(["-P", str(HOLD)], argv[1:3])
+        # Every argument through untouched, separator and all: a lost `--`
+        # would turn the command into devices to hold.
+        self.assertEqual(given, argv[3:])
+
+    def test_the_interpreter_is_asked_before_it_is_run(self):
+        """The same predicate, put to the candidate: a `True` means the
+        re-run returns at `in_checkout_environment` and does nothing more,
+        which is what makes one attempt the only attempt."""
+        self.assertTrue(_checkout.venv_python_would_arrive())
+        saying_no = self.root / "says-no" / "python"
+        saying_no.parent.mkdir(parents=True)
+        saying_no.write_text("#!/bin/sh\necho False\n", encoding="utf-8")
+        saying_no.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", saying_no):
+            self.assertFalse(_checkout.venv_python_would_arrive())
+
+    def test_an_interpreter_that_cannot_answer_is_not_run(self):
+        """A `#!` wrapper passes every test a file can pass and reports the
+        interpreter behind it, so a guard that looked at the answer
+        afterwards would re-run for ever. This asks first."""
+        wrapper = self.root / "wrapper" / "python"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text(
+            f"#!{sys.executable}\n# a wrapper, not an interpreter\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", wrapper):
+            self.assertFalse(_checkout.venv_python_would_arrive())
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with unittest.mock.patch.object(
+                        _checkout.os, "execv"
+                    ) as execv:
+                        with self.assertRaises(SystemExit) as caught:
+                            _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        execv.assert_not_called()
+        self.assertIn("bootstrap.py", str(caught.exception))
+
+    def test_a_banner_from_someone_elses_sitecustomize_is_not_an_answer(self):
+        """An interpreter may print at startup for reasons of its own. A
+        good environment must not be turned down over a banner, and a
+        banner must not be able to pass for the answer."""
+        noisy = self.root / "noisy" / "python"
+        noisy.parent.mkdir(parents=True)
+        noisy.write_text(
+            "#!/bin/sh\necho 'loading site customizations'\necho True\n",
+            encoding="utf-8",
+        )
+        noisy.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", noisy):
+            self.assertTrue(_checkout.venv_python_would_arrive())
+        lying = self.root / "lying" / "python"
+        lying.parent.mkdir(parents=True)
+        lying.write_text(
+            "#!/bin/sh\necho 'True is a fine word'\necho False\n",
+            encoding="utf-8",
+        )
+        lying.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", lying):
+            self.assertFalse(_checkout.venv_python_would_arrive())
+
+    def test_an_interpreter_that_answers_one_way_and_runs_another_still_ends(self):
+        """Not a threat -- the same write access reaches this module -- but a
+        helper on a bench has to end whatever it is given, so the attempts
+        are bounded as well as decided."""
+        self.assertFalse(_checkout.attempted_once({}))
+        self.assertFalse(
+            _checkout.attempted_once({_checkout.ATTEMPT_ENV: "/elsewhere"})
+        )
+        self.assertTrue(
+            _checkout.attempted_once(
+                {_checkout.ATTEMPT_ENV: str(_checkout.CHECKOUT)}
+            )
+        )
+        with unittest.mock.patch.dict(
+            _checkout.os.environ, {_checkout.ATTEMPT_ENV: str(_checkout.CHECKOUT)}
+        ):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with unittest.mock.patch.object(
+                        _checkout, "venv_python_would_arrive", return_value=True
+                    ) as asked:
+                        with unittest.mock.patch.object(
+                            _checkout.os, "execv"
+                        ) as execv:
+                            with self.assertRaises(SystemExit):
+                                _checkout.run_in_checkout_environment(
+                                    str(HOLD), "hold"
+                                )
+        execv.assert_not_called()
+        asked.assert_not_called()
+
+    def test_the_attempt_note_does_not_reach_the_command(self):
+        outside = self.outside_interpreter()
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c",
+                "echo \"attempt vars: [$(env | grep -c UBERTOOTH_HARNESS_LAB)]\"",
+            ],
+            capture_output=True, text=True, env=self.plain_environment(),
+            cwd=str(self.root), timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("attempt vars: [0]", result.stdout)
+
+    def test_an_environment_that_would_not_arrive_is_told_apart_from_none(self):
+        """"Run bootstrap.py" is wrong advice for a checkout whose
+        environment is fine and whose interpreter cannot be reached."""
+        advice = _checkout.unreachable_environment_advice("hold")
+        self.assertIn(str(_checkout.VENV_PYTHON), advice)
+        self.assertIn("PYTHONEXECUTABLE", advice)
+        self.assertNotIn("has no environment yet", advice)
+        # bootstrap.py refuses to touch a `.venv` it did not build, even
+        # with --recreate, and that is the likeliest cause of all, so the
+        # remedy it does accept comes first.
+        self.assertIn("move it aside", advice)
+        self.assertLess(advice.index("move it aside"), advice.index("--recreate"))
+
+    def test_an_interpreter_there_and_not_executable_is_not_called_absent(self):
+        """A malformed environment is not a missing one, and the advice for
+        a missing one would send the operator the wrong way."""
+        unrunnable = self.root / "unrunnable" / "python"
+        unrunnable.parent.mkdir(parents=True)
+        unrunnable.write_text("", encoding="utf-8")
+        unrunnable.chmod(0o644)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", unrunnable):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        self.assertIn("did not confirm", str(caught.exception))
+
+    def test_output_that_is_not_text_is_an_answer_not_a_traceback(self):
+        """A file in place of an interpreter may write anything at all."""
+        binary = self.root / "binary" / "python"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(
+            "#!/bin/sh\nprintf '\\377\\376 not text\\n'\n", encoding="utf-8"
+        )
+        binary.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", binary):
+            self.assertFalse(_checkout.venv_python_would_arrive())
+
+    def test_an_interpreter_that_never_answers_is_not_waited_on(self):
+        """A bench gets an answer or a refusal, not a helper that hangs."""
+        slow = self.root / "slow" / "python"
+        slow.parent.mkdir(parents=True)
+        slow.write_text("#!/bin/sh\nsleep 600\n", encoding="utf-8")
+        slow.chmod(0o755)
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", slow):
+            with unittest.mock.patch.object(_checkout, "PROBE_TIMEOUT_S", 2):
+                self.assertFalse(_checkout.venv_python_would_arrive())
+
+    def test_a_forged_interpreter_name_ends_rather_than_looping(self):
+        """On a macOS framework build `PYTHONEXECUTABLE` decides what an
+        interpreter calls itself, and app-bundle launchers set it, so this
+        reaches a bench by accident as well as on purpose. What has to hold
+        is that it ends.
+
+        How it ends is the platform's to decide, and the two differ. On
+        macOS the interpreter still runs and the helper refuses, naming the
+        interpreter that would not arrive. On Linux the forged name is
+        taken for the interpreter's own location, so the standard library
+        is not where it looks for it and the interpreter cannot import
+        `subprocess`: it fails on its way in, before any of this code is
+        reached, which no code here can improve on. Either way no device is
+        held and nothing spins; the refusal is checked on its own in
+        `test_what_a_caller_can_arrange_is_a_refusal_at_most`, which does
+        not depend on breaking an interpreter.
+        """
+        outside = self.outside_interpreter()
+        environment = self.plain_environment()
+        environment["PYTHONEXECUTABLE"] = "/usr/bin/not-this-interpreter"
+        # The timeout is the assertion: a loop here was a real defect, and
+        # it took a bench helper down for as long as anyone waited.
+        result = subprocess.run(
+            [str(outside), str(HOLD), "--help"],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.root), timeout=120,
+        )
+        if result.returncode == 0:
+            self.assertIn("usage:", result.stdout)
+        else:
+            self.assertNotIn("usage:", result.stdout)
+
+    def test_what_a_caller_can_arrange_is_a_refusal_at_most(self):
+        """Setting the attempt note is how a caller would try to keep a
+        helper out of its checkout's environment. What it buys is the
+        refusal, not a hold in whatever environment the caller preferred."""
+        outside = self.outside_interpreter()
+        environment = self.plain_environment()
+        environment[_checkout.ATTEMPT_ENV] = str(REPO)
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c", "echo held",
+            ],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.root), timeout=120,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("did not confirm", result.stderr)
+        self.assertNotIn("held", result.stdout)
+
+    def test_a_pythonpath_a_caller_sets_does_not_answer_for_the_delegate(self):
+        """The checkout is named ahead of it, and the working directory is
+        off the delegate's path entirely."""
+        outside = self.outside_interpreter()
+        environment = self.plain_environment()
+        environment["PYTHONPATH"] = str(self.decoy_checkout())
+        result = subprocess.run(
+            [
+                str(outside), str(HOLD),
+                "--hardware", str(self.registry),
+                "--lease-dir", str(self.leases),
+                "--wait-for-boards", "0",
+                "UT0", "--", "sh", "-c", "echo held",
+            ],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.root), timeout=120,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("held", result.stdout)
+        self.assertNotIn("decoy harness imported", result.stdout + result.stderr)
+
+    def test_it_does_not_re_run_when_it_is_already_this_environment(self):
+        with unittest.mock.patch.object(_checkout.os, "execv") as execv:
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=True
+            ):
+                _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        execv.assert_not_called()
+
+    def test_with_no_environment_here_another_bootstrapped_one_will_do(self):
+        """The package still comes from beside the script, so the two halves
+        of a hold cannot be different versions of the harness."""
+        missing = self.root / "nothing" / "bin" / "python"
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", missing):
+            with unittest.mock.patch.object(_checkout.os, "execv") as execv:
+                with unittest.mock.patch.object(
+                    _checkout, "in_checkout_environment", return_value=False
+                ):
+                    with unittest.mock.patch.object(
+                        _checkout, "in_harness_environment", return_value=True
+                    ):
+                        _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        execv.assert_not_called()
+
+    def test_an_interpreter_nobody_bootstrapped_is_turned_down(self):
+        """Whatever versions of the dependencies happen to be installed is
+        not an environment to drive devices from."""
+        missing = self.root / "nothing" / "bin" / "python"
+        with unittest.mock.patch.object(_checkout, "VENV_PYTHON", missing):
+            with unittest.mock.patch.object(
+                _checkout, "in_checkout_environment", return_value=False
+            ):
+                with unittest.mock.patch.object(
+                    _checkout, "in_harness_environment", return_value=False
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        _checkout.run_in_checkout_environment(str(HOLD), "hold")
+        self.assertIn(str(REPO), str(caught.exception))
+        self.assertIn("bootstrap.py", str(caught.exception))
+
+    def test_the_environment_marker_is_the_one_bootstrap_writes(self):
+        """Named in two places because this module runs before the harness
+        is importable; they must not drift."""
+        from ubertooth_harness import environment
+
+        self.assertEqual(environment.MARKER, _checkout.VENV_MARKER)
+
+    def test_this_checkouts_environment_is_recognized_as_one(self):
+        self.assertTrue(_checkout.in_harness_environment())
+        self.assertTrue(_checkout.in_checkout_environment())
+
+    def test_the_advice_names_the_checkout_to_bootstrap(self):
+        """A bench runs helpers by path, so "run bootstrap.py" is not enough."""
+        advice = _checkout.bootstrap_advice("hold")
+        self.assertIn(str(REPO), advice)
+        self.assertIn("bootstrap.py", advice)
+        self.assertTrue(advice.startswith("hold: "))
+
+    def test_the_advice_carries_the_import_error_it_came_from(self):
+        """An import that is broken rather than missing must not read as
+        a checkout nobody bootstrapped."""
+        advice = _checkout.bootstrap_advice("hold", ImportError("no module named yaml"))
+        self.assertIn("no module named yaml", advice)
+
+    def test_a_refused_registry_names_the_harness_that_refused_it(self):
+        """#312's error read as a mistake in a file that was perfectly good.
+
+        What it was missing is which harness turned it down, since an older
+        one turns down a registry a newer one wrote.
+        """
+        self.registry.write_text(
+            REGISTRY.replace("Ubertooth: UT0", "Ubertooth: UT_Absent"),
+            encoding="utf-8",
+        )
+        from ubertooth_harness.resources import RegistryError
+
+        with self.assertRaises(RegistryError) as caught:
+            _bench.load_registry(self.registry)
+        self.assertIn(str(_checkout.CHECKOUT), str(caught.exception))
+        self.assertIn("read by the harness in", str(caught.exception))
+
+    def test_a_registry_that_loads_is_returned_unchanged(self):
+        registry = _bench.load_registry(self.registry)
+        self.assertEqual("UT0", registry.get("Host_Linux").defaults["Ubertooth"])
+
+    def test_a_name_error_is_not_blamed_on_the_harness(self):
+        """A device nobody registered is the caller's mistake, not a version."""
+        from ubertooth_harness.resources import RegistryError
+
+        registry = self.load_registry()
+        with self.assertRaises(RegistryError) as caught:
+            hold.resolve(registry, "UT_Absent")
+        self.assertNotIn("read by the harness in", str(caught.exception))
+
+
 class LabFiles(unittest.TestCase):
     def test_both_scripts_are_executable_and_compile(self):
         for path in (HOLD, HUB_PORT, PEER):  # _bench.py is imported, not run
@@ -1334,6 +1926,23 @@ class LabFiles(unittest.TestCase):
         )
         self.assertNotIn("ATTRS{", rule)
 
+    def test_every_helper_is_a_program_a_bench_can_exec(self):
+        """A wrapper on a bench names its bench and a path (#312).
+
+        What it must not have to name is anything about which harness runs:
+        no interpreter and no working directory, because anything a wrapper
+        supplies is something it can supply wrongly, and one wrapper naming
+        another checkout's interpreter is what took every device command on
+        a host down. Its own registry it does name, since a helper refuses
+        rather than guessing which bench it is for.
+        """
+        for path in (HOLD, HUB_PORT, PEER):
+            with self.subTest(script=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("#!/usr/bin/env python3\n"))
+                self.assertTrue(os.access(path, os.X_OK))
+                self.assertIn("run_in_checkout_environment", text)
+
     def test_no_script_names_a_host_serial_or_home_path(self):
         """These are public: a bench's own identities stay in its registry."""
         banned = re.compile(
@@ -1344,7 +1953,7 @@ class LabFiles(unittest.TestCase):
             re.IGNORECASE,
         )
         for path in (HOLD, HUB_PORT, PEER, RULES, LAB / "_bench.py",
-                     LAB / "README.md"):
+                     LAB / "_checkout.py", LAB / "README.md"):
             with self.subTest(file=path.name):
                 for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                     self.assertIsNone(
