@@ -1687,8 +1687,8 @@ with no usage text after the message.
 
 **`ubertooth-btle`'s replay, and the dump it writes.** `-R` replays a dump
 `-d` saved (fork `04dbe53c`, [ubertooth#1129](https://github.com/SqueakyFloors/ubertooth/pull/1129)),
-and four of its decisions are made while the command line is read, so they
-run here with no board. `-R` with none of `-f`, `-n` or `-p` is refused: a
+and four of its decisions come before a board is asked for and before any
+destination is opened for writing, so they run here with no board. `-R` with none of `-f`, `-n` or `-p` is refused: a
 record does not say which mode wrote it, and the modes stamp their packets
 from different clocks, so the times a replay reconstructed would be wrong past
 the first wrap with nothing in the file to say so. Every option that drives,
@@ -1702,11 +1702,13 @@ about a replay having no board to tune. And a destination that is the dump
 opened for writing, which would empty the file before a record of it had been
 read. Smoke refuses it by name; comprehensive adds a symbolic link, a hard
 link, and the replay reading the link while the destination names the file, so
-what is compared is the file. One capture at a time may have standard output,
-so `-q -` (and `-c -`, comprehensive) beside `-d -` is refused, as is either
-pair naming one file. A `-R` input that is not there is reported as
-`error: <file>: No such file or directory` before any board, since the input
-is opened first (comprehensive).
+what is compared is the file. That one comparison takes the open input to say
+which file it holds, so it is made after the input has been opened for
+reading, and a `-R` input that is not there is reported as
+`error: <file>: No such file or directory` first (comprehensive) -- both still
+before any board and before any destination is opened. One capture at a time
+may have standard output, so `-q -` (and `-c -`, comprehensive) beside `-d -`
+is refused while the command line is read, as is either pair naming one file.
 
 **`ubertooth-dfu -u` and standard output.** The read-back is written through a
 temporary file renamed over the name given, and a retry rewinds it to block
@@ -3121,7 +3123,7 @@ carries `required hardware: true`, so the naming costs the other benches
 nothing and hides nothing either: a registry without those peers, or without
 that host, runs every other release test and records this one as blocked, and
 the run finishes failed rather than passing with the recovery unmeasured. Its
-smoke estimate is about 520 s, which takes the release suite to about 1175 s
+smoke estimate is about 520 s, which takes the release suite to about 1185 s
 (roughly 20 minutes) on the host it names; a target without the peers plans
 about 665 s of the suite and fails on this step. The third, `-t` case stays in the
 `classic-comprehensive` suite, which a release runs alongside the gate.

@@ -953,7 +953,7 @@ Linux host they are on; it carries `required hardware: true`, so a bench
 without them runs the rest of the plan and the run fails on it rather than
 passing with that gate unmeasured (see
 [Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
-It runs the `smoke` profile there, about 520 s of the plan's roughly 1175 s.
+It runs the `smoke` profile there, about 520 s of the plan's roughly 1185 s.
 A target that is not the host it names plans about 665 s of the suite, which
 is what run setup shows for that target, with this step named as one it does
 not run — and it holds Run there, because such a run could not measure the

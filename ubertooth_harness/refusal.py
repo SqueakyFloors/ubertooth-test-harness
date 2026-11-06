@@ -101,12 +101,19 @@ def check(directory: Path, absent, kept, symlinks=(), hardlinks=()) -> str:
             return f"{name} now points at {os.readlink(path)}, not {target}"
     for name, target in hardlinks:
         path, other = directory / name, directory / target
-        if not path.is_file():
-            return f"{name} is gone"
+        # lstat, not stat: a hard link is the file itself, so a symbolic
+        # link to the same target is not one and must not pass as it.
+        try:
+            here = path.lstat()
+            there = other.lstat()
+        except OSError as error:
+            return f"{name} or {target} cannot be read ({error.strerror})"
+        if path.is_symlink():
+            return (f"{name} is a symbolic link, not the same file as "
+                    f"{target}; a refused command line replaced it")
         # Device and inode: an inode number alone is unique only within one
         # filesystem.
-        if (path.stat().st_dev, path.stat().st_ino) != (
-                other.stat().st_dev, other.stat().st_ino):
+        if (here.st_dev, here.st_ino) != (there.st_dev, there.st_ino):
             return (f"{name} is no longer the same file as {target}; a refused "
                     "command line replaced it")
     named = set(kept)

@@ -1063,8 +1063,9 @@ Refused command lines:
     in either order is refused naming both options as written, before the dump
     file is opened; and scan and follow refuse a stray word with no usage text
     after the message.
-    ubertooth-btle's replay decides four things before a board or a file is
-    opened: -R needs the major mode its dump was recorded with, because a
+    ubertooth-btle's replay decides four things before a board is asked for
+    and before any destination is opened for writing: -R needs the major mode
+    its dump was recorded with, because a
     record does not say which mode wrote it and the modes stamp their packets
     from different clocks; every option that drives, names, or tunes a board
     is refused beside -R naming itself; -A with -p is refused for not going
@@ -1072,10 +1073,12 @@ Refused command lines:
     destination that is the dump -R is replaying is refused with the dump
     unchanged, by name in smoke and through a symbolic link, a hard link and
     the link read as the input in comprehensive, since it is the file that is
-    compared. One capture at a time may have standard output, so -q - (and
+    compared. That last comparison takes the open input to identify the file
+    it holds, so it comes after the input has been opened for reading, and a
+    -R input that is not there is reported first (comprehensive). One capture
+    at a time may have standard output, so -q - (and
     -c -, comprehensive) beside -d - is refused, as is either pair naming one
-    file; a -R input that is not there is reported before any board
-    (comprehensive). ubertooth-dfu -u refuses a value naming standard output,
+    file. ubertooth-dfu -u refuses a value naming standard output,
     the lone - and the names of descriptor 1, as the value is read -- before
     -h (comprehensive) and before any board -- while a path whose last
     component is - is an ordinary file, so that command line is accepted and

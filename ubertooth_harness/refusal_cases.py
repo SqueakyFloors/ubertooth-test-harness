@@ -49,9 +49,12 @@ only read are checked first, so the refused image neither creates nor
 replaces <file>.dfu (ubertooth-dfu.md).
 
 ubertooth-btle's replay (fork 04dbe53c, fork #1129) decides four things of
-its own while the command line is read, each before a board is asked for and
-before any file is opened, so they belong here (ubertooth-btle.md, REPLAYING
-A DUMP):
+its own, each before a board is asked for and before any destination is
+opened for writing, so they belong here (ubertooth-btle.md, REPLAYING A
+DUMP). The first three are decided while the command line is read; the
+fourth comes after the replay's input has been opened for reading, because
+identifying the file it holds takes the open input, so a -R input that is
+not there is reported before it:
 
   * -R needs the major mode its dump was recorded with, because a record does
     not say which mode wrote it and -f/-n and -p stamp their packets from
