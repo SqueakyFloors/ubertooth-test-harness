@@ -426,7 +426,9 @@ def _dk_serial_refusal(alias: str, serial: str) -> str:
         return wanted
     return (
         f"{wanted}. That is the same probe written short, so write it as "
-        f'"{padded}" (quoted, so the leading zeros survive). Nothing else '
+        f'"{padded}" -- quoted, because an unquoted value is read as a number '
+        "and loses its leading zeros, which is one way a serial arrives here "
+        "short. Nothing else "
         f"changes: its lease file stays 'nrf52840dk-{int(serial)}', and "
         "a bench note or `scripts/lab/hold` still takes either spelling as a "
         f"name. A bench whose own scripts lock 'board-{serial}.lock' renames "
