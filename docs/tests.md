@@ -2433,8 +2433,8 @@ every configured objective is met: enough of the on periods could be judged
 at all (above); both readers detected the advertiser within `detect within`
 of an on period starting, and saw sustained presence, in at least
 `minimum detection share` of the judged periods; the
-readers disagreed about no more windows than the allowance; no on period held
-a silence longer than `maximum gap`; the rate over the minutes the advertiser
+readers disagreed about no more windows than the allowance; no more judged periods than
+the allowance held a silence longer than `maximum gap`; the rate over the minutes the advertiser
 was on cleared `minimum packets per minute`; at least one captured packet
 carried the harness payload tag, so the address is this advertiser's and not
 a collision; every capture file could be read to its end; the advertiser fell
@@ -2500,6 +2500,24 @@ and a run therefore holds the harness's host lock for its whole window
 (README, "The host lock"). On the 72-hour suite that means no other command
 on that host may write firmware or switch USB power for three days, on any
 board. That is the other reason these runs are booked rather than scheduled.
+
+**Every comparison carries an allowance, and the run says so.** Detection,
+sustained presence, parity, the gap limit and the off-period quiet all judge a
+*share* rather than demanding none: each one is measured over thousands of
+periods in the long suites, and each rests on a time the host read something,
+so a single delayed stdio flush must not end three days of work. The
+allowances for the gap limit and the off periods are the complement of
+`minimum detection share`; parity's is `maximum window disagreement share`.
+A run reports the count and the allowance beside each other.
+
+**A run that cannot finish still reports.** A bench failure, a full disk under
+the progress file, or a fault nobody expected is caught, added to the problems
+as the reason, and written to `summary.json` with a verdict of `fail` or
+`configuration`, because the verdict of a run of days is read from there and
+not from a traceback. The capture is stopped on the way out however the run
+ends, and a cancellation writes the report before it quiets the advertiser:
+the harness allows about two seconds after its SIGTERM, and the report is the
+part that must not be lost.
 
 **Known limits.** The two readers keep different clocks by nature. The text
 reader's time is when the host read a line, which the tool's own stdio

@@ -1529,8 +1529,10 @@ BLE address parity soak:
     registered address, then the soak itself. The soak passes when both
     readers met the detection objective for first sighting and for sustained
     presence, the readers disagreed about no more windows than the allowance,
-    no judged period held a silence longer than the gap limit, the rate over
-    the minutes the advertiser was on cleared its floor, at least one captured
+    no more judged periods than the allowance held a silence longer than the
+    gap limit, the advertiser fell quiet in all but the allowance of the off
+    periods, the rate over the time the advertiser was really on cleared its
+    floor, at least one captured
     packet carried the harness payload tag, no restart beyond the budget
     happened, the final stop was a clean one, the advertiser's schedule was
     applied throughout, and the board answered every read afterwards. A period
@@ -1547,7 +1549,11 @@ BLE address parity soak:
     after it; where no judged period followed, the run says the recovery is
     not established rather than claiming one.
   limitations: >-
-    The two readers keep different clocks by nature: the text reader's time
+    Every comparison judges a share rather than demanding none, because each
+    is measured over thousands of periods in a long run and each rests on a
+    time the host read something. A run that cannot finish at all still
+    writes its summary, with the reason among its problems. The two readers
+    keep different clocks by nature: the text reader's time
     is when the host read a line, which the tool's own output buffering
     delays, and the record reader's is what the capture wrote. A window near
     a boundary can therefore fall either side for one reader and not the

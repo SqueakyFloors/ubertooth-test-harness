@@ -60,6 +60,15 @@ offset = float(os.environ.get("FAKE_BTLE_TIME_OFFSET", "0"))
 # which is a capture file that cannot be read past that point.
 bad_record_after = float(os.environ.get("FAKE_BTLE_BAD_RECORD_AFTER", "0"))
 wrote_bad_record = False
+# Write half a record header and stop, which is a capture file whose last
+# record never arrived.
+partial_tail = bool(os.environ.get("FAKE_BTLE_PARTIAL_TAIL"))
+if partial_tail:
+    def _leave_partial(*_a):
+        handle.write(b"\x01\x02\x03\x04\x05\x06")
+        handle.flush()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _leave_partial)
 if os.environ.get("FAKE_BTLE_IGNORE_SIGTERM"):
     signal.signal(signal.SIGTERM, lambda *a: None)
 
@@ -695,6 +704,18 @@ class OffPeriodTests(SoakTestCase):
 class UnreadableCaptureTests(SoakTestCase):
     """A capture the structural reader cannot read is named, not guessed at."""
 
+    def test_a_half_written_record_after_a_clean_stop_is_an_error(self):
+        # A tool that was asked to stop flushes and closes its capture, so a
+        # partial record after a clean stop is a file that cannot be read to
+        # its end. After a kill it is ordinary, which the probe relies on.
+        self.set_tool(PARTIAL_TAIL="1")
+        code, out, _err = self.run_soak()
+        self.assertEqual(addresssoak.EXIT_FAIL, code)
+        self.assertIn("bytes of an incomplete record", out)
+        self.assertIn("capture file(s) could not be read to the end", out)
+        attempts = self.summary()["attempts"]
+        self.assertGreater(attempts[-1]["partial_tail_bytes"], 0)
+
     def test_a_corrupt_record_header_fails_the_run_with_its_own_reason(self):
         # Without this the run fails later for a symptom -- the readers
         # disagreed, or no advertiser packet at all -- on the very fault this
@@ -803,10 +824,12 @@ class ConfigurationTests(SoakTestCase):
         self.assertIn("does not answer", err)
         self.assertIn("in use by another program", err)
         self.assertIn("SOAK VERDICT: configuration", out)
+        self.assertIn("FAIL: the run could not finish", out)
         # Nothing was captured, and nothing was reset: the board belongs to
-        # whatever has it.
+        # whatever has it. The summary still says what happened, because the
+        # verdict of a run is read from there.
         self.assertFalse((self.out / "capture-0001.pcap").exists())
-        self.assertFalse((self.out / "summary.json").exists())
+        self.assertEqual("configuration", self.summary()["verdict"])
 
     def test_an_advertiser_at_another_address_is_a_configuration_failure(self):
         self.firmware.address = "C3:00:00:00:00:09"
@@ -1016,6 +1039,12 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(30, parity["windows_seen"])
         self.assertEqual(0, parity["disagreements"])  # each is beside one
         self.assertEqual(1, parity["allowance"])
+        # The adjacency tolerance lets that through, and the detection
+        # objective is what catches it: a reader seeing every other window
+        # has no run of windows, so neither reader has sustained presence.
+        problems = soak.judge()
+        self.assertTrue(any("sustained presence" in problem
+                            for problem in problems), problems)
 
     def test_an_off_period_the_advertiser_was_heard_in_is_allowed_one(self):
         soak = self.soak()
@@ -1067,14 +1096,17 @@ class VerdictTests(unittest.TestCase):
         seen = self.seen_throughout()
         for index in (0, 1, 2):
             self.add_period(soak, "on", index=index, text=seen, structural=seen)
-        # Heard at the start of the period and then not again.
+        # Heard at the start of two periods and then not again: one over the
+        # limit is inside the allowance, which is there for an outlier.
         self.add_period(soak, "on", index=3, text=[0.5], structural=[0.5])
+        self.add_period(soak, "on", index=4, text=[0.5], structural=[0.5])
         soak.minute_packets = {minute: 60 for minute in range(200)}
         problems = soak.judge()
         self.assertEqual(29.5, soak.gaps()["structural_max_s"])
         self.assertTrue(any("gap with no advertiser packet longer than 10s"
                             in problem for problem in problems), problems)
-        self.assertEqual(1, soak.gaps()["periods_over_limit"])
+        self.assertEqual(2, soak.gaps()["periods_over_limit"])
+        self.assertEqual(1, soak.gaps()["allowance"])
 
     def test_the_rate_is_per_second_the_advertiser_was_really_on(self):
         # Not per wall-clock minute an on period happened to touch: a
@@ -1236,6 +1268,53 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(ADDRESS, options.address)  # normalized
         self.assertEqual("", options.payload)  # "none"
         self.assertEqual(self.timings(), options.timings())
+
+
+class AdvertiserShellTests(unittest.TestCase):
+    """A dropped serial port is the failure the retry is written for."""
+
+    def dk(self, opener):
+        return nrfdk.Dk(1050000001, "/nonexistent", opener=opener)
+
+    def test_a_shell_that_cannot_be_reopened_raises_a_soak_error(self):
+        # Not an AttributeError on the next transition thirty seconds later:
+        # every caller handles a SoakError, and a run that died of the other
+        # would end in a traceback with no report.
+        def opener(_path):
+            raise nrfdk.NrfDkError("cannot open /nonexistent")
+
+        advertiser = addresssoak.Advertiser(self.dk(opener))
+        advertiser.shell = None
+        with self.assertRaises(addresssoak.SoakError):
+            advertiser.command("adv start")
+        with self.assertRaises(addresssoak.SoakError):
+            advertiser.status()
+
+    def test_a_transition_is_retried_once_on_a_reopened_shell(self):
+        opened = []
+
+        class Dead:
+            def command(self, _text, timeout=None):
+                raise nrfdk.NrfDkError("the port went away")
+
+            def status(self, timeout=None):
+                raise nrfdk.NrfDkError("the port went away")
+
+            def close(self):
+                pass
+
+        firmware = FakeFirmware(address=ADDRESS)
+
+        def opener(path):
+            opened.append(path)
+            return nrfdk.Shell(FakePort(firmware))
+
+        advertiser = addresssoak.Advertiser(self.dk(opener))
+        advertiser.shell = Dead()
+        self.assertEqual([], advertiser.command("adv start"))
+        self.assertEqual(1, advertiser.retries)
+        self.assertEqual(0, advertiser.errors)
+        self.assertEqual(1, len(opened))
 
 
 class MemoryTests(unittest.TestCase):

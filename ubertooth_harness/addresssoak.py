@@ -102,6 +102,8 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -166,6 +168,9 @@ MAX_PENDING_LINES = 200000
 # How many chunks the end of an attempt reads before it stops: TAIL_CHUNK each,
 # so this is a bounded drain of a file the reader had fallen behind on.
 MAX_FINAL_POLLS = 64
+# How many attempts a run holds in memory. Past it the middle ones are
+# forgotten, oldest and newest kept; every attempt is in progress.jsonl.
+MAX_HELD_ATTEMPTS = 2000
 # How large one capture file may grow before the run starts another. A
 # capture on a crowded advertising channel records every advertiser in range,
 # so a run of days would otherwise leave a file of gigabytes in the run
@@ -226,14 +231,14 @@ EXIT_USAGE = 2
 EXIT_CONFIGURATION = 3
 
 
-def say(*text) -> None:
+def say(*text, file=None) -> None:
     """Print one line and flush it.
 
     A soak's own progress lines are read while it runs, and the harness kills
     this process about two seconds after it cancels a step, so an unflushed
     line is a line nobody sees.
     """
-    print(*text, flush=True)
+    print(*text, flush=True, file=file or sys.stdout)
 
 
 class SoakError(RuntimeError):
@@ -319,6 +324,11 @@ class PcapTail:
         """
         return self._open()
 
+    @property
+    def pending_bytes(self) -> int:
+        """Bytes of a record that has not finished arriving."""
+        return len(self._pending)
+
     def poll(self) -> list[tuple[float, bytes]]:
         """(capture time in epoch seconds, record) for every whole record."""
         if not self._open():
@@ -365,20 +375,22 @@ class LineSink:
 
     def __init__(self, limit: int = MAX_PENDING_LINES):
         self._lock = threading.Lock()
-        self._items: list = []
+        self._items: deque = deque()
         self.limit = limit
         self.dropped = 0
 
     def add(self, item) -> None:
         with self._lock:
             if len(self._items) >= self.limit:
-                self._items.pop(0)
+                # The oldest goes: a deque, so the drop costs nothing in the
+                # case the bound is for.
+                self._items.popleft()
                 self.dropped += 1
             self._items.append(item)
 
     def drain(self) -> list:
         with self._lock:
-            items, self._items = self._items, []
+            items, self._items = list(self._items), deque()
         return items
 
 
@@ -789,28 +801,36 @@ class Advertiser:
         self.close()
         self.open()
 
+    def _shell(self):
+        if self.shell is None:
+            # A reopen that failed leaves none: every caller handles a
+            # SoakError, and an attribute error on the next transition would
+            # end the run in a traceback with no report.
+            raise SoakError("the advertiser's shell is not open")
+        return self.shell
+
     def command(self, text: str) -> list[str]:
         """One shell command, retried once on a reopened shell."""
         self.transitions += 1
         try:
-            return self.shell.command(text)
+            return self._shell().command(text)
         except (nrfdk.NrfDkError, OSError) as first:
             self.retries += 1
             try:
                 self._reopen()
-                return self.shell.command(text)
+                return self._shell().command(text)
             except (nrfdk.NrfDkError, OSError) as second:
                 self.errors += 1
                 raise SoakError(f"'{text}' failed twice: {first}; then {second}") from second
 
     def status(self) -> dict:
         try:
-            return self.shell.status()
+            return self._shell().status()
         except (nrfdk.NrfDkError, OSError) as first:
             self.retries += 1
             try:
                 self._reopen()
-                return self.shell.status()
+                return self._shell().status()
             except (nrfdk.NrfDkError, OSError) as second:
                 self.errors += 1
                 raise SoakError(f"status failed twice: {first}; then {second}") from second
@@ -1103,9 +1123,6 @@ class Capture:
             except OSError:
                 pass
         self.attempt.records = self.tail.records
-        # What the tool left half-written: ordinary for a capture that was
-        # killed, so it is reported rather than judged.
-        self.attempt.partial_tail_bytes = len(self.tail._pending)
         kept = 0
         for path in (self.capture_path, self.log_path):
             try:
@@ -1149,7 +1166,10 @@ class Soak:
         self.other_packets = 0
         self.attempt_text_packets = 0
         self.unattributed_packets = 0
+        # Problems a fault outside judge() has to add (report_error).
+        self.extra_problems: list = []
         self.capture_errors: list = []
+        self.attempts_forgotten = 0
         self.captures_removed = 0
         self.capture_bytes_removed = 0
         self.other_addresses: set = set()
@@ -1479,6 +1499,10 @@ class Soak:
             if self.capture.tail.records == before:
                 break
         attempt.records = self.capture.tail.records
+        # What the tool left half-written, measured once the file has been
+        # read to its end: ordinary for a capture that was killed, judged
+        # for one that was asked to stop (below).
+        attempt.partial_tail_bytes = self.capture.tail.pending_bytes
         if self.capture.reader is not None:
             self.transcript_budget -= self.capture.reader.written_bytes
             self.transcript_bytes += self.capture.reader.written_bytes
@@ -1486,6 +1510,13 @@ class Soak:
         self.capture.close()
         self.read_text()
         self.attempts.append(attempt)
+        if len(self.attempts) > MAX_HELD_ATTEMPTS:
+            # A board that died in the first hour of a three-day run is
+            # restarted every few seconds for the rest of it. The oldest
+            # records are in progress.jsonl; what is held here is what the
+            # summary and the pruning read.
+            self.attempts_forgotten += 1
+            del self.attempts[MAX_HELD_ATTEMPTS // 2]
         if attempt.forced and not kill:
             self.forced_stops += 1
         if attempt.returncode is not None and not attempt.signalled:
@@ -1494,6 +1525,16 @@ class Soak:
             # the end of the run. Counted here, where every attempt is
             # closed, so no death is reported nowhere.
             self.unexplained_exits += 1
+        if attempt.partial_tail_bytes and not attempt.forced and not kill:
+            # A tool that was asked to stop flushes and closes its capture,
+            # so a half-written record after a clean stop is a file that
+            # cannot be read to its end. After a kill it is ordinary.
+            reason = (f"{attempt.capture} ends in {attempt.partial_tail_bytes} "
+                      "bytes of an incomplete record")
+            self.capture_errors.append(reason)
+            say(f"capture {attempt.index}: {reason}")
+            self.record({"record": "capture_unreadable", "index": attempt.index,
+                          "reason": reason})
         self.record(attempt.to_dict())
         self.capture = None
         self.prune_captures()
@@ -1687,6 +1728,18 @@ class Soak:
         self.progress = (options.out / "progress.jsonl").open("w", encoding="utf-8")
         try:
             return self._run()
+        except (SoakError, nrfdk.NrfDkError) as error:
+            # A bench failure: the run cannot be judged, and it says so with
+            # the report it has rather than only on standard error.
+            return self.report_error(f"the run could not finish: {error}",
+                                      EXIT_CONFIGURATION)
+        except Exception as error:  # noqa: BLE001 - the report comes first
+            # Anything else -- a full disk under the progress file, a fault
+            # nobody expected -- still leaves the one machine-readable
+            # artifact of a run of days, with the reason in it.
+            traceback.print_exc()
+            return self.report_error(f"the run ended with an error: {error!r}",
+                                      EXIT_FAIL)
         finally:
             # However the run ends -- an error nobody expected, a disk that
             # filled under the progress file -- the tool does not outlive it
@@ -1765,17 +1818,21 @@ class Soak:
         # has. The board reads and the closing watchdog read are skipped --
         # each can take ten seconds, and the case's own cleanup steps read
         # and restore the board anyway.
+        if self.canceled:
+            # The report first: quieting the advertiser is a shell command
+            # with a retry behind it, and the harness allows about two
+            # seconds after its SIGTERM. The run's own `finally` closes the
+            # shell, and the case's cleanup leaves the DK idle.
+            return self.report(final)
         try:
             self.advertiser.stop()
-            if not self.canceled:
-                self.counter_after = self.advertiser.status()["counter"]
+            self.counter_after = self.advertiser.status()["counter"]
         except SoakError as error:
             self.schedule_errors += 1
             self.record({"record": "schedule_error", "when": "the run finished",
                          "reason": str(error)})
-        if not self.canceled:
-            self.read_watchdog_now("after the run")
-            self.read_board_after()
+        self.read_watchdog_now("after the run")
+        self.read_board_after()
         return self.report(final)
 
     def check_liveness(self) -> None:
@@ -1946,7 +2003,14 @@ class Soak:
         over = sum(1 for period in periods
                    if max(period.text.max_gap, period.structural.max_gap)
                    > self.options.max_gap_s)
+        # With an allowance, like detection, parity and the off periods: the
+        # text reader's gap is measured on when the host read a stdio block,
+        # and one outlier should not end three days of work.
+        allowance = (0 if not periods else
+                     max(1, math.ceil(
+                         (1.0 - self.options.min_detection_share) * len(periods))))
         return {
+            "allowance": allowance,
             "text_max_s": round(max(text), 3) if text else None,
             "structural_max_s": round(max(structural), 3) if structural else None,
             "structural_median_s": (round(statistics.median(structural), 3)
@@ -2120,10 +2184,11 @@ class Soak:
                 f"only, {parity['windows_structural_only']} structural only), more than "
                 f"the allowance of {parity['allowance']}")
         gaps = self.gaps()
-        if gaps["periods_over_limit"]:
+        if gaps["periods_over_limit"] > gaps["allowance"]:
             problems.append(
                 f"{gaps['periods_over_limit']} judged period(s) held a gap with "
-                f"no advertiser packet longer than {options.max_gap_s:g}s "
+                f"no advertiser packet longer than {options.max_gap_s:g}s, more "
+                f"than the allowance of {gaps['allowance']} "
                 f"(longest {gaps['structural_max_s']}s structural, "
                 f"{gaps['text_max_s']}s text)")
         rate = self.rate()
@@ -2176,9 +2241,17 @@ class Soak:
         if probe is False:
             problems.append("the advertiser was not heard again in the first judged "
                             "on period after the restart probe")
+        if self.sink.dropped:
+            # The harness's own loss, not the board's: those are sightings
+            # the text reader never saw, so the figures above are not the
+            # whole picture and the run says so rather than judging them.
+            problems.append(
+                f"{self.sink.dropped} line(s) of the tool's output were dropped "
+                "before they were read, so the text reader's figures are "
+                "incomplete")
         if self.canceled:
             problems.append(f"the run was stopped by {self.canceled}")
-        return problems
+        return problems + list(self.extra_problems)
 
     def summary(self) -> dict:
         return {
@@ -2229,7 +2302,9 @@ class Soak:
             "gaps": self.gaps(),
             "rate_per_minute": self.rate(),
             "memory": self.memory(),
-            "process": {"attempts": len(self.attempts), "restarts": self.restarts,
+            "process": {"attempts": len(self.attempts),
+                         "attempts_forgotten": self.attempts_forgotten,
+                         "restarts": self.restarts,
                          "probe_restarts": self.probe_restarts,
                          "rotations": self.rotations,
                          "unexplained_exits": self.unexplained_exits,
@@ -2259,7 +2334,25 @@ class Soak:
                 + [{"record": "attempts_left_out", "count": left_out}]
                 + attempts[-keep:])
 
-    def report(self, final: Attempt | None) -> int:
+    VERDICTS = {EXIT_CONFIGURATION: "configuration"}
+
+    def report_error(self, problem: str, status: int) -> int:
+        """Report a run that could not finish, with what it had.
+
+        The verdict of a soak is read from its summary, so an error has to
+        leave one: the figures up to the fault, the problems the run already
+        had, and this one.
+        """
+        self.extra_problems.append(problem)
+        try:
+            self.report(self.attempts[-1] if self.attempts else None,
+                        verdict=self.VERDICTS.get(status, "fail"))
+        except Exception:  # noqa: BLE001 - nothing may hide the first fault
+            traceback.print_exc()
+        say(f"error: {problem}", file=sys.stderr)
+        return status
+
+    def report(self, final: Attempt | None, verdict: str | None = None) -> int:
         summary = self.summary()
         detection = summary["detection"]
         parity = summary["parity"]
@@ -2283,6 +2376,9 @@ class Soak:
               f"{len(self.other_addresses)} other address(es), never recorded")
         say(f"captures: {self.captures_removed} attempt(s) removed to stay inside "
             f"the run's budget ({self.capture_bytes_removed} bytes)")
+        if self.sink.dropped:
+            say(f"output: {self.sink.dropped} line(s) dropped before they were "
+                "read, so the text reader's figures are incomplete")
         say(f"transcript: {self.transcript_bytes} of {MAX_LOG_BYTES} bytes kept, "
               f"{self.transcript_dropped_lines} line(s) past the budget read but "
               "not kept")
@@ -2298,7 +2394,8 @@ class Soak:
             f"{self.reanchor_s:g}s)")
         say(f"gaps: longest {gaps['structural_max_s']}s structural, "
               f"{gaps['text_max_s']}s text, limit {self.options.max_gap_s:g}s, "
-              f"{gaps['periods_over_limit']} period(s) over it")
+              f"{gaps['periods_over_limit']} period(s) over it (allowance "
+              f"{gaps['allowance']})")
         say(f"rate: {rate['mean']} packets a minute over {rate['on_seconds']}s of "
             f"advertising in {rate['periods']} period(s) (slowest {rate['min']}, "
             f"fastest {rate['max']})")
@@ -2333,7 +2430,8 @@ class Soak:
                 else "no whole advertiser on period followed it, so whether it "
                      "recovered is not established"))
         self.problems = self.judge()
-        verdict = "fail" if self.problems else "pass"
+        if verdict is None:
+            verdict = "fail" if self.problems else "pass"
         # Written after the verdict and carrying it: the one machine-readable
         # artifact of a run of days has to say how it came out.
         summary["verdict"] = verdict
