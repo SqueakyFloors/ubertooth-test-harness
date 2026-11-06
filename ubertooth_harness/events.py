@@ -10,7 +10,17 @@ import secrets
 import shlex
 from typing import Callable, Mapping, Protocol, Sequence, TextIO
 
-from ubertooth_harness.rawlog import line_tag
+from ubertooth_harness.rawlog import (
+    CASE_RULE,
+    TEST_RULE,
+    banner,
+    count_text,
+    inline,
+    line_tag,
+    stage_label,
+    value_lines,
+    verdict,
+)
 
 
 EVENT_SCHEMA_VERSION = 1
@@ -113,6 +123,43 @@ class JsonlEventSink:
 
 
 
+def _test_context(details: Mapping) -> str:
+    """Which invocation of a test this is, and on what: the line under a
+    test's banner, so a tailed run says which board a result is about."""
+    parts = []
+    invocation = inline(details.get("invocation_id") or "")
+    host = inline(details.get("host") or "")
+    if invocation:
+        parts.append(invocation + (f" on {host}" if host else ""))
+    elif host:
+        parts.append(host)
+    resources = details.get("resources") or {}
+    if isinstance(resources, Mapping) and resources:
+        parts.append(", ".join(
+            f"{inline(role)}={inline(alias)}" for role, alias in resources.items()
+        ))
+    return "; ".join(parts)
+
+
+def _test_counts(details: Mapping) -> str:
+    """What a finished test counted, leaving out every zero.
+
+    ``watchdog_warnings`` counts warning lines rather than resets: a new
+    processor fault is one too (watchdog.py), so it is named as report.md
+    names it.
+    """
+    counted = (
+        ("failed_cases", "failed case", "failed cases"),
+        ("failed_guard_checks", "failed state check", "failed state checks"),
+        ("failed_watchdog_checks", "failed watchdog check", "failed watchdog checks"),
+        ("skipped_cases", "skipped case", "skipped cases"),
+        ("not_applicable_cases", "case not applicable", "cases not applicable"),
+        ("watchdog_warnings", "watchdog warning", "watchdog warnings"),
+    )
+    counts = (count_text(details.get(key), one, many) for key, one, many in counted)
+    return ", ".join(count for count in counts if count)
+
+
 class TerminalEventSink:
     """Render command events immediately without contaminating summary stdout."""
 
@@ -172,42 +219,81 @@ class TerminalEventSink:
         elif event.event_type == "known_target":
             self.stream.write(f"[M] {details.get('summary', '')}\n")
         elif event.event_type == "not_applicable":
-            what = str(details.get("test_name", ""))
+            what = inline(details.get("test_name") or "")
             if details.get("case_name"):
-                what += f" / {details['case_name']}"
+                what += f" / {inline(details['case_name'])}"
             self.stream.write(
-                f"[not applicable] {what}: not applicable on "
-                f"{details.get('host', '')}: {details.get('reason', '')}\n"
+                f"[{verdict('not_applicable')}] {what}: not applicable on "
+                f"{inline(details.get('host') or '')}: "
+                f"{inline(details.get('reason') or '')}\n"
             )
         elif event.event_type == "blocked":
             self.stream.write(
-                f"[blocked] {details.get('test_name', '')}: blocked on "
-                f"{details.get('host', '')}: {details.get('reason', '')}\n"
+                f"[{verdict('blocked')}] {inline(details.get('test_name') or '')}: "
+                f"blocked on {inline(details.get('host') or '')}: "
+                f"{inline(details.get('reason') or '')}\n"
             )
         elif event.event_type == "preflight_started":
             self.stream.write("\n== mandatory preflight ==\n")
+        elif event.event_type == "test_started":
+            # A banner, so the test a tailed run is on is easy to find (#342).
+            self.stream.write("\n" + banner(
+                "TEST", inline(details.get("test_name") or ""), rule=TEST_RULE
+            ))
+            context = _test_context(details)
+            if context:
+                self.stream.write(f"[M] {context}\n")
+        elif event.event_type == "test_finished":
+            name = inline(details.get("test_name") or "")
+            line = f"[{verdict(event.status)}] TEST {name}"
+            counts = _test_counts(details)
+            if counts:
+                line += f" ({counts})"
+            reason = inline(details.get("reason") or "")
+            if event.status != "passed" and reason:
+                # The reason opens with the test's own name, which this line
+                # has already said.
+                line += f": {reason.removeprefix(f'{name}: ')}"
+            self.stream.write(line + "\n")
         elif event.event_type == "check_started":
-            name = details.get("check_name", details.get("case_name", "check"))
+            name = inline(
+                details.get("check_name") or details.get("case_name") or "check"
+            )
             phase = details.get("phase", "check")
-            self.stream.write(f"\n[{phase}] {name}\n")
+            if phase == "test":
+                # Each case of a test gets its own banner, drawn with a
+                # lighter rule than the test's so the two nest visibly.
+                self.stream.write("\n" + banner("CASE", name, rule=CASE_RULE))
+            else:
+                self.stream.write(f"\n[{phase}] {name}\n")
         elif event.event_type == "check_finished":
-            name = details.get("check_name", details.get("case_name", "check"))
-            self.stream.write(f"[{event.status}] {name}\n")
+            name = inline(
+                details.get("check_name") or details.get("case_name") or "check"
+            )
+            line = f"[{verdict(event.status)}] {name}"
+            reason = inline(details.get("reason") or "")
+            if event.status != "passed" and reason:
+                # A case's reason opens with the case's own name, so it is
+                # said once: the verdict, then why.
+                line += f": {reason.removeprefix(f'{name}: ')}"
+            self.stream.write(line + "\n")
         elif event.event_type == "step_finished":
-            line = f"[{details.get('stage', 'step')} {event.status}] "
-            line += str(details.get("step_name", "step"))
+            name = inline(details.get("step_name") or "step")
+            line = (
+                f"[{stage_label(details.get('stage', 'step'))} "
+                f"{verdict(event.status)}] {name}"
+            )
             if details.get("attempt"):
                 line += f" (attempt {details['attempt']})"
-            if details.get("expected") is not None:
-                line += (
-                    f" (expected {details.get('expected')}, "
-                    f"observed {details.get('observed')})"
-                )
-            elif details.get("observed") is not None:
-                line += f" (recorded {details.get('observed')})"
-            if details.get("reason"):
-                line += f": {details['reason']}"
-            self.stream.write(line + "\n")
+            reason = inline(details.get("reason") or "")
+            if reason:
+                # Said once here too: a step's reason opens with its name.
+                line += f": {reason.removeprefix(f'{name}: ')}"
+            self.stream.write(
+                "\n".join(
+                    [line, *value_lines(details.get("expected"), details.get("observed"))]
+                ) + "\n"
+            )
         elif event.event_type == "preflight_finished":
             self.stream.write(f"\n== preflight {event.status} ==\n")
         elif event.event_type == "command_started":

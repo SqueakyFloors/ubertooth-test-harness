@@ -40,7 +40,13 @@ from ubertooth_harness.outputfiles import (
     output_of,
     stream_for,
 )
-from ubertooth_harness.rawlog import record_output
+from ubertooth_harness.rawlog import (
+    STAGE_BASELINE,
+    STAGE_CLEANUP,
+    STAGE_STATE,
+    STAGE_TRANSITION,
+    record_output,
+)
 from ubertooth_harness.resources import RegistryError
 from ubertooth_harness import targets
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
@@ -738,7 +744,7 @@ class NamedTestSequencer:
         ):
             context[step.observe.key] = outcome.observed
         elif (
-            stage == "guard"
+            stage in (STAGE_BASELINE, STAGE_STATE)
             and step.observe is not None
             and outcome.observed is not None
             and outcome.failure
@@ -848,7 +854,7 @@ class NamedTestSequencer:
                         "canceled",
                         {
                             **owner,
-                            "stage": "transition",
+                            "stage": STAGE_TRANSITION,
                             "step_id": step.step_id,
                             "step_name": step.name,
                             "argv": None,
@@ -857,7 +863,7 @@ class NamedTestSequencer:
                     )
                     break
                 failure, ran, canceled, skipped = self._run_state_step(
-                    publisher, token, output_dir, step, "transition",
+                    publisher, token, output_dir, step, STAGE_TRANSITION,
                     context, owner, case_id, attempt=attempt,
                 )
                 mutated = mutated or (ran and step.mutates)
@@ -904,7 +910,7 @@ class NamedTestSequencer:
         for index, step in enumerate(case.cleanup):
             try:
                 failure, ran, _canceled, skipped = self._run_state_step(
-                    publisher, cleanup_token, output_dir, step, "cleanup",
+                    publisher, cleanup_token, output_dir, step, STAGE_CLEANUP,
                     context, owner, case_id,
                     unchanged=not mutated,
                 )
@@ -1015,11 +1021,15 @@ class NamedTestSequencer:
         failures = []
         changed = []
         canceled = False
+        # The stage says which of the two reads this is, so a reader can tell
+        # the baseline snapshot from the later unchanged-state check without
+        # inferring it from the check's name (#342).
+        stage = STAGE_BASELINE if after is None else STAGE_STATE
         for board in boards:
             board_failed = False
             for step in transitions.guard_steps((board,), after):
                 failure, _ran, step_canceled, _skipped = self._run_state_step(
-                    publisher, token, output_dir, step, "guard", context, owner, case_id
+                    publisher, token, output_dir, step, stage, context, owner, case_id
                 )
                 if failure:
                     failures.append(failure)
