@@ -17,13 +17,20 @@ around them: a tool mentioned in a sentence is a cross-reference, not a
 command this test sends.
 
 The shared allowance is per command, not per test and not per case: a
-command is the shared block's only when the step that sends it is one of the
-transitions helpers' (``is_shared_command``). So a section's own setter must
-be documented even where the shared restore passes the same option with
-another value, which the option names alone cannot tell apart. The other two
-shared command sets, preflight's reads and the guard reads, are no
-allowance at all: no case sends one, so each is compared with the code that
-builds it instead, in both directions.
+command is the shared block's only when its step is one the transitions
+helpers built AND the command is the one that step should send
+(``is_shared_command``). So a section's own setter must be documented even
+where the shared restore passes the same option with another value, which
+the option names alone cannot tell apart.
+
+All three shared blocks are compared with the code that builds their
+commands, in both directions: the transition block against what
+``is_shared_command`` classifies as shared, which is derived from the
+settings themselves, and preflight's reads and the guard reads against
+``preflight.py`` and ``transitions.GUARD_READBACK``. The last two are no
+allowance at all, because no case sends one of those commands; the
+transition block is the allowance, and comparing it is what makes its
+content mean something.
 
 Options are compared both ways too, per program, which is what catches a
 block that names the right tool with the wrong options. What that does not
@@ -359,50 +366,85 @@ def _words(argv) -> list[str]:
     return words
 
 
-# The step IDs the transitions helpers give the commands the shared
-# transition block states: the idle stop first and last (`_stop`), the reads
-# that record the originals and the restores and their verifications
-# (`Setting.read_original`, `Setting.restore`, and the CRC pair), and the
-# serial read that confirms the board afterwards (`_identity`). They are the
-# allowance, and nothing else is.
+# What the shared transition block states, derived from the transitions
+# helpers that build those commands rather than written out again: per
+# setting, the query `Setting.read_original` and `Setting.verify` send and
+# the set options `Setting.restore` sends; the idle stop (`_stop`); the
+# serial read that confirms the board (`_identity`); the firmware watchdog
+# record; and the CRC pair. So a setting added to the harness, or one whose
+# query option changes, moves this with it.
 #
-# The step ID rather than the option name, because the two cannot be told
-# apart by name: the shared squelch restore and a squelch setter a section
-# is about are both `ubertooth-util -z<dBm>`, and only values distinguish
-# them. Matching on the name excused a section's own setter lines, so one
-# could be deleted from a Commands block with every check still passing.
-# The setting keys those helpers name their steps after, read from the
-# settings themselves, plus the CRC flag, which has its own pair.
-_SHARED_KEYS = tuple(
-    setting.key for setting in (
-        transitions.CHANNEL, transitions.CHANNEL_INDEX, transitions.PA_LEVEL,
-        transitions.SQUELCH, transitions.USR_LED, transitions.LEDS,
-    )
-) + ("crc", "watchdog")
-# The BLE access address is read and restored the same way, and its pair of
-# step IDs is `read-original-access-address` / `restore-access-address`. It
-# is deliberately NOT here: the shared block states no `ubertooth-btle -a`
-# command, so calling those steps shared would excuse an option the reader
-# of that block never sees. `BLE settings` documents its own `-a` forms.
-# The steps that are the shared block whatever they are about.
-SHARED_STEP_IDS = frozenset({"stop", "cleanup-stop", "restored-device-identity"})
-# The three things those helpers do to a setting, each named after it.
-SHARED_STEP_VERBS = ("read-original-", "restore-", "verify-restored-")
-
-
-# The shared block's read-only commands, as whole commands: the idle stop,
-# the serial read that confirms the board, the watchdog record, and each
-# setting query. A step that sends one of these IS that shared command
-# whatever its ID, which is how the stop is recognized in the several names
-# the cases give it (`establish-idle`, `mode-stop`, `cleanup-stop`). A
-# SETTER is never recognized this way, only by its step ID: the shared
-# restore and a section's own setter are the same command but for the value.
-SHARED_QUERIES = frozenset(
-    {("ubertooth-util", option)
-     for option in ("-S", "-s", "-w", "-C", "-a", "-z", "-d")}
-    | {("ubertooth-btle", "-k")}
+# A step ID alone is not enough to recognize one, because the shared squelch
+# restore and a squelch setter a section is about are the same command but
+# for the value, which no option name shows. So the ID says which shared
+# command the step should be and the command is then held to it: a
+# `read-original-channel` step that sends `-c2426` is a setter whatever it
+# is called.
+UTIL, BTLE = "ubertooth-util", "ubertooth-btle"
+_SHARED_SETTINGS = (
+    transitions.CHANNEL, transitions.CHANNEL_INDEX, transitions.PA_LEVEL,
+    transitions.SQUELCH, transitions.USR_LED, transitions.LEDS,
 )
 
+
+def _set_option_names(setting) -> frozenset:
+    """The option names a setting's restore passes, `-d` and `-l` for the
+    LED triple and one option for the rest."""
+    value = setting.after_mode_stop or (
+        setting.candidates[0] if setting.candidates else "0")
+    return frozenset(
+        (UTIL, word[:2]) for word in setting.set_options(value)
+        if word.startswith("-")
+    )
+
+
+# A shared command is either a bare query, where the words after the
+# selector must be exactly those options with no value (so `-z` is the
+# shared squelch read and `-z-60` is not), or a write, where each word
+# carries its value attached and only the option names are compared,
+# because the value is whatever the run recorded.
+QUERY, WRITE = "query", "write"
+
+
+def _shared_commands() -> dict:
+    """What each shared step ID family must send: ``(kind, options)``."""
+    found = {
+        "stop": (QUERY, ((UTIL, "-S"),)),
+        "cleanup-stop": (QUERY, ((UTIL, "-S"),)),
+        "restored-device-identity": (QUERY, ((UTIL, "-s"),)),
+        "read-original-watchdog": (QUERY, ((UTIL, "-w"),)),
+        "read-original-crc": (QUERY, ((BTLE, "-k"),)),
+        "verify-restored-crc": (QUERY, ((BTLE, "-k"),)),
+        "restore-crc": (WRITE, frozenset({(BTLE, "-k")})),
+    }
+    for setting in _SHARED_SETTINGS:
+        query = (QUERY, ((UTIL, setting.query),))
+        found[f"read-original-{setting.key}"] = query
+        found[f"verify-restored-{setting.key}"] = query
+        found[f"restore-{setting.key}"] = (WRITE, _set_option_names(setting))
+    return found
+
+
+SHARED_COMMANDS = _shared_commands()
+# The read-only commands among them, which a step sends under whatever name
+# its case gives it: `_stop`'s step ID is the caller's to choose, so the
+# idle stop turns up as `establish-idle`, `mode-stop` and `idle-stop`. A
+# write is never recognized this way; only the step ID can place one.
+SHARED_QUERIES = frozenset(
+    options[0] for kind, options in SHARED_COMMANDS.values() if kind == QUERY
+)
+# Every option the shared block therefore has to name, and no other.
+SHARED_OPTIONS = frozenset(
+    {(UTIL, "-U"), (BTLE, "-U")}
+    | SHARED_QUERIES
+    | set().union(*(options for kind, options in SHARED_COMMANDS.values()
+                    if kind == WRITE))
+)
+# The BLE access address is read and restored the same way, and its step
+# IDs are `read-original-access-address` / `restore-access-address`. It is
+# deliberately absent: the shared block states no `ubertooth-btle -a`
+# command, so calling those steps shared would excuse an option the reader
+# of that block never sees. `BLE settings` documents its own `-a` forms.
 
 # Every shared command is one of these two tools naming one board by its
 # full serial. Both halves are load-bearing. Without the program, a step ID
@@ -410,8 +452,32 @@ SHARED_QUERIES = frozenset(
 # runs `nrfdk.py stop`, is one. Without the serial, `ubertooth-util -U all
 # -s` read as the shared per-board read, and the selector is what
 # `Multi-board selection` is about.
-SHARED_TOOLS = frozenset({"ubertooth-util", "ubertooth-btle"})
+SHARED_TOOLS = frozenset({UTIL, BTLE})
 SERIAL = re.compile(r"[0-9a-fA-F]{32}")
+
+
+def shared_expectation(step_id: str):
+    """``(kind, options)`` a step with this ID must send to be the shared
+    command, or None when the ID names no shared command.
+
+    A test that drives two boards works the role into the ID, before it
+    (`sender-restored-device-identity`) or inside it
+    (`read-original-sender-squelch`), so the ID is read whole, again
+    without a leading word, and again with one word taken out of the middle
+    of a `<verb>-<role>-<setting>` form.
+    """
+    if not step_id:
+        return None
+    candidates = [step_id, step_id.split("-", 1)[-1]]
+    for candidate in tuple(candidates):
+        for verb in ("read-original-", "restore-", "verify-restored-"):
+            if candidate.startswith(verb):
+                setting = candidate[len(verb):]
+                candidates.append(verb + setting.split("-", 1)[-1])
+    for candidate in candidates:
+        if candidate in SHARED_COMMANDS:
+            return SHARED_COMMANDS[candidate]
+    return None
 
 
 def is_shared_command(step_id: str, argv) -> bool:
@@ -424,41 +490,30 @@ def is_shared_command(step_id: str, argv) -> bool:
     `Ubertooth identity` documenting the reads it is about.
     """
     words = list(argv)
-    if not step_id or not words or program(words[0]) not in SHARED_TOOLS:
+    if not step_id or not words:
+        return False
+    tool = program(words[0])
+    if tool not in SHARED_TOOLS:
         return False
     if len(words) < 4 or words[1] != "-U" or not SERIAL.fullmatch(words[2]):
         return False
-    if is_shared_step(step_id):
-        return True
-    # A read-only command is recognized by its whole form, so the idle stop
-    # is found under each of the names the cases give it. Nothing longer:
+    expectation = shared_expectation(step_id)
+    if expectation is not None:
+        # The ID says which shared command this is, so the command has to
+        # be it.
+        kind, options = expectation
+        rest = words[3:]
+        if kind == QUERY:
+            # Exactly those bare options: a value makes it a write, and a
+            # write is not what a read step sends.
+            return tuple((tool, word) for word in rest) == options
+        return (_options(argv) == set(options) | {(tool, "-U")}
+                and all(len(word) > 2 and word.startswith("-")
+                        for word in rest))
+    # Otherwise only a read-only command, by its whole form, which is how
+    # the idle stop is found under each of its names. Nothing longer:
     # `ubertooth-util -U <serial> -s -C` is a section's own read.
-    return len(words) == 4 and (program(words[0]), words[3]) in SHARED_QUERIES
-
-
-def is_shared_step(step_id: str) -> bool:
-    """Is this step one of the commands the shared transition block states?
-
-    A test that drives two boards works the role into the ID, before it
-    (`sender-restored-device-identity`) or inside it
-    (`read-original-sender-squelch`), so the ID is read whole and again
-    without a leading word, and the setting is matched at the end. The
-    setting has to match: a bare `restore-` would also excuse a step that
-    restores something else, such as a flash image.
-    """
-    if not step_id:
-        return False
-    for candidate in (step_id, step_id.split("-", 1)[-1]):
-        if candidate in SHARED_STEP_IDS:
-            return True
-        for verb in SHARED_STEP_VERBS:
-            if not candidate.startswith(verb):
-                continue
-            setting = candidate[len(verb):]
-            if any(setting == key or setting.endswith(f"-{key}")
-                   for key in _SHARED_KEYS):
-                return True
-    return False
+    return len(words) == 4 and (tool, words[3]) in SHARED_QUERIES
 
 
 def _options(argv) -> set[tuple[str, str]]:
@@ -701,8 +756,12 @@ def options_named(lines) -> set[tuple[str, str]]:
     continued = False
     for line in lines:
         # A line of its own starts a command; a line continued from the one
-        # before (that one ended in a backslash) carries its program on.
-        if not continued:
+        # before (that one ended in a backslash) carries its program on,
+        # and so does a line that is only a comment, which is how a block
+        # says which other forms the line above stands for ("# and -A40").
+        # Resetting there counted an option on such a line in neither
+        # direction, which is where a fence states its extra forms.
+        if not continued and line.strip() and not line.strip().startswith("#"):
             current = ""
         continued = line.rstrip().endswith("\\")
         previous = ""
@@ -1037,6 +1096,32 @@ class DocumentedCommandTests(unittest.TestCase):
             "the shared block names an option no test passes",
         )
 
+    def test_the_transition_fence_matches_the_commands_it_stands_in_for(self):
+        """The transition block is the one allowance the forward checks
+        grant, standing in for about forty sections, so it needs the same
+        comparison with code the other two shared blocks have.
+
+        What it has to state is exactly what `is_shared_command` classifies
+        as shared, and that is derived from the transitions helpers
+        themselves (``SHARED_OPTIONS``). Without this the block's content
+        constrained nothing: its lines could be deleted, or an option
+        letter changed, with every other check still passing, because the
+        classification never read the block.
+        """
+        lines = shared_fences(self.sections[SHARED])["transition"]
+        named = options_named(lines)
+        self.assertEqual(
+            [], sorted(f"{prog} {option}"
+                       for prog, option in SHARED_OPTIONS - named),
+            "the transition block leaves out a command it stands in for",
+        )
+        self.assertEqual(
+            [], sorted(f"{prog} {option}"
+                       for prog, option in named - SHARED_OPTIONS),
+            "the transition block names an option it does not stand in for",
+        )
+        self.assertEqual(SHARED_TOOLS, programs_named(lines))
+
     def test_the_guard_fence_matches_the_code_that_builds_the_guard_reads(self):
         """The guard reads are the other shared command set no case argv
         carries: `transitions.guard_steps` builds them outside
@@ -1222,10 +1307,32 @@ class DocumentedCommandTests(unittest.TestCase):
             ("sender-read-original-crc", ("ubertooth-btle", "-U", serial, "-k")),
             ("responder-restored-device-identity",
              ("ubertooth-util", "-U", serial, "-s")),
+            # A write, whose value is whatever the run recorded, so only
+            # the option names are compared.
+            ("restore-crc", ("ubertooth-btle", "-U", serial, "-k0")),
+            ("restore-leds", ("ubertooth-util", "-U", serial, "-d1", "-l1")),
+            # The USR LED query, which is `-l`: the set of queries comes
+            # from the settings, so it is not a letter anyone can forget.
+            ("read-original-usr-led", ("ubertooth-util", "-U", serial, "-l")),
         ]
         own = [
             # A setter is the section's, however close to the restore.
             ("own-setter", ("ubertooth-util", "-U", serial, "-z-60")),
+            # A step named after a read that writes instead, and one named
+            # after a restore that writes the wrong setting: the ID says
+            # which shared command it should be, and the command is held to
+            # it.
+            ("read-original-channel", ("ubertooth-util", "-U", serial, "-c2426")),
+            ("read-original-sender-squelch",
+             ("ubertooth-util", "-U", serial, "-z-60")),
+            ("restore-channel", ("ubertooth-util", "-U", serial, "-C2426")),
+            ("restore-leds", ("ubertooth-util", "-U", serial, "-d1")),
+            # A stop that stops nothing: `_stop`'s step ID is its caller's
+            # to choose, so the ID cannot be taken on its own.
+            ("x-stop", ("ubertooth-util", "-U", serial, "-x")),
+            # The access address pair, deliberately not shared.
+            ("restore-access-address",
+             ("ubertooth-btle", "-U", serial, "-a8e89bed6")),
             # Another program, whatever its step is called: `nrfdk.py stop`
             # is one of these.
             ("advertiser-stop", ("nrfdk.py", "stop", "--jlink", "1")),
