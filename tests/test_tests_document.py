@@ -40,9 +40,13 @@ compare:
   compared in neither direction);
 - whether a form a block collapses behind a placeholder covers every case
   it stands for. ``COLLAPSED`` says which options a placeholder stands for,
-  and the document names them too: the prose beside the block, or, for
-  ``<peer options>``, which several sections share, the placeholder list in
-  "How to read a section";
+  and the document says so too, in the prose beside the block. Only one of
+  those statements is compared with anything: ``<peer options>``, which
+  five sections share, is defined in "How to read a section" and checked
+  against the declarations
+  (test_the_shared_placeholder_paragraph_names_every_option_it_covers).
+  The ``-<mode>`` and ``<refusal>`` legends are prose, so deleting one
+  fails nothing;
 - a program ``program`` does not know, in either direction: a
   ``ubertooth-*`` name is caught by its prefix, but a misspelled ``tshrk``
   is not a program to it, and the setup utilities it knows are the three the
@@ -231,12 +235,21 @@ def _registry(directory):
     # carries `--port <path>`. That is a conditional form like `ensure`'s
     # `--hex`, and a registry without it would never produce it, so this
     # copy names one: the document has to state the fuller command.
-    text, ports = re.subn(
-        r"(?m)^(\s*)jlink serial: (.*)$",
-        r"\1jlink serial: \2\n\1serial device: /dev/serial/by-id/dk-vcom0",
-        text,
+    ports = [0]
+
+    def _port(match):
+        # One path per DK: two resources naming one path would be two
+        # resources for one device.
+        ports[0] += 1
+        return (f"{match.group(1)}jlink serial: {match.group(2)}\n"
+                f"{match.group(1)}serial device: "
+                f"/dev/serial/by-id/dk-vcom0-{ports[0]}")
+
+    text = re.sub(r"(?m)^(\s*)jlink serial: (.*)$", _port, text)
+    assert ports[0] >= 2, (
+        "the example registry must register at least two nRF52840 DKs for "
+        f"this check to reach the connection tests, found {ports[0]}"
     )
-    assert ports, "no nRF52840 DK in the example registry to give a port to"
     for index, placeholder in enumerate(
         dict.fromkeys(re.findall(r"REPLACE_WITH_[A-Z_]+", text))
     ):
@@ -245,7 +258,17 @@ def _registry(directory):
         text = text.replace(placeholder, f"abcdef{index:02x}" * 4)
     path = Path(directory) / "hardware.yaml"
     path.write_text(text, encoding="utf-8")
-    return FileResourceRegistry.load(path)
+    registry = FileResourceRegistry.load(path)
+    # The registry is what says the injection worked: a DK that already
+    # named a port would have left a duplicate YAML key, which the loader
+    # resolves silently to one of the two.
+    paths = [resource.identity.get("serial device")
+             for resource in registry.resources.values()
+             if resource.type == "nRF52840 DK"]
+    assert len(paths) == ports[0] and len(set(paths)) == ports[0], (
+        f"each DK needs a serial device of its own, got {paths}"
+    )
+    return registry
 
 
 def _context(case=None):
@@ -355,7 +378,12 @@ _SHARED_KEYS = tuple(
         transitions.CHANNEL, transitions.CHANNEL_INDEX, transitions.PA_LEVEL,
         transitions.SQUELCH, transitions.USR_LED, transitions.LEDS,
     )
-) + ("crc", "access address", "watchdog")
+) + ("crc", "watchdog")
+# The BLE access address is read and restored the same way, and its pair of
+# step IDs is `read-original-access-address` / `restore-access-address`. It
+# is deliberately NOT here: the shared block states no `ubertooth-btle -a`
+# command, so calling those steps shared would excuse an option the reader
+# of that block never sees. `BLE settings` documents its own `-a` forms.
 # The steps that are the shared block whatever they are about.
 SHARED_STEP_IDS = frozenset({"stop", "cleanup-stop", "restored-device-identity"})
 # The three things those helpers do to a setting, each named after it.
@@ -376,15 +404,36 @@ SHARED_QUERIES = frozenset(
 )
 
 
+# Every shared command is one of these two tools naming one board by its
+# full serial. Both halves are load-bearing. Without the program, a step ID
+# ending in `-stop` excused whatever it ran, and `advertiser-stop`, which
+# runs `nrfdk.py stop`, is one. Without the serial, `ubertooth-util -U all
+# -s` read as the shared per-board read, and the selector is what
+# `Multi-board selection` is about.
+SHARED_TOOLS = frozenset({"ubertooth-util", "ubertooth-btle"})
+SERIAL = re.compile(r"[0-9a-fA-F]{32}")
+
+
 def is_shared_command(step_id: str, argv) -> bool:
-    """Is this command one the shared transition block states?"""
+    """Is this command one the shared transition block states?
+
+    Only a step of a state-changing case can be: the shared block states
+    what a transition case sends, and the transitions helpers that build
+    those commands build steps. A ``CommandCase`` has no step, so it is its
+    section's own however close its command comes, which is what keeps
+    `Ubertooth identity` documenting the reads it is about.
+    """
+    words = list(argv)
+    if not step_id or not words or program(words[0]) not in SHARED_TOOLS:
+        return False
+    if len(words) < 4 or words[1] != "-U" or not SERIAL.fullmatch(words[2]):
+        return False
     if is_shared_step(step_id):
         return True
-    words = list(argv)
-    # `ubertooth-util -U <serial> <query>`, and nothing more on the line.
-    if len(words) != 4 or words[1] != "-U":
-        return False
-    return (program(words[0]), words[3]) in SHARED_QUERIES
+    # A read-only command is recognized by its whole form, so the idle stop
+    # is found under each of the names the cases give it. Nothing longer:
+    # `ubertooth-util -U <serial> -s -C` is a section's own read.
+    return len(words) == 4 and (program(words[0]), words[3]) in SHARED_QUERIES
 
 
 def is_shared_step(step_id: str) -> bool:
@@ -513,17 +562,27 @@ def programs_by_test():
         arguments = definition.normalize_arguments({"hosts": ["Host_Linux"]})
         found = used.setdefault(name, set())
         for case in definition.command_cases(arguments, {}, {}):
-            for _step_id, argv in _argvs(case):
-                found.update(filter(None, (program(w) for w in _words(argv))))
-                options.setdefault(name, set()).update(_options(argv))
+            # These are plain command cases, so every command is the test's
+            # own: `own` and `own_programs` have to be filled here too, or
+            # the two forward checks compare an empty set and a section can
+            # say anything (review round 13).
+            for step_id, argv in _argvs(case):
+                ran = set(filter(None, (program(w) for w in _words(argv))))
+                found.update(ran)
+                passed = _options(argv)
+                options.setdefault(name, set()).update(passed)
+                if not is_shared_command(step_id, argv):
+                    own.setdefault(name, set()).update(passed)
+                    own_programs.setdefault(name, set()).update(ran)
     return used, options, own, own_programs, skipped
 
 
 def _argvs(case):
     """``(step ID, argv)`` for every command a case sends.
 
-    A ``CommandCase`` is one command and no step, so its ID is empty, which
-    is not a shared one: its options are its section's to document.
+    A ``CommandCase`` is one command and no step, so its ID is empty, and
+    ``is_shared_command`` takes nothing without a step as shared: its
+    options are its section's to document.
     """
     if isinstance(case, CommandCase):
         return [("", tuple(case.argv))]
@@ -1143,6 +1202,51 @@ class DocumentedCommandTests(unittest.TestCase):
                          _words(("bash", "-c", "timeout 5 ubertooth-btle -f | tail")))
              if p],
         )
+
+    def test_what_the_shared_transition_block_stands_in_for(self):
+        """`is_shared_command` decides which commands a section may leave
+        out, so it is the loophole to watch: every widening of it excuses a
+        real command form somewhere. These are the cases reviewers found.
+        """
+        serial = "abcdef00" * 4
+        shared = [
+            # The idle stop, under each of the names the cases give it.
+            ("stop", ("ubertooth-util", "-U", serial, "-S")),
+            ("establish-idle", ("ubertooth-util", "-U", serial, "-S")),
+            ("mode-stop", ("ubertooth-util", "-U", serial, "-S")),
+            # A read, and the restore pair, which only the step ID tells
+            # from a setter.
+            ("read-original-squelch", ("ubertooth-util", "-U", serial, "-z")),
+            ("restore-squelch", ("ubertooth-util", "-U", serial, "-z-120")),
+            # A two-board test works the role into the ID.
+            ("sender-read-original-crc", ("ubertooth-btle", "-U", serial, "-k")),
+            ("responder-restored-device-identity",
+             ("ubertooth-util", "-U", serial, "-s")),
+        ]
+        own = [
+            # A setter is the section's, however close to the restore.
+            ("own-setter", ("ubertooth-util", "-U", serial, "-z-60")),
+            # Another program, whatever its step is called: `nrfdk.py stop`
+            # is one of these.
+            ("advertiser-stop", ("nrfdk.py", "stop", "--jlink", "1")),
+            ("peer-stop", ("esp32peer.py", "reset", "--device", "/dev/x")),
+            ("flash-cleanup-stop",
+             ("ubertooth-dfu", "-U", serial, "-d", "image.dfu", "-r")),
+            # Another selector: `-U all` and an index are what `Multi-board
+            # selection` is about.
+            ("list-all", ("ubertooth-util", "-U", "all", "-s")),
+            ("by-index", ("ubertooth-util", "-U", "0", "-z")),
+            # More on the line than the shared read.
+            ("read-back", ("ubertooth-util", "-U", serial, "-s", "-C")),
+            # A command case, which has no step at all.
+            ("", ("ubertooth-util", "-U", serial, "-S")),
+        ]
+        for step_id, argv in shared:
+            with self.subTest(step_id, argv=argv):
+                self.assertTrue(is_shared_command(step_id, argv))
+        for step_id, argv in own:
+            with self.subTest(step_id, argv=argv):
+                self.assertFalse(is_shared_command(step_id, argv))
 
 
 if __name__ == "__main__":

@@ -69,8 +69,9 @@
   sends, naming the executable, with a named placeholder for anything a run
   substitutes. `tests/test_tests_document.py` checks the headings, their
   order, the fields, and that every executable a test's cases really run is
-  named in that test's **Commands** block, or in the shared block of "What
-  every test shares" for a test built from state-changing cases; it builds
+  named in that test's **Commands** block, unless that command is one the
+  shared transition block of "What every test shares" states, which is
+  decided per command rather than per test; it builds
   the cases from the catalog, so there is no second list of commands to
   maintain. It compares options both ways too: an option a case passes must
   be named in its block, and an option a block names must be one that case
