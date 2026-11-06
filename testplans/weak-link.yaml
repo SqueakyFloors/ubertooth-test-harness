@@ -5,6 +5,10 @@ plan: Weak-link receiver
 # plan they belong to:
 #
 #   ble.yaml     ble-weak-link       a DK advertiser capture at 20 and 40 dB
+#   ble.yaml     connection-weak-link  a DK-pair connection captured at
+#                                    40 dB and followed across its end at
+#                                    20 dB (measured 2026-11-04, once the
+#                                    bench had two DKs)
 #   classic.yaml classic-weak-link   piconet follow and AFH recovery at
 #                                    20 dB, UAP/clock recovery and the
 #                                    access-code error threshold at 40 dB
