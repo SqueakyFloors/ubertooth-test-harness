@@ -883,6 +883,41 @@ class ImageAwareGuardTests(ReadOnlyGuardCommands, unittest.TestCase):
         )
         self.assertIn(transitions.GUARD_UNSUPPORTED, report)
 
+    def test_two_guards_on_the_alternate_image_do_not_block_the_suite(self):
+        """The bench #329 was measured on: two boards left on btbr.
+
+        Before the reads were image-aware, the baseline of each such guard
+        gave three `command exited 1` lines and no case ran, so one board
+        left on the alternate image blocked every guarded test on the host --
+        which a bench that runs the btbr test is expected to have. Both
+        guards are read in full here, both pass, and neither is written to or
+        reflashed to make it answer more.
+        """
+        guards = [image_guard(BTBR_IMAGE, serial=serial, stalls=BTBR_STALLS)
+                  for serial in (B, C)]
+        bench = Bench(FakeUbertooth(serial=A), *guards)
+        before = [dict(guard.state) for guard in guards]
+
+        summary, events, _report = run_guarded(
+            guarded_invocation("Radio setting transitions", guards=(B, C)),
+            bench,
+        )
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual([], failed_guard_reads(events))
+        for index, (guard, state) in enumerate(zip(guards, before), 1):
+            self.assertEqual(state, guard.state)
+            self.assertEqual(0, guard.stops)
+            self.assert_guard_commands_read_only(bench, guard.serial)
+            readings = guard_readings(events, f"guard Ubertooth {index}")
+            self.assertEqual(
+                {key: transitions.GUARD_UNSUPPORTED
+                 for key in BTBR_UNANSWERED},
+                {key: readings[key] for key in BTBR_UNANSWERED},
+            )
+            self.assertEqual(guard.serial,
+                             readings[transitions.GUARD_IDENTITY_KEY])
+
     def test_the_alternate_image_guard_still_catches_what_it_does_answer(self):
         guard = image_guard(BTBR_IMAGE, stalls=BTBR_STALLS)
         bench = Bench(

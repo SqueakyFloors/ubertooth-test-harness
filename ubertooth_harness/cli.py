@@ -914,6 +914,12 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
     """
     mode = args.bootloader
     boards = tuple(getattr(args, "bootloader_boards", ()))
+    # Boards whose application image a test of the suite writes itself. They
+    # are read and compared like the rest, and never written here: `update`
+    # installs on the boards whose firmware preflight requires, and a board
+    # the suite reflashes would then have to be verified against an
+    # application revision the run does not require (#327).
+    established = frozenset(getattr(args, "bootloader_established", ()))
     ubertooth = next(source for source in sources if source.name == "Ubertooth")
     if not bootloader.supported_at(ubertooth):
         # A fork commit from before `ubertooth-util -B`. Nothing can be read,
@@ -930,14 +936,14 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
                 "mode": mode, "reason": reason, "expected": None, "boards": [],
             })
         return None, None
-    if not boards:
+    if not boards and not established:
         if publisher is not None:
             publisher.emit("bootloader_stage_finished", "skipped", {
-                "mode": mode, "reason": "no board needs the run's firmware",
+                "mode": mode, "reason": "no board of this suite is read",
                 "expected": None, "boards": [],
             })
         return None, None
-    if mode != bootloader.MODE_UPDATE:
+    if mode != bootloader.MODE_UPDATE or not boards:
         # Nothing here writes flash, and the build below can take minutes, so
         # the host's firmware lock goes back before it rather than after.
         _release_flash_host_lock(args, leases)
@@ -954,7 +960,26 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
                 output_dir=run_dir,
                 cancellation=token,
             )
-    if mode == bootloader.MODE_UPDATE:
+    if mode == bootloader.MODE_UPDATE and not boards:
+        # Every Ubertooth of this suite has its own application image written
+        # by a test in it, so there is no board this mode can install on. Said
+        # rather than left to look like a write that happened: the read below
+        # still compares, and a stale bootloader fails preflight with the
+        # reason that names the programmer path.
+        if publisher is not None:
+            publisher.emit("bootloader_stage_finished", "skipped", {
+                "mode": mode,
+                "reason": (
+                    "no board of this suite is installed on: a test in it "
+                    "writes the application image of every Ubertooth it uses, "
+                    "so each board's bootloader is read and compared only"
+                ),
+                "expected": (
+                    artifact.identity().to_dict() if artifact else None
+                ),
+                "boards": [],
+            })
+    elif mode == bootloader.MODE_UPDATE:
         with _signals_cancel(CancellationToken()) as token:
             summary = bootloader.BootloaderUpdater(executor).run(
                 boards, publisher, mode=mode, artifact=artifact,
@@ -972,6 +997,7 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
             mode=mode,
             expected=artifact.identity() if artifact else None,
             boards={board.alias: board for board in boards},
+            established=established,
         ),
         artifact,
     )
@@ -1128,12 +1154,20 @@ def _run_suite(args: argparse.Namespace) -> int:
             )
             for alias in needs_firmware
         )
-    # The boards whose bootloader this run reads, compares, or installs: the
-    # ones whose firmware preflight requires, which is where the bootloader
-    # read can be answered at all.
+    # The boards whose bootloader this run may install: the ones whose
+    # firmware preflight requires, which are also the ones a building run
+    # flashes, so the application the board answers from afterwards is this
+    # run's own.
     args.bootloader_boards = bootloader.boards_for_bootloader(
         registry, needs_firmware
     )
+    # The rest of the suite's Ubertooths: a test in it writes their own
+    # application image. Their bootloader is read and compared too, since no
+    # firmware write replaces it and for one test it is the subject (#327),
+    # but it is never installed here.
+    args.bootloader_established = PreflightPolicy(
+        registry, catalog
+    ).boards_establishing_firmware(invocations)
     if args.bootloader == bootloader.MODE_UPDATE:
         without = [
             board.alias for board in args.bootloader_boards

@@ -70,10 +70,15 @@ from ubertooth_harness.stateful import (
     StateCase,
     StateCaseError,
     Step,
+    Unrestorable,
     artifact_key,
     require,
 )
-from ubertooth_harness.transitions import _serial, _util
+from ubertooth_harness.transitions import (
+    GUARD_BOOTLOADER_PATTERN,
+    _serial,
+    _util,
+)
 
 TEST_NAME = "Classic btbr console"
 CASE_ID = "btbr-console"
@@ -104,6 +109,16 @@ _REVISION = r"Firmware version:\s+(?:\S+\s+)?(?P<value>\S+)\s+\(API:"
 # The build string on a `-V` line, which is image-agnostic.
 _BUILD_REVISION = r"\bubertooth\s+(?P<value>\S+)\s+\("
 VERSION_TIMEOUT_S = 20.0
+# The bootloader line, read once under each of the two images. The first read
+# is the baseline the second is held to.
+_BTBR_BOOTLOADER_KEY = "btbr bootloader"
+_RESTORED_BOOTLOADER_KEY = "restored bootloader"
+# One control transfer against a board whose report was worked out at
+# startup. The same figure bootloader.IDENTITY_TIMEOUT_S gives the preflight
+# read; written out here because importing that module from a catalog case
+# would close an import cycle, and tests/test_btbr_cases.py keeps the two in
+# step.
+BOOTLOADER_TIMEOUT_S = 5.0
 
 
 def _image(label):
@@ -134,6 +149,42 @@ def _image_step(serial: str, step_id: str, name: str, image: str, key: str) -> S
         output_patterns=(image_name_pattern(image),),
         observe=Observation(key, _REVISION, _revision),
     )
+
+
+def _bootloader_step(serial: str, step_id: str, name: str, key: str, *,
+                     expected=None) -> Step:
+    """Read `ubertooth-util -B`, and with ``expected`` require the same line.
+
+    `ubertooth-dfu` writes the application region only, so the bootloader is
+    the same bootloader before and after each of this case's two writes, and
+    both images answer the request (the alternate image's own vendor request
+    handler implements it). Reading it on either side of the pair is what says
+    so: the identity is taken while the board runs `btbr`, and the cleanup's
+    read, after the application image is back, must give the same line
+    (#327/#329). Both reads are of this run's own images, so neither can be
+    firmware older than the request.
+    """
+    return Step(
+        step_id, name, _util(serial, "-B"), timeout_s=BOOTLOADER_TIMEOUT_S,
+        observe=Observation(key, GUARD_BOOTLOADER_PATTERN, expected),
+    )
+
+
+def _same_bootloader(context) -> str:
+    """The line the `btbr` image gave, or nothing to compare with.
+
+    The baseline is read once the run's own `btbr` image is on the board, so
+    a case that failed at the write or at the image check never recorded one.
+    That leaves this cleanup read nothing to decide, which is a skip and not
+    a cleanup failure: the restore itself is what that case needs.
+    """
+    try:
+        return context[_BTBR_BOOTLOADER_KEY]
+    except KeyError:
+        raise Unrestorable(
+            f"the {BTBR_IMAGE} image never reported the board's bootloader, "
+            "so there is nothing to compare this read with"
+        ) from None
 
 
 def console_argv(serial: str, peer, *, comprehensive: bool) -> tuple[str, ...]:
@@ -309,6 +360,9 @@ def _case(serial, peer, number: int, sessions: int, *,
         _image_step(serial, "verify-btbr-image",
                     f"The board reports the {BTBR_IMAGE} image at the run's "
                     "revision", BTBR_IMAGE, "btbr revision"),
+        _bootloader_step(serial, "read-btbr-bootloader",
+                         f"The {BTBR_IMAGE} image reports the board's "
+                         "bootloader", _BTBR_BOOTLOADER_KEY),
         Step("verify-btbr-build",
              f"The {BTBR_IMAGE} build string is the run's revision",
              _util(serial, "-V"), timeout_s=VERSION_TIMEOUT_S,
@@ -325,6 +379,11 @@ def _case(serial, peer, number: int, sessions: int, *,
         _image_step(serial, "verify-restored-image",
                     f"The board reports {APPLICATION_IMAGE} at the run's "
                     "revision again", APPLICATION_IMAGE, "restored revision"),
+        _bootloader_step(serial, "verify-restored-bootloader",
+                         f"{APPLICATION_IMAGE} reports the same bootloader "
+                         f"the {BTBR_IMAGE} image did",
+                         _RESTORED_BOOTLOADER_KEY,
+                         expected=_same_bootloader),
         _reset_peer("reset-peer-after", peer),
     )
     name = (f"The {BTBR_IMAGE} image runs a console session against "

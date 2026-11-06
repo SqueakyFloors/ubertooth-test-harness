@@ -76,6 +76,24 @@ def matched_image(match: re.Match | None) -> str | None:
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 
+# A board refuses a request its firmware has not got by stalling it, and the
+# stall is all the host sees; libubertooth reports it in this one wording
+# (ubertooth_report_unsupported_request() in
+# host/libubertooth/src/ubertooth_api_version.c, which fork #636 made the only
+# wording for it). The `libusb -9` tail is there when the stall came back as
+# an error code, which a synchronous control request does.
+#
+# Two kinds of firmware answer this way: an image that implements less than
+# the application one (the alternate `btbr` image refuses the radio settings),
+# and firmware older than the request (2020-12-R1 refuses the bootloader read
+# and the watchdog record). Neither is a board that changed or a read that
+# failed, so a check that can say so records it rather than failing. One thing
+# it cannot be told apart from: a wedged board stalls everything sent to it.
+FIRMWARE_UNSUPPORTED_PATTERN = (
+    r"error: [^\n]*: the board's firmware does not support it "
+    r"\(stalled(?:, libusb -9)?\)"
+)
+
 # How long to give a `-V`, wherever one is asked. `ubertooth-util -H` only
 # printed the host's own lines, but `-V` goes on to read every attached board,
 # and a board that does not answer costs a libusb control timeout or two
