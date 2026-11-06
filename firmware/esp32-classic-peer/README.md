@@ -82,6 +82,47 @@ needs the large single-app partition table `sdkconfig.defaults` selects.
 is generated from `sdkconfig.defaults` and git-ignored, so edit the defaults
 file, not it.
 
+### Without installing the SDK
+
+`scripts/ci.sh firmware-esp32` builds the same image in Espressif's own
+image for the version `IDF_VERSION` pins, so nothing but docker is needed:
+
+```sh
+scripts/ci.sh firmware-esp32              # or scripts/local-ci.sh firmware-esp32
+IDF_WORKSPACE=~/idf-ci scripts/ci.sh firmware-esp32   # keep the build directory
+IDF_IMAGE=idf-local:test scripts/ci.sh firmware-esp32 # another toolchain image
+```
+
+It copies these sources into the workspace, configures them for `esp32`,
+builds them, and then checks three things: that every setting
+`sdkconfig.defaults` asks for came back out of Kconfig as it was asked for
+(an option that was renamed or withdrawn is otherwise ignored with a warning
+nobody reads, and the image runs with another radio, log, or partition
+configuration than this directory describes), that the build warned about
+none of the files in this directory, and that the image carries
+`UTESP_FW_VERSION`, which is the string a peer's shell reports and a run
+checks it by. ESP-IDF's own warnings are left alone: they are Espressif's to
+fix, not this repository's. The repository is mounted read-only, so a build
+writes nothing into the working tree, and the copy is what `set-target`
+writes `sdkconfig` into.
+
+The sources are built once and compared with nothing. The DK's step builds
+the commit a pull request is against as well, because `nrfdk.py ensure`
+reflashes a DK only when it reports another version, so a changed image with
+the version left alone would never reach a board. Nothing in the harness
+flashes a peer: a run fails when a peer reports a version older than the
+test needs, so there a missing bump is loud on the bench instead of silent.
+The image's SHA-256 is printed and compared with nothing either, since this
+image is not reproducible (its error checks carry their own line numbers);
+[`docs/hardware.md`](../../docs/hardware.md) records the hash of the image a
+bench was flashed with, for that bench to confirm its copy.
+
+The `ESP32 peer firmware` workflow runs it on a change under this directory,
+once a week, and on request
+([#326](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/326));
+it is not a required check, because the toolchain image is several gigabytes.
+The image it builds is not published: a board is flashed from a local build.
+
 ## Flash
 
 ```sh
@@ -832,3 +873,9 @@ built image also links ESP-IDF, which is Apache License 2.0, and Espressif's
 Bluetooth controller libraries, which are distributed under the ESP-IDF
 license for use with Espressif hardware; images are built locally and not
 committed.
+
+The toolchain container the build above uses is Espressif's own published
+image of that ESP-IDF version (`espressif/idf:$IDF_VERSION` on Docker Hub),
+carrying the same ESP-IDF and the same controller libraries under those
+licenses. It is pulled when a build needs it and is neither committed here
+nor republished.

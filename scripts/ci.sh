@@ -7,11 +7,15 @@
 #   scripts/ci.sh libbtbb-pin   only the build's libbtbb pin check
 #   scripts/ci.sh dfu-part-table  only the build's DFU part table check
 #   scripts/ci.sh firmware-dk   build the nRF52840 DK role firmware (needs docker)
+#   scripts/ci.sh firmware-esp32  build the ESP32 Classic peer firmware (needs docker)
 #
 # firmware-dk builds both DK images and compares each with the one another
 # commit's sources build when DK_BASE_REF (a git ref, for example origin/main) or
 # DK_BASE_SRC (a directory holding the sources, which wins where both are
 # set) says what to compare against.
+#
+# firmware-esp32 builds the peer image once and compares it with nothing; the
+# comment above run_firmware_esp32 says why.
 #
 # Run from the repository root. PYTHON selects the interpreter that runs
 # bootstrap.py (default python3). UBERTOOTH_SOURCE / LIBBTBB_SOURCE point the
@@ -819,6 +823,203 @@ run_firmware_dk() {
     fi
 }
 
+# The ESP32 Classic peer firmware (firmware/esp32-classic-peer), which
+# nothing else compiles: until this step, a source change that does not build
+# passed every check this repository runs, because the unit suite reads those
+# sources as text and the fake board implements the protocol rather than the
+# firmware (#326). It is built with the ESP-IDF version the firmware pins
+# (firmware/esp32-classic-peer/IDF_VERSION), in Espressif's own image for
+# that version, so neither CI nor a developer installs the 3 GB SDK to
+# compile it. That image is Espressif's published build of ESP-IDF, which is
+# under the Apache License 2.0, with the Bluetooth controller libraries it
+# carries under the ESP-IDF license for use with Espressif hardware; it is
+# pulled and never committed or republished, and no image built here is
+# published either. The firmware README's License section covers what a built
+# image links. Needs docker; IDF_WORKSPACE keeps the sources and the build
+# directory across runs, and IDF_IMAGE replaces the image.
+#
+# This is not part of `all`: the image is gigabytes and the firmware changes
+# rarely, so the ESP32 peer firmware workflow runs it on a change under
+# firmware/esp32-classic-peer, once a week, and by hand.
+#
+# One build, with nothing compared against another commit. The DK's step
+# compares images because `nrfdk.py ensure` reflashes a DK only when it
+# reports a version other than the pinned one, so a changed image with the
+# version left alone would never reach a board. Nothing in the harness
+# flashes an ESP32 peer: a run fails when a peer reports a version older than
+# the test needs, so there a missing bump is loud on the bench instead of
+# silent, and a second build would only cost runtime here.
+ESP_FIRMWARE=firmware/esp32-classic-peer
+ESP_TARGET=esp32
+
+run_firmware_esp32() {
+    # The physical path: a docker mount must not depend on a symlinked
+    # parent (/tmp on macOS).
+    repo=$(pwd -P)
+    version=$(cat "$ESP_FIRMWARE/IDF_VERSION")
+    if [ -z "$version" ]; then
+        echo "error: $ESP_FIRMWARE/IDF_VERSION is empty" >&2
+        return 1
+    fi
+    image=${IDF_IMAGE:-espressif/idf:$version}
+    workspace=${IDF_WORKSPACE:-$WORK/esp}
+    # The sources every build compiles, copied out of the read-only mount:
+    # `idf.py set-target` writes the resolved configuration into the project
+    # directory, and the working tree is not a build's to write to.
+    src=$workspace/utesp-src
+    build=$workspace/utesp-build
+    bin=$build/esp32-classic-peer.bin
+    log=$workspace/build.log
+    mkdir -p "$workspace"
+
+    # Every toolchain command runs in that image, whose entry point puts the
+    # pinned tools on PATH and activates ESP-IDF's own Python environment
+    # before running what it is given. The repository is mounted read-only,
+    # so a build cannot write into the working tree, and everything written
+    # goes to the workspace. git is told the mounted tree is safe to use,
+    # since the container is root and the directory belongs to whoever ran
+    # this.
+    esp() {
+        docker run --rm \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0='*' \
+            -v "$repo:$repo:ro" -v "$workspace:$workspace" -w "$workspace" \
+            "$image" bash -c "$1"
+    }
+
+    step "ESP-IDF $version toolchain ($image)"
+    esp 'idf.py --version; cmake --version | head -1; xtensa-esp32-elf-gcc --version | head -1'
+
+    step "the peer sources, in the one place every build compiles them from"
+    rm -rf "$src"
+    mkdir -p "$src"
+    cp -R "$repo/$ESP_FIRMWARE/." "$src/"
+    # What a developer's tree may hold beside the sources, all of it
+    # generated and all of it git-ignored: `set-target` writes the resolved
+    # configuration here, and this step judges the one this ESP-IDF resolves
+    # rather than one left over from another.
+    rm -rf "$src/build" "$src/sdkconfig" "$src/sdkconfig.old"
+    ls "$src"
+
+    step "configure $ESP_FIRMWARE for $ESP_TARGET"
+    esp "idf.py -C $src -B $build set-target $ESP_TARGET"
+
+    # Every default that is not a plain `=n` has to come back out of Kconfig
+    # verbatim. An option that was renamed or withdrawn is otherwise ignored
+    # with a warning nobody reads, and the image then builds and runs with
+    # another radio, log, or partition configuration than this directory
+    # asks for, which no compiler can catch. `=n` defaults are left out of
+    # the comparison: Kconfig writes a disabled option as a comment, and a
+    # disabled member of a choice may not be written at all.
+    step "the resolved configuration holds every default this firmware sets"
+    wanted=$workspace/wanted
+    missing=$workspace/missing
+    grep -E '^CONFIG_[A-Z0-9_]+=' "$src/sdkconfig.defaults" | grep -v '=n$' \
+        > "$wanted" || [ $? = 1 ]
+    if [ ! -s "$wanted" ]; then
+        echo "error: $ESP_FIRMWARE/sdkconfig.defaults sets nothing this step" \
+             "can check, so it is not the defaults file it was" >&2
+        return 1
+    fi
+    : > "$missing"
+    while IFS= read -r setting; do
+        grep -qxF "$setting" "$src/sdkconfig" ||
+            printf '%s\n' "$setting" >> "$missing"
+    done < "$wanted"
+    if [ -s "$missing" ]; then
+        cat "$missing" >&2
+        echo "error: ESP-IDF $version did not resolve the settings above as" \
+             "$ESP_FIRMWARE/sdkconfig.defaults asks: each was renamed," \
+             "withdrawn, or overridden. Fix the defaults file, rather than" \
+             "flashing an image configured some other way" >&2
+        return 1
+    fi
+    echo "all $(wc -l < "$wanted" | tr -d ' ') of them"
+
+    step "build $ESP_FIRMWARE for $ESP_TARGET"
+    # The output is kept for the warning check below while it still reaches
+    # the job log as it arrives. The build's own status comes from a file:
+    # sh has no pipefail, so the pipeline's status is tee's, and the `if`
+    # is what keeps set -e from ending the script on a build that failed.
+    code=$workspace/.build-exit
+    rm -f "$code"
+    { if esp "idf.py -C $src -B $build build"
+      then echo 0 > "$code"
+      else echo $? > "$code"
+      fi; } 2>&1 | tee "$log"
+    if [ ! -f "$code" ]; then
+        echo "error: the build did not report a status" >&2
+        return 1
+    fi
+    if [ "$(cat "$code")" != 0 ]; then
+        echo "error: $ESP_FIRMWARE did not build with ESP-IDF $version" >&2
+        return 1
+    fi
+
+    # A compiler warning about the peer's own sources. ESP-IDF's own
+    # warnings are Espressif's and not this repository's to fix, so a line
+    # counts only when it names one of these files, by directory and name
+    # together so that it counts whether the compiler spelled the path from
+    # the root or from the build directory.
+    step "no compiler warning in the peer's own sources"
+    ours=$workspace/ours
+    warnings=$workspace/warnings
+    hits=$workspace/warning-hits
+    (cd "$src" && find . -name '*.c' -o -name '*.h') | sed 's/^\.//' > "$ours"
+    if [ ! -s "$ours" ]; then
+        echo "error: no C sources in $src, so a warning in them could not" \
+             "be found" >&2
+        return 1
+    fi
+    grep -F 'warning:' "$log" > "$warnings" || [ $? = 1 ]
+    grep -F -f "$ours" "$warnings" > "$hits" || [ $? = 1 ]
+    if [ -s "$hits" ]; then
+        cat "$hits" >&2
+        echo "error: the build warned about the lines above in" \
+             "$ESP_FIRMWARE, which is built with none of them: fix them, or" \
+             "say in the source why the warning is the right answer" >&2
+        return 1
+    fi
+    echo "none; ESP-IDF's own sources accounted for" \
+         "$(wc -l < "$warnings" | tr -d ' ') warning line(s)"
+
+    # The same string the board's shell reports and ubertooth_harness
+    # /targets.py pins, which is how a run decides a peer is current. A unit
+    # test keeps that pin and this header in step; this is the other half,
+    # that the built image carries it.
+    step "the image carries the pinned firmware version"
+    fw=$(sed -n 's/^#define UTESP_FW_VERSION "\(.*\)".*/\1/p' "$src/main/peer.h")
+    if [ -z "$fw" ]; then
+        echo "error: no UTESP_FW_VERSION in $ESP_FIRMWARE/main/peer.h" >&2
+        return 1
+    fi
+    if [ ! -f "$bin" ]; then
+        echo "error: the build left no image at $bin" >&2
+        return 1
+    fi
+    ls -l "$bin"
+    if ! grep -qF "$fw" "$bin"; then
+        echo "error: $bin does not carry firmware version $fw, which a peer's" \
+             "shell reports and a run checks it by" >&2
+        return 1
+    fi
+    echo "firmware version: $fw"
+
+    # Printed and compared with nothing. This image is not reproducible: its
+    # error checks carry their own line numbers, so a comment added above one
+    # of them gives another hash for the same version. docs/hardware.md
+    # records the hash of the image a bench was flashed with, for that bench
+    # to confirm its copy, and a build here is not that image.
+    step "the image this build produced"
+    if command -v sha256sum > /dev/null 2>&1; then
+        sha256sum "$bin"
+    elif command -v shasum > /dev/null 2>&1; then
+        shasum -a 256 "$bin"
+    else
+        echo "no sha256 command on this host"
+    fi
+}
+
 case "${1:-}" in
     test) run_test ;;
     build) run_build ;;
@@ -827,7 +1028,8 @@ case "${1:-}" in
     # Only the part table check of the build, against UBERTOOTH_SOURCE (tests).
     dfu-part-table) check_dfu_part_table "${UBERTOOTH_SOURCE:?UBERTOOTH_SOURCE is required}" ;;
     firmware-dk) run_firmware_dk ;;
+    firmware-esp32) run_firmware_esp32 ;;
     all) run_test; run_build ;;
-    *) echo "usage: scripts/ci.sh test|build|all|libbtbb-pin|dfu-part-table|firmware-dk" >&2; exit 2 ;;
+    *) echo "usage: scripts/ci.sh test|build|all|libbtbb-pin|dfu-part-table|firmware-dk|firmware-esp32" >&2; exit 2 ;;
 esac
 step "${1} passed"

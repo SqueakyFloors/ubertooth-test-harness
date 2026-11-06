@@ -721,6 +721,20 @@ of the commit it is against, and fails when either pair differs with
 `UTDK_FW_VERSION` unchanged
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)).
 
+CI compiles both peer firmwares, each in its vendor's own toolchain image for
+the version its sources pin, on a change under that firmware's directory,
+once a week, and on request: `scripts/ci.sh firmware-dk` for the DK
+([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147))
+and `scripts/ci.sh firmware-esp32` for the ESP32 peer
+([#326](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/326)).
+Neither is a required check, because each image is gigabytes. The peer step
+builds once and compares nothing: nothing in the harness flashes an ESP32
+peer, so a missing version bump fails a run on the bench rather than leaving
+the old image in place with nothing to say so. It does check that the image
+carries `UTESP_FW_VERSION`, that every setting `sdkconfig.defaults` asks for
+came back out of Kconfig as it was asked for, and that the build warned
+about none of the firmware's own files.
+
 ### Which Ubertooth firmware, and why
 
 The harness never tests host tools against firmware from another commit:
@@ -1106,10 +1120,12 @@ tools); `tshark` from the distribution (no GUI) for
 Add `--with-acroname` to `bootstrap.py` on a host with an Acroname hub.
 Install the peer SDKs only on the host that builds the peer
 images: nRF Connect SDK v3.4.1 with `nrfutil sdk-manager` (about 6 GB), and
-ESP-IDF v5.5.6 (about 3 GB). A host with docker can build the DK image
-without that install, with `scripts/ci.sh firmware-dk` (see the
-[firmware README](../firmware/nrf52840dk/README.md)); flashing still needs
-`nrfutil`.
+ESP-IDF v5.5.6 (about 3 GB). A host with docker can build either peer image
+without that install, with `scripts/ci.sh firmware-dk` and
+`scripts/ci.sh firmware-esp32` (see the
+[DK](../firmware/nrf52840dk/README.md) and
+[ESP32 peer](../firmware/esp32-classic-peer/README.md) firmware READMEs);
+flashing still needs `nrfutil` for a DK and `esptool` for a peer.
 
 ### macOS
 
