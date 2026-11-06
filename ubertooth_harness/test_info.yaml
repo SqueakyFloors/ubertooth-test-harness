@@ -79,7 +79,7 @@ Help smoke:
 
 Host CLI surface:
   purpose: >-
-    Keeps -h and -V working on every host tool the build installs. Several
+    Keeps -h and -V working on every C host tool the fork builds. Several
     tools in this fork used to exit 1 for -h, which breaks a user's first
     command and any script that asks a tool what it takes; -V is how a user
     reports which host tools they are running, and it is the line preflight

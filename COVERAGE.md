@@ -91,13 +91,15 @@ Harness-wide checks that use the CLIs:
   `sign-test-build`, which is not applicable without one (left out before
   the run; README "Host requirements").
 - **Linux only** (need BlueZ; not applicable on macOS, decided at planning, not
-  skipped): `ubertooth-scan -h` and `ubertooth-follow -h` (Host CLI surface),
+  skipped): `ubertooth-scan` and `ubertooth-follow`, both `-h` and `-V`
+  (Host CLI surface),
   and every `follow` and `scan` case of Refused command lines. A Linux `--build` must
   install both tools into the run prefix (the build fails otherwise), so these
   cases always run there ([#40](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/40)). `ubertooth-specan-ui -h`
   (Python tools) is not applicable without `--build --with-python`.
 - **Exclusive Ubertooth topology** (`exclusive` plan, Linux, power control):
-  runs `ubertooth-util -s`, `ubertooth-util -v`, and `ubertooth-btle -f` with no
+  runs `ubertooth-util -s`, `ubertooth-util -v`, and, under `timeout` and
+  `tail`, `ubertooth-btle -f` with no
   `-U` while only one board is powered.
 - **MAC polling soak** (`mac-polling` plan; planned, catalog-only): long
   `ubertooth-btle -f` without `-U` on a single board, with a known advertiser.

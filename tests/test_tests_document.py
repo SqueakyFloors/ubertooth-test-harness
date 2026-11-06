@@ -111,6 +111,14 @@ BY_A_DRIVER = {
 # A word a Commands block writes that looks like a program and is not: a
 # placeholder in angle brackets.
 NOT_A_PROGRAM = re.compile(r"^<.*>$")
+# Wrappers and pipeline commands a case puts around the tool under test.
+# `program` does not name them, because `env` or `timeout` in front of every
+# no-board command would say nothing about the fork's CLI -- but the option
+# readers stop attributing options at one, so `timeout --foreground -k 2 -s
+# INT` and `tail -n 20` are not read as options of the tool beside them.
+WRAPPERS = frozenset({"env", "sh", "bash", "timeout", "python", "python3",
+                      "tail", "cat", "tr", "date", "printf", "echo", "sleep",
+                      "exit", "head", "true", "false"})
 # What a placeholder in a Commands block stands for, per test: the options a
 # collapsed form covers, so the forward check knows the block does document
 # them. Written down here rather than assumed, so a block cannot hide an
@@ -137,28 +145,24 @@ def _collapsed(test, program_name, *options):
 OPTION = re.compile(r"^(?P<name>-{1,2}[A-Za-z][A-Za-z0-9-]*)")
 
 
-# Only what a placeholder has to stand for: an option a block names
-# literally is not declared here, because an entry for one would excuse it
-# if somebody took it out of the block
+# Only what a placeholder has to stand for: an option a block names, in a
+# command or in a comment beside one, is not declared here, because an entry
+# for one would excuse it if somebody took it out of the block
 # (test_every_collapsed_declaration_is_load_bearing).
 #
-# `-<setter or mode>` and the values two profiles give one option
-# (Argument validation).
-_collapsed("Argument validation", "ubertooth-util",
-           "-C", "-S", "-d", "-l", "-q", "-x")
-# `-<mode>`: the continuous modes each of these refuses a pair of.
-_collapsed("Ubertooth util conflicts", "ubertooth-util",
-           "-I", "-e", "-n", "-q", "-t", "-x")
+# `-<setter or mode>`, the one `ubertooth-util` option Argument validation
+# writes only as a placeholder.
+_collapsed("Argument validation", "ubertooth-util", "-S")
+# `-<mode>`: the modes Util mode refusals pairs with `-i`.
 _collapsed("Util mode refusals", "ubertooth-util", "-I", "-e", "-n", "-t")
 # `<refusal>`: the file option, the later value, the repeat or the stray
 # word each refusal case writes after the tool.
 _collapsed("Refused command lines", "ubertooth-btle", "-A", "-a", "-f", "-h")
-_collapsed("Refused command lines", "ubertooth-rx", "-h", "-l", "-u", "-z")
-_collapsed("Refused command lines", "ubertooth-dump", "-U", "-c", "-h", "-l")
+_collapsed("Refused command lines", "ubertooth-rx", "-c", "-h", "-l", "-u", "-z")
+_collapsed("Refused command lines", "ubertooth-dump", "-U", "-h")
 _collapsed("Refused command lines", "ubertooth-specan", "-h", "-l", "-u")
 _collapsed("Refused command lines", "ubertooth-dfu", "-d", "-h")
-_collapsed("Refused command lines", "ubertooth-follow", "-e", "-h")
-_collapsed("Refused command lines", "ubertooth-scan", "-h")
+_collapsed("Refused command lines", "ubertooth-follow", "-e")
 # The helper forms a block collapses with `...`.
 _collapsed("DFU image checks", "dfuimage.py",
            "--allow", "--before", "--mode", "--read-only")
@@ -288,10 +292,11 @@ def _options(argv) -> set[tuple[str, str]]:
     current = ""
     previous = ""
     for word in _words(argv):
-        if word in ("|", ";", "&&", "||", "&"):
-            # A shell string's next command: whatever follows belongs to it,
-            # not to the tool before the pipe (`... ubertooth-btle -f | tail
-            # -n 20`, whose -n is tail's).
+        if (word in ("|", ";", "&&", "||", "&")
+                or word.rsplit("/", 1)[-1] in WRAPPERS):
+            # A shell string's next command, or a wrapper: whatever follows
+            # belongs to it, not to the tool before it (`... ubertooth-btle
+            # -f | tail -n 20`, whose -n is tail's).
             current = previous = ""
             continue
         name = program(word)
@@ -424,10 +429,16 @@ def commands_of(body: str) -> list[str]:
 
 
 def _fence_words(lines):
-    """The words of a Commands block, with the comments taken off."""
+    """Every word of a Commands block, a comment's words included.
+
+    A comment in a fence says which other forms the line stands for ("# and
+    -A40, -k 2"), so it is command text and is held to the same standard: a
+    program or an option written there is compared like any other. Reading
+    it is what catches an option named only in a comment, which was 84
+    tokens across 18 sections when the comments were skipped.
+    """
     for line in lines:
-        text = line.split("#", 1)[0]
-        for word in text.replace("|", " ").split():
+        for word in line.replace("|", " ").replace("#", " ").split():
             yield word.strip(",;`.)([]")
 
 
@@ -452,6 +463,9 @@ def options_named(lines) -> set[tuple[str, str]]:
         # carries across a continued line (one ending in a backslash).
         previous = ""
         for word in _fence_words([line]):
+            if word.rsplit("/", 1)[-1] in WRAPPERS:
+                current = previous = ""
+                continue
             name = program(word)
             # A program name given as an option's value is that value, not
             # another command: `--peer-reset esp32peer.py`.

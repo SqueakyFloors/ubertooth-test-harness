@@ -587,7 +587,7 @@ serial. `update` also needs a `Debug programmer` paired with the board, with a
 `update` the write and the reads around it:
 
 ```text
-ubertooth-util -U <serial> -B                     # every --bootloader setting
+ubertooth-util -U <serial> -B                     # read for every setting
 lpc21isp -control <bootloader.hex> <serial device> 230400 4000
 ubertooth-util -U <serial> -v                     # the application came back
 ```
@@ -759,7 +759,9 @@ line per option here stands for the values the two profiles give it:
 ```text
 ubertooth-util   -U <serial> -c2401        # and -c 2481, -C79, -C-1, -Cabc
 ubertooth-util   -U <serial> -a8           # and -a 8, -aa, -a 7x
-ubertooth-util   -U <serial> -z19          # and -z183, -q19, -q121, -l2, -d2
+ubertooth-util   -U <serial> -z128         # and -z-129, -zabc
+ubertooth-util   -U <serial> -q19          # and -q121, -q183
+ubertooth-util   -U <serial> -l2           # and -d2
 ubertooth-util   -U <serial> -z -I         # and -z -q, -z -x
 ubertooth-util   -U <serial> -U all -<setter or mode>
 ubertooth-btle   -U <serial> -x33
@@ -1650,7 +1652,7 @@ ubertooth-dump  -U <serial> -d <case dir>/dump-full.bin
 ubertooth-dump  -U <serial> -b -d <case dir>/dump-bitstream.bin
 ubertooth-dump  -U <serial> -c -d <case dir>/dump-classic.bin
 ubertooth-dump  -U <serial> -l -d <case dir>/dump-le.bin
-ubertooth-debug -U <serial> -r 0x03 -v0                         # MDMCTRL, for -c and -l
+ubertooth-debug -U <serial> -r 0x03 -v0                         # MDMCTRL, after each
 ubertooth-ego   -U <serial> -r -c 2440
 ubertooth-ego   -U <serial> -r -c 2440 -l 1                     # and -l 48
 ubertooth-ego   -U <serial> -r -c 2440 -a 630f9ffe
@@ -1948,8 +1950,11 @@ ubertooth-rx -i <case dir>/replay.bin -z                   # the survey
 ubertooth-rx -i <case dir>/replay.bin -r <case dir>/replay.pcapng
 ubertooth-rx -i <case dir>/replay.bin -q <case dir>/replay.pcap
 ubertooth-rx -i <case dir>/replay.bin -d <case dir>/replay.dump
+ubertooth-rx -i <case dir>/replay.bin -u <UAP>              # -u with no -l
+ubertooth-rx -i <case dir>/replay.bin -d <case dir>/no-such-dir/x.bin
 ubertooth-rx -i <case dir>/a-directory                      # and a missing file
 ubertooth-rx -h
+python -c '<os.makedirs>' <case dir>/a-directory            # the directory input
 stdoutdest.py run --stdout <case dir>/stdout.pcap -- ubertooth-rx -i <case dir>/replay.bin -q -
 stdoutdest.py run --fd 3=<case dir>/fd3.pcap -- ubertooth-rx -i <case dir>/replay.bin -q /dev/fd/3
 stdoutdest.py seed|link|unlink <case dir> ...               # the destinations
@@ -2075,6 +2080,9 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle   -q <case dir>/new.pcap <refusal
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle   -c <case dir>/new.pcap <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx     -r|-q|-d <case dir>/new.<ext> <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump   -d <case dir>/new.dump <refusal>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump   -d <case dir>/new.dump -c -l
+                                        # and -l -c: refused naming both,
+                                        # a capture uses one modulation
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-specan -d <case dir>/new.specan <refusal>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-specan -d <case dir>/missing/new.specan
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu    -s|-u <case dir>/<file> <refusal>
@@ -2083,7 +2091,6 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-scan   stray        # BlueZ builds, no
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-scan   -- -x        # and -h stray, and a bare -
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow stray        # BlueZ builds, no file
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow -- -x        # and -h stray, and a bare -
-env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx     -c 79        # a bad later value
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -q - -c <case dir>/extra.pcap
                                         # accepted: the extra file is warned
                                         # about on stderr and never created
@@ -2188,8 +2195,11 @@ refusal.py seed <case dir> <names>
 capturefile.py --packets <case dir>/new.pcap
 ```
 
-`<destination>` is each one the cases try: a new file, a seeded file, `-`,
-`/dev/null`, a symbolic link, a directory, and a read-only directory.
+`<destination>` is each one the replay cases try: a new file, `/dev/null`,
+a symbolic link, an existing directory, a read-only directory, and a
+directory that is not there. The seeded destinations belong to the
+`ubertooth-btle` and `ubertooth-dump` lines above, and `-q -` to the
+no-input case, which has a line of its own.
 
 **Expected outcome.** Smoke runs 6 cases: `ubertooth-rx -r -q -d`,
 `ubertooth-btle -n -r -q`, and `ubertooth-dump -d` stopped at the board lookup
@@ -2400,6 +2410,7 @@ pytools.py extcap --extcap-control-in=x --extcap-config
 pytools.py extcap --extcap-control-out=x --extcap-config
 pytools.py extcap --extcap-config-option-name=x --extcap-config
 pytools.py extcap --extcap-version=4.2.0 ...                    # and 4.4.1 as a next word
+pytools.py extcap --extcap-version ... --extcap-version         # with no value, twice
 pytools.py extcap-failing-util --extcap-interfaces
 ```
 
@@ -2673,6 +2684,11 @@ advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel>
     --min-packets <n> --max-packets <n>
 advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel> --absent
 ```
+
+Every `nrfdk.py` command also takes `--port <serial device>` where the
+registry names one for that DK; without it the driver derives the VCOM0 path
+from the J-Link serial, which is what the example bench does and so what the
+commands above show.
 
 **Expected outcome.** Smoke runs 6 cases: the DK is confirmed to run the
 pinned firmware at its registered address; `ubertooth-btle -n -q` sees it on
@@ -4522,8 +4538,13 @@ long run's output does not have to be kept:
 ```text
 ubertooth-util -s
 ubertooth-util -v
-ubertooth-btle -f                 # under timeout --foreground -k 2 -s INT <seconds>
+bash -c 'timeout --foreground -k 2 -s INT <seconds> ubertooth-btle -f \
+    | tail -n 20; exit ${PIPESTATUS[0]}'
 ```
+
+The capture runs under `timeout`, which sends it SIGINT at the deadline, and
+through `tail` so a long run's output does not have to be kept; the pipeline's
+first exit status is the one the step is judged on.
 
 **Expected outcome.** Three cases: the no-selector serial is the selected
 board's, the no-selector firmware query reaches one board, and the
