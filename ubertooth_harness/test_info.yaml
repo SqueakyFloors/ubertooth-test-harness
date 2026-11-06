@@ -1052,7 +1052,7 @@ Refused command lines:
     No board. Nothing transmits. The ubertooth-follow and ubertooth-scan cases
     declare that they need BlueZ, so they are left out on a host without it.
   expected: >-
-    On Linux, smoke runs 45 cases and comprehensive 67; macOS runs 12 fewer in
+    On Linux, smoke runs 50 cases and comprehensive 77; macOS runs 12 fewer in
     smoke, since the BlueZ-only cases are not applicable. Every file option of
     btle, follow, rx, dump, specan, and dfu is refused three ways: with a
     stray word, with -h (which exits 0 and must still create nothing), and
@@ -1062,13 +1062,37 @@ Refused command lines:
     in either order is refused naming both options as written, before the dump
     file is opened; and scan and follow refuse a stray word with no usage text
     after the message.
+
+    The ubertooth-rx board list adds five refusals in smoke -- a board named
+    twice, an empty list entry, a channel count that is neither one nor one
+    per board, and -d or -V beside several boards -- and four more in
+    comprehensive: an empty channel entry, a list longer than the eight boards
+    a capture reads in each of -U and -c, and -i beside several boards. Each
+    requires exit 1, the tool's one error: line, and an empty standard output,
+    which is what the -V case rests on: a version answer would go there, so a
+    refusal cannot be read as an answer. Where two refusals would apply to one
+    command line the other message is forbidden, so the order is asserted: the
+    board list is read before the channel list, and only a list longer than
+    the tool takes at all is refused as too long.
   limitations: >-
     Forks from before the no-devices switch ignore it, so the first step of
     every case reads the built library's bytes and the case skips when the
     name is absent; that has to be a run-time skip because only the built
     library can tell. The test says nothing about what the tools do once a
-    command line is accepted.
-  related: []
+    command line is accepted. In particular the accepted half of the
+    ubertooth-rx board list is covered nowhere: a capture that really reads
+    several boards, and the UAP corroboration and merged channel map they
+    share, depend on which board hears what, so an assertion about the
+    agreement notes would be counting the room rather than the code. The
+    selectors the refusals name are invented, not registry serials, since no
+    board is opened; each begins with a letter, because libubertooth reads an
+    all-digit selector as a USB index. -U all for a capture, a dump per board,
+    and a PCAPNG interface per board are open design questions rather than
+    gaps here.
+  related:
+    - ubertooth#1063
+    - ubertooth-test-harness#331
+    - ubertooth-test-harness#340
 
 Failed capture files:
   purpose: >-
