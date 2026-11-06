@@ -1744,11 +1744,16 @@ lease directory). A lab that also guards boards with its own per-board lock
 files can hand the harness their path with `--external-board-lock`, and every
 lease then takes the DK's file too (see [External board
 locks](#external-board-locks)); the DK's file is the one named after its
-J-Link serial exactly as the registry carries it,
-`board-<J-Link serial>.lock` for the template
+J-Link serial, `board-<J-Link serial>.lock` for the template
 `<lab lock dir>/board-{serial}.lock`, which is the file a lab's own scripts
-already lock. The lease key strips the leading zeros and the lock file does
-not, so a registry carrying the padded form means a padded file name. Hold
+already lock. One spelling of that serial, because one device has one file:
+the registry takes the 12 digits `nrfutil device list` prints, zeros and
+all, and refuses the zero-stripped spelling with the padded form to write
+instead
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
+The lease key strips the leading zeros and the lock file keeps them, so a
+wrapper written against either spelling resolves the board through the
+registry or `scripts/lab/hold` and takes the padded file. Hold
 such a lock only for the run, so other users of the DK get their turn.
 
 ## Classic test devices (ESP32 Classic peers)
@@ -2306,10 +2311,15 @@ may have `board-esp32-<serial>.lock`, `board-nrf52840dk-<serial>.lock` or
 `board-programmer-<serial>.lock` files left over from when a run asked for
 the lease key: nothing takes those now, so delete them and make sure the
 lab's own wrappers lock the plain-serial file, which is the one every harness
-command takes. One spelling matters: the file is named after the serial as the
-registry spells it, so a DK's is the padded J-Link serial if that is what the
-registry carries, not `nrfutil`'s zero-stripped form
-([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)). Each external lock is an exclusive `flock` on that file, taken in
+command takes. One spelling matters, and a DK is the device that has two:
+its file is the padded J-Link serial, the 12 digits `nrfutil device list`
+prints and the by-id name carries, which is the one spelling the registry
+takes. nrfutil's zero-stripped form is refused there, with the padded form
+to write instead, so a wrapper cannot be written against a file nothing else
+locks
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
+Either spelling still names the board to `scripts/lab/hold`, which takes the
+padded file. Each external lock is an exclusive `flock` on that file, taken in
 the same all-or-nothing attempt as the leases and dropped by the kernel when
 the holder exits, like a lease. A missing file is created (mode 0644, an
 existing file keeps its mode and content; the harness opens it read-only and

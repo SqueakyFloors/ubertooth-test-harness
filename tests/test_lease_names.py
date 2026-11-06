@@ -129,19 +129,21 @@ class OneLeaseKeyOneDevice(NamesTestCase):
     hold for a key built from something else.
     """
 
-    def test_two_dks_whose_keys_collide_and_whose_serials_do_not(self):
-        """The lease key alone, with nothing in the serials to go on.
+    def test_two_dks_can_no_longer_collide_on_a_key(self):
+        """What one spelling of a J-Link serial settles (#324).
 
-        A J-Link serial is zero-padded by sysfs and not by nrfutil, so the
-        key drops the leading zeros. `000000` and `0000000` are two serials
-        with no bench name in common (the stripped form is empty and is not
-        a name at all) and one lease file.
+        The key drops the leading zeros, so `000000` and `0000000` used to
+        be two serials with no bench name in common (the stripped form is
+        empty and is not a name at all) and one lease file. The registry now
+        takes the padded spelling alone, and padding to a fixed width is
+        one-to-one: two serials it accepts never strip to one key.
         """
-        reason = self.refuse(dk("DK_A", "000000"), dk("DK_B", "0000000"))
-        self.assertIn("DK_A", reason)
-        self.assertIn("DK_B", reason)
-        self.assertIn("would both be leased as 'nrf52840dk-0'", reason)
-        self.assertIn("one lease file is one device", reason)
+        self.assertIn("exactly 12 digits", self.refuse(dk("DK_A", "000000")))
+        registry = self.load(dk("DK_A", "000000000000"), dk("DK_B", "000000000001"))
+        self.assertEqual(
+            ["nrf52840dk-0", "nrf52840dk-1"],
+            [leases.resource_key(registry.get(alias)) for alias in ("DK_A", "DK_B")],
+        )
 
     def test_the_key_is_read_from_the_function_that_builds_it(self):
         """So a type whose key stops coming from a serial is still covered."""
@@ -250,7 +252,8 @@ class OneBenchLockNameOneDevice(NamesTestCase):
 
     def test_a_dk_may_not_take_a_peer_s_serial(self):
         """Every type is in that one space, not only the two with a pair."""
-        reason = self.refuse(dk("DK_A", "123456789"), peer("ESP_A", "123456789"))
+        reason = self.refuse(dk("DK_A", "000123456789"),
+                             peer("ESP_A", "000123456789"))
         self.assertIn("DK_A (nRF52840 DK)", reason)
         self.assertIn("ESP_A (ESP32 Classic peer)", reason)
 
@@ -316,20 +319,34 @@ class OneBenchLockNameOneDevice(NamesTestCase):
         self.assertEqual("nrf52840dk-123456789",
                          leases.resource_key(registry.get("DK_A")))
 
-    def test_two_dks_whose_serials_differ_only_in_leading_zeros(self):
-        """sysfs zero-pads a J-Link serial and nrfutil does not.
+    def test_only_the_padded_spelling_of_a_j_link_serial_is_registrable(self):
+        """sysfs zero-pads a J-Link serial and nrfutil does not (#324).
 
-        So a bench note may name either spelling, both are in that one
-        space, and these two would also take one lease file.
+        A bench note may name either spelling, so both were registrable, and
+        the external lock file is named after the serial: two spellings were
+        two files, and a wrapper written against the one the registry did not
+        carry met nothing. The registry takes the padded spelling alone now,
+        and the refusal says what to write and which file a bench renames.
         """
-        reason = self.refuse(dk("DK_A", "000123456789"), dk("DK_B", "123456789"))
-        self.assertIn("DK_A", reason)
-        self.assertIn("DK_B", reason)
-        self.assertIn("one serial is one device", reason)
+        reason = self.refuse(dk("DK_B", "123456789"))
+        self.assertIn("exactly 12 digits", reason)
+        self.assertIn('write it as "000123456789"', reason)
+        self.assertIn("nrf52840dk-123456789", reason)
+        self.assertIn("board-123456789.lock", reason)
+        self.assertIn("board-000123456789.lock", reason)
         registry = self.load(dk("DK_A", "000123456789"))
         self.assertEqual(
             "nrf52840dk-123456789", leases.resource_key(registry.get("DK_A"))
         )
+
+    def test_a_serial_that_is_no_j_link_serial_gets_no_migration(self):
+        """Nothing to pad, so the refusal says the shape and stops."""
+        for serial in ("abc", "0001234567890"):
+            with self.subTest(serial=serial):
+                reason = self.refuse(dk("DK_A", serial))
+                self.assertIn("exactly 12 digits", reason)
+                self.assertIn(f"registered '{serial}'", reason)
+                self.assertNotIn("write it as", reason)
 
 
 class BenchLockFileNames(NamesTestCase):
@@ -572,6 +589,61 @@ class BenchLockFileNames(NamesTestCase):
                 self.assertTrue(board.bench_lock)
                 self.assertIsNotNone(
                     leases.external_lock_path(self.template, board))
+
+    def test_a_dk_is_locked_under_the_padded_spelling_of_its_serial(self):
+        """One spelling, and it is the one a bench sees (#324).
+
+        nrfutil prints the serial without the leading zeros sysfs pads it
+        with, so a DK answers to two spellings of one number. A device gets
+        one external lock file, named after the serial the registry carries,
+        which is now the padded spelling alone.
+        """
+        registry = self.load(dk("DK_A", "000123456789"))
+        board = leases.board_for_resource(registry.get("DK_A"))
+        self.assertEqual("nrf52840dk-123456789", board.key)
+        self.assertEqual("000123456789", board.lock_name)
+        self.assertEqual(
+            self.locks / "board-000123456789.lock",
+            leases.external_lock_path(self.template, board),
+        )
+
+    def test_a_dk_made_in_code_is_padded_to_that_one_spelling(self):
+        """The backstop, where no registry refused the other spelling.
+
+        A resource built in code never passed the registry's rule, and a DK
+        is the one device two spellings of one serial name, so the padding
+        is here as well: every path that leases this DK takes the one file.
+        """
+        made = SimpleNamespace(
+            alias="DK_Code", type="nRF52840 DK",
+            identity={"jlink serial": "123456789"},
+        )
+        board = leases.board_for_resource(made)
+        self.assertEqual("nrf52840dk-123456789", board.key)
+        self.assertEqual("000123456789", board.lock_name)
+        self.assertEqual(
+            self.locks / "board-000123456789.lock",
+            leases.external_lock_path(self.template, board),
+        )
+
+    def test_the_padded_spelling_is_the_one_the_registry_takes(self):
+        """One width, stated twice, so the two may not drift apart.
+
+        The registry's rule is a pattern and the lock name is built by
+        padding; a registry that accepted a width the padding did not
+        produce would give a DK two files again.
+        """
+        serial = leases.canonical_jlink_serial("123456789")
+        self.assertEqual(leases.JLINK_SERIAL_DIGITS, len(serial))
+        registry = self.load(dk("DK_A", serial))
+        self.assertEqual(
+            serial, leases.board_for_resource(registry.get("DK_A")).lock_name
+        )
+        # Padding leaves alone what the registry refuses anyway, rather than
+        # inventing a spelling for it.
+        for value in ("abc", "0001234567890", ""):
+            with self.subTest(value=value):
+                self.assertEqual(value, leases.canonical_jlink_serial(value))
 
     def test_every_leased_type_s_two_names(self):
         """One rule for all four, so no path can name a file no other does."""

@@ -89,7 +89,19 @@ NRF52840_DK = "nRF52840 DK"
 # all three and `role <name>` switches between them.
 DK_ROLES = ("advertiser", "central", "peripheral")
 _DK_IDENTITY_KEYS = ("jlink serial", "BLE address", "serial device")
-_JLINK_SERIAL = re.compile(r"^[0-9]{6,12}$")
+# The canonical spelling of a J-Link serial, and the only one a registry
+# takes: the padded digits `nrfutil device list` prints and udev's by-id
+# name carries (``leases.JLINK_SERIAL_DIGITS``). A DK answers to two
+# spellings of one serial, and its external lock file is named after the
+# serial, so two spellings are two files and a lab wrapper that chose the
+# other one would meet nothing (#324). One spelling here is what gives the
+# device one lock file; nrfutil's zero-stripped form is still a name
+# `scripts/lab/hold` resolves, and the lease key is built from it either
+# way, so nothing but the registry entry changes.
+# The width is the spelling and nothing more: how many digits a probe's
+# serial itself has is ``nrfdk.jlink_serial``'s rule, which is unchanged
+# and is what judges the number the DK is driven by.
+_JLINK_SERIAL = re.compile(r"^[0-9]{12}$")
 # A 48-bit device address, colon separated: a DK's BLE address and an
 # ESP32 peer's BD_ADDR are written the same way.
 _ADDRESS_48 = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
@@ -248,16 +260,23 @@ def _bench_lock_names(resource) -> tuple[tuple[str, str], ...]:
             continue
         names.append((serial, written))
         if resource.type == NRF52840_DK and serial.isdigit():
-            # A DK's J-Link serial is the one serial a lock file is named
-            # after in two spellings: nrfutil prints it without the leading
-            # zeros sysfs pads it with, and `scripts/lab/hold` takes the
-            # name a bench note would use. An all-digit serial of another
-            # type names only one file, so it reserves only itself. (A
-            # stripped all-digit serial of any type still *names* a device
-            # to `scripts/lab/_bench.resolve`; two devices that share one
-            # are refused when a command resolves the name, which says so
-            # and names them both.)
-            names.append((serial.lstrip("0"), written))
+            # A DK's J-Link serial is the one serial a device answers to in
+            # two spellings: nrfutil prints it without the leading zeros
+            # sysfs pads it with, and `scripts/lab/hold` takes the name a
+            # bench note would use. Only the padded one names a lock file
+            # now (#324), and the stripped one is still the name the lease
+            # key is built from and a name `_bench.resolve` accepts, so
+            # neither may belong to a second device. An all-digit serial of
+            # another type names only one file, so it reserves only itself.
+            # (A stripped all-digit serial of any type still *names* a
+            # device to `scripts/lab/_bench.resolve`; two devices that share
+            # one are refused when a command resolves the name, which says
+            # so and names them both.)
+            from ubertooth_harness.leases import canonical_jlink_serial
+
+            for spelling in (canonical_jlink_serial(serial), serial.lstrip("0")):
+                if spelling != serial:
+                    names.append((spelling, written))
     return tuple(item for item in names if item[0])
 
 
@@ -387,6 +406,34 @@ def _validate_programmer(resource) -> None:
         )
 
 
+def _dk_serial_refusal(alias: str, serial: str) -> str:
+    """Why this 'jlink serial' is not the spelling a DK is locked under.
+
+    A serial written short is the commoner mistake and the one worth a
+    migration: it is the same probe, so the refusal says what to write
+    instead and what it costs a bench that locks the short name today.
+    """
+    from ubertooth_harness.leases import JLINK_SERIAL_DIGITS, canonical_jlink_serial
+
+    wanted = (
+        f"nRF52840 DK {alias} requires a 'jlink serial' of exactly "
+        f"{JLINK_SERIAL_DIGITS} digits: the spelling `nrfutil device list` "
+        "prints and the /dev/serial/by-id name carries, which is also what "
+        f"this DK's external lock file is named after; registered '{serial}'"
+    )
+    padded = canonical_jlink_serial(serial)
+    if padded == serial or not padded:
+        return wanted
+    return (
+        f"{wanted}. That is the same probe written short, so write it as "
+        f'"{padded}" (quoted, so the leading zeros survive). Nothing else '
+        f"changes: its lease file stays 'nrf52840dk-{int(serial)}', and "
+        "a bench note or `scripts/lab/hold` still takes either spelling as a "
+        f"name. A bench whose own scripts lock 'board-{serial}.lock' renames "
+        f"that file to 'board-{padded}.lock'"
+    )
+
+
 def _validate_dk(resource) -> None:
     """An nRF52840 DK: J-Link serial, optional BLE address and VCOM0 path."""
     alias = resource.alias
@@ -396,10 +443,9 @@ def _validate_dk(resource) -> None:
             f"nRF52840 DK {alias} identity has unknown key(s) {', '.join(unknown)}; "
             f"use {', '.join(_DK_IDENTITY_KEYS)}"
         )
-    if not _JLINK_SERIAL.fullmatch(resource.identity.get("jlink serial", "")):
-        raise RegistryError(
-            f"nRF52840 DK {alias} requires a 'jlink serial' identity (6-12 digits)"
-        )
+    serial = resource.identity.get("jlink serial", "")
+    if not _JLINK_SERIAL.fullmatch(serial):
+        raise RegistryError(_dk_serial_refusal(alias, serial))
     address = resource.identity.get("BLE address")
     if address is not None and not _ADDRESS_48.fullmatch(address):
         raise RegistryError(
