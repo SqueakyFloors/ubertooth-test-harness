@@ -1454,12 +1454,64 @@ that no live run can pin down, and to run the whole thing in CI.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
-**Expected outcome.** Smoke runs 12 cases (11 where there is no `/proc`): decode every LAP in the fixture,
-derive the UAP with `-l`, replay into PCAPNG and into PCAP (link type 255, the
+**Expected outcome.** Smoke runs 13 cases (12 where there is no `/proc`): decode every LAP in the fixture,
+derive the UAP with `-l`, read every field of a filtered capture's records,
+replay into PCAPNG and into PCAP (link type 255, the
 fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
 and `-s` decoding the same as without it, with `-h` listing `-s` as the
 default.
+
+**The capture's own records, with a known answer.** One case replays with
+`-l <LAP>` into a PCAPNG and then reads every field of every record with the
+same decoder the live Classic tests use
+([`bredrrecord.py`](../ubertooth_harness/bredrrecord.py); see
+`Classic capture record fields` for what it reads). It is here because what
+that decoder's sharpest checks need is a record the bench rarely produces: on
+live traffic a payload-bearing record turns up about 11 times in 2620 and a
+settled address part about one run in nine, so the checks that read a
+payload's own length field, recompute its CRC-16, and hold a record's transport
+nibble to the payload it names are checks waiting for something to fire on.
+The harness wrote this input, so they fire on every run, with no board, in CI.
+
+What the case requires, beyond every rule the decoder applies to every
+record: each of the eight records carries LAP A and names it as the reference
+LAP; each record that carries a reference UAP names UAP A, which the records
+before the address part settles do not and are not asked to -- the rule is on
+the field a record claims, which is how a capture that gave a clock up is an
+honest record rather than a wrong one; at least four carry that UAP; at least
+one carries a payload, at least one passed a payload CRC, and at least one
+passed a header HEC with a reference UAP to check it against; a `DH1/2-DH1` record is among them and its transport is
+named `ACL`; every record carries the fixture's own signal level and none
+claims a measured noise power; the file names LAP A, with an empty UAP mask,
+as the address it was following; and **the record that settled the address
+part carries its own header and the payload whose CRC settled it**. That last
+one is the point of reading these records at all: three fixes are each about
+that one record, and every floor around it is met by the records either side
+([ubertooth#770](https://github.com/SqueakyFloors/ubertooth/pull/770),
+[libbtbb#99](https://github.com/SqueakyFloors/libbtbb/pull/99), and
+[libbtbb#85](https://github.com/SqueakyFloors/libbtbb/pull/85)). The
+comprehensive filtered-PCAP case reads the same records in the other format,
+which carries no interface option and so is the one check it leaves out.
+
+The two level rules are here rather than on a live capture for the same
+reason. Neither of the decoder's standing rules can fail on a level that
+stopped being the packet's own: the -120 to 0 dBm range is wide enough for a
+figure taken from another packet, and the noise-power flag is how libbtbb's
+writer computes it from the two figures, so it restates the writer. Pinned
+against a known answer they bite: each of these records says its average
+reading is that packet's own power and carries three readings far apart, so a
+level taken from anything else -- the strongest reading of the packet, which
+gives -82 dBm, or the loudest of the records around it on the same channel --
+reads as another figure
+([ubertooth#754](https://github.com/SqueakyFloors/ubertooth/pull/754)), and
+they carry no background estimate, so a record claiming a measured noise
+power is a figure made up
+([ubertooth#909](https://github.com/SqueakyFloors/ubertooth/pull/909)). The
+printed side is held the same way: every packet line of a replay of this
+fixture must carry that level and `n=none snr=none`, required rather than
+accepted, which `receive_cases`' pattern for a live capture cannot do because
+a live packet may carry either.
 
 **Which note each command line prints.** libbtbb reports a clock out of the
 address-part search as a CLK6 note only when it already held the UAP, which is
@@ -1504,12 +1556,13 @@ a `-d` that names the dump `-i` is replaying is refused as
 six ends by stating the whole directory, with the input's SHA-256, so a
 refusal that truncated or rewrote the file it was reading fails.
 
-Comprehensive runs 30 (29 where there is no `/proc`), adding the survey
+Comprehensive runs 31 (30 where there is no `/proc`), adding the survey
 listing of both piconets
 (the two addresses on standard output and the `Survey Results` heading on
 standard error),
 a LAP filter, a correct and a wrong `-u`, `-e 0` dropping the packet with an
-error, a `-d` dump compared byte for byte with the fixture, a filtered PCAP,
+error, a `-d` dump compared byte for byte with the fixture, a filtered PCAP
+whose records are read field by field as above,
 an empty file, a file whose last record is cut short (exit 1 after the whole
 records), a missing file, the recorded systime on every packet line, a
 directory passed as `-i` (exit 1 with the read error), and `-u` without `-l`
@@ -2473,29 +2526,35 @@ two rules hold: a record with no payload names no transport, and a record
 with one names its own type's. Only TYPE code `0111` takes two answers, and
 that is the point of the field — an HV3 and an EV3 share that code and a
 length, so nothing else in a record says which it holds, and so whether the
-payload ends in a CRC. A record naming `any` passes either way, which is what
-a libbtbb from before that change wrote for every packet, so a run against an
-older `--libbtbb-ref` is not failed for a field that library never filled in.
-No case puts a floor on how many records name a transport: payload-bearing
-records are rare on this bench (see the known limits), so a floor would be a
-count of the room rather than of the decoder.
+payload ends in a CRC.
 
-**That `any` is a real gap, kept on purpose.** At the libbtbb the *fork*
-pins, a payload-bearing record always names a transport — the library names
-one whenever it produced a payload, and an abandoned trial clock clears the
-transport and the payload together — so a libbtbb that stopped filling the
-field in would pass here. What it covers is a run that names a libbtbb from
-before [libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133)
-itself, which names no transport at all. A run that takes the fork's pin, as a
-deployed runner's `fork-pin` does, has named transports since that change; the
-*harness's* own `LIBBTBB_PIN` and the README's example refs named an older one
-until
+**A payload-bearing record naming `any` fails.** It used to pass, because a
+libbtbb from before
+[libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133) names no
+transport at all and a run against such a `--libbtbb-ref` should not fail for
+a field that library never filled in. The escape also let a libbtbb that
+stopped filling the field in pass, and the only refs that needed it were the
+*harness's* own `LIBBTBB_PIN` and the README's examples, which
 [#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341)
-moved them, and those were the runs the escape was written for. A floor is no
-substitute either way, at 11 payload-bearing records in 2620. Dropping it is
-[#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339),
-whose one precondition, that pin, is now met; it is left there because it
-changes the rule a live capture is judged by, which is that issue's subject.
+moved to the commit the fork pins. At that commit the library names a
+transport whenever it produced a payload and clears it with the payload
+wherever it drops one, so a payload-bearing record always names one, and the
+rule says so ([#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339)).
+
+What that costs: a run told to build a libbtbb from before that change fails
+this rule, and no catalog case can turn it off. `--any-transport` exists, and
+the inquiry-scan case passes it, but for a different reason — a capture whose
+headers do not decode gives the nibble no type to be checked against — and
+no plan argument reaches it. Such a run is not something the harness supports
+anyway: every other rule here assumes the pinned library's clears, as the
+known limits below say. Running `bredrrecord.py` by hand on an older capture
+is where the option is for.
+
+No case here puts a floor on how many records name a transport, because
+payload-bearing records are rare on this bench (see the known limits), so a
+floor would be a count of the room rather than of the decoder. What does hold
+the rule to a record is `Raw receive replay`, whose synthetic input carries a
+DH1 whose payload must be named `ACL` on every run, in CI, with no board.
 
 On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the
@@ -2607,6 +2666,19 @@ for" above: the flag-to-field agreements of this test are what a
 marginal link would exercise, and the measurements below are what the
 bench found when it was tried.
 
+**The level fields are read here and pinned elsewhere.** Every record's
+signal and noise are read, their flags held to the fields they describe, and
+their range checked, and neither of those can fail on a figure that stopped
+being the packet's own: the -120 to 0 dBm range is wide enough for a figure
+taken from another packet, and the noise-power flag is how libbtbb's writer
+computes it from the two figures, so the rule restates the writer. What would
+catch a change there is a capture whose own answer is known, which is
+`Raw receive replay`: its records carry one recorded reading each and no
+background estimate, so the level and the absence of a noise figure are both
+required there, on every run and with no board. A floor on how many *distinct*
+figures a live capture's records carry would be the bench's own version of
+that, and no run has measured one to set it with.
+
 **The payload checks barely fire on the bench's own traffic.** Measured over
 four 25-second captures, no record carried a payload at all: `ubertooth-rx`
 kept re-seeding its CLK1-27 candidates and never entered follow mode. A
@@ -2616,10 +2688,13 @@ the explanation: 7 of the 11 came from windows that recovered no clock, so a
 payload-bearing record is not something follow mode is needed for. They are
 simply rare, 11 records in 2620. So no case puts a floor on records with a
 payload, and the payload length and CRC checks are there for the capture that
-does settle a clock — they are exercised deterministically by the unit tests
-and by replaying the synthetic fixture, where a DH1 payload's length field and
-CRC both have to agree. Whether the clock recovery should settle on this pair
-is the fork's question.
+does settle a clock. Where they are required rather than merely applied is
+`Raw receive replay`, which replays the synthetic fixture and asks for at
+least one payload-bearing record, at least one passing a payload CRC, and the
+record that settled the address part carrying its own header and that
+payload; the unit tests build records field by field and check each failure
+is named. Whether the clock recovery should settle on this pair is the fork's
+question.
 
 A malformed record cannot be produced on purpose here. A well-behaved peer
 will not send a payload header that disagrees with its own packet, or a
@@ -3073,9 +3148,9 @@ carries `required hardware: true`, so the naming costs the other benches
 nothing and hides nothing either: a registry without those peers, or without
 that host, runs every other release test and records this one as blocked, and
 the run finishes failed rather than passing with the recovery unmeasured. Its
-smoke estimate is about 520 s, which takes the release suite to about 1175 s
+smoke estimate is about 520 s, which takes the release suite to about 1180 s
 (roughly 20 minutes) on the host it names; a target without the peers plans
-about 655 s of the suite and fails on this step. The third, `-t` case stays in the
+about 660 s of the suite and fails on this step. The third, `-t` case stays in the
 `classic-comprehensive` suite, which a release runs alongside the gate.
 
 **Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and

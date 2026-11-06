@@ -193,7 +193,7 @@ class EstimateTests(unittest.TestCase):
         # fork 7cbc191a against the same test without them (#333).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(1179.6, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1180.2, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 
