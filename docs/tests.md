@@ -2336,28 +2336,38 @@ otherwise meet every detection, gap and rate objective, and the run would
 report a controlled schedule it never had. So in each judged off period the
 advertiser must fall quiet: a sighting by either reader more than two seconds
 into it (or half the period, whichever is less, so a short schedule still has
-something judged) fails the run. The two seconds are for the packets already
+something judged) makes that period noisy, and more noisy periods than the
+allowance fails the run. The allowance is there for the same reason the
+parity one is: the text reader's time is when the host read a line, so one
+delayed flush should not fail three days of work. The two seconds are for the packets already
 on the air and already in the tool's buffers when the stop lands.
 
 **Timing relationships are checked before any board is leased.** The
 figures below constrain each other, and a run holds an Ubertooth and a DK for
 hours, so a plan whose own figures contradict each other has to fail when the
-plan loads rather than on the bench. Eight relationships are refused
+plan loads rather than on the bench. Every relationship below is refused
 (`addresssoak.check_timings`, raised through the catalog's
-`check_arguments`): a detection deadline longer than the advertiser is on
-for; sustained presence (`presence windows` × `presence window`) that does
-not fit in an on period; a liveness timeout no longer than the off period; a
-gap limit below the detection deadline, which every period's wait for its
-first packet would fail, or as long as an on period, which no gap inside one
-could ever reach; a duration shorter than two schedule cycles; a sampling
-interval that would leave fewer than three samples; and a presence window or
-a sampling interval too short to run for days (a window is held per reader
-per period, and each sample is a synced record); a schedule leg under a
-second, or a duration and a schedule that together make more periods than a
-run can hold; and a liveness timeout that does not clear an off period *and*
-the wait for the next period's first packet, which is the quiet stretch a
-healthy run really has. The driver makes the same checks from the same code
-when it is run by hand.
+`check_arguments`), and the driver makes the same checks from the same code
+when it is run by hand:
+
+* a schedule leg under a second, or a duration and a schedule that together
+  make more periods than a run can hold — each period is kept for the whole
+  run and writes two synced records;
+* a presence window or a sampling interval too short to run for days, for the
+  same reason;
+* an advertising interval that leaves fewer than three events in a presence
+  window, so one lost or late event would empty it, or that cannot send the
+  packets a minute the rate floor asks for;
+* a detection deadline longer than the advertiser is on for;
+* sustained presence (`presence windows` × `presence window`) that does not
+  fit in an on period;
+* a liveness timeout that does not clear an off period *and* the wait for the
+  next period's first packet, which is the quiet stretch a healthy run has;
+* a gap limit below the detection deadline, which every period's wait for its
+  first packet would fail, or as long as an on period, which no gap inside one
+  could ever reach;
+* a duration shorter than two schedule cycles, or a sampling interval that
+  would leave fewer than three samples.
 
 **Hardware and arguments.** One `Ubertooth`, selected by serial and receiving
 only, and one `advertiser` (nRF52840 DK) with a registered J-Link serial and

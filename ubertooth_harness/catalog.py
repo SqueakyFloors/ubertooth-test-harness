@@ -249,8 +249,11 @@ def _check_follow_end_duration(arguments) -> None:
 
 
 def _advertising_channel(value):
-    # The three primary advertising channels ubertooth-btle -A takes.
-    if value not in (37, 38, 39) or isinstance(value, bool):
+    # The three primary advertising channels ubertooth-btle -A takes. The
+    # type is checked as well: `channel: 37.0` is a float in YAML and would
+    # otherwise reach the tool as -A37.0.
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or value not in (37, 38, 39)):
         raise CatalogError("must be an advertising channel 37, 38 or 39")
     return value
 

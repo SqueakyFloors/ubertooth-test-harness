@@ -196,7 +196,7 @@ class SoakTestCase(unittest.TestCase):
             "--channel": "37", "--duration": "4", "--jlink": "1050000001",
             "--interval": "100", "--payload": "c0ffee",
             "--advertiser-on": "1", "--advertiser-off": "1",
-            "--sample-every": "1", "--presence-window": "0.25",
+            "--sample-every": "1", "--presence-window": "0.5",
             "--presence-windows": "2", "--liveness-timeout": "2",
             "--detect-within": "0.75", "--min-detection-share": "0.9",
             "--max-gap": "0.9", "--min-packets-per-minute": "1",
@@ -601,6 +601,58 @@ class BudgetTests(SoakTestCase):
         self.assertFalse(attempts[-1]["files_removed"])
         self.assertTrue((self.out / attempts[-1]["capture"]).is_file())
 
+    def test_an_attempt_whose_files_are_empty_is_still_pruned(self):
+        # The state a failing run reaches: the transcript budget is spent, so
+        # later logs are empty, and an attempt whose tool never got the board
+        # leaves no capture either. An earlier version unlinked those files
+        # and then put the attempt back because nothing had been freed, which
+        # re-targeted the same attempt for ever and left the budget disabled
+        # for the rest of the run.
+        soak = self.built_soak(budget=1)
+        # The oldest attempt's files are empty -- the transcript budget was
+        # spent and its tool never got the board -- while a later one holds
+        # the bytes that put the run over its budget.
+        first = self.fake_attempt(1, size=0)
+        second = self.fake_attempt(2, size=4096)
+        soak.attempts += [first, second]
+        soak.prune_captures()
+        self.assertTrue(first.files_removed)
+        self.assertFalse(second.files_removed)
+        self.assertEqual(1, soak.captures_removed)
+        self.assertEqual(0, soak.capture_bytes_removed)
+        self.assertFalse((self.out / first.capture).exists())
+        self.assertTrue((self.out / second.capture).is_file())
+
+    def test_an_attempt_whose_files_cannot_be_removed_is_kept(self):
+        soak = self.built_soak(budget=1)
+        first, second = self.fake_attempt(1), self.fake_attempt(2)
+        soak.attempts += [first, second]
+        (self.out / first.capture).chmod(0o444)
+        (self.out / first.log).chmod(0o444)
+        self.out.chmod(0o555)
+        self.addCleanup(self.out.chmod, 0o755)
+        soak.prune_captures()
+        self.assertFalse(first.files_removed)
+        self.assertEqual(0, soak.captures_removed)
+        self.assertTrue((self.out / first.capture).is_file())
+
+    def built_soak(self, budget):
+        """A Soak with an output directory and no run behind it."""
+        self.out.mkdir(parents=True, exist_ok=True)
+        argv = self.argv(max_total_capture_bytes=budget)
+        options = addresssoak.options_from(
+            addresssoak.build_parser().parse_args(argv))
+        return addresssoak.Soak(options, None)
+
+    def fake_attempt(self, index, size=16):
+        """An attempt whose files are on disk, as a finished one leaves them."""
+        attempt = addresssoak.Attempt(
+            index, (), f"capture-{index:04d}.pcap", f"btle-{index:04d}.log")
+        for name in (attempt.capture, attempt.log):
+            (self.out / name).write_bytes(b"x" * size)
+        attempt.bytes_kept = 2 * size
+        return attempt
+
     def test_no_budget_removes_nothing(self):
         self.set_tool(PAD_BYTES="8192")
         self.run_soak(max_capture_bytes=2048, max_total_capture_bytes=0)
@@ -623,7 +675,10 @@ class OffPeriodTests(SoakTestCase):
                 return super().handle(line)
 
         self.firmware = Deaf(self.state, address=ADDRESS)
-        code, out, _err = self.run_soak()
+        # Long enough for several off periods: one noisy period is inside the
+        # allowance, which is there for a delayed flush rather than for an
+        # advertiser that never stopped.
+        code, out, _err = self.run_soak(duration=8)
         self.assertEqual(addresssoak.EXIT_FAIL, code)
         self.assertIn("did not stop when it was told to", out)
         quiet = self.summary()["off_quiet"]
@@ -654,6 +709,54 @@ class UnreadableCaptureTests(SoakTestCase):
         records = [record for record in self.progress()
                    if record["record"] == "capture_unreadable"]
         self.assertTrue(records)
+
+
+class CancelDuringRestartTests(SoakTestCase):
+    """A cancellation that lands between two captures still leaves a report."""
+
+    def test_a_run_canceled_with_nothing_running_still_reports(self):
+        # The window is real: a restart stops its capture, reads the
+        # watchdog, may reset the board, and waits before the next attempt.
+        # A cancellation anywhere in there used to reach the teardown with no
+        # capture and die of it -- no summary, no verdict, a traceback.
+        soak = self.built_soak(budget=0)
+        soak.cancel("SIGTERM")
+        self.assertIsNone(soak.stop_capture("the run was stopped"))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = soak.report(None)
+        self.assertIn("nothing was running when the run ended", out.getvalue())
+        self.assertEqual(addresssoak.EXIT_FAIL, code)
+        summary = json.loads(
+            (self.out / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual("fail", summary["verdict"])
+        self.assertEqual("SIGTERM", summary["canceled"])
+        self.assertTrue(any("stopped by SIGTERM" in problem
+                            for problem in summary["problems"]))
+
+    def test_a_cancellation_stops_the_board_work_a_restart_would_do(self):
+        soak = self.built_soak(budget=0)
+        soak.attempts.append(self.fake_attempt(1))
+        soak.cancel("SIGTERM")
+        # No capture, canceled: restart must return without reading the
+        # watchdog or resetting the board, each of which is bounded in tens
+        # of seconds while the harness allows about two.
+        soak.restart("no packet for 2.0s")
+        self.assertEqual(0, soak.watchdog_reads)
+        self.assertEqual(0, soak.board_resets)
+        self.assertIsNone(soak.capture)
+
+    def built_soak(self, budget):
+        self.out.mkdir(parents=True, exist_ok=True)
+        options = addresssoak.options_from(addresssoak.build_parser().parse_args(
+            self.argv(max_total_capture_bytes=budget)))
+        soak = addresssoak.Soak(options, None)
+        soak.board_after = {}
+        return soak
+
+    def fake_attempt(self, index):
+        return addresssoak.Attempt(index, (), f"capture-{index:04d}.pcap",
+                                   f"btle-{index:04d}.log")
 
 
 class RecordClockTests(SoakTestCase):
@@ -899,6 +1002,46 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(1, period.disagreements())
         self.assertEqual(1, soak.parity()["disagreements"])
 
+    def test_readers_that_never_share_a_window_cannot_pass(self):
+        # The degenerate case the allowance base has to cover: if only the
+        # shared and the lonely windows counted, two readers that alternated
+        # windows and never agreed on one would have an allowance of one and
+        # nothing to compare.
+        soak = self.soak()
+        period = self.add_period(soak, "on", index=0)
+        period.text.windows.update(range(0, 30, 2))
+        period.structural.windows.update(range(1, 30, 2))
+        parity = soak.parity()
+        self.assertEqual(0, parity["windows_both"])
+        self.assertEqual(30, parity["windows_seen"])
+        self.assertEqual(0, parity["disagreements"])  # each is beside one
+        self.assertEqual(1, parity["allowance"])
+
+    def test_an_off_period_the_advertiser_was_heard_in_is_allowed_one(self):
+        soak = self.soak()
+        seen = self.seen_throughout()
+        for index in range(4):
+            self.add_period(soak, "on", index=index, text=seen, structural=seen)
+        noisy = self.add_period(soak, "off", index=4, seconds=self.OFF)
+        noisy.structural.see(noisy.started + 20.0, noisy.started, 2.0)
+        quiet = soak.off_quiet()
+        self.assertEqual(1, quiet["periods"])
+        self.assertEqual(1, quiet["noisy"])
+        self.assertEqual(1, quiet["allowance"])
+        self.assertEqual([], soak.judge())
+
+    def test_several_noisy_off_periods_fail(self):
+        soak = self.soak()
+        seen = self.seen_throughout()
+        for index in range(4):
+            self.add_period(soak, "on", index=index, text=seen, structural=seen)
+        for index in (4, 5, 6):
+            noisy = self.add_period(soak, "off", index=index, seconds=self.OFF)
+            noisy.structural.see(noisy.started + 20.0, noisy.started, 2.0)
+        problems = soak.judge()
+        self.assertTrue(any("did not stop when it was told to" in problem
+                            for problem in problems), problems)
+
     def test_a_reader_that_missed_a_whole_period_is_still_caught(self):
         soak = self.healthy()
         soak.periods[0].structural = addresssoak.Side()
@@ -1061,9 +1204,12 @@ class TimingTests(unittest.TestCase):
             ({"off_s": 0.5}, "'advertiser off' (0.5s) is shorter than 1s"),
             ({"duration_s": 86400.0 * 3, "on_s": 1.0, "off_s": 1.0},
              "more than 20000"),
-            ({"interval_ms": 3000}, "longer than the 2s presence window"),
-            ({"interval_ms": 10000, "window_s": 20.0, "on_s": 120.0,
-              "min_packets_per_minute": 30},
+            ({"interval_ms": 3000}, "fewer than 3 advertising events in a 2s"),
+            # One event per window is not enough either: the advertiser
+            # delays each event a little and the air loses some.
+            ({"interval_ms": 1000}, "fewer than 3 advertising events in a 2s"),
+            ({"interval_ms": 10000, "window_s": 30.0, "windows_needed": 2,
+              "on_s": 120.0, "min_packets_per_minute": 30},
              "about 6 packets a minute, fewer than the 30"),
             ({"duration_s": 60.0}, "less than two 60s schedule cycles"),
             ({"sample_every_s": 300.0}, "'sample every' (300s) leaves fewer"),
