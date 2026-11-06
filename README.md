@@ -2636,9 +2636,9 @@ RUN SUMMARY
   plan / suite       fast / fast
   host               Host_Linux (Linux 24.04 6.8.0 x86_64)
   Ubertooth          main = 9903b4251f... (git-9903b42)
-  libbtbb            fork-pin at 52b2afcb0c... (git-52b2afc)
-  host tools         Host tools version: libubertooth 1.07 (git-9903b42), libbtbb 1.3 (git-52b2afc)
-  libbtbb in tools   git-52b2afc, the libbtbb this run resolved (--libbtbb-ref) (verified)
+  libbtbb            fork-pin at 7e1cdf0336... (git-7e1cdf0)
+  host tools         Host tools version: libubertooth 1.07 (git-9903b42), libbtbb 1.3 (git-7e1cdf0)
+  libbtbb in tools   git-7e1cdf0, the libbtbb this run resolved (--libbtbb-ref) (verified)
   device UT_0        Ubertooth, serial aaaa...aaaa: firmware git-9903b42 (verified)
   preflight          6/6 checks passed
   tests              12/12 passed

@@ -312,9 +312,9 @@ def summary_events() -> list[dict]:
              "repository": "https://example.invalid/ubertooth.git"},
             # `--libbtbb-ref fork-pin` resolves to the commit the Ubertooth
             # commit pins, and records that name beside it.
-            {"name": "libbtbb", "requested_ref": "52b2afcb0c" + "1" * 30,
-             "ref_name": "fork-pin", "commit": "52b2afcb0c" + "1" * 30,
-             "short_commit": "52b2afc", "expected_revision": "git-52b2afc",
+            {"name": "libbtbb", "requested_ref": "7e1cdf0336" + "1" * 30,
+             "ref_name": "fork-pin", "commit": "7e1cdf0336" + "1" * 30,
+             "short_commit": "7e1cdf0", "expected_revision": "git-7e1cdf0",
              "repository": "https://example.invalid/libbtbb.git"},
         ],
         "invocations": [{
@@ -347,7 +347,7 @@ def summary_events() -> list[dict]:
                    {"kind": "expected", "name": "Host version libbtbb",
                     "found": True,
                     "matched": "Host tools version: libubertooth 1.07 "
-                               "(git-9903b42), libbtbb 1.3 (git-52b2afc)"},
+                               "(git-9903b42), libbtbb 1.3 (git-7e1cdf0)"},
                ]),
         record(5, "check_finished", "passed", "2026-11-05T09:12:33.300",
                phase="preflight", check_id="preflight-001-host-version",
@@ -392,15 +392,15 @@ class ConsoleSummaryTests(unittest.TestCase):
         self.assertIn(f"Ubertooth          main = 9903b4251f{'0' * 30} "
                       "(git-9903b42)", text)
         # A ref chosen elsewhere (the libbtbb a commit pins) is named as that.
-        self.assertIn(f"libbtbb            fork-pin at 52b2afcb0c{'1' * 30} "
-                      "(git-52b2afc)", text)
+        self.assertIn(f"libbtbb            fork-pin at 7e1cdf0336{'1' * 30} "
+                      "(git-7e1cdf0)", text)
 
     def test_the_version_line_is_one_line_however_it_was_recorded(self):
         # A build keeps the whole answer `-V` gave, which is more than one
         # line, and every row of this block is read by its alignment.
         answer = (
             "Host tools version: libubertooth 1.07 (git-9903b42), "
-            "libbtbb 1.3 (git-52b2afc)\n"
+            "libbtbb 1.3 (git-7e1cdf0)\n"
             "libbtbb loaded from: /usr/local/lib/libbtbb.so.1\n"
         )
         events = summary_events()
@@ -412,7 +412,7 @@ class ConsoleSummaryTests(unittest.TestCase):
                 if line.startswith("  ")]
         self.assertIn(
             "  host tools         Host tools version: libubertooth 1.07 "
-            "(git-9903b42), libbtbb 1.3 (git-52b2afc)",
+            "(git-9903b42), libbtbb 1.3 (git-7e1cdf0)",
             rows,
         )
         self.assertFalse([line for line in rows if "loaded from" in line])
@@ -442,7 +442,7 @@ class ConsoleSummaryTests(unittest.TestCase):
         # library they load (#294).
         self.assertIn(
             "host tools         Host tools version: libubertooth 1.07 "
-            "(git-9903b42), libbtbb 1.3 (git-52b2afc)",
+            "(git-9903b42), libbtbb 1.3 (git-7e1cdf0)",
             self.summary(),
         )
 
@@ -582,7 +582,7 @@ class BenchTools:
     def __init__(self, bench, revision):
         self.bench = bench
         self.line = (f"Host tools version: libubertooth 1.07 ({revision}), "
-                     "libbtbb 1.3 (git-52b2afc)\n")
+                     "libbtbb 1.3 (git-7e1cdf0)\n")
         self.answered = False
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
