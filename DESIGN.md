@@ -1054,9 +1054,15 @@ pins / reset-hold) that cannot be done remotely. Characterize this at the rack
 before relying on reset-into-new-image for unattended runs.
 
 **Version flags (how the harness identifies builds):**
-- `ubertooth-util -V` — the whole version report: the host tools (libubertooth
-  and libbtbb) version and git hash on its `Host tools version:` line, which
-  needs no device, then the firmware version and build of each attached board.
+- `ubertooth-util -V` — the whole version report: the host tools' version on
+  its `Host tools version:` line, which needs no device, then the firmware
+  version and build of each attached board. Since ubertooth#1230 that line
+  names the release the build came from with libbtbb's beside it
+  (`Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)`); before it,
+  the two library versions each with the commit they were built from, and a
+  `libbtbb loaded from:` line under it. The harness works out which a build
+  of the resolved commit reports (`ubertooth_harness/release.py`) and requires
+  the layout that goes with it, so older refs are still held to the old line.
   Forks before the one `-V` answer (ubertooth#813) answered the host line on
   `-H` instead, which preflight falls back to.
 - `ubertooth-util -v` — firmware revision alone (from device).

@@ -275,6 +275,11 @@ _HOST_VERSION_LINE_START = (
 # marks it: the version is a bare word, and a board's firmware lines under it
 # carry versions too.
 _RELEASE_LINE_START = rf"(?m)^{re.escape(HOST_VERSION_LABEL)} "
+# The libbtbb half of that line, whole: a version is there, and the bracket
+# closes at the end of the line. Required even where the check is only about
+# the tools' own half, because a line missing it is not the line the fork
+# prints and nothing should pass on half an answer.
+_LIBBTBB_BRACKET = r"\(libbtbb[ \t]+[^)\n]*[^)\s][ \t]*\)"
 
 
 def host_version_pattern(expected_revision: str, *, names_release: bool) -> str:
@@ -287,10 +292,12 @@ def host_version_pattern(expected_revision: str, *, names_release: bool) -> str:
     if names_release:
         # The libbtbb bracket must follow, which is also what ends the
         # version token: without it a longer release name starting with this
-        # one would match.
+        # one would match. The whole bracket, to the end of the line, because
+        # the line is exactly this and nothing else: a half-written one, and
+        # one with something after the bracket, are not the answer.
         return (
             rf"{_RELEASE_LINE_START}{revision_pattern(expected_revision)}"
-            r"[ \t]+\(libbtbb[ \t]"
+            rf"[ \t]+{_LIBBTBB_BRACKET}$"
         )
     # Spaces and tabs, not \s, so a match cannot run past the end of that
     # line onto the version of something else.
@@ -314,7 +321,7 @@ def libbtbb_version_pattern(expected_revision: str, *,
     if names_release:
         return (
             rf"{_RELEASE_LINE_START}\S+[ \t]+\(libbtbb[ \t]+"
-            rf"{revision_pattern(expected_revision)}\)"
+            rf"{revision_pattern(expected_revision)}\)$"
         )
     return (
         rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb[ \t]+\S+[ \t]+"
@@ -331,7 +338,7 @@ def libbtbb_reported_pattern(*, names_release: bool) -> str:
     if names_release:
         return (
             rf"{_RELEASE_LINE_START}\S+[ \t]+\(libbtbb[ \t]+"
-            r"(?P<value>[^)\n]*)\)"
+            r"(?P<value>[^)\n]*)\)$"
         )
     return (
         rf"{_HOST_VERSION_LINE_START}\b[^\n]*?\blibbtbb[ \t]+\S+[ \t]+"

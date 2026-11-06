@@ -1238,6 +1238,33 @@ class ReleaseVersionLineTests(unittest.TestCase):
         self.assertIn("identity mismatch",
                       check.result_failure(self.result(firmware_only)))
 
+    def test_the_line_has_to_be_the_whole_line(self):
+        """Half an answer, and something after it, are not that line.
+
+        The check is about the tools' own half, and it still requires the
+        libbtbb bracket: a line the fork never prints must not pass because
+        the pattern happened to stop before the broken part of it.
+        """
+        ubertooth = self.source("Ubertooth", self.RELEASE)
+        libbtbb = self.source("libbtbb", self.LIBBTBB_RELEASE, commit="b" * 40)
+        for patterns in (host_version_patterns(ubertooth),
+                         host_version_patterns(ubertooth, libbtbb)):
+            check = self.check(patterns)
+            for line in (
+                f"Host tools version: {self.RELEASE} (libbtbb ",
+                f"Host tools version: {self.RELEASE} (libbtbb)",
+                f"Host tools version: {self.RELEASE} (libbtbb "
+                f"{self.LIBBTBB_RELEASE}",
+                f"Host tools version: {self.RELEASE} (libbtbb "
+                f"{self.LIBBTBB_RELEASE}) and something else",
+            ):
+                with self.subTest(line=line, halves=len(patterns)):
+                    answer = self.ANSWER.replace(
+                        self.ANSWER.split("\n", 1)[0], line, 1
+                    )
+                    self.assertIn("identity mismatch",
+                                  check.result_failure(self.result(answer)))
+
     def test_the_libbtbb_half_is_read_off_the_new_line(self):
         identity = LibbtbbIdentity(
             self.LIBBTBB_RELEASE, LIBBTBB_RESOLVED_ORIGIN, "fix it",

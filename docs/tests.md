@@ -641,7 +641,8 @@ missing line. `-l` and `-d` both print a USR LED line, so that pair requires
 two of them. `-V` is left out of the compositions and gets two cases of its
 own that go the other way: since fork `f898fe5` it is the version command and
 ends the command, so `-V -s` and `-s -V` must each print the whole version
-answer (its four lines, in order) and no serial line. The fork sets the flags
+answer (its lines, in order, with the libbtbb path line among them on a
+commit that prints one) and no serial line. The fork sets the flags
 while it reads the command line and acts only once the whole line has parsed,
 so both orders must behave alike. Asking for `-V` beside the others would
 hide every query behind it.

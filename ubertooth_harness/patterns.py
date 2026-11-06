@@ -43,8 +43,13 @@ LIBBTBB_PATH_LINE = r"(?m)^libbtbb loaded from: \S"
 # error beside it. The libbtbb path line is optional, since only older
 # commits print one, and it may not stand anywhere else.
 VERSION_ANSWER = (
-    r"(?m)^Host tools version: \S[^\n]*\n"
-    r"(?:libbtbb loaded from: \S[^\n]*\n)?"
+    r"(?m)^Host tools version: "
+    # Each layout with the path line that goes with it, rather than one host
+    # line and an optional path line: no build prints a release name and a
+    # path line, and a pattern that took both would pass an answer no fork
+    # commit produces.
+    r"(?:libubertooth [^\n]*\nlibbtbb loaded from: \S[^\n]*"
+    r"|\S+[ \t]+\(libbtbb[ \t]+[^)\n]*\))\n"
     # Not "read failed" or "unavailable, <reason>", which is what the line
     # carries when the board answered nothing; the build line below is not
     # printed at all then, so this only says so in the pattern as well.

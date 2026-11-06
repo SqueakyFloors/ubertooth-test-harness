@@ -290,6 +290,32 @@ class PartsTests(unittest.TestCase):
         self.assertEqual(release.DEFAULT_LATEST_RELEASE,
                          release.latest_release("set(SOMETHING_ELSE 1)\n"))
 
+    def test_a_dirty_checkout_never_reaches_the_derivation(self):
+        """The `*` a modified tree gets is never predicted, and need not be.
+
+        Both fork derivations append it, and nothing here does, because a run
+        refuses a dirty source checkout before it resolves anything and
+        builds from a clean clone of it. So a reported `*` is a mismatch to
+        report rather than something to expect. This pins the refusal, which
+        is what makes that safe.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = Checkout(root / "dirty")
+            tree.tag("2026-11-DEV1")
+            tree.commit("work")
+            # Clean, so far: the release name, with no marker.
+            self.assertEqual("2026-11-DEV1+1", tree.version().value)
+
+            (tree.path / "file.txt").write_text("edited\n", encoding="utf-8")
+
+            from ubertooth_harness.manifest import (
+                GitRevisionResolver, ManifestError,
+            )
+            with self.assertRaises(ManifestError) as caught:
+                GitRevisionResolver().resolve("Ubertooth", tree.path, "HEAD")
+            self.assertIn("dirty", str(caught.exception))
+
     def test_a_path_that_is_no_checkout_reports_a_hash(self):
         with tempfile.TemporaryDirectory() as directory:
             os.makedirs(Path(directory) / "empty")
