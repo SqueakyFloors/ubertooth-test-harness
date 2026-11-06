@@ -318,6 +318,40 @@ class HealthyRunTests(SoakTestCase):
         self.assertEqual(0, self.summary()["process"]["forced_stops"])
 
 
+class TranscriptTests(SoakTestCase):
+    """The tool's own output: kept, bounded, and still read past the bound."""
+
+    def test_the_transcript_is_the_tools_output_and_nothing_else(self):
+        self.run_soak()
+        transcript = (self.out / "btle-0001.log").read_text(encoding="utf-8")
+        self.assertIn("AdvA:", transcript)
+        self.assertIn("Advertising / AA 8e89bed6", transcript)
+        self.assertNotIn("SOAK VERDICT", transcript)
+        kept = self.summary()["transcript"]
+        self.assertGreater(kept["kept_bytes"], 0)
+        self.assertEqual(0, kept["dropped_lines"])
+
+    def test_the_budget_is_the_whole_run_s_and_lines_past_it_are_still_read(self):
+        # A crowded channel prints megabytes a minute, and restarts and file
+        # rotations would multiply a per-attempt cap, so the budget belongs
+        # to the run. What a run loses past it is the per-packet text: the
+        # lines are still parsed, so the figures do not change.
+        self.set_tool(PAD_BYTES="4096")
+        addresssoak.MAX_LOG_BYTES, held = 2048, addresssoak.MAX_LOG_BYTES
+        self.addCleanup(setattr, addresssoak, "MAX_LOG_BYTES", held)
+        code, out, _err = self.run_soak(max_capture_bytes=2048)
+        self.assertEqual(addresssoak.EXIT_PASS, code, out)
+        summary = self.summary()
+        kept = summary["transcript"]
+        self.assertLessEqual(kept["kept_bytes"], 2048)
+        self.assertGreater(kept["dropped_lines"], 0)
+        self.assertGreaterEqual(summary["process"]["rotations"], 1)
+        # The second attempt's transcript shares the one budget, so it is
+        # almost nothing, and the packets were counted all the same.
+        self.assertGreater(summary["structural"]["advertiser_packets"], 0)
+        self.assertGreater(summary["text"]["advertiser_packets"], 0)
+
+
 class ParityTests(SoakTestCase):
 
     def test_a_text_only_capture_fails_the_parity_comparison(self):

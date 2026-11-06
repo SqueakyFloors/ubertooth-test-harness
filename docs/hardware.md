@@ -102,10 +102,19 @@ it from the deployed target runner, which keeps the run going after whatever
 started it disconnects. Two things it costs the host: the DK's serial port
 stays open for the run, and the capture file grows for as long as the run
 lasts — on a crowded advertising channel the capture holds every advertiser in
-range, not only this one, so the plan's `capture file limit` is what keeps a
-long run inside the host's disk. The run reports the capture process's
-resident memory from `ps`, which needs no privilege and nothing installed; a
-host that refuses to run `ps` costs the memory figures and nothing else.
+range, not only this one, so the plan's `capture file limit` is what keeps any
+one file manageable. **Check the host's free space before booking a long
+run**, because the total is the channel's traffic, not the advertiser's.
+Measured on this bench on 2026-11-05, channel 37, over a 30-second capture:
+1.3 MB of capture and 14 MB of the tool's own transcript, with 40116 packets
+from 6652 other addresses beside the advertiser's 225. At that rate three
+days of capture is on the order of ten gigabytes. The transcript has a
+run-wide budget of 64 MiB that restarts and file rotations cannot multiply
+(`addresssoak.MAX_LOG_BYTES`); every line is still read either way, so the
+figures do not change, and the run reports how much it kept. The run also
+reports the capture process's resident memory from `ps`, which needs no
+privilege and nothing installed; a host that refuses to run `ps` costs the
+memory figures and nothing else.
 
 Registered by its J-Link serial, quoted so leading zeros survive, plus the
 BLE address its `status` reports. That address is a static random address

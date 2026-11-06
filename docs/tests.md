@@ -2439,6 +2439,19 @@ as this run. The board's own leases are the harness's business
 (README, "Sharing boards: leases"); this is the last check before hours of
 capture.
 
+**Measured on the bench, 2026-11-05.** The `address-parity` suite at fork
+`828e7322`, one Ubertooth and one DK: the test took 66.8 s, both readers
+detected the advertiser in both judged on periods (first detection 0.064 s
+text, 0.062 s structural) and saw sustained presence in both; the text reader
+counted 226 of the advertiser's packets and the structural reader 225, over
+31 windows both of them agreed on, with no window either saw alone; the
+longest silence inside a judged period was 0.32 s; the capture process grew
+from 3804 to 4340 KiB over five samples; the final stop was a SIGTERM exit 0;
+the firmware reported no unrequested reset over three reads; and the restart
+probe recovered. The bench is crowded — 40116 packets from 6652 other
+addresses arrived in the same window, none of them recorded — which is what
+the capture file limit and the transcript budget are sized for.
+
 **Known limits.** The two readers keep different clocks by nature. The text
 reader's time is when the host read a line, which the tool's own stdio
 buffering delays by a block on a busy channel, and the structural reader's is

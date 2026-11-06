@@ -1564,7 +1564,11 @@ BLE address parity soak:
     capture was stopped or started, which is why the coverage floor exists
     and why the periods the run itself interrupted are allowed against it. A
     run the harness has to kill outright can leave the capture tool holding
-    the board, which the case's own cleanup then stops.
+    the board, which the case's own cleanup then stops. What the captures
+    cost the host is the channel's traffic rather than the advertiser's, so a
+    long run on a crowded channel wants its free space checked first; the
+    tool's own transcript is bounded for the whole run, so the figures hold
+    but the per-packet text past the budget is not kept.
   related:
     - ubertooth-test-harness#350
     - ubertooth#703

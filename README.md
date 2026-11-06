@@ -2449,8 +2449,14 @@ directory as it goes, and writes `summary.json` at the end, so a soak is
 reviewable while it runs and after the client has gone. Each capture attempt
 keeps its own `capture-NNNN.pcap` and the tool's own transcript in
 `btle-NNNN.log`, and a capture file that reaches the plan's `capture file
-limit` is rolled over at the start of an off period, so a run of days does
-not fill the host's disk. The short suite also asks for a `restart probe`:
+limit` is rolled over at the start of an off period, so no one file grows
+without bound. The transcript has a run-wide budget instead (64 MiB, shared
+across every attempt, so restarts and rotations cannot multiply it); every
+line is read whether or not it is kept, so the figures do not change, and the
+run reports how much it kept. What the captures themselves cost is the
+channel's traffic rather than the advertiser's, so check the host's free space
+before booking a long run; [`docs/hardware.md`](docs/hardware.md) has the
+measured rate. The short suite also asks for a `restart probe`:
 the driver kills the capture once, at the middle of the run, with no stop
 sent to the board -- the way a lost session ends one -- and the advertiser
 must be heard again afterwards, so a run carries evidence that the restart

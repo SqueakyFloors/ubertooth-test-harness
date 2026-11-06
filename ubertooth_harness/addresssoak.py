@@ -136,9 +136,13 @@ DEFAULT_TERM_GRACE_S = 3.0
 # A restart no more often than this, so a board that cannot capture at all
 # is not hammered.
 DEFAULT_RESTART_MIN_INTERVAL_S = 5.0
-# How much of each attempt's transcript is kept. A busy bench prints hundreds
-# of lines a second, so a 72-hour run would otherwise fill the run directory;
-# every line is still read, and the cap is recorded.
+# How much of the tool's own transcript the whole run keeps, shared across
+# every attempt. A crowded advertising channel is the case that decides this:
+# on the lab bench one 30-second capture printed 14 MB of transcript, which
+# over three days and the restarts and rotations of a long run would be
+# hundreds of gigabytes. Every line is still read, whether or not it is kept,
+# so the figures the verdict rests on do not change; what a run loses past
+# the budget is the per-packet text, and it is recorded how much.
 MAX_LOG_BYTES = 64 * 1024 * 1024
 # How much of a growing capture file is read per poll, so one tick's work is
 # bounded however far behind the reader is.
@@ -765,9 +769,10 @@ class Capture:
     MODE_WARNING = "is still in mode"
 
     def __init__(self, options: Options, index: int, sink: LineSink,
-                 clock=time.monotonic):
+                 clock=time.monotonic, max_log_bytes: int = MAX_LOG_BYTES):
         self.options = options
         self.clock = clock
+        self.max_log_bytes = max_log_bytes
         self.capture_path = options.out / f"capture-{index:04d}.pcap"
         self.log_path = options.out / f"btle-{index:04d}.log"
         self.argv = (TOOL, "-n", "-U", options.serial, f"-A{options.channel}",
@@ -799,7 +804,8 @@ class Capture:
             raise SoakError(f"cannot run {TOOL}: {error}") from error
         self.attempt.pid = self.process.pid
         self.reader = TranscriptReader(self.process.stdout, self.log_path, self.sink,
-                                       clock=self.clock)
+                                       clock=self.clock,
+                                       max_bytes=self.max_log_bytes)
         self.reader.start()
 
     def running(self) -> bool:
@@ -934,6 +940,11 @@ class Soak:
         self.forced_stops = 0
         self.schedule_errors = 0
         self.canceled = ""
+        # Shared by every attempt, so restarts and file rotations cannot
+        # multiply what the transcript costs (MAX_LOG_BYTES).
+        self.transcript_budget = MAX_LOG_BYTES
+        self.transcript_bytes = 0
+        self.transcript_dropped_lines = 0
         self.start_mono = clock()
         self.started_wall = wall()
         self.counter_before = None
@@ -1103,7 +1114,8 @@ class Soak:
         self.note_capture_gap(planned)
         self.capture_index += 1
         self.capture = Capture(self.options, self.capture_index, self.sink,
-                               clock=self.clock)
+                               clock=self.clock,
+                               max_log_bytes=max(0, self.transcript_budget))
         self.capture.start()
         ready = self.wait_until_capturing()
         self.last_packet_at = self.elapsed
@@ -1143,6 +1155,10 @@ class Soak:
         # the rest of the file before letting go of it.
         self.read_structural()
         attempt.records = self.capture.tail.records
+        if self.capture.reader is not None:
+            self.transcript_budget -= self.capture.reader.written_bytes
+            self.transcript_bytes += self.capture.reader.written_bytes
+            self.transcript_dropped_lines += self.capture.reader.dropped_lines
         self.capture.close()
         self.read_text()
         self.attempts.append(attempt)
@@ -1628,6 +1644,9 @@ class Soak:
             "text": {"advertiser_packets": self.text_packets,
                       "other_packets": self.other_packets,
                       "other_addresses": len(self.other_addresses)},
+            "transcript": {"kept_bytes": self.transcript_bytes,
+                            "budget_bytes": MAX_LOG_BYTES,
+                            "dropped_lines": self.transcript_dropped_lines},
             "structural": {"advertiser_packets": self.structural_packets,
                             "records": self.records_seen,
                             "records_not_advertiser_crc_valid": self.crc_dropped,
@@ -1676,6 +1695,9 @@ class Soak:
                   f"sustained, first detection {found['first_detection_s']}s")
         print(f"other traffic: {self.other_packets} packets from "
               f"{len(self.other_addresses)} other address(es), never recorded")
+        print(f"transcript: {self.transcript_bytes} of {MAX_LOG_BYTES} bytes kept, "
+              f"{self.transcript_dropped_lines} line(s) past the budget read but "
+              "not kept")
         print(f"parity: {parity['windows_both']} windows both, "
               f"{parity['windows_text_only']} text only, "
               f"{parity['windows_structural_only']} structural only, allowance "
