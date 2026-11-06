@@ -61,8 +61,10 @@ class FakeTools:
     refusal on the list speaks instead), channel-count-ignored (a channel
     count that lines up with nothing is taken), version-several-boards (-V
     answers for the first board of a list) and replay-several-boards (-i is
-    given a list). Three more add to a refusal that is otherwise right, which
-    a check for the message alone would accept: second-error-line,
+    given a list), dump-several-boards (-d is given one), and
+    list-checks-skipped (rx_split_list takes an empty entry and a list longer
+    than the tool reads). Three more add to a refusal that is otherwise right,
+    which a check for the message alone would accept: second-error-line,
     note-after-refusal and warning-after-refusal.
     ``missing`` tools are not installed; ``switch`` False is a library from
     before b6d8ede."""
@@ -260,7 +262,7 @@ class FakeTools:
         return ""
 
     @staticmethod
-    def _split_list(text, what):
+    def _split_list(text, what, bugs=frozenset()):
         """ubertooth-rx's rx_split_list(): the entries, or the one refusal.
 
         The empty-entry check comes before the limit, per entry, so a list
@@ -268,9 +270,9 @@ class FakeTools:
         """
         words = []
         for part in text.split(","):
-            if part == "":
+            if part == "" and "list-checks-skipped" not in bugs:
                 return None, f"error: the {what} list has an empty entry\n"
-            if len(words) == RX_MAX_BOARDS:
+            if len(words) == RX_MAX_BOARDS and "list-checks-skipped" not in bugs:
                 return None, (f"error: at most {RX_MAX_BOARDS} {what}s can be "
                               "given\n")
             words.append(part)
@@ -296,7 +298,7 @@ class FakeTools:
         values = dict(flags)
         boards = None
         if values.get("U") is not None:
-            boards, refused = self._split_list(values["U"], "board")
+            boards, refused = self._split_list(values["U"], "board", self.bugs)
             if refused:
                 return refused, 1
             if "board-twice-allowed" not in self.bugs:
@@ -308,7 +310,7 @@ class FakeTools:
                         return f"error: board {selector} is named twice\n", 1
         n_boards = len(boards) if boards else 1
         if values.get("c") is not None:
-            channels, refused = self._split_list(values["c"], "channel")
+            channels, refused = self._split_list(values["c"], "channel", self.bugs)
             if refused:
                 return refused, n_boards
             if (len(channels) not in (1, n_boards)
@@ -570,35 +572,68 @@ class MultiBoardRefusalTests(unittest.TestCase):
         self.assertLessEqual(set(self.SMOKE) | set(self.COMPREHENSIVE), set(full))
         for case_id in self.SMOKE + self.COMPREHENSIVE:
             case = full[case_id]
+            steps = [s for s in case.steps if s.step_id.startswith("refuse")]
             with self.subTest(case_id):
-                # No BlueZ, no board role, and one command under the switch.
+                # No BlueZ and no board role. A case that names a capture file
+                # refuses twice, once naming a new file and once a seeded one,
+                # so "creates nothing" and "truncates nothing" are both said.
                 self.assertEqual((), case.needs.bluez_tools)
-                refuse = case.steps[[s.step_id for s in case.steps].index("refuse")]
-                argv = refuse.resolve_argv({"capture dir": "/x"})
-                self.assertEqual(refusal_cases.NO_DEVICES + ("ubertooth-rx",),
-                                 argv[:3])
-                self.assertEqual((1,), refuse.expected_returncodes)
-                # The refusal must be one error: line on standard error, with
-                # standard output left empty and no board ever asked for.
-                self.assertIs(refuse.output_check,
-                              refusal_cases.nothing_on_stdout)
-                self.assertIn(refusal_cases.NO_BOARD_NOTE,
-                              refuse.forbidden_patterns)
-                # Exactly one error: line and no note or warning: a refusal
-                # that went on to say more would pass a check for its own
-                # message alone.
-                for pattern in refusal_cases._ONE_ERROR_ONLY:
-                    self.assertIn(pattern, refuse.forbidden_patterns)
-                # One expected message, so a case cannot quietly accept two.
-                self.assertEqual(1, len(refuse.output_patterns))
+                names = [s.step_id for s in steps]
+                self.assertIn(names, (["refuse"], ["refuse-new", "refuse-kept"]))
+                for refuse in steps:
+                    argv = refuse.resolve_argv({"capture dir": "/x"})
+                    self.assertEqual(refusal_cases.NO_DEVICES + ("ubertooth-rx",),
+                                     argv[:3])
+                    self.assertEqual((1,), refuse.expected_returncodes)
+                    # The refusal must be one error: line on standard error,
+                    # with standard output left empty and no board ever asked
+                    # for.
+                    self.assertIs(refuse.output_check,
+                                  refusal_cases.nothing_on_stdout)
+                    self.assertIn(refusal_cases.NO_BOARD_NOTE,
+                                  refuse.forbidden_patterns)
+                    # Exactly one error: line and no note or warning: a
+                    # refusal that went on to say more would pass a check for
+                    # its own message alone.
+                    for pattern in refusal_cases._ONE_ERROR_ONLY:
+                        self.assertIn(pattern, refuse.forbidden_patterns)
+                    # One expected message, so a case cannot quietly accept two.
+                    self.assertEqual(1, len(refuse.output_patterns))
+                if names == ["refuse-new", "refuse-kept"]:
+                    # The second command must name the seeded file, or the
+                    # pair says nothing more than the first alone.
+                    new, existing = (s.resolve_argv({"capture dir": "/x"})[-1]
+                                     for s in steps)
+                    self.assertTrue(new.endswith("/x/new." + new.rsplit(".", 1)[1]))
+                    self.assertTrue(existing.startswith("/x/kept."))
+                    self.assertEqual(new.rsplit(".", 1)[1],
+                                     existing.rsplit(".", 1)[1])
 
     def test_the_selectors_are_not_registry_serials(self):
         """No board is opened, so the selectors are invented; each must still
         begin with a letter, since libubertooth reads an all-digit selector as
-        a USB index rather than as a serial."""
-        for selector in refusal_cases._SEL:
-            self.assertRegex(selector, r"^[a-z][0-9a-z]+$")
-            self.assertFalse(selector.isdigit())
+        a USB index rather than as a serial. That covers the over-long list's
+        own nine entries too: a digit-only one there would be an index."""
+        selectors = list(refusal_cases._SEL) + refusal_cases._OVER_LONG.split(",")
+        self.assertEqual(3 + 9, len(selectors))
+        for selector in selectors:
+            with self.subTest(selector):
+                self.assertRegex(selector, r"^[a-z][0-9a-z]+$")
+                self.assertFalse(selector.isdigit())
+
+    def test_a_split_list_that_takes_what_the_tool_refuses_fails(self):
+        """An empty entry and a list longer than the eight boards a capture
+        reads are rx_split_list's own refusals. A fork that dropped them would
+        carry on with the list, so the four cases that cover them must fail:
+        the message they require never comes."""
+        summary, events = run(FakeTools(bugs=("list-checks-skipped",)))
+        self.assertFalse(summary.passed)
+        full = self._by_id("comprehensive")
+        failed = failed_names(events)
+        for case_id in ("rx-boards-empty-entry", "rx-channel-empty-entry",
+                        "rx-boards-over-long", "rx-channels-over-long"):
+            with self.subTest(case_id):
+                self.assertIn(full[case_id].name, failed)
 
     def test_fork_tools_pass_the_board_list_refusals(self):
         for coverage in ("smoke", "comprehensive"):

@@ -1065,9 +1065,11 @@ Refused command lines:
 
     The ubertooth-rx board list adds five refusals in smoke -- a board named
     twice, an empty list entry, a channel count that is neither one nor one
-    per board, and -d or -V beside several boards -- and four more in
+    per board, and -d or -V beside several boards -- and five more in
     comprehensive: an empty channel entry, a list longer than the eight boards
-    a capture reads in each of -U and -c, and -i beside several boards. Each
+    a capture reads in each of -U and -c, -i beside several boards, and a
+    board named twice beside a channel count that does not line up either.
+    Each
     requires exit 1 and pins the whole of what the tool said: that one error:
     line with no second error, note or warning line, and an empty standard
     output. Expecting the message alone would pass a tool that printed it and

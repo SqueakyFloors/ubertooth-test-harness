@@ -1696,8 +1696,10 @@ what the rest of this test already establishes. Five are in smoke: a board
 named twice (`-U <a>,<a>`), an empty list entry (`-U <a>,,<b>`), two channels
 for three boards (`-c` naming a count that is neither one nor one per board),
 `-d` beside several boards, and `-V` beside several boards. Comprehensive adds
-an empty channel entry, lists longer than the eight boards a capture reads (in
-each of `-U` and `-c`), and `-i` beside several boards. Each case requires
+five: an empty channel entry, lists longer than the eight boards a capture
+reads (in each of `-U` and `-c`), `-i` beside several boards, and a board
+named twice beside a channel count that does not line up either. Each case
+requires
 exit 1 and pins the whole of what the tool said: that one `error:` line and no
 second error, note, or warning line, and an **empty standard output**. Both
 halves matter. Expecting the message alone would pass a tool that printed it
