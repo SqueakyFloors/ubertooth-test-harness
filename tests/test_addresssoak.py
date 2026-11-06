@@ -145,6 +145,22 @@ sys.exit(0)
 """
 
 
+class SilentCapture:
+    """A capture that is running and has produced nothing, for the ladder."""
+
+    def __init__(self, records=0):
+        self.tail = type("Tail", (), {"records": records, "error": ""})()
+        self.attempt = addresssoak.Attempt(1, (), "capture-0001.pcap",
+                                           "btle-0001.log")
+        self.attempt.records = records
+
+    def running(self):
+        return True
+
+    def poll_records(self):
+        return []
+
+
 class ScheduledFirmware(FakeFirmware):
     """The fake DK, with its advertising state written where the tool sees it.
 
@@ -466,18 +482,71 @@ class LivenessTests(SoakTestCase):
         self.assertIn("no packet for", out)
         self.assertEqual(addresssoak.EXIT_FAIL, code)
 
-    def test_the_second_silent_restart_resets_the_board(self):
-        # The recovery ladder: a clean restart that still hears nothing is
-        # followed by one board reset before the next attempt.
-        self.set_tool(MODE="records", RATE="0.01")
-        # Long enough for three liveness restarts even on a loaded machine:
-        # the reset is the second rung, so it needs the first restart to have
-        # happened and the next capture to hear nothing either.
-        self.run_soak(max_restarts=9, duration=14, liveness_timeout=2)
-        self.assertGreaterEqual(self.summary()["process"]["board_resets"], 1)
-        resets = [record for record in self.progress()
-                  if record["record"] == "board_reset"]
-        self.assertTrue(resets)
+    def test_the_second_silent_restart_asks_for_a_board_reset(self):
+        """The ladder's second rung, decided rather than timed.
+
+        A run that reaches it needs two liveness timeouts in a row and the
+        restart interval between them, which is seconds of real waiting and
+        fits or does not fit depending on how loaded the machine is -- a CI
+        runner three modules deep could not. So the condition is driven
+        directly: an attempt that heard nothing, after a restart that had
+        already happened, is what asks for the reset, and `restart` is what
+        runs it.
+        """
+        soak = self.silent_soak()
+        soak.restarts = 1  # the clean restart has already been tried
+        self.quietly(soak.check_liveness)
+        self.assertTrue(soak.reset_next_restart)
+
+    def test_the_restart_that_follows_resets_the_board(self):
+        # The rung itself: `ubertooth-util -r`, counted, recorded, and
+        # followed by a watchdog read, which is where the firmware says
+        # where the board had been stuck.
+        soak = self.silent_soak(stub_restart=False)
+        soak.reset_next_restart = True
+        stopped = addresssoak.Attempt(1, (), "capture-0001.pcap", "btle-0001.log")
+        soak.stop_capture = lambda *a, **k: stopped
+        soak.start_capture = lambda *a, **k: None
+        self.quietly(soak.restart, "no packet for 3.0s")
+        self.assertEqual(1, soak.board_resets)
+        self.assertFalse(soak.reset_next_restart)
+        # Read before the reset and after it.
+        self.assertEqual(2, soak.watchdog_reads)
+
+    def test_the_first_silent_capture_is_restarted_without_a_reset(self):
+        # The first rung is a clean restart: the board is not reset until a
+        # restart has been tried and the capture still heard nothing.
+        soak = self.silent_soak()
+        self.quietly(soak.check_liveness)
+        self.assertFalse(soak.reset_next_restart)
+
+    def test_a_capture_that_heard_something_never_asks_for_a_reset(self):
+        soak = self.silent_soak(records=5)
+        soak.restarts = 1
+        self.quietly(soak.check_liveness)
+        self.assertFalse(soak.reset_next_restart)
+
+    def quietly(self, call, *arguments):
+        """Run it with the driver's own progress lines out of the way."""
+        out = io.StringIO()
+        with redirect_stdout(out):
+            return call(*arguments)
+
+    def silent_soak(self, records=0, stub_restart=True):
+        """A run whose capture is running and has heard nothing for a while."""
+        self.out.mkdir(parents=True, exist_ok=True)
+        options = addresssoak.options_from(addresssoak.build_parser().parse_args(
+            self.argv()))
+        soak = addresssoak.Soak(options, None)
+        soak.capture = SilentCapture(records)
+        # Longer ago than the liveness timeout the arguments carry.
+        soak.last_packet_at = soak.elapsed - options.liveness_timeout_s - 1
+        if stub_restart:
+            # The decision is what these tests are about, not the restart it
+            # leads to, which has its own test below.
+            soak.restart = lambda *args, **options: None
+        soak.board_after = {}
+        return soak
 
     def test_a_tool_that_ignores_sigterm_is_killed_and_the_run_fails(self):
         self.set_tool(IGNORE_SIGTERM="1")
