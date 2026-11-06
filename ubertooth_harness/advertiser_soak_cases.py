@@ -94,6 +94,7 @@ def timings(arguments: Mapping) -> addresssoak.Timings:
         detect_within_s=seconds(arguments["detect within"]),
         max_gap_s=seconds(arguments["maximum gap"]),
         sample_every_s=seconds(arguments["sample every"]),
+        restart_probe=arguments["restart probe"],
         interval_ms=arguments["interval"],
         min_packets_per_minute=arguments["minimum packets per minute"],
     )

@@ -213,6 +213,12 @@ class ArgumentTests(unittest.TestCase):
             ({"maximum gap": "5s"}, "is shorter than 'detect within'"),
             ({"maximum gap": "30s"}, "is not shorter than the 30s"),
             ({"presence window": "50ms"}, "'presence window' (0.05s) is shorter"),
+            # A probe needs a whole cycle after the midpoint it fires at, or
+            # its recovery could never be judged.
+            ({"duration": "2m", "advertiser on": "30s", "advertiser off": "30s",
+              "restart probe": True}, "at least three 60s schedule cycles"),
+            ({"capture file limit": 512, "capture budget": 256},
+             "larger than 'capture budget'"),
             ({"duration": "1m"}, "less than two 60s schedule cycles"),
             ({"sample every": "2h"}, "leaves fewer than three samples"),
             ({"sample every": "500ms"}, "'sample every' (0.5s) is shorter"),

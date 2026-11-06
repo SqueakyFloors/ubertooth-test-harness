@@ -138,6 +138,9 @@ POLL_S = 0.1
 # whole of this and no longer.
 UTIL_TIMEOUT_S = 10.0
 RESET_TIMEOUT_S = 20.0
+# Between tries of the watchdog read after a reset, as the harness's own
+# monitor pauses (watchdog.RECOVERY_PAUSE_S).
+WATCHDOG_RETRY_PAUSE_S = watchdog.RECOVERY_PAUSE_S
 # SIGTERM first, then this long before SIGKILL. #703's planned pattern says
 # three seconds; the harness's own measured bound for `ubertooth-btle` ending
 # after a signal is five (interrupt_cases.EXIT_DEADLINE_S), and a tool that
@@ -196,6 +199,9 @@ MAX_SUMMARY_ATTEMPTS = 40
 # How many of the places a board reset itself the summary names; every read is
 # in progress.jsonl.
 MAX_WATCHDOG_WHERE = 20
+# How many distinct unreadable-capture reasons the summary names; the count
+# is kept whole.
+MAX_CAPTURE_ERRORS = 20
 # How long a capture is given to open its file before the schedule starts
 # against it. Bounded by the liveness timeout as well, so this never delays
 # the rule that notices a capture which never starts at all.
@@ -613,6 +619,10 @@ class Timings:
     # the bench.
     interval_ms: int = 100
     min_packets_per_minute: int = 0
+    # Whether the run kills its own capture once, which the duration has to
+    # leave room for: the probe is only evidence if a period is judged after
+    # it (`probe_outcome`).
+    restart_probe: bool = False
 
 
 @dataclass
@@ -649,6 +659,7 @@ class Options:
 
     def timings(self) -> Timings:
         return Timings(
+            restart_probe=self.restart_probe,
             interval_ms=self.interval_ms,
             min_packets_per_minute=self.min_packets_per_minute,
             duration_s=self.duration_s, on_s=self.on_s, off_s=self.off_s,
@@ -722,6 +733,14 @@ def check_timings(options: Timings | Options) -> None:
             f"{options.on_s:g}s the advertiser is on, so no gap inside a period "
             "could ever reach it")
     cycle = options.on_s + options.off_s
+    if options.restart_probe and options.duration_s < 3 * cycle:
+        # The probe fires at the middle of the run and the period it lands in
+        # is not judged, so a whole cycle has to follow it for the recovery
+        # to be measured at all.
+        raise SoakError(
+            f"a restart probe needs a duration of at least three {cycle:g}s "
+            f"schedule cycles, so a whole period follows the probe; this is "
+            f"{options.duration_s:g}s")
     if options.duration_s < 2 * cycle:
         raise SoakError(
             f"the duration ({options.duration_s:g}s) is less than two "
@@ -891,13 +910,27 @@ def board_answers(serial: str) -> tuple[bool, str]:
     return False, reason or f"{UTIL} -v exited {result.returncode}"
 
 
-def read_watchdog(serial: str) -> tuple[watchdog.WatchdogRecord | None, str]:
-    """The firmware's watchdog record, or why there is none."""
-    result = run_util(serial, "-w")
-    text = (result.stdout or "") + (result.stderr or "")
-    record = watchdog.parse_report(text)
-    if record is not None:
-        return record, ""
+def read_watchdog(serial: str, tries: int = 1,
+                  pause_s: float = WATCHDOG_RETRY_PAUSE_S
+                  ) -> tuple[watchdog.WatchdogRecord | None, str]:
+    """The firmware's watchdog record, or why there is none.
+
+    ``tries`` is for the read after a reset, which is the one
+    SqueakyFloors/ubertooth#703 asks for by name: `ubertooth-util -r` waits
+    about two seconds for the board to come back and the board refuses every
+    request until the host has noticed it re-enumerate, so a single read
+    there is the one most likely to find nothing and record "the board did
+    not answer" for a board that is perfectly well.
+    """
+    text = ""
+    for attempt in range(max(1, tries)):
+        if attempt:
+            time.sleep(pause_s)
+        result = run_util(serial, "-w")
+        text = (result.stdout or "") + (result.stderr or "")
+        record = watchdog.parse_report(text)
+        if record is not None:
+            return record, ""
     if watchdog.board_unreachable(text):
         return None, "the board did not answer the watchdog read"
     return None, "this firmware does not report a watchdog record"
@@ -1169,6 +1202,8 @@ class Soak:
         # Problems a fault outside judge() has to add (report_error).
         self.extra_problems: list = []
         self.capture_errors: list = []
+        self.capture_error_count = 0
+        self._seen_capture_errors: set = set()
         self.attempts_forgotten = 0
         self.captures_removed = 0
         self.capture_bytes_removed = 0
@@ -1378,14 +1413,14 @@ class Soak:
             return
         records = self.capture.poll_records()
         error = self.capture.tail.error
-        if error and error not in self.capture_errors:
+        if error and error not in self._seen_capture_errors:
             # One corrupt record header, a file that is not a capture, or the
             # wrong link type stops the structural reader for the rest of the
             # attempt. Reported and judged: without this the run would fail
             # later for a reason that is a symptom (the readers disagreed, or
             # no advertiser packet at all) on the very fault this test is
             # here to diagnose.
-            self.capture_errors.append(error)
+            self._note_capture_error(error)
             say(f"capture {self.capture_index}: {error}")
             self.record({"record": "capture_unreadable",
                           "index": self.capture_index, "reason": error})
@@ -1531,7 +1566,7 @@ class Soak:
             # cannot be read to its end. After a kill it is ordinary.
             reason = (f"{attempt.capture} ends in {attempt.partial_tail_bytes} "
                       "bytes of an incomplete record")
-            self.capture_errors.append(reason)
+            self._note_capture_error(reason)
             say(f"capture {attempt.index}: {reason}")
             self.record({"record": "capture_unreadable", "index": attempt.index,
                           "reason": reason})
@@ -1539,6 +1574,18 @@ class Soak:
         self.capture = None
         self.prune_captures()
         return attempt
+
+    def _note_capture_error(self, reason: str) -> None:
+        """Record a capture that could not be read, bounded like the rest.
+
+        A run that keeps restarting would otherwise add one of these per
+        attempt and copy all of them into the summary; what a reader needs is
+        that it happened, how often, and the first few reasons.
+        """
+        self.capture_error_count += 1
+        self._seen_capture_errors.add(reason)
+        if len(self.capture_errors) < MAX_CAPTURE_ERRORS:
+            self.capture_errors.append(reason)
 
     def prune_captures(self) -> None:
         """Keep the newest captures inside the run's budget.
@@ -1549,10 +1596,14 @@ class Soak:
         """
         options = self.options
         kept = [attempt for attempt in self.attempts if not attempt.files_removed]
+        # Attempts whose files would not go away: passed over rather than
+        # returned on, so one of them cannot disable the budget for the rest
+        # of a run of days.
+        skipped: list = []
         # Never the last one standing: the newest capture is the one a reader
         # of a failed run wants, and "newest kept" is what this promises.
         while len(kept) > 1:
-            total = sum(attempt.bytes_kept for attempt in kept)
+            total = sum(attempt.bytes_kept for attempt in kept + skipped)
             over_budget = (options.capture_budget_bytes > 0
                            and total > options.capture_budget_bytes)
             if not over_budget and len(kept) <= MAX_KEPT_ATTEMPTS:
@@ -1572,16 +1623,16 @@ class Soak:
                 except OSError:
                     left.append(name)
             if left:
+                skipped.append(oldest)
                 # A file that is still there has not been given back to the
                 # filesystem, so this attempt stays in the accounting and
                 # the run says nothing it did not do. Earlier versions put
                 # it back after unlinking, which deleted the files and then
                 # re-targeted the same attempt for ever, leaving the budget
                 # disabled for the rest of the run.
-                kept.insert(0, oldest)
                 self.record({"record": "capture_not_removed",
                               "index": oldest.index, "files": left})
-                return
+                continue
             # Marked whether or not there were bytes to free: an attempt
             # whose files were empty, or never written, is still one fewer
             # attempt's worth of files in the directory.
@@ -1647,7 +1698,10 @@ class Soak:
             self.reset_next_restart = False
             if self.canceled:
                 return
-            self.read_watchdog_now("after a board reset")
+            # The board is re-enumerating, so this read is tried more than
+            # once (watchdog.RECOVERY_TRIES is the monitor's own number).
+            self.read_watchdog_now("after a board reset",
+                                    tries=watchdog.RECOVERY_TRIES)
         if self.canceled:
             return
         if self.elapsed - self.last_restart_at < self.options.restart_min_interval_s:
@@ -1663,9 +1717,9 @@ class Soak:
         if probe:
             self.probe_period_index = len(self.periods) - 1
 
-    def read_watchdog_now(self, when: str) -> None:
+    def read_watchdog_now(self, when: str, tries: int = 1) -> None:
         """Read the watchdog record while no capture is running."""
-        record, reason = read_watchdog(self.options.serial)
+        record, reason = read_watchdog(self.options.serial, tries)
         entry = {"record": "watchdog", "when": when, "reason": reason}
         if record is not None:
             change = watchdog.compare(self.watchdog_baseline, record)
@@ -1848,23 +1902,33 @@ class Soak:
             attempt = self.capture.attempt
             say(f"capture {attempt.index} exited {attempt.returncode} by itself"
                   + (f"; last error: {attempt.last_error}" if attempt.last_error else ""))
+            # The ladder is about a capture that brings nothing back,
+            # however it fails: a tool that exits at once reaches the reset
+            # rung as a silent one does.
+            self.reset_next_restart = self.needs_a_reset()
             self.restart(f"the process exited {attempt.returncode}")
             return
         quiet = self.elapsed - self.last_packet_at
         if quiet >= options.liveness_timeout_s:
             if self.elapsed - self.last_restart_at < options.restart_min_interval_s:
                 return
-            # This attempt's own packets, not the run's: a run whose first
-            # capture worked would otherwise never reach the reset rung,
-            # however many later captures heard nothing.
-            had_packets = (self.capture.tail.records > 0
-                           or self.attempt_text_packets > 0)
-            # Nothing at all from this attempt: a clean restart has not
-            # brought the capture back, so the next one is preceded by a
-            # board reset (#703's ladder).
-            self.reset_next_restart = not had_packets and self.restarts > 0
+            self.reset_next_restart = self.needs_a_reset()
             say(f"capture {self.capture_index}: no packet for {quiet:.1f}s, restarting")
             self.restart(f"no packet for {quiet:.1f}s")
+
+    def needs_a_reset(self) -> bool:
+        """Has a clean restart failed to bring this capture back?
+
+        The ladder's second rung: this attempt heard nothing at all, and a
+        restart has already been tried, so the next one is preceded by
+        ``ubertooth-util -r``. This attempt's own packets, not the run's: a
+        run whose first capture worked would otherwise never reach the rung,
+        however many later captures heard nothing.
+        """
+        if self.capture is None:
+            return False
+        heard = (self.capture.tail.records > 0 or self.attempt_text_packets > 0)
+        return not heard and self.restarts > 0
 
     def read_board_after(self) -> None:
         """The board answers, and what it is set to, once the capture is done."""
@@ -2200,9 +2264,9 @@ class Soak:
             problems.append(
                 "no captured packet carried the harness payload tag, so the address "
                 "may not be this advertiser's")
-        if self.capture_errors:
+        if self.capture_error_count:
             problems.append(
-                f"{len(self.capture_errors)} capture file(s) could not be read to "
+                f"{self.capture_error_count} capture file(s) could not be read to "
                 "the end: " + "; ".join(self.capture_errors[:3]))
         if not self.structural_packets:
             problems.append("the capture held no packet of the advertiser at all")
@@ -2241,6 +2305,14 @@ class Soak:
         if probe is False:
             problems.append("the advertiser was not heard again in the first judged "
                             "on period after the restart probe")
+        elif probe is None and options.restart_probe:
+            # The plan asked for the evidence, so a run that could not
+            # produce it has not met what it was asked for: passing while
+            # reporting "not established" would be a soak that never showed
+            # the restart path recovering.
+            problems.append(
+                "no judged advertiser on period followed the restart probe, so "
+                "whether the capture recovered was never measured")
         if self.sink.dropped:
             # The harness's own loss, not the board's: those are sightings
             # the text reader never saw, so the figures above are not the
@@ -2288,6 +2360,7 @@ class Soak:
             "structural": {"advertiser_packets": self.structural_packets,
                             "records": self.records_seen,
                             "unreadable_captures": list(self.capture_errors),
+                            "unreadable_capture_count": self.capture_error_count,
                             "records_not_advertiser_crc_valid": self.crc_dropped,
                             "payload_matches": self.payload_matches},
             "detection": self.detection(),
@@ -2436,8 +2509,15 @@ class Soak:
         # artifact of a run of days has to say how it came out.
         summary["verdict"] = verdict
         summary["problems"] = list(self.problems)
-        (self.options.out / "summary.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # Written beside and renamed into place: a canceled run has about
+        # two seconds before the harness kills it, and a truncate-then-write
+        # interrupted in the middle would leave an empty file where the one
+        # machine-readable artifact of a run of days should be.
+        final_path = self.options.out / "summary.json"
+        beside = final_path.with_suffix(".json.part")
+        beside.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                          encoding="utf-8")
+        os.replace(beside, final_path)
         self.record({"record": "finished", "verdict": verdict,
                       "problems": list(self.problems)})
         for problem in self.problems:
@@ -2487,7 +2567,44 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _check_values(args) -> None:
+    """Refuse a figure the catalog would refuse, for a run started by hand.
+
+    The driver is documented as runnable on its own, so the contract cannot
+    live only in the catalog: a negative budget read as "no budget" would
+    quietly turn the disk bound off.
+    """
+    for name, value in (("--presence-windows", args.presence_windows),
+                        ("--min-packets-per-minute", args.min_packets_per_minute),
+                        ("--max-restarts", args.max_restarts),
+                        ("--max-capture-bytes", args.max_capture_bytes),
+                        ("--max-total-capture-bytes", args.max_total_capture_bytes),
+                        ("--max-memory-growth-kb", args.max_memory_growth_kb)):
+        if value is not None and value < 0:
+            raise SoakError(f"{name} cannot be negative (got {value})")
+    if args.presence_windows < 1:
+        raise SoakError("--presence-windows must be at least 1")
+    for name, value in (("--min-detection-share", args.min_detection_share),
+                        ("--max-disagreement-share", args.max_disagreement_share)):
+        if not 0 < value <= 1:
+            raise SoakError(f"{name} must be a fraction above 0 and at most 1 "
+                            f"(got {value})")
+    for name, value in (("--duration", args.duration),
+                        ("--advertiser-on", args.advertiser_on),
+                        ("--advertiser-off", args.advertiser_off),
+                        ("--sample-every", args.sample_every),
+                        ("--presence-window", args.presence_window),
+                        ("--liveness-timeout", args.liveness_timeout),
+                        ("--detect-within", args.detect_within),
+                        ("--max-gap", args.max_gap),
+                        ("--term-grace", args.term_grace),
+                        ("--restart-min-interval", args.restart_min_interval)):
+        if value < 0:
+            raise SoakError(f"{name} cannot be negative (got {value})")
+
+
 def options_from(args) -> Options:
+    _check_values(args)
     payload = "" if args.payload.lower() == "none" else args.payload.lower()
     return Options(
         out=Path(args.out),

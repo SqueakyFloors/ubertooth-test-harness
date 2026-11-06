@@ -285,6 +285,15 @@ def _check_address_soak(arguments) -> None:
     through the same conversion the driver's own command line gets, so the
     plan is judged by what will really run.
     """
+    if arguments["capture file limit"] > arguments["capture budget"]:
+        # The budget is what the run's captures may cost altogether, so a
+        # per-file limit above it would prune down to one over-budget file
+        # at every rotation. Here rather than in the driver because it is a
+        # relationship between two plan figures, like the rest.
+        raise CatalogError(
+            f"'capture file limit' ({arguments['capture file limit']} MiB) is "
+            f"larger than 'capture budget' ({arguments['capture budget']} MiB), "
+            "which is what the whole run's captures may cost")
     try:
         addresssoak.check_timings(advertiser_soak_cases.timings(arguments))
     except addresssoak.SoakError as error:

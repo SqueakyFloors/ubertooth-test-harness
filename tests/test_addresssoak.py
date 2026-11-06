@@ -146,16 +146,25 @@ sys.exit(0)
 
 
 class SilentCapture:
-    """A capture that is running and has produced nothing, for the ladder."""
+    """A capture that has produced nothing, for the recovery ladder.
+
+    ``exited`` stands for a tool that has already gone, which is the other
+    way the ladder is reached.
+    """
 
     def __init__(self, records=0):
         self.tail = type("Tail", (), {"records": records, "error": ""})()
         self.attempt = addresssoak.Attempt(1, (), "capture-0001.pcap",
                                            "btle-0001.log")
         self.attempt.records = records
+        self.attempt.returncode = 1
+        self.exited = False
 
     def running(self):
-        return True
+        return not self.exited
+
+    def finish(self):
+        return self.attempt
 
     def poll_records(self):
         return []
@@ -513,6 +522,24 @@ class LivenessTests(SoakTestCase):
         # Read before the reset and after it.
         self.assertEqual(2, soak.watchdog_reads)
 
+    def test_a_capture_that_dies_at_once_reaches_the_reset_rung_too(self):
+        # The death #703 names first. The rung used to be reachable only
+        # through the silence branch, so a board whose tool exited at once
+        # restarted every few seconds for the rest of the window and the
+        # reset the ladder specifies never ran.
+        soak = self.silent_soak()
+        soak.restarts = 1
+        soak.capture.exited = True
+        self.quietly(soak.check_liveness)
+        self.assertTrue(soak.reset_next_restart)
+
+    def test_a_capture_that_dies_after_hearing_something_asks_for_no_reset(self):
+        soak = self.silent_soak(records=5)
+        soak.restarts = 1
+        soak.capture.exited = True
+        self.quietly(soak.check_liveness)
+        self.assertFalse(soak.reset_next_restart)
+
     def test_the_first_silent_capture_is_restarted_without_a_reset(self):
         # The first rung is a clean restart: the board is not reset until a
         # restart has been tried and the capture still heard nothing.
@@ -594,7 +621,10 @@ class ProbeTests(SoakTestCase):
         self.assertIsNot(True, summary["process"]["probe_recovered"])
         self.assertIn("restart probe: ", out)
         self.assertNotIn("restart probe: recovered", out)
-        self.assertIn(code, (addresssoak.EXIT_PASS, addresssoak.EXIT_FAIL))
+        # Either way it fails: the advertiser was not heard again, or no
+        # judged period followed the probe and the plan asked for evidence
+        # that cannot then be given.
+        self.assertEqual(addresssoak.EXIT_FAIL, code, out)
 
     def test_a_capture_that_keeps_dying_is_restarted_and_recorded_each_time(self):
         self.set_tool(ONCE=str(self.root / "ran-once"), EXIT_AFTER="2",
@@ -989,7 +1019,6 @@ class VerdictTests(unittest.TestCase):
         seen = self.seen_throughout()
         for index in range(periods):
             self.add_period(soak, "on", index=index, text=seen, structural=seen)
-        soak.minute_packets = {minute: 60 for minute in range(0, 200)}
         return soak
 
     def test_a_healthy_run_has_nothing_to_report(self):
@@ -1013,7 +1042,6 @@ class VerdictTests(unittest.TestCase):
         for index in range(4):
             self.add_period(soak, "on", index=index, text=[0.5, 11.0],
                             structural=[0.5, 11.0])
-        soak.minute_packets = {minute: 60 for minute in range(200)}
         problems = soak.judge()
         self.assertTrue(any("sustained presence (5 x 2s windows) in 0 of 4"
                             in problem for problem in problems), problems)
@@ -1042,7 +1070,6 @@ class VerdictTests(unittest.TestCase):
         # The probe's own period, and the one the duration ended.
         self.add_period(soak, "on", index=3, planned_gaps=1)
         self.add_period(soak, "on", index=4, cut_by_duration=True, seconds=3.0)
-        soak.minute_packets = {minute: 60 for minute in range(200)}
         self.assertEqual([], soak.judge())
         self.assertEqual({"ran": 5, "ended_by_the_run": 1, "cut_short": 0,
                           "schedule_error": 0, "capture_gap": 1,
@@ -1055,7 +1082,6 @@ class VerdictTests(unittest.TestCase):
             self.add_period(soak, "on", index=index, text=seen, structural=seen)
         self.add_period(soak, "on", index=4, schedule_error="'adv start' failed twice")
         soak.schedule_errors = 1
-        soak.minute_packets = {minute: 60 for minute in range(200)}
         problems = soak.judge()
         # Reported twice, and both are true: the schedule is not known, and
         # the run could not judge enough of what it ran because of it. A
@@ -1177,7 +1203,6 @@ class VerdictTests(unittest.TestCase):
         # limit is inside the allowance, which is there for an outlier.
         self.add_period(soak, "on", index=3, text=[0.5], structural=[0.5])
         self.add_period(soak, "on", index=4, text=[0.5], structural=[0.5])
-        soak.minute_packets = {minute: 60 for minute in range(200)}
         problems = soak.judge()
         self.assertEqual(29.5, soak.gaps()["structural_max_s"])
         self.assertTrue(any("gap with no advertiser packet longer than 10s"
@@ -1261,12 +1286,16 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("the advertiser was not heard again in the first judged on "
                       "period after the restart probe", soak.judge())
 
-    def test_a_probe_with_no_judged_period_after_it_claims_nothing(self):
+    def test_a_probe_with_no_judged_period_after_it_is_a_failure(self):
+        # The plan asked for evidence that the restart path recovers, so a
+        # run that could not produce it has not met what it was asked for.
         soak = self.healthy()
         soak.options.restart_probe = True
         soak.probe_period_index = 10  # after every period the run had
         self.assertIsNone(soak.probe_outcome())
-        self.assertEqual([], soak.judge())
+        self.assertIn("no judged advertiser on period followed the restart probe, "
+                      "so whether the capture recovered was never measured",
+                      soak.judge())
 
     def test_a_cancellation_is_its_own_reason(self):
         soak = self.healthy()
@@ -1433,9 +1462,14 @@ class SideTests(unittest.TestCase):
         side.close(end, start)
         return side
 
-    def test_windows_come_from_the_time_inside_the_period(self):
+    def test_windows_come_from_the_run_s_own_clock(self):
+        # The index is the run's, not the period's, which is what makes a
+        # window's neighbour its neighbour across a period boundary
+        # (VerdictTests covers the comparison that rests on it).
         side = self.side([0.1, 0.9, 1.2, 5.5])
         self.assertEqual({0, 1, 5}, side.windows)
+        later = self.side([10.1, 11.2], start=10.0, end=12.0)
+        self.assertEqual({10, 11}, later.windows)
         self.assertEqual(4, side.packets)
         self.assertEqual(0.1, side.first)
         self.assertEqual(5.5, side.last)
