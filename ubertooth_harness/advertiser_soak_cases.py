@@ -45,7 +45,7 @@ from ubertooth_harness.stateful import (
     require,
 )
 from ubertooth_harness.transitions import (
-    MODE_RESET_SETTINGS,
+    RESTORED_SETTINGS,
     _cleanup,
     _read_originals,
     _serial,
@@ -155,7 +155,10 @@ def _soak_case(serial: str, dk: Mapping, arguments: Mapping) -> StateCase:
     duration = arguments["duration"]
     steps = (
         _stop(serial, "establish-idle", "Establish idle before reading"),
-        *_read_originals(serial, MODE_RESET_SETTINGS),
+        # Every setting ubertooth-util can write back, not only the ones a
+        # mode stop clears: the recovery ladder may run `ubertooth-util -r`,
+        # a full reset, which also returns the PA level to its boot default.
+        *_read_originals(serial, RESTORED_SETTINGS),
         Step("soak",
              f"ubertooth-btle -n -A{arguments['channel']} for {duration}, read as "
              "AdvA text and as capture records",
@@ -173,11 +176,12 @@ def _soak_case(serial: str, dk: Mapping, arguments: Mapping) -> StateCase:
         f"A {duration} advertising capture: the text and record readers agree "
         "about a known address",
         steps,
-        (_dk_idle(dk),) + _cleanup(serial, MODE_RESET_SETTINGS),
+        (_dk_idle(dk),) + _cleanup(serial, RESTORED_SETTINGS),
         expected_state=(
             "the advertiser met the configured detection objective, both readers "
             "agreed, the capture never died unexplained and stopped cleanly, and "
-            "the board answers with its channel, squelch, and LEDs restored"),
+            "the board answers with its channel, PA level, squelch, and LEDs "
+            "restored"),
         capture_dir=True,
     )
 

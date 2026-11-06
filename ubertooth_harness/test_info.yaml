@@ -1512,8 +1512,11 @@ BLE address parity soak:
     One Ubertooth, selected by serial and receiving only, and one nRF52840 DK
     advertising its registered address on one channel at normal BLE power.
     The DK is flashed when it reports a firmware version other than the one
-    the harness pins, so the run holds the host lock; nothing else is
-    written, and no power is switched. The Ubertooth's channel, squelch, and
+    the harness pins, so the run holds the host lock for its whole window --
+    on the longest suite that is three days in which no other command on that
+    host may write firmware or switch power, which is why these runs are
+    booked rather than scheduled; nothing else is written, and no power is
+    switched. The Ubertooth's channel, squelch, and
     LEDs are recorded before the run and restored afterwards, and the DK is
     left idle in the advertiser role. The board's watchdog record is read
     before the run, after each restart, and at the end, while no capture is

@@ -56,6 +56,10 @@ pad = int(os.environ.get("FAKE_BTLE_PAD_BYTES", "0"))
 # Stamp the records this far from the host clock, which is what the board's
 # own clock drifting (or losing a wrap) does over a long capture.
 offset = float(os.environ.get("FAKE_BTLE_TIME_OFFSET", "0"))
+# Write one record header claiming an impossible length this many seconds in,
+# which is a capture file that cannot be read past that point.
+bad_record_after = float(os.environ.get("FAKE_BTLE_BAD_RECORD_AFTER", "0"))
+wrote_bad_record = False
 if os.environ.get("FAKE_BTLE_IGNORE_SIGTERM"):
     signal.signal(signal.SIGTERM, lambda *a: None)
 
@@ -93,6 +97,10 @@ while True:
             # After the first couple of seconds, which is a clock that
             # stepped rather than one that was always offset: an anchor
             # absorbs a constant offset, and a step is the fault.
+            if (bad_record_after and not wrote_bad_record
+                    and now - started >= bad_record_after):
+                wrote_bad_record = True
+                handle.write(struct.pack("<IIII", int(now), 0, 1 << 30, 1 << 30))
             stamp = now + (offset if now - started > 2 else 0)
             handle.write(fake_advertiser.pcap_record(
                 data, int(stamp), int((stamp % 1) * 1e9)))
@@ -440,8 +448,8 @@ class LivenessTests(SoakTestCase):
         # Nothing arrives at all, which is the production rule: no packet of
         # any address for the timeout means the capture is not working.
         self.set_tool(MODE="records", RATE="0.01")
-        code, out, _err = self.run_soak(max_restarts=5, duration=6,
-                                        liveness_timeout=1.5)
+        code, out, _err = self.run_soak(max_restarts=5, duration=8,
+                                        liveness_timeout=2)
         self.assertGreaterEqual(self.summary()["process"]["restarts"], 1)
         self.assertIn("no packet for", out)
         self.assertEqual(addresssoak.EXIT_FAIL, code)
@@ -450,7 +458,10 @@ class LivenessTests(SoakTestCase):
         # The recovery ladder: a clean restart that still hears nothing is
         # followed by one board reset before the next attempt.
         self.set_tool(MODE="records", RATE="0.01")
-        self.run_soak(max_restarts=5, duration=8, liveness_timeout=1.5)
+        # Long enough for three liveness restarts even on a loaded machine:
+        # the reset is the second rung, so it needs the first restart to have
+        # happened and the next capture to hear nothing either.
+        self.run_soak(max_restarts=9, duration=14, liveness_timeout=2)
         self.assertGreaterEqual(self.summary()["process"]["board_resets"], 1)
         resets = [record for record in self.progress()
                   if record["record"] == "board_reset"]
@@ -571,6 +582,18 @@ class BudgetTests(SoakTestCase):
         self.assertTrue(removals)
         self.assertIn("budget", removals[0]["reason"])
 
+    def test_the_newest_attempt_is_never_pruned(self):
+        # "Newest kept" is what the budget promises, and the newest capture
+        # is the one a reader of a failed run wants: a budget smaller than
+        # one attempt must not leave an empty directory.
+        self.set_tool(PAD_BYTES="8192")
+        code, out, _err = self.run_soak(max_capture_bytes=2048,
+                                        max_total_capture_bytes=1)
+        self.assertEqual(addresssoak.EXIT_PASS, code, out)
+        attempts = self.summary()["attempts"]
+        self.assertFalse(attempts[-1]["files_removed"])
+        self.assertTrue((self.out / attempts[-1]["capture"]).is_file())
+
     def test_no_budget_removes_nothing(self):
         self.set_tool(PAD_BYTES="8192")
         self.run_soak(max_capture_bytes=2048, max_total_capture_bytes=0)
@@ -605,6 +628,25 @@ class OffPeriodTests(SoakTestCase):
         quiet = self.summary()["off_quiet"]
         self.assertGreater(quiet["periods"], 0)
         self.assertEqual(0, quiet["noisy"])
+
+
+class UnreadableCaptureTests(SoakTestCase):
+    """A capture the structural reader cannot read is named, not guessed at."""
+
+    def test_a_corrupt_record_header_fails_the_run_with_its_own_reason(self):
+        # Without this the run fails later for a symptom -- the readers
+        # disagreed, or no advertiser packet at all -- on the very fault this
+        # test exists to find.
+        self.set_tool(BAD_RECORD_AFTER="1")
+        code, out, _err = self.run_soak()
+        self.assertEqual(addresssoak.EXIT_FAIL, code)
+        self.assertIn("capture file(s) could not be read to the end", out)
+        errors = self.summary()["structural"]["unreadable_captures"]
+        self.assertTrue(errors)
+        self.assertIn("more than", errors[0])
+        records = [record for record in self.progress()
+                   if record["record"] == "capture_unreadable"]
+        self.assertTrue(records)
 
 
 class RecordClockTests(SoakTestCase):
@@ -819,7 +861,8 @@ class VerdictTests(unittest.TestCase):
 
     def test_window_disagreements_beyond_the_allowance_fail(self):
         soak = self.healthy()
-        # One reader saw a window the other did not, in every period.
+        # One reader saw a window the other did not, nowhere near one of
+        # theirs, in every period.
         for period in soak.periods:
             period.text.windows.add(99)
         parity = soak.parity()
@@ -827,6 +870,60 @@ class VerdictTests(unittest.TestCase):
         problems = soak.judge()
         self.assertTrue(any("the readers disagreed about 4 of" in problem
                             for problem in problems), problems)
+
+    def test_a_window_beside_one_the_other_reader_had_is_not_a_disagreement(self):
+        # Both readers see their packets after the fact, through buffers that
+        # do not fill together, so a packet near a window's edge lands either
+        # side of it. What the comparison is for is a reader that missed the
+        # advertiser, which is a run of windows away from the other's.
+        soak = self.healthy()
+        period = soak.periods[0]
+        self.assertEqual(0, period.disagreements())
+        # One window past the end of what both readers had: beside theirs.
+        edge = max(period.structural.windows) + 1
+        period.text.windows.add(edge)
+        self.assertEqual(0, period.disagreements())
+        self.assertEqual(0, soak.parity()["disagreements"])
+        self.assertEqual(1, soak.parity()["windows_text_only"])
+        # One nowhere near it is a disagreement, and is judged.
+        period.text.windows.add(edge + 50)
+        self.assertEqual(1, period.disagreements())
+        self.assertEqual(1, soak.parity()["disagreements"])
+
+    def test_a_reader_that_missed_a_whole_period_is_still_caught(self):
+        soak = self.healthy()
+        soak.periods[0].structural = addresssoak.Side()
+        parity = soak.parity()
+        self.assertGreater(parity["disagreements"], parity["allowance"])
+        self.assertTrue(any("the readers disagreed about" in problem
+                            for problem in soak.judge()), soak.judge())
+
+    def test_a_window_beside_one_the_other_reader_had_is_not_a_disagreement(self):
+        # Both readers see their packets after the fact, through buffers that
+        # do not fill together, so a packet near a window's edge lands either
+        # side of it. What the comparison is for is a reader that missed the
+        # advertiser, which is a run of windows away from the other's.
+        soak = self.healthy()
+        period = soak.periods[0]
+        self.assertEqual(0, period.disagreements())
+        # One window past the end of what both readers had: beside theirs.
+        edge = max(period.structural.windows) + 1
+        period.text.windows.add(edge)
+        self.assertEqual(0, period.disagreements())
+        self.assertEqual(0, soak.parity()["disagreements"])
+        self.assertEqual(1, soak.parity()["windows_text_only"])
+        # One nowhere near it is a disagreement, and is judged.
+        period.text.windows.add(edge + 50)
+        self.assertEqual(1, period.disagreements())
+        self.assertEqual(1, soak.parity()["disagreements"])
+
+    def test_a_reader_that_missed_a_whole_period_is_still_caught(self):
+        soak = self.healthy()
+        soak.periods[0].structural = addresssoak.Side()
+        parity = soak.parity()
+        self.assertGreater(parity["disagreements"], parity["allowance"])
+        self.assertTrue(any("the readers disagreed about" in problem
+                            for problem in soak.judge()), soak.judge())
 
     def test_the_allowance_is_a_share_of_the_windows_either_reader_saw(self):
         soak = self.healthy()
@@ -956,12 +1053,18 @@ class TimingTests(unittest.TestCase):
             ({"detect_within_s": 40.0}, "'detect within' (40s) is longer"),
             ({"windows_needed": 40}, "sustained presence"),
             ({"liveness_timeout_s": 30.0}, "'liveness timeout' (30s) is not longer"),
+            ({"liveness_timeout_s": 35.0},
+             "an off period and the wait for the next detection (30s + 10s)"),
             ({"max_gap_s": 5.0}, "'maximum gap' (5s) is shorter than 'detect "
                                  "within'"),
             ({"max_gap_s": 30.0}, "'maximum gap' (30s) is not shorter than the "
                                   "30s"),
             ({"window_s": 0.05}, "'presence window' (0.05s) is shorter"),
             ({"sample_every_s": 0.5}, "'sample every' (0.5s) is shorter"),
+            ({"on_s": 0.5}, "'advertiser on' (0.5s) is shorter than 1s"),
+            ({"off_s": 0.5}, "'advertiser off' (0.5s) is shorter than 1s"),
+            ({"duration_s": 86400.0 * 3, "on_s": 1.0, "off_s": 1.0},
+             "more than 20000"),
             ({"duration_s": 60.0}, "less than two 60s schedule cycles"),
             ({"sample_every_s": 300.0}, "'sample every' (300s) leaves fewer"),
         ):
@@ -1103,6 +1206,22 @@ class PcapTailTests(unittest.TestCase):
         tail = self.tail()
         self.assertEqual([], tail.poll())
         self.assertIn("not PCAP", tail.error)
+        self.assertEqual([], tail.poll())
+
+    def test_a_record_claiming_more_than_a_capture_holds_is_refused(self):
+        # One corrupt record header would otherwise make the reader hold
+        # every later read until that many bytes arrived, which on a run of
+        # days is the whole capture in memory.
+        data = fake_advertiser.record(ADDRESS)
+        bad = bytearray(fake_advertiser.pcap_record(data, 1, 0))
+        bad[8:12] = (addresssoak.PcapTail.MAX_RECORD_LEN + 1).to_bytes(4, "little")
+        self.path.write_bytes(fake_advertiser.PCAP_HEADER + bytes(bad))
+        tail = self.tail()
+        self.assertEqual([], tail.poll())
+        self.assertIn("more than", tail.error)
+        self.assertIn("262144", tail.error)
+        # And it stops there rather than reading on past a file it cannot
+        # make sense of.
         self.assertEqual([], tail.poll())
 
     def test_a_capture_of_another_link_type_is_refused(self):

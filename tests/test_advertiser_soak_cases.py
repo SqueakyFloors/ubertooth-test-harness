@@ -57,10 +57,14 @@ class CaseTests(unittest.TestCase):
 
     def test_the_soak_case_reads_and_restores_the_board(self):
         soak = self.cases()[1]
+        # Every setting ubertooth-util can write back, because the recovery
+        # ladder may run a full reset, which also returns the PA level.
         self.assertEqual(
-            ["establish-idle", "read-original-channel", "read-original-squelch",
-             "read-original-leds", "soak"],
+            ["establish-idle", "read-original-channel", "read-original-pa-level",
+             "read-original-squelch", "read-original-leds", "soak"],
             [step.step_id for step in soak.steps])
+        self.assertIn("restore-pa-level",
+                      [step.step_id for step in soak.cleanup])
         # The DK is released first, then the board is stopped and restored.
         self.assertEqual("advertiser-idle", soak.cleanup[0].step_id)
         self.assertEqual("cleanup-stop", soak.cleanup[1].step_id)
@@ -202,7 +206,9 @@ class ArgumentTests(unittest.TestCase):
         for extra, reason in (
             ({"detect within": "40s"}, "is longer than the 30s"),
             ({"presence windows": 40}, "sustained presence"),
-            ({"liveness timeout": "30s"}, "is not longer than the 30s"),
+            ({"liveness timeout": "30s"},
+             "an off period and the wait for the next detection"),
+            ({"advertiser on": "500ms"}, "'advertiser on' (0.5s) is shorter"),
             ({"maximum gap": "5s"}, "is shorter than 'detect within'"),
             ({"maximum gap": "30s"}, "is not shorter than the 30s"),
             ({"presence window": "50ms"}, "'presence window' (0.05s) is shorter"),

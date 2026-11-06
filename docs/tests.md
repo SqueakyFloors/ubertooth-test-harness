@@ -2319,6 +2319,16 @@ allowance that is a share of the windows either reader saw it in, so the
 allowance scales with the run instead of being a count that is strict at one
 duration and meaningless at another.
 
+A window **beside** one the other reader had is not counted at all. Both
+readers see their packets after the fact, through buffers that do not fill
+together: the tool's own output reaches the pipe a stdio block at a time, and
+its capture file reaches the disk the same way, so a packet near a window's
+edge lands either side of it depending on which buffer flushed first. The
+bench measured exactly that — two windows the record reader had alone in a
+one-minute run of 238 packets, with nothing wrong. What the comparison is for
+is a reader that misses the advertiser while the other sees it, and that is a
+run of windows rather than an edge.
+
 **The schedule is checked in both directions.** The on periods are where
 detection is measured; the off periods are where the schedule itself is
 checked. An advertiser that accepts `adv stop` and keeps advertising would
@@ -2342,8 +2352,12 @@ first packet would fail, or as long as an on period, which no gap inside one
 could ever reach; a duration shorter than two schedule cycles; a sampling
 interval that would leave fewer than three samples; and a presence window or
 a sampling interval too short to run for days (a window is held per reader
-per period, and each sample is a synced record). The driver makes the same
-checks from the same code when it is run by hand.
+per period, and each sample is a synced record); a schedule leg under a
+second, or a duration and a schedule that together make more periods than a
+run can hold; and a liveness timeout that does not clear an off period *and*
+the wait for the next period's first packet, which is the quiet stretch a
+healthy run really has. The driver makes the same checks from the same code
+when it is run by hand.
 
 **Hardware and arguments.** One `Ubertooth`, selected by serial and receiving
 only, and one `advertiser` (nRF52840 DK) with a registered J-Link serial and
@@ -2363,8 +2377,10 @@ disagreement share:` for how far the readers may differ; `maximum restarts:`
 for how many unplanned restarts still pass; `maximum memory growth:`, which
 only applies a limit when a plan sets one; `restart probe:`, which kills the
 capture once at the middle of the run; and `capture file limit:`, in MiB,
-which rolls the capture over to a new file at the start of an off period so a
-run of days does not leave gigabytes in the run directory.
+which rolls the capture over to a new file at the start of an off period; and
+`capture budget:`, also in MiB, which is what the whole run's captures may
+cost (past it the oldest complete capture and its transcript are removed,
+newest kept, each removal recorded).
 
 **Plans.** `testplans/address-soak.yaml`, four suites, none of them in `fast`
 or in the non-soak `release` plan: `address-parity` (about a minute of
@@ -2411,7 +2427,10 @@ readers disagreed about no more windows than the allowance; no on period held
 a silence longer than `maximum gap`; the rate over the minutes the advertiser
 was on cleared `minimum packets per minute`; at least one captured packet
 carried the harness payload tag, so the address is this advertiser's and not
-a collision; there were no more unplanned restarts than the budget; the final
+a collision; every capture file could be read to its end; the advertiser fell
+quiet in every judged off period; the capture process died of its own accord
+no more often than the restart budget allows; there were no more unplanned
+restarts than the budget; the final
 stop was a clean one (SIGTERM, within its grace, no kill needed); every
 schedule command reached the DK; and the board answered every read
 afterwards. Each failed objective is its own `FAIL:` line and the step
@@ -2464,6 +2483,13 @@ the firmware reported no unrequested reset over three reads; and the restart
 probe recovered. The bench is crowded — 40116 packets from 6652 other
 addresses arrived in the same window, none of them recorded — which is what
 the capture file limit and the transcript budget are sized for.
+
+**The host lock, for three days.** The test flashes the DK when it runs
+another firmware version, so it is declared as a test that writes firmware,
+and a run therefore holds the harness's host lock for its whole window
+(README, "The host lock"). On the 72-hour suite that means no other command
+on that host may write firmware or switch USB power for three days, on any
+board. That is the other reason these runs are booked rather than scheduled.
 
 **Known limits.** The two readers keep different clocks by nature. The text
 reader's time is when the host read a line, which the tool's own stdio

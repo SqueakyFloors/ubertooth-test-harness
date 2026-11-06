@@ -2424,6 +2424,11 @@ both readers, the readers in agreement, no gap beyond the configured limit,
 no restart beyond the budget, a clean final stop, and a board that answers
 afterwards; every figure is reported with its distribution either way.
 
+The test flashes the DK when it runs another firmware version, so a run holds
+the [host lock](#the-host-lock) for its whole window: on the 72-hour suite no
+other command on that host may write firmware or switch power for three days.
+Book these runs rather than scheduling them beside other bench work.
+
 Four suites, none of them in `fast` or in the non-soak `release` plan: a
 `address-parity` run of about a minute for development and a short bench
 check, then `address-soak-4h`, `address-soak-24h`, and `address-soak-72h`,

@@ -10,7 +10,8 @@ Run as a script by the `BLE address parity soak` case::
         --detect-within S --min-detection-share F --max-gap S
         --min-packets-per-minute N --max-disagreement-share F
         --max-restarts N [--max-memory-growth-kb N] [--restart-probe]
-        [--max-capture-bytes N] [--term-grace S] [--restart-min-interval S]
+        [--max-capture-bytes N] [--max-total-capture-bytes N]
+        [--term-grace S] [--restart-min-interval S]
 
 One Ubertooth, pinned by serial, runs ``ubertooth-btle -n -U <serial>
 -A<channel> -q <file>``: advertising only, never following a connection, with
@@ -135,8 +136,12 @@ POLL_S = 0.1
 # whole of this and no longer.
 UTIL_TIMEOUT_S = 10.0
 RESET_TIMEOUT_S = 20.0
-# SIGTERM first, then this long before SIGKILL: the planned pattern of #703.
-DEFAULT_TERM_GRACE_S = 3.0
+# SIGTERM first, then this long before SIGKILL. #703's planned pattern says
+# three seconds; the harness's own measured bound for `ubertooth-btle` ending
+# after a signal is five (interrupt_cases.EXIT_DEADLINE_S), and a tool that
+# takes four would otherwise be killed here and fail a three-day run at its
+# last step while passing `Interrupting a capture`.
+DEFAULT_TERM_GRACE_S = 5.0
 # A restart no more often than this, so a board that cannot capture at all
 # is not hammered.
 DEFAULT_RESTART_MIN_INTERVAL_S = 5.0
@@ -176,6 +181,9 @@ DEFAULT_CAPTURE_BUDGET_BYTES = 4 * 1024 * 1024 * 1024
 MAX_KEPT_ATTEMPTS = 64
 # How many attempts the summary carries in full; progress.jsonl holds them all.
 MAX_SUMMARY_ATTEMPTS = 40
+# How many of the places a board reset itself the summary names; every read is
+# in progress.jsonl.
+MAX_WATCHDOG_WHERE = 20
 # How long a capture is given to open its file before the schedule starts
 # against it. Bounded by the liveness timeout as well, so this never delays
 # the rule that notices a capture which never starts at all.
@@ -185,6 +193,11 @@ CAPTURE_READY_TIMEOUT_S = 10.0
 # a sample is a record written and synced.
 MIN_WINDOW_S = 0.1
 MIN_SAMPLE_EVERY_S = 1.0
+# The shortest leg of the schedule, and the most periods a run may hold: each
+# period is kept for the whole run, for the detection and parity figures, and
+# each one writes two synced progress records.
+MIN_SCHEDULE_LEG_S = 1.0
+MAX_PERIODS = 20000
 # How long into an off period the advertiser may still be heard. The stop is
 # a shell command and the packets already on the air, and already in the
 # tool's own buffers, arrive after it; what is judged is the rest of the
@@ -454,6 +467,12 @@ class Side:
         }
 
 
+def _lonely_windows(mine: set, theirs: set) -> int:
+    """How many of ``mine`` have no window of ``theirs`` beside them."""
+    return sum(1 for window in mine
+               if not {window - 1, window, window + 1} & theirs)
+
+
 @dataclass
 class Period:
     """One leg of the advertiser's schedule, as it was really applied."""
@@ -489,8 +508,21 @@ class Period:
         return 0.0 if self.ended is None else self.ended - self.started
 
     def disagreements(self) -> int:
-        """Windows one reader found the address in and the other did not."""
-        return len(self.text.windows ^ self.structural.windows)
+        """Windows one reader found the address in and the other did not.
+
+        A window next to one the other reader did have is not counted. Both
+        readers see their packets later than the packets themselves -- the
+        tool's own output goes through a stdio buffer on its way to the pipe,
+        and its capture file through another on its way to the disk -- and
+        the two buffers do not fill together, so a packet near a window's
+        edge lands either side of it depending on which buffer flushed
+        first. The bench showed exactly that: two windows the record reader
+        had alone in a one-minute run of 238 packets, with nothing wrong.
+        What the comparison is for is a reader that misses the advertiser
+        while the other sees it, which is a run of windows and not an edge.
+        """
+        return (_lonely_windows(self.text.windows, self.structural.windows)
+                + _lonely_windows(self.structural.windows, self.text.windows))
 
     def to_dict(self) -> dict:
         return {
@@ -587,6 +619,21 @@ def check_timings(options: Timings | Options) -> None:
     """
     if isinstance(options, Options):
         options = options.timings()
+    # A schedule in milliseconds is legal as a duration and would leave a
+    # three-day run holding a million periods and writing a synced record for
+    # each of them, so both the leg and the number of legs are bounded.
+    for name, seconds in (("advertiser on", options.on_s),
+                          ("advertiser off", options.off_s)):
+        if seconds < MIN_SCHEDULE_LEG_S:
+            raise SoakError(
+                f"'{name}' ({seconds:g}s) is shorter than {MIN_SCHEDULE_LEG_S:g}s; "
+                "every leg of the schedule is a period the run holds")
+    periods = 2 * options.duration_s / (options.on_s + options.off_s)
+    if periods > MAX_PERIODS:
+        raise SoakError(
+            f"{options.duration_s:g}s of {options.on_s:g}s on and "
+            f"{options.off_s:g}s off is about {periods:.0f} periods, more than "
+            f"{MAX_PERIODS}; the run holds every one of them")
     # Each reason names the figure as a plan writes it ('detect within') and
     # not as this command line spells it, because a plan is where these are
     # usually wrong and the catalog raises these same words (the driver's
@@ -601,10 +648,15 @@ def check_timings(options: Timings | Options) -> None:
             f"sustained presence ({options.windows_needed} x "
             f"{options.window_s:g}s windows) does not fit in the "
             f"{options.on_s:g}s the advertiser is on")
-    if options.liveness_timeout_s <= options.off_s:
+    # The quiet stretch a healthy run really has is an off period and then
+    # the wait for the next period's first packet, so the timeout has to
+    # clear both; clearing the off period alone would restart the capture
+    # every cycle on a bench where nothing else is advertising.
+    if options.liveness_timeout_s <= options.off_s + options.detect_within_s:
         raise SoakError(
             f"'liveness timeout' ({options.liveness_timeout_s:g}s) is not "
-            f"longer than the {options.off_s:g}s the advertiser is off, so the "
+            f"longer than an off period and the wait for the next detection "
+            f"({options.off_s:g}s + {options.detect_within_s:g}s), so the "
             "schedule's own silence would restart the capture")
     # A gap is measured inside one on period, from its start to its end, so
     # the limit has to sit between the detection deadline -- every period's
@@ -1011,10 +1063,10 @@ class Soak:
         self.sink = LineSink()
         self.periods: list[Period] = []
         self.attempts: list[Attempt] = []
-        self.watchdog_reads: list[dict] = []
+        self.watchdog_reads = 0
+        self.watchdog_where: list = []
         self.watchdog_baseline = None
         self.watchdog_resets = 0
-        self.watchdog_where: list[str] = []
         self.samples = 0
         self.rss_first = None
         self.rss_last = None
@@ -1022,6 +1074,7 @@ class Soak:
         self.minute_packets: dict[int, int] = {}
         self.other_packets = 0
         self.attempt_text_packets = 0
+        self.capture_errors: list = []
         self.captures_removed = 0
         self.capture_bytes_removed = 0
         self.other_addresses: set = set()
@@ -1223,6 +1276,18 @@ class Soak:
         if self.capture is None:
             return
         records = self.capture.poll_records()
+        error = self.capture.tail.error
+        if error and error not in self.capture_errors:
+            # One corrupt record header, a file that is not a capture, or the
+            # wrong link type stops the structural reader for the rest of the
+            # attempt. Reported and judged: without this the run would fail
+            # later for a reason that is a symptom (the readers disagreed, or
+            # no advertiser packet at all) on the very fault this test is
+            # here to diagnose.
+            self.capture_errors.append(error)
+            say(f"capture {self.capture_index}: {error}")
+            self.record({"record": "capture_unreadable",
+                          "index": self.capture_index, "reason": error})
         if records:
             # Any record at all is the capture working, whether or not
             # libbtbb printed an AdvA line for it: the liveness rule is about
@@ -1301,7 +1366,10 @@ class Soak:
         while self.clock() < deadline and not self.canceled:
             if self.capture is None or not self.capture.running():
                 return None
-            if self.capture.tail.open_header() or self.capture.tail.error:
+            if self.capture.tail.error:
+                # Not readable at all; read_structural records and judges it.
+                return None
+            if self.capture.tail.open_header():
                 return self.clock() - started
             time.sleep(POLL_S)
         return None
@@ -1344,7 +1412,9 @@ class Soak:
         """
         options = self.options
         kept = [attempt for attempt in self.attempts if not attempt.files_removed]
-        while kept:
+        # Never the last one standing: the newest capture is the one a reader
+        # of a failed run wants, and "newest kept" is what this promises.
+        while len(kept) > 1:
             total = sum(attempt.bytes_kept for attempt in kept)
             over_budget = (options.capture_budget_bytes > 0
                            and total > options.capture_budget_bytes)
@@ -1417,6 +1487,11 @@ class Soak:
             time.sleep(max(0.0, self.options.restart_min_interval_s
                            - (self.elapsed - self.last_restart_at)))
         self.last_restart_at = self.elapsed
+        if self.canceled:
+            # Starting a tool the teardown is about to stop would cost the
+            # board a mode change for nothing, and the harness kills this
+            # process about two seconds after it cancels a step.
+            return
         self.start_capture(reason, planned=probe)
         if probe:
             self.probe_period_index = len(self.periods) - 1
@@ -1435,9 +1510,12 @@ class Soak:
                 self.watchdog_baseline = record
             elif change.reset_itself:
                 self.watchdog_resets += change.new_resets
-                self.watchdog_where.append(record.last_reset_where())
+                if len(self.watchdog_where) < MAX_WATCHDOG_WHERE:
+                    self.watchdog_where.append(record.last_reset_where())
             entry["watchdog"] = record.to_dict()
-        self.watchdog_reads.append(entry)
+        # Counted, not kept: a run that restarts for three days reads the
+        # record thousands of times, and progress.jsonl holds every one.
+        self.watchdog_reads += 1
         self.record(entry)
 
     # -- sampling ---------------------------------------------------------
@@ -1643,9 +1721,15 @@ class Soak:
                                   or period.seconds < self.options.on_s * 0.9)),
             "schedule_error": sum(1 for period in ran if period.schedule_error),
             "capture_gap": sum(1 for period in ran if period.capture_gap),
+            # Credited against the coverage floor, so it is only the periods
+            # whose one trouble was the run's own doing: a period that was
+            # also cut short, or whose schedule command failed, was not
+            # judgeable for a reason the run did not choose.
             "planned_capture_gap": sum(
                 1 for period in ran
-                if period.planned_gaps and not period.unplanned_gaps),
+                if period.planned_gaps and not period.unplanned_gaps
+                and not period.cut_by_duration and not period.schedule_error
+                and period.seconds >= self.options.on_s * 0.9),
         }
 
     def detection(self) -> dict:
@@ -1731,17 +1815,23 @@ class Soak:
 
     def parity(self) -> dict:
         both = text_only = structural_only = 0
+        disagreements = 0
         for period in self.periods:
             both += len(period.text.windows & period.structural.windows)
             text_only += len(period.text.windows - period.structural.windows)
             structural_only += len(period.structural.windows - period.text.windows)
-        disagreements = text_only + structural_only
+            # Not text_only + structural_only: a window beside one the other
+            # reader had is the two buffers flushing at different moments,
+            # not a reader that missed the advertiser (Period.disagreements).
+            disagreements += period.disagreements()
         seen = both + disagreements
         allowance = max(1, math.ceil(seen * self.options.max_disagreement_share))
         return {
             "windows_both": both,
             "windows_text_only": text_only,
             "windows_structural_only": structural_only,
+            # Of the windows above, the ones with no window of the other
+            # reader's beside them, which is what the allowance is against.
             "disagreements": disagreements,
             "windows_seen": seen,
             "allowance": allowance,
@@ -1859,6 +1949,10 @@ class Soak:
             problems.append(
                 "no captured packet carried the harness payload tag, so the address "
                 "may not be this advertiser's")
+        if self.capture_errors:
+            problems.append(
+                f"{len(self.capture_errors)} capture file(s) could not be read to "
+                "the end: " + "; ".join(self.capture_errors[:3]))
         if not self.structural_packets:
             problems.append("the capture held no packet of the advertiser at all")
         if self.restarts > options.max_restarts:
@@ -1927,6 +2021,7 @@ class Soak:
                             "dropped_lines": self.transcript_dropped_lines},
             "structural": {"advertiser_packets": self.structural_packets,
                             "records": self.records_seen,
+                            "unreadable_captures": list(self.capture_errors),
                             "records_not_advertiser_crc_valid": self.crc_dropped,
                             "payload_matches": self.payload_matches},
             "detection": self.detection(),
@@ -1945,7 +2040,7 @@ class Soak:
                          "forced_stops": self.forced_stops,
                          "board_resets": self.board_resets,
                          "probe_recovered": self.probe_outcome()},
-            "watchdog": {"reads": len(self.watchdog_reads),
+            "watchdog": {"reads": self.watchdog_reads,
                           "unrequested_resets": self.watchdog_resets,
                           "where": self.watchdog_where},
             "board_after": self.board_after,
@@ -2025,7 +2120,7 @@ class Soak:
               f"{sum(a.legacy_death_lines for a in self.attempts)} line(s) matching the "
               "older capture-died wording")
         say(f"watchdog: {self.watchdog_resets} unrequested reset(s) over "
-              f"{len(self.watchdog_reads)} read(s)"
+              f"{self.watchdog_reads} read(s)"
               + ("; " + "; ".join(self.watchdog_where) if self.watchdog_where else ""))
         if self.options.restart_probe:
             probe = summary["process"]["probe_recovered"]
