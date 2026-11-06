@@ -1461,6 +1461,31 @@ line, no usage text, nothing created or changed anywhere in the directory),
 and `-s` decoding the same as without it, with `-h` listing `-s` as the
 default.
 
+**Which note each command line prints.** libbtbb reports a clock out of the
+address-part search as a CLK6 note only when it already held the UAP, which is
+the UAP a caller stated; a UAP it worked out for itself is reported as the UAP
+note in the same place. So the two command lines are checked for different
+notes. `-l` alone must print the UAP note and then the start of the CLK1-27
+search (`<n> initial CLK1-27 candidates`), because the packet whose CRC
+settles a discovered UAP settles CLK1-6 with it and the clock search carries
+on from that packet; a CLK6 note there is forbidden, since printing one is the
+earlier behavior, where the address-part search ran again on every later
+packet, reported CLK1-6 over and over, and reached no clock
+([libbtbb#137](https://github.com/SqueakyFloors/libbtbb/pull/137), taken on by
+the fork in
+[ubertooth#1135](https://github.com/SqueakyFloors/ubertooth/pull/1135)).
+Comprehensive's correct `-u` is the other half: there the CLK6 note is
+required, at offset 0, with the candidates after it. The `-l` case is the one
+that guards against a return to the earlier behavior, and it is in smoke, so
+it runs with no board in CI; the `-u` case prints the same notes under either
+library and could not tell them apart
+([harness#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341)).
+What the `-l` case can no longer pin is the settled CLK1-6 itself: nothing it
+prints names that offset, since the note that carried it is the one this
+command line does not print, and the candidate count is matched as `<n>`
+rather than as a figure of the library's own. The `-u` case is where offset 0
+is still required.
+
 Six of the smoke cases are about where a capture goes
 ([`stdoutdest.py`](../ubertooth_harness/stdoutdest.py) puts the descriptors
 where the case needs them, since a harness step otherwise runs with the
@@ -2740,14 +2765,18 @@ count of the room rather than of the decoder.
 pins, a payload-bearing record always names a transport — the library names
 one whenever it produced a payload, and an abandoned trial clock clears the
 transport and the payload together — so a libbtbb that stopped filling the
-field in would pass here. It is accepted because the *harness's* own
-`LIBBTBB_PIN` still predates
-[libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133) and names no
-transport at all, so a strict default would fail every payload-bearing record
-of a run built at the harness's own pin, and a floor is no substitute at 11
-payload-bearing records in 2620. Tightening it is
+field in would pass here. What it covers is a run that names a libbtbb from
+before [libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133)
+itself, which names no transport at all. A run that takes the fork's pin, as a
+deployed runner's `fork-pin` does, has named transports since that change; the
+*harness's* own `LIBBTBB_PIN` and the README's example refs named an older one
+until
+[#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341)
+moved them, and those were the runs the escape was written for. A floor is no
+substitute either way, at 11 payload-bearing records in 2620. Dropping it is
 [#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339),
-which waits on that pin rather than on a decision.
+whose one precondition, that pin, is now met; it is left there because it
+changes the rule a live capture is judged by, which is that issue's subject.
 
 On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the
