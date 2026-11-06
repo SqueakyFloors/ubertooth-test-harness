@@ -1896,22 +1896,6 @@ Follow Classic piconet over HCI:
     - ubertooth#518
     - ubertooth#316
 
-CLI usage smoke:
-  purpose: >-
-    A catalog entry for exercising host tool usage paths. No implementation
-    yet, and superseded in practice: Host CLI surface covers -h and -V on
-    every C host tool the fork builds, and Help smoke covers the single-tool
-    case.
-  theory: >-
-    Not established.
-  hardware: >-
-    No board. Nothing transmits.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Superseded in practice by Host CLI surface.
-  related: []
-
 BLE soak:
   purpose: >-
     A catalog entry for a long BLE monitoring run with periodic sampling. No

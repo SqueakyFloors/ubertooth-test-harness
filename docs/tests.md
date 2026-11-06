@@ -46,7 +46,18 @@ built from it, so `ubertooth-btle -U <serial> -n -A<channel> -q <case dir>/le.pc
 is one line however many channels the profile runs. A harness driver the test
 runs is written as the module it is, `esp32peer.py stream ... -- <tool ...>`,
 with the tool it wraps; the interpreter in front of it is the harness's own
-environment and is left out. The commands every transition case shares (the
+environment and is left out.
+
+`<peer options>` is the one placeholder several sections share. It is the
+eleven options every `esp32peer.py` session carries to bring the pair's link
+up: `--acceptor`, `--acceptor-address`, `--acceptor-alias`, `--initiator`,
+`--initiator-address`, `--initiator-alias`, `--period`, `--payload`,
+`--min-seconds`, `--min-writes`, and `--timeout`. "Capture known Classic
+device" writes them out with values; every later section collapses them,
+because what differs between those tests is the tool inside the session and
+not the session.
+
+The commands every transition case shares (the
 idle stop, the reads it records, the restores, and the guard reads) are in
 "What every test shares" below rather than repeated in each section.
 `tests/test_tests_document.py` checks that every executable a test's cases
@@ -2236,9 +2247,12 @@ refusal.py seed <case dir> <names>
 capturefile.py --packets <case dir>/new.pcap
 ```
 
-`<fixture>` is each input `rxreplay.py` builds: `replay.bin`, and the
-`partial`, `skipped` and `truncated` ones, which is where the three
-destinations are taken back or kept together. `<destination>` is what the
+`<fixture>` is each input the three-destination replay is given, which is
+where the three files are taken back or kept together: `no-record.bin` (the
+`partial` variant, which reads no whole record), `skipped-record.bin`
+(`skipped`) and `tail-cut.bin` (`truncated`), which do. `replay.bin`, the
+`full` variant, is written out above on the lines that give one destination.
+`<destination>` is what the
 `no-record.bin` line gives one `-q`: a symbolic link, and `/dev/null`. The
 three directory destinations have lines of their own above, the seeded ones
 belong to the `ubertooth-btle` and `ubertooth-dump` lines, and `-q -` to the
@@ -2376,7 +2390,14 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.bin \
     -d <case dir>/synthetic.dfu -r     # signs, then stops at the board lookup
 dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <reference> \
     --reference-name <name>
-dfuimage.py copy|strip|same|regular|state|not-root ...
+dfuimage.py copy <case dir>/synthetic.bin|synthetic.dfu <case dir>/<name>
+dfuimage.py same <case dir>/target.dfu <case dir>/synthetic.bin
+dfuimage.py strip <case dir>/synthetic.dfu <case dir>/readonly.bin --read-only
+dfuimage.py strip <test image> <case dir>/build.bin
+dfuimage.py regular <case dir>/image.dfu [--mode 600]
+dfuimage.py state <case dir>|<case dir>/ro [--before <directory before>] \
+    [--allow <file>]
+dfuimage.py not-root
 mkdir <case dir>/ro                # read-only, and folder.bin, folder.dfu:
                                    # a directory where a file is expected
 ln -s target.dfu <case dir>/image.dfu   # the .dfu link a signing replaces
@@ -2635,7 +2656,12 @@ installs the plugin in a Wireshark configuration of its own and runs the real
 `tshark` against it:
 
 ```text
-nrfdk.py identify|ensure|advertise|stop|idle --jlink <jlink serial> --alias <alias> ...
+nrfdk.py identify  --jlink <jlink serial> --alias <alias>
+nrfdk.py ensure    --jlink <jlink serial> --alias <alias> --address <DK address> \
+    --hex <nRF52840 advertiser image>
+nrfdk.py advertise --jlink <jlink serial> --alias <alias> --chmap 37 \
+    --interval 100 --payload <tag>
+nrfdk.py stop|idle --jlink <jlink serial> --alias <alias>
 tsharkcapture.py capture --interface ubertooth<serial> --seconds <duration> \
     --address <DK address> --min-packets 1 --held ubertooth<serial>
 ```
@@ -2649,6 +2675,10 @@ tsharkcapture.py capture ... --interrupt-after <seconds>
 
 `tshark -i ubertooth<serial>` is what the driver runs, with
 `-T fields -e btle.advertising_address -e btle.advertising_header.pdu_type`.
+
+`ensure` takes `--hex` only where the run carries the `nRF52840 advertiser`
+artifact, and every `nrfdk.py` command takes `--port <serial device>` where
+the registry names one; see "Capture known BLE advertiser" above for both.
 
 **Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
 pinned firmware at its registered address, then the plugin's listing names
@@ -2720,7 +2750,8 @@ of the capture, `ubertooth-btle` takes it, and `advcapture.py` decodes it:
 
 ```text
 nrfdk.py identify  --jlink <jlink serial> --alias <alias>
-nrfdk.py ensure    --jlink <jlink serial> --alias <alias> --address <DK address>
+nrfdk.py ensure    --jlink <jlink serial> --alias <alias> --address <DK address> \
+    --hex <nRF52840 advertiser image>
 nrfdk.py advertise --jlink <jlink serial> --alias <alias> --chmap <channel> \
     --interval <ms> --payload <tag> --type <nonconn|conn>
 nrfdk.py stop|idle --jlink <jlink serial> --alias <alias>
@@ -2733,10 +2764,15 @@ advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel>
 advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel> --absent
 ```
 
-Every `nrfdk.py` command also takes `--port <serial device>` where the
-registry names one for that DK; without it the driver derives the VCOM0 path
-from the J-Link serial, which is what the example bench does and so what the
-commands above show.
+Two options above are conditional. Every `nrfdk.py` command also takes
+`--port <serial device>` where the registry names one for that DK; without it
+the driver derives the VCOM0 path from the J-Link serial, which is what the
+example bench does and so what the commands above show. And `ensure` is given
+`--hex` only where the run carries the `nRF52840 advertiser` artifact. With
+it, a board reporting another firmware version is flashed with that image;
+without it, a board already on the pinned version passes and one on anything
+else fails, naming the `--artifact` to run with. One image holds every role,
+so the label is the same whichever role the DK is brought up in.
 
 **Expected outcome.** Smoke runs 6 cases: the DK is confirmed to run the
 pinned firmware at its registered address; `ubertooth-btle -n -q` sees it on
@@ -2794,7 +2830,8 @@ DK firmware, so the run holds the host lock.
 
 ```text
 nrfdk.py identify   --jlink <jlink serial> --alias <alias>
-nrfdk.py ensure     --jlink <jlink serial> --alias <alias> --address <address> --role <role>
+nrfdk.py ensure     --jlink <jlink serial> --alias <alias> --address <address> \
+    --role <role> --hex <nRF52840 advertiser image>
 nrfdk.py peripheral --jlink <jlink serial> --alias <alias> --dle on --chmap 37
 nrfdk.py central    --jlink <jlink serial> --alias <alias> --peer <address> \
     --interval <ms> --dle on --payload 244 --period 50 --cycle 5000 --autoupdate <ms>
@@ -2806,6 +2843,12 @@ conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <a
     --min-valid-packets 1 --min-data-length <bytes> --long-packets <n> \
     --check-connection-info
 ```
+
+`ensure` takes `--hex` only where the run carries the `nRF52840 advertiser`
+artifact, and every `nrfdk.py` command takes `--port <serial device>` where
+the registry names one; see "Capture known BLE advertiser" above for both.
+One image holds every role, so the central and the peripheral are brought up
+from the same artifact.
 
 **Expected outcome.** Smoke runs 2 cases: both DKs confirmed on the pinned
 firmware at their registered addresses, and `ubertooth-btle -f -r` holding the
@@ -2926,7 +2969,13 @@ firmware, so the run holds the host lock.
 one capture across the whole window and `conncapture.py` reading it:
 
 ```text
-nrfdk.py identify|ensure|peripheral|central|status|idle ... --jlink <jlink serial> --alias <alias>
+nrfdk.py identify   --jlink <jlink serial> --alias <alias>
+nrfdk.py ensure     --jlink <jlink serial> --alias <alias> --address <address> \
+    --role <role> --hex <nRF52840 advertiser image>
+nrfdk.py peripheral --jlink <jlink serial> --alias <alias> --dle on --chmap 37
+nrfdk.py central    --jlink <jlink serial> --alias <alias> --peer <address> \
+    --interval <ms> --dle on --payload 244 --period 50 --cycle 5000 --autoupdate <ms>
+nrfdk.py status|idle --jlink <jlink serial> --alias <alias>
 ubertooth-btle -U <serial> -f -A37 -r <case dir>/capture-<n>.pcapng
 conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <address> \
     --interval-units <n> --latency 0 --timeout-units 400 --min-data-packets 5 \
@@ -2934,6 +2983,10 @@ conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <a
     --after-update-ms <ms> --require-announced --max-quiet-ms <ms> --min-span-ms <ms>
 ubertooth-util -U <serial> -s -C      # the board answers at once, read back in idle mode
 ```
+
+`ensure` takes `--hex` only where the run carries the `nRF52840 advertiser`
+artifact, and every `nrfdk.py` command takes `--port <serial device>` where
+the registry names one; see "Capture known BLE advertiser" above for both.
 
 **Expected outcome.** 2 cases: both DKs confirmed on the pinned firmware at
 their registered addresses, and the capture across the window. The capture
@@ -3128,8 +3181,8 @@ esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alia
 capturefile.py <case dir>/follow.pcap --packets
 ```
 
-`<peer options>` is the acceptor and initiator ports, addresses, aliases and
-stream settings of the session above.
+`<peer options>` is the eleven session options written out in "Capture known
+Classic device" above, and named in "How to read a section" at the top.
 
 **Expected outcome.** Smoke runs 2 cases: `-l <central LAP> -u <central UAP>`
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
@@ -4303,24 +4356,6 @@ sees short captures should widen `BOARD_SETUP_S` rather than the duration.
 
 `-w`, `-e`, `-r` and `-d` are not exercised here.
 
-## CLI usage smoke
-
-**What it does.** Nothing yet: a catalog entry for exercising host tool usage
-paths.
-
-**Theory of operation.** Not established. `Host CLI surface` covers `-h` and
-`-V` on every C host tool the fork builds, and `Help smoke` covers the
-single-tool case.
-
-**Hardware and arguments.** No board role. `hosts:` only.
-
-**Commands.** None: no implementation yet.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Superseded in practice by `Host CLI surface`.
-
 ## BLE soak
 
 **What it does.** Nothing yet: a catalog entry for a long BLE monitoring run
@@ -4538,11 +4573,18 @@ ubertooth-dfu -U <serial> -u <case dir>/readback.bin -r
 ubertooth-dfu -s <case dir>/image.bin                    # and a .dfu, refused:
                                                          # signing needs no board
 ubertooth-dfu -U <serial> -d <case dir>/<variant>.dfu -r # each bad image, refused
-dfuimage.py make|strip|copy|same|absent ...
+dfuimage.py make <variant> <test image> <case dir>/<variant>.dfu
+dfuimage.py copy <test image> <case dir>/signed.bin|signed.dfu
+dfuimage.py same <case dir>/signed.dfu <test image>
+dfuimage.py absent <case dir>/signed.dfu
+dfuimage.py strip <test image> <case dir>/image.bin|readonly.bin [--read-only]
 dfuimage.py check-readback <case dir>/readback.bin <test image> --reported <read-back range>
 dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <test image>
 ubertooth-util -U <serial> -v                            # the revision written
-dfuimage.py answers|after-reject|restore --serial <serial> --image <test image> ...
+dfuimage.py answers --serial <serial> --revision <expected revision>
+dfuimage.py after-reject|restore --serial <serial> --image <test image> \
+    --revision <expected revision> --readback <case dir>/<name>.bin \
+    [--guard <serial>]
 ```
 
 **Expected outcome.** Smoke runs 2 cases: `-u` reads back the image `-d`

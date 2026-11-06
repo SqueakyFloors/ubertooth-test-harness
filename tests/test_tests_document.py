@@ -31,7 +31,9 @@ compare:
   compared in neither direction);
 - whether a form a block collapses behind a placeholder covers every case
   it stands for. ``COLLAPSED`` says which options a placeholder stands for,
-  and the prose beside the block says the rest;
+  and the document names them too: the prose beside the block, or, for
+  ``<peer options>``, which several sections share, the placeholder list in
+  "How to read a section";
 - a program ``program`` does not know, in either direction: a
   ``ubertooth-*`` name is caught by its prefix, but a misspelled ``tshrk``
   is not a program to it, and the setup utilities it knows are the three the
@@ -72,7 +74,7 @@ from ubertooth_harness.hostneeds import HOST_TOOLS
 from ubertooth_harness.plan import PlanError, load_plan
 from ubertooth_harness.planner import PlanCompiler, PlanningError
 from ubertooth_harness.resources import FileResourceRegistry
-from ubertooth_harness.stateful import StateCase
+from ubertooth_harness.stateful import StateCase, artifact_key
 from ubertooth_harness import transitions
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -87,6 +89,11 @@ FIELDS = ("What it does", "Theory of operation", "Hardware and arguments",
 # idle stop, the reads it records, the restores, the guard reads, and
 # preflight), so no section below repeats them.
 SHARED = "What every test shares"
+# The section that says how to read the others, and so where a placeholder
+# several sections share is defined.
+HOW_TO_READ = "How to read a section"
+# The one such placeholder: the options every `esp32peer.py` session carries.
+PEER_PLACEHOLDER = "<peer options>"
 # The last section, which is not a test: what the harness has decided not to
 # test, so a missing catalog entry is not mistaken for an oversight.
 OUT_OF_SCOPE = "Out of scope: Uberducky and E-GO devices"
@@ -181,27 +188,22 @@ _collapsed("Refused command lines", "ubertooth-dump", "<refusal>", "-U", "-h")
 _collapsed("Refused command lines", "ubertooth-specan", "<refusal>", "-h", "-l", "-u")
 _collapsed("Refused command lines", "ubertooth-dfu", "<refusal>", "-d", "-h")
 _collapsed("Refused command lines", "ubertooth-follow", "<refusal>", "-e")
-# The helper forms a block collapses with `...`.
-_collapsed("DFU image checks", "dfuimage.py", "...",
-           "--allow", "--before", "--mode", "--read-only")
-_collapsed("DFU images", "dfuimage.py", "...",
-           "--guard", "--read-only", "--readback", "--revision")
+# The two DFU sections write every `dfuimage.py` form out, so nothing here
+# stands for one of its options either.
 # `<peer options>`: the ports, addresses, aliases and stream settings every
 # peer session carries, per test, since each one holds the link differently.
+# The document names all eleven in "How to read a section" and writes them
+# out with values under `Capture known Classic device`.
 _PEER = ("--acceptor", "--acceptor-address", "--acceptor-alias", "--initiator",
          "--initiator-address", "--initiator-alias", "--min-seconds",
          "--min-writes", "--payload", "--period", "--timeout")
 for _test in ("Follow Classic Bluetooth piconet", "Classic capture record fields",
               "Recover AFH map", "Bluetooth inquiry scan",
               "Follow Classic piconet over HCI"):
-    _collapsed(_test, "esp32peer.py", "<peer options>", *_PEER)
-# `nrfdk.py <subcommand> ... --jlink <serial> --alias <alias> ...`: the
-# options the role commands carry beyond the two every line names.
-_collapsed("BLE extcap in tshark", "nrfdk.py", "...",
-           "--address", "--chmap", "--interval", "--payload")
-_collapsed("Follow a BLE connection across its end", "nrfdk.py", "...",
-           "--address", "--autoupdate", "--chmap", "--cycle", "--dle",
-           "--interval", "--payload", "--peer", "--period", "--role")
+    _collapsed(_test, "esp32peer.py", PEER_PLACEHOLDER, *_PEER)
+# The two DK sections that once collapsed their role commands behind `...`
+# write every one of them out, so nothing here stands for a `nrfdk.py`
+# option.
 
 
 def _registry(directory):
@@ -225,12 +227,19 @@ def _registry(directory):
     return FileResourceRegistry.load(path)
 
 
-def _context():
-    """A stand-in for what an earlier step recorded.
+def _context(case=None):
+    """A stand-in for what an earlier step, and the run, recorded.
 
     The settings' own values, so a restore step that parses one (the LED
     triple, the channel in MHz) resolves; anything else becomes a visible
     placeholder.
+
+    A case's optional artifacts are entries of the mapping itself rather
+    than placeholders the lookup invents, because a step asks for one with
+    ``context.get``, which never reaches ``__missing__``. Without them a
+    conditional form would be collected as the command a run WITHOUT that
+    artifact sends, so ``nrfdk.py ensure``'s ``--hex <image>`` would never
+    be collected and the block could leave it out and still pass.
     """
     settings = (transitions.CHANNEL, transitions.PA_LEVEL, transitions.SQUELCH,
                 transitions.USR_LED, transitions.LEDS, transitions.CHANNEL_INDEX)
@@ -245,7 +254,12 @@ def _context():
         def __missing__(self, key):
             return recorded.get(key, f"<{key}>")
 
-    return Recorded()
+    present = Recorded()
+    for label in getattr(case, "artifacts", ()) + getattr(
+        case, "optional_artifacts", ()
+    ):
+        present[artifact_key(label)] = f"<{label}>"
+    return present
 
 
 # The harness's own driver modules, by file name: a Commands block writes
@@ -349,9 +363,12 @@ def programs_by_test():
     catalog = builtin_catalog()
     used: dict[str, set[str]] = {}
     options: dict[str, set[tuple[str, str]]] = {}
-    # The options a test passes from a state-changing case, which are the
-    # only ones the shared transition commands can stand in for.
+    # The programs and the options a test runs from a state-changing case,
+    # which are the only ones the shared transition commands can stand in
+    # for: an allowance that followed the test would excuse a program or an
+    # option a case of another kind sends.
     stateful: dict[str, set[tuple[str, str]]] = {}
+    stateful_programs: dict[str, set[str]] = {}
     with tempfile.TemporaryDirectory() as directory:
         registry = _registry(directory)
         compiler = PlanCompiler(catalog, registry)
@@ -379,12 +396,15 @@ def programs_by_test():
         found = used.setdefault(invocation.test_name, set())
         for case in cases:
             for argv in _argvs(case):
-                found.update(filter(None, (program(w) for w in _words(argv))))
+                ran = set(filter(None, (program(w) for w in _words(argv))))
+                found.update(ran)
                 passed = _options(argv)
                 options.setdefault(invocation.test_name, set()).update(passed)
                 if isinstance(case, StateCase):
                     stateful.setdefault(invocation.test_name, set()).update(
                         passed)
+                    stateful_programs.setdefault(
+                        invocation.test_name, set()).update(ran)
     # A test no committed plan names (`Host version` and `Help smoke`, whose
     # question every run asks in preflight instead) still has commands: ask
     # it for them with nothing but a host.
@@ -398,7 +418,7 @@ def programs_by_test():
             for argv in _argvs(case):
                 found.update(filter(None, (program(w) for w in _words(argv))))
                 options.setdefault(name, set()).update(_options(argv))
-    return used, options, stateful, skipped
+    return used, options, stateful, stateful_programs, skipped
 
 
 def _argvs(case):
@@ -410,7 +430,7 @@ def _argvs(case):
     out = []
     for step in tuple(case.steps) + tuple(case.cleanup):
         try:
-            out.append(step.resolve_argv(_context()))
+            out.append(step.resolve_argv(_context(case)))
         except (ValueError, LookupError) as error:
             # A command built from a value only a run records, which the
             # stand-in context cannot produce: `Two-device range test`'s two
@@ -595,7 +615,8 @@ class DocumentedCommandTests(unittest.TestCase):
     def setUpClass(cls):
         cls.catalog = builtin_catalog()
         cls.sections = dict(sections())
-        cls.used, cls.options, cls.stateful, cls.skipped = programs_by_test()
+        (cls.used, cls.options, cls.stateful, cls.stateful_programs,
+         cls.skipped) = programs_by_test()
         cls.named = {
             name: programs_named(commands_of(body))
             for name, body in cls.sections.items()
@@ -656,10 +677,14 @@ class DocumentedCommandTests(unittest.TestCase):
         )
         self.assertEqual({"ubertooth-util", "ubertooth-btle"}, shared)
         for name, used in sorted(self.used.items()):
+            # The allowance follows the case, as it does for options: a
+            # program this test runs from a case of another kind has to be
+            # named, even in a test that has state-changing cases too.
+            allowed = shared & self.stateful_programs.get(name, set())
             with self.subTest(name):
                 undocumented = sorted(
                     item for item in used
-                    if item not in self.named[name] and item not in shared
+                    if item not in self.named[name] and item not in allowed
                 )
                 self.assertEqual(
                     [], undocumented,
@@ -699,6 +724,36 @@ class DocumentedCommandTests(unittest.TestCase):
                     [], sorted(programs - self.named[name]),
                     f"{name} exempts a program its block does not name",
                 )
+
+    def test_the_shared_placeholder_paragraph_names_every_option_it_covers(self):
+        """`<peer options>` is the one placeholder several sections share, so
+        what it stands for is stated once, in "How to read a section", rather
+        than in each of them. That paragraph is the only statement of those
+        options a reader of the document gets, so it is compared with the
+        ``COLLAPSED`` declarations that excuse them: an option added to or
+        taken out of the peer session fails here until the paragraph says so.
+        """
+        declared = {option for entries in COLLAPSED.values()
+                    for (prog, placeholder), options in entries.items()
+                    if placeholder == PEER_PLACEHOLDER
+                    for _prog, option in options}
+        self.assertTrue(declared, "no test collapses the peer session options")
+        paragraph = next(
+            (part for part in self.sections[HOW_TO_READ].split("\n\n")
+             if PEER_PLACEHOLDER in part),
+            "",
+        )
+        self.assertTrue(
+            paragraph,
+            f'"{HOW_TO_READ}" must have a paragraph defining {PEER_PLACEHOLDER}',
+        )
+        named = {word.strip(",.`") for word in paragraph.split()
+                 if word.strip(",.`").startswith("--")}
+        self.assertEqual(
+            sorted(declared), sorted(named),
+            f"the {PEER_PLACEHOLDER} paragraph and what the blocks collapse "
+            "behind it have drifted apart",
+        )
 
     def test_every_collapsed_declaration_is_load_bearing(self):
         """COLLAPSED says what a placeholder in a block stands for, which
@@ -804,21 +859,15 @@ class DocumentedCommandTests(unittest.TestCase):
                 )
 
     def test_the_shared_block_names_only_commands_some_test_sends(self):
-        # The shared fences stand in for ~40 sections, so they carry the
-        # most weight and need the same backward check: a program or an
+        # The transition fence stands in for ~40 sections, so it carries the
+        # most weight and needs the same backward check: a program or an
         # option written there that no test sends would excuse itself
-        # everywhere. The preflight fence is included, and preflight's argv
-        # is built from the same tools.
-        from ubertooth_harness import bootloader, preflight
-
+        # everywhere. The preflight fence is not here: no case sends one of
+        # its commands, so it is compared with preflight.py instead, in both
+        # directions (test_the_preflight_fence_matches_the_code...).
         every_program = set().union(*self.used.values())
         every_option = set().union(*self.options.values())
-        # The preflight fence documents two reads no test case sends: the
-        # bootloader read, and the host version fallback for a fork before
-        # the one -V answer. Both come from the code that builds them.
-        every_option |= _options(bootloader.identity_argv("<serial>"))
-        every_option |= _options(preflight.HOST_VERSION_FALLBACK_ARGV)
-        lines = fences(self.sections[SHARED])
+        lines = shared_fences(self.sections[SHARED])["transition"]
         self.assertEqual([], sorted(programs_named(lines) - every_program))
         self.assertEqual(
             [],
@@ -827,6 +876,52 @@ class DocumentedCommandTests(unittest.TestCase):
                    if (prog, option) not in every_option),
             "the shared block names an option no test passes",
         )
+
+    def test_the_preflight_fence_matches_the_code_that_builds_preflight(self):
+        """The preflight block stands in for every run's pre-test commands,
+        and no catalog case sends one of them, so the checks above cannot
+        reach it: the backward check alone would let a read added to or
+        removed from `preflight.py` pass unremarked.
+
+        So it is compared with the code both ways, like the two fences
+        below: every program and option preflight builds must be in the
+        block, and every one the block names must be one preflight builds.
+        """
+        from ubertooth_harness import bootloader, preflight
+
+        serial, revision = "abcdef00" * 4, "<revision>"
+        argvs = [preflight.HOST_VERSION_ARGV,
+                 preflight.HOST_VERSION_FALLBACK_ARGV,
+                 preflight.guard_api_check(serial)[1],
+                 bootloader.identity_argv(serial)]
+        argvs += [argv for _name, argv, _patterns
+                  in preflight.device_checks(serial, revision)]
+        # The two device drivers, whose commands are built from a registered
+        # device's own identity.
+        with tempfile.TemporaryDirectory() as directory:
+            registry = _registry(directory)
+            for alias, build in (("DK_Linux0", preflight._dk_check),
+                                 ("ESP32_Linux0", preflight._peer_check)):
+                resource = registry.get(alias)
+                argvs.append(build(1, "Host_Linux", resource, revision).argv)
+
+        built = set()
+        programs = set()
+        for argv in argvs:
+            built |= _options(argv)
+            programs |= set(filter(None, (program(w) for w in _words(argv))))
+        lines = shared_fences(self.sections[SHARED])["preflight"]
+        named = options_named(lines)
+        self.assertEqual(
+            [], sorted(f"{prog} {option}" for prog, option in built - named),
+            "preflight sends these and the preflight block does not name them",
+        )
+        self.assertEqual(
+            [], sorted(f"{prog} {option}" for prog, option in named - built),
+            "the preflight block names an option preflight does not send",
+        )
+        self.assertEqual([], sorted(programs - programs_named(lines)))
+        self.assertEqual([], sorted(programs_named(lines) - programs))
 
     def test_the_two_fences_no_case_argv_covers_match_the_code(self):
         """`Bootloader identity` and `Flash reliability` document commands no

@@ -1873,12 +1873,6 @@ def builtin_catalog() -> TestCatalog:
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),
-        TestDefinition(
-            "CLI usage smoke",
-            "Exercise host tool usage paths",
-            MappingProxyType({"hosts": HOSTS}),
-            MappingProxyType({}),
-        ),
         _device_test(
             "BLE soak",
             "Long BLE monitor",
