@@ -636,18 +636,21 @@ board's in-system programming header. On a board whose bootloader came from
 this tree the test is a test; on a board with the factory bootloader it is a
 way to brick that board, which then needs its P4 entry pin bridged. So the
 plan names the board the registry pairs with a `Debug programmer` — the board
-that has a recovery path — and the run holds the programmer with it. Read the
-bootloader before and after with `ubertooth-util -U <serial> -B` yourself.
-`--bootloader check` does not cover this board: preflight reads the bootloader
-of a board whose firmware the run requires, and this test establishes its own,
-so the read is skipped for it
-([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
-[#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
-Passing the option costs nothing, and covers no board of this suite: the read
-leaves out a guard-only board too. `--bootloader update` installs over a
-programmer for the same boards, so it does not reach this board either; a
-board that needs a bootloader gets one before this plan runs, from a run that
-does require its firmware or by hand over the programmer.
+that has a recovery path — and the run holds the programmer with it.
+`--bootloader check` does cover this board, so run it with that option: the
+read now reaches every Ubertooth a test of the suite selects, this one
+included
+([#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+Because the board's application image is written by the test rather than
+required by the run, it may be carrying firmware older than the request when
+preflight reads it; that answer is recorded as `not read` with the reason and
+the run goes on, where any other board that will not answer fails. A board
+that does answer is compared like the rest, and `check` fails the run on a
+stale bootloader there. `--bootloader update` still does not reach it — the
+write covers the boards whose firmware preflight requires, which this one is
+not — so the reason sends you to the programmer, and the stage says it had no
+board to install on. Reading `-B` before and after by hand is still worth
+doing, since preflight reads it before the test and nothing reads it after.
 
 **Run it by hand, with someone who can reach the bench.** It is destructive:
 if the bootloader does start the unstartable image, the board faults on every
@@ -1584,7 +1587,7 @@ which one a board has on `ubertooth-util -B`, and every run reads it
 
 - `record` (the default) reads `-B` after the firmware checks and records the
   version, the build string, and the CRC-32 of the whole region, for every
-  board whose firmware preflight requires. Nothing is compared and nothing is
+  Ubertooth a test of the suite selects. Nothing is compared and nothing is
   written: installing a bootloader is physical and cannot be undone over USB,
   so a bench run and the release suite never do it by implication.
 - `check` also builds the bootloader from the run's own Ubertooth source and
@@ -1597,6 +1600,30 @@ which one a board has on `ubertooth-util -B`, and every run reads it
   requires `-B` to report exactly what was written and the application to
   still report the run's revision. A stale board with no programmer fails, and
   the reason names the missing capability rather than trying USB.
+
+**The read covers one board the write does not.** A board whose application
+image a test of the suite writes itself (`Flash reliability`, `DFU images`,
+`Classic btbr console`, `Reset into invalid application`) is read and compared
+like the rest: the bootloader is not written by either image, and for `Reset
+into invalid application` it is the subject of the test, so leaving that board
+out left the check off where it mattered most
+([#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+What such a board is carrying when preflight runs is whatever the last run
+left, though, and firmware older than the request refuses it — the 2020-12-R1
+image a flash test alternates in is one such — so there its refusal is the
+reading: the verdict is `not read`, the reason says nothing was compared, and
+the run goes on. Only the one wording libubertooth prints for a stalled
+request counts; every other way the read can fail still fails the check, on
+that board as on any other. A board that does answer is compared, and `check`
+fails the run on a stale bootloader there, with the programmer named: the
+write still covers only the boards whose firmware preflight requires, because
+a board the suite reflashes could not then be held to the application revision
+the write verifies. A suite with no other board says so rather than looking
+like a write that happened (`bootloader_stage_finished`, `skipped`).
+
+Guard-only boards are not in either set. Their bootloader is read as part of
+the [guard baseline](#guard-ubertooths) and compared with itself after every
+case, which is the question a guard exists to answer.
 
 `check` and `update` need `--build` and `arm-none-eabi-gcc`; `update` also
 needs `lpc21isp` and a programmer with a `serial device` in the registry, and
