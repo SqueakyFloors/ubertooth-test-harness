@@ -94,10 +94,10 @@ role with a default named after the role (`central:`, `peripheral:`, and the
 plain `nRF52840 DK:` for the advertiser).
 
 Registered by its J-Link serial, plus the BLE address its `status` reports.
-The serial is all 12 digits `nrfutil device list` prints, quoted so the
-leading zeros survive: that is the one spelling the registry takes, because
-the DK's external lock file is named after the serial and nrfutil's
-zero-stripped spelling would name a second file
+The serial is all 12 digits, as the `/dev/serial/by-id` name carries it and
+quoted so the leading zeros survive: that is the one spelling the registry
+takes, because the DK's external lock file is named after the serial and the
+zero-stripped spelling of the same number would name a second file
 ([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
 A shorter all-digit serial is refused with the padded form to write instead.
 Either spelling still *names* the board to `scripts/lab/hold`, and the lease

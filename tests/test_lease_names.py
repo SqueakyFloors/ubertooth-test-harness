@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from ubertooth_harness import leases
+from ubertooth_harness import leases, report, targets
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 
 PLATFORM = "macos" if sys.platform == "darwin" else "linux"
@@ -144,6 +144,33 @@ class OneLeaseKeyOneDevice(NamesTestCase):
             ["nrf52840dk-0", "nrf52840dk-1"],
             [leases.resource_key(registry.get(alias)) for alias in ("DK_A", "DK_B")],
         )
+
+    def test_two_adapters_on_two_hosts_may_not_take_one_lease_file(self):
+        """The key check itself, now that a DK cannot reach it (#324).
+
+        An adapter is keyed by its own address, because `hciN` is attach
+        order, and it has no serial, so a bench lock name cannot catch this
+        pair. One address on two hosts is a registry that records one
+        controller twice; the duplicate-address check is per host, so this
+        is the check that sees it.
+        """
+        second_host = HOST.replace("resources:\n", "").replace(
+            "Host_Linux", "Host_Other"
+        )
+        # Their `hci device` names differ, which is what the kernel gave
+        # them, so the duplicate-identity check (whole mappings) passes them.
+        other = (
+            adapter("BT_B", "AC:00:00:00:00:01")
+            .replace("Host_Linux", "Host_Other")
+            .replace("hci device: hci0", "hci device: hci1")
+        )
+        reason = self.refuse(
+            adapter("BT_A", "AC:00:00:00:00:01"), second_host, other
+        )
+        self.assertIn("BT_A", reason)
+        self.assertIn("BT_B", reason)
+        self.assertIn("would both be leased as 'bluez-ac0000000001'", reason)
+        self.assertIn("one lease file is one device", reason)
 
     def test_the_key_is_read_from_the_function_that_builds_it(self):
         """So a type whose key stops coming from a serial is still covered."""
@@ -320,7 +347,7 @@ class OneBenchLockNameOneDevice(NamesTestCase):
                          leases.resource_key(registry.get("DK_A")))
 
     def test_only_the_padded_spelling_of_a_j_link_serial_is_registrable(self):
-        """sysfs zero-pads a J-Link serial and nrfutil does not (#324).
+        """A DK's by-id name pads its J-Link serial; its tools do not (#324).
 
         A bench note may name either spelling, so both were registrable, and
         the external lock file is named after the serial: two spellings were
@@ -593,10 +620,11 @@ class BenchLockFileNames(NamesTestCase):
     def test_a_dk_is_locked_under_the_padded_spelling_of_its_serial(self):
         """One spelling, and it is the one a bench sees (#324).
 
-        nrfutil prints the serial without the leading zeros sysfs pads it
-        with, so a DK answers to two spellings of one number. A device gets
-        one external lock file, named after the serial the registry carries,
-        which is now the padded spelling alone.
+        The by-id name pads the serial and the tools the harness runs on a DK
+        write the same number without those zeros, so a DK answers to two
+        spellings of one number. A device gets one external lock file, named
+        after the serial the registry carries, which is now the padded
+        spelling alone.
         """
         registry = self.load(dk("DK_A", "000123456789"))
         board = leases.board_for_resource(registry.get("DK_A"))
@@ -626,12 +654,13 @@ class BenchLockFileNames(NamesTestCase):
             leases.external_lock_path(self.template, board),
         )
 
-    def test_the_padded_spelling_is_the_one_the_registry_takes(self):
-        """One width, stated twice, so the two may not drift apart.
+    def test_the_padded_spelling_is_the_one_everything_else_writes(self):
+        """One width, stated in four places, which may not drift apart.
 
-        The registry's rule is a pattern and the lock name is built by
-        padding; a registry that accepted a width the padding did not
-        produce would give a DK two files again.
+        The registry's rule is a pattern, the lock name is built by padding,
+        the by-id path formats the serial itself, and `--redact-serials` masks
+        that width; a registry that took a width one of the others did not
+        write would give a DK two names again.
         """
         serial = leases.canonical_jlink_serial("123456789")
         self.assertEqual(leases.JLINK_SERIAL_DIGITS, len(serial))
@@ -639,6 +668,8 @@ class BenchLockFileNames(NamesTestCase):
         self.assertEqual(
             serial, leases.board_for_resource(registry.get("DK_A")).lock_name
         )
+        self.assertIn(serial, targets.DK_BY_ID.format(serial=int(serial)))
+        self.assertEqual(leases.JLINK_SERIAL_DIGITS, report._SERIAL_PADDED_DIGITS)
         # Padding leaves alone what the registry refuses anyway, rather than
         # inventing a spelling for it.
         for value in ("abc", "0001234567890", ""):

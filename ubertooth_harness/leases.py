@@ -478,13 +478,15 @@ LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE, ADAPTER_TYPE)
 # A 48-bit address with its colons taken out, which is what names an adapter's
 # lock; the registry has already refused anything else (resources.py).
 _ADAPTER_ADDRESS = re.compile(r"^[0-9a-f]{12}$")
-# How wide the canonical spelling of a J-Link serial is: the 12 digits
-# `nrfutil device list` prints and udev's by-id name carries
-# (targets.DK_BY_ID). A DK is the one device reachable by two spellings of
-# one serial, and the external lock file takes a serial, so the two
-# spellings would name two files and whichever a wrapper chose the other
-# would be unmet (#324). The registry requires this one (resources.py), and
-# the zero-stripped spelling stays a name `scripts/lab/hold` resolves.
+# How wide the canonical spelling of a J-Link serial is: the 12 digits the
+# registry carries and udev's by-id name holds (targets.DK_BY_ID). A DK is
+# the one device reachable by two spellings of one serial -- that one, and
+# the same number with its leading zeros gone, which is what the harness
+# puts on a DK command line (preflight.py) and what a bench note writes --
+# and the external lock file takes a serial, so the two spellings would name
+# two files and whichever a wrapper chose the other would be unmet (#324).
+# The registry requires this one (resources.py), and the zero-stripped
+# spelling stays a name `scripts/lab/hold` resolves.
 JLINK_SERIAL_DIGITS = 12
 _JLINK_DIGITS = re.compile(r"^[0-9]{1,%d}$" % JLINK_SERIAL_DIGITS)
 
@@ -493,7 +495,7 @@ def canonical_jlink_serial(value: str) -> str:
     """A J-Link serial as the bench's own lock file for a DK spells it.
 
     The padded spelling, because that is what the registry carries and what
-    a wrapper written against `nrfutil device list` or the by-id name sees.
+    a wrapper written against the registry or the by-id name sees.
     A value that is not a plain decimal serial of at most that many digits
     comes back as it was: the registry refuses such a serial where it loads,
     and padding something else would name a file nothing else takes.

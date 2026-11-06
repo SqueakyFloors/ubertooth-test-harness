@@ -1747,9 +1747,9 @@ locks](#external-board-locks)); the DK's file is the one named after its
 J-Link serial, `board-<J-Link serial>.lock` for the template
 `<lab lock dir>/board-{serial}.lock`, which is the file a lab's own scripts
 already lock. One spelling of that serial, because one device has one file:
-the registry takes the 12 digits `nrfutil device list` prints, zeros and
-all, and refuses the zero-stripped spelling with the padded form to write
-instead
+the registry takes the 12 digits the by-id name carries, zeros and all, and
+refuses the zero-stripped spelling of the same number with the padded form
+to write instead
 ([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
 The lease key strips the leading zeros and the lock file keeps them, so a
 wrapper written against either spelling resolves the board through the
@@ -2312,11 +2312,10 @@ may have `board-esp32-<serial>.lock`, `board-nrf52840dk-<serial>.lock` or
 the lease key: nothing takes those now, so delete them and make sure the
 lab's own wrappers lock the plain-serial file, which is the one every harness
 command takes. One spelling matters, and a DK is the device that has two:
-its file is the padded J-Link serial, the 12 digits `nrfutil device list`
-prints and the by-id name carries, which is the one spelling the registry
-takes. nrfutil's zero-stripped form is refused there, with the padded form
-to write instead, so a wrapper cannot be written against a file nothing else
-locks
+its file is the padded J-Link serial, the 12 digits the by-id name carries,
+which is the one spelling the registry takes. The zero-stripped spelling of
+the same number is refused there, with the padded form to write instead, so
+a wrapper cannot be written against a file nothing else locks
 ([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
 Either spelling still names the board to `scripts/lab/hold`, which takes the
 padded file. Each external lock is an exclusive `flock` on that file, taken in

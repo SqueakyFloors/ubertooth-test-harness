@@ -90,12 +90,12 @@ NRF52840_DK = "nRF52840 DK"
 DK_ROLES = ("advertiser", "central", "peripheral")
 _DK_IDENTITY_KEYS = ("jlink serial", "BLE address", "serial device")
 # The canonical spelling of a J-Link serial, and the only one a registry
-# takes: the padded digits `nrfutil device list` prints and udev's by-id
-# name carries (``leases.JLINK_SERIAL_DIGITS``). A DK answers to two
-# spellings of one serial, and its external lock file is named after the
+# takes: the padded digits udev's by-id name carries
+# (``leases.JLINK_SERIAL_DIGITS``, ``targets.DK_BY_ID``). A DK answers to
+# two spellings of one serial, and its external lock file is named after the
 # serial, so two spellings are two files and a lab wrapper that chose the
 # other one would meet nothing (#324). One spelling here is what gives the
-# device one lock file; nrfutil's zero-stripped form is still a name
+# device one lock file; the zero-stripped form is still a name
 # `scripts/lab/hold` resolves, and the lease key is built from it either
 # way, so nothing but the registry entry changes.
 # The width is the spelling and nothing more: how many digits a probe's
@@ -261,22 +261,18 @@ def _bench_lock_names(resource) -> tuple[tuple[str, str], ...]:
         names.append((serial, written))
         if resource.type == NRF52840_DK and serial.isdigit():
             # A DK's J-Link serial is the one serial a device answers to in
-            # two spellings: nrfutil prints it without the leading zeros
-            # sysfs pads it with, and `scripts/lab/hold` takes the name a
-            # bench note would use. Only the padded one names a lock file
-            # now (#324), and the stripped one is still the name the lease
-            # key is built from and a name `_bench.resolve` accepts, so
-            # neither may belong to a second device. An all-digit serial of
-            # another type names only one file, so it reserves only itself.
-            # (A stripped all-digit serial of any type still *names* a
-            # device to `scripts/lab/_bench.resolve`; two devices that share
-            # one are refused when a command resolves the name, which says
-            # so and names them both.)
-            from ubertooth_harness.leases import canonical_jlink_serial
-
-            for spelling in (canonical_jlink_serial(serial), serial.lstrip("0")):
-                if spelling != serial:
-                    names.append((spelling, written))
+            # two spellings: the padded digits the by-id name carries, which
+            # is the one the registry takes and the only one that names a
+            # lock file (#324), and the same number with its leading zeros
+            # gone, which is what the lease key is built from, what a DK
+            # command line carries, and a name `_bench.resolve` accepts. So
+            # the stripped one may not belong to a second device either. An
+            # all-digit serial of another type names only one file, so it
+            # reserves only itself. (A stripped all-digit serial of any type
+            # still *names* a device to `scripts/lab/_bench.resolve`; two
+            # devices that share one are refused when a command resolves the
+            # name, which says so and names them both.)
+            names.append((serial.lstrip("0"), written))
     return tuple(item for item in names if item[0])
 
 
@@ -417,22 +413,24 @@ def _dk_serial_refusal(alias: str, serial: str) -> str:
 
     wanted = (
         f"nRF52840 DK {alias} requires a 'jlink serial' of exactly "
-        f"{JLINK_SERIAL_DIGITS} digits: the spelling `nrfutil device list` "
-        "prints and the /dev/serial/by-id name carries, which is also what "
-        f"this DK's external lock file is named after; registered '{serial}'"
+        f"{JLINK_SERIAL_DIGITS} digits: the spelling the /dev/serial/by-id "
+        "name carries, which is also what this DK's external lock file is "
+        f"named after; registered '{serial}'"
     )
     padded = canonical_jlink_serial(serial)
     if padded == serial or not padded:
         return wanted
+    # The derived names come from the serial itself, so a value written with
+    # whitespace around it does not reach them.
+    short = str(serial).strip()
     return (
         f"{wanted}. That is the same probe written short, so write it as "
         f'"{padded}" -- quoted, because an unquoted value is read as a number '
         "and loses its leading zeros, which is one way a serial arrives here "
-        "short. Nothing else "
-        f"changes: its lease file stays 'nrf52840dk-{int(serial)}', and "
-        "a bench note or `scripts/lab/hold` still takes either spelling as a "
-        f"name. A bench whose own scripts lock 'board-{serial}.lock' renames "
-        f"that file to 'board-{padded}.lock'"
+        f"short. Nothing else changes: its lease file stays "
+        f"'nrf52840dk-{int(short)}', and a bench note or `scripts/lab/hold` "
+        f"still takes either spelling as a name. A bench whose own scripts "
+        f"lock 'board-{short}.lock' renames that file to 'board-{padded}.lock'"
     )
 
 
