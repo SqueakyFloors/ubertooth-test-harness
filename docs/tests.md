@@ -434,7 +434,7 @@ that sets `do_version`, and the eleven tools a macOS build produces answer
 it identically there: the host version line, the libbtbb path, and
 `Firmware version: no Ubertooth attached` with exit 0 on a host with no board
 ([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
-Both cases of a tool come from one list, the list of tools the build
+Both cases of a tool come from one list, the C host tools the build
 installs, so a tool the fork adds is asked both questions with the build
 rather than when somebody remembers a second list.
 
@@ -446,7 +446,8 @@ cases, so on a host without it (every macOS host) they are left out before
 the run as not applicable, rather than failing or being skipped at run time.
 The `-V` cases run with a 20 s timeout.
 
-**Commands.** Two per tool, for `ubertooth-util`, `-debug`, `-specan`, `-rx`,
+**Commands.** Two per tool, one list of tools, for `ubertooth-util`,
+`-debug`, `-specan`, `-rx`,
 `-tx`, `-dump`, `-btle`, `-dfu`, `-ego`, `-afh` and `-ducky`, and for
 `ubertooth-scan` and `-follow` where BlueZ is present:
 
@@ -757,13 +758,15 @@ reach every attached board. `coverage:`.
 line per option here stands for the values the two profiles give it:
 
 ```text
-ubertooth-util   -U <serial> -c2401        # and -c 2481, -C79, -C-1, -Cabc
-ubertooth-util   -U <serial> -a8           # and -a 8, -aa, -a 7x
-ubertooth-util   -U <serial> -z128         # and -z-129, -zabc
-ubertooth-util   -U <serial> -q19          # and -q121, -q183
-ubertooth-util   -U <serial> -l2           # and -d2
+ubertooth-util   -U <serial> -c2401        # and -c 2481, -c2481, -c2440x, -cabc
+ubertooth-util   -U <serial> -C79          # and -C-1, -Cabc
+ubertooth-util   -U <serial> -a8           # and -a 8, -aa
+ubertooth-util   -U <serial> -z128         # and -z -129, -z-129, -zabc
+ubertooth-util   -U <serial> -q19          # and -q0, -q121, -q183, -qabc
+ubertooth-util   -U <serial> -l2           # and -lx, -d2, -dx
 ubertooth-util   -U <serial> -z -I         # and -z -q, -z -x
-ubertooth-util   -U <serial> -U all -<setter or mode>
+ubertooth-util   -U all -a5               # and -U all -x: a setter and a
+                                          # mode, with no serial selector
 ubertooth-btle   -U <serial> -x33
 ubertooth-btle   -U <serial> -A36          # and -A40
 ubertooth-btle   -U <serial> -k 2          # and -k stray
@@ -791,7 +794,12 @@ ubertooth-ego    -U <serial> stray
 ubertooth-rx     -U <serial> stray
 ubertooth-specan -U <serial> -l 2402 stray
 ubertooth-tx     -U <serial> stray
-ubertooth-util   -U <serial> -a 7x
+ubertooth-util   -U <serial> -a 7x         # a next word that is not a value
+ubertooth-util   -U <serial> -c2470 stray  # and -x stray
+ubertooth-util   -U <serial> -c2470 -      # a bare dash, and -z -
+ubertooth-util   -U <serial> -v -- -c2470  # a word after --
+ubertooth-btle   -U <serial> -             # a bare dash
+ubertooth-util   -U <serial> -v            # the firmware, read after a refusal
 ```
 
 Every case then reads the board back with the shared setting reads, so a
@@ -843,7 +851,8 @@ ubertooth-util -U <serial> -c2426          # and -c 2426, the next-word form
 ubertooth-util -U <serial> -C24            # and -C 24: the channel as an index
 ubertooth-util -U <serial> -a3             # and -a 6, -a0, -a 0: the PA level
 ubertooth-util -U <serial> -z-60           # the squelch, in dBm
-ubertooth-util -U <serial> -l1 -d1         # USR alone, then all three LEDs
+ubertooth-util -U <serial> -l1             # the USR LED alone
+ubertooth-util -U <serial> -d1             # all three LEDs
 ubertooth-util -U <serial> -c2426 -a0 -z-60 -d1   # several setters in one command
 ubertooth-util -U <serial> -c 2426 -a 6 -z -60 -d 1 -l 0   # the same as next words
 ubertooth-util -U <serial> -c2426 -c       # a set and a read of one value
@@ -1036,6 +1045,7 @@ ubertooth-util -U <serial> -q120               # and -q20 and a bare -q: the LED
 ubertooth-util -U <serial> -r                  # no stale range-test result
 ubertooth-util -U <serial> -m                  # the result, read after it
 ledblink.py ubertooth-util <serial> --max-samples 60 --deadline 10 --interval 0.05
+ubertooth-util -U <serial> -v                  # the firmware, after -r
 ```
 
 A failed LED read is retried once inside the sampler, and the retry is
@@ -1747,6 +1757,7 @@ killedcapture.py kill   --capture <case dir>/killed-specan.bin \
 killedcapture.py verify --capture <case dir>/killed-specan.bin \
     --record <case dir>/killed-specan.json
 ubertooth-util -U <serial> -r                  # back to the boot defaults
+ubertooth-util -U <serial> -v                  # the firmware, read once
 ubertooth-dump  -U <serial> -l -d <case dir>/after-killed-specan.bin
 ubertooth-debug -U <serial> -r 0x03 -v0
 rxdump.py <case dir>/after-killed-specan.bin full --min-records 150 \
@@ -1865,6 +1876,7 @@ captureinterrupt.py interrupt --grow <case dir>/le.pcapng --min-bytes 28 ... \
     -- ubertooth-btle -U <serial> -n -r <case dir>/le.pcapng -q <case dir>/le.pcap
 captureinterrupt.py interrupt --grow <case dir>/specan.bin --min-bytes 4096 ... \
     -- ubertooth-specan -U <serial> -d <case dir>/specan.bin
+ubertooth-util -U <serial> -v                        # the board answers at once
 rxdump.py      <case dir>/dump.bin full --min-records 20
 capturefile.py --packets <case dir>/le.pcapng       # and le.pcap
 specandump.py  <case dir>/specan.bin 2402 2480
@@ -1954,7 +1966,8 @@ ubertooth-rx -i <case dir>/replay.bin -u <UAP>              # -u with no -l
 ubertooth-rx -i <case dir>/replay.bin -d <case dir>/no-such-dir/x.bin
 ubertooth-rx -i <case dir>/a-directory                      # and a missing file
 ubertooth-rx -h
-python -c '<os.makedirs>' <case dir>/a-directory            # the directory input
+python -c 'import os, sys; os.makedirs(sys.argv[1], exist_ok=True)' \
+    <case dir>/a-directory                                  # the directory input
 stdoutdest.py run --stdout <case dir>/stdout.pcap -- ubertooth-rx -i <case dir>/replay.bin -q -
 stdoutdest.py run --fd 3=<case dir>/fd3.pcap -- ubertooth-rx -i <case dir>/replay.bin -q /dev/fd/3
 stdoutdest.py seed|link|unlink <case dir> ...               # the destinations
@@ -2328,7 +2341,7 @@ dfuimage.py make <variant> <case dir>/synthetic.dfu <case dir>/<variant>.dfu
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -d <case dir>/<variant>.dfu -r
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -d <case dir>/synthetic.dfu -r   # reaches the lookup
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.bin
-env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.dfu          # refused
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/synthetic.dfu      # refused
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -s <case dir>/image.bin \
     -d <case dir>/synthetic.dfu -r     # signs, then stops at the board lookup
 dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <reference> \
@@ -4493,6 +4506,7 @@ ubertooth-dfu -U <serial> -d <case dir>/<variant>.dfu -r # each bad image, refus
 dfuimage.py make|strip|copy|same|absent ...
 dfuimage.py check-readback <case dir>/readback.bin <test image> --reported <read-back range>
 dfuimage.py check-suffix <case dir>/image.bin <case dir>/image.dfu <test image>
+ubertooth-util -U <serial> -v                            # the revision written
 dfuimage.py answers|after-reject|restore --serial <serial> --image <test image> ...
 ```
 

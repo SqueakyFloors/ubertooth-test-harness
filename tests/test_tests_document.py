@@ -314,10 +314,15 @@ def _options(argv) -> set[tuple[str, str]]:
             current = previous = ""
             continue
         name = program(word)
-        # A program name given as an option's value is that value, not the
-        # next command: `btbrconsole.py ... --peer-reset esp32peer.py` runs
-        # one program, and its own options are its own.
-        if name and not OPTION.match(previous):
+        # A program name is the next command at the front of one -- after a
+        # wrapper or a pipe -- and after `--`, which is how a driver gives
+        # the command it wraps (`esp32peer.py stream ... -- ubertooth-rx
+        # ...`). Anywhere else it is an argument of the command already
+        # running: `btbrconsole.py ... --peer-reset esp32peer.py` as an
+        # option's value, `ledblink.py ubertooth-util <serial>
+        # --max-samples ...` as a positional. The options after it are that
+        # command's, not the name's.
+        if name and (not current or previous == "--"):
             current = name
             previous = word
             continue
@@ -434,6 +439,30 @@ def fences(text: str) -> list[str]:
     return lines
 
 
+def shared_fences(body: str) -> dict[str, list[str]]:
+    """The two fenced blocks of "What every test shares", by what they are.
+
+    ``transition`` holds the commands every state-changing case sends, which
+    is what a section may leave out. ``preflight`` holds the run-level reads
+    the harness makes before any test, which a section may NOT leave out:
+    they are a different thing from the shared cleanup, and treating them as
+    an allowance excused `ubertooth-util -v`, `-V`, `-H` and `-B` for every
+    test at once.
+    """
+    def after(heading):
+        text = body.split(heading, 1)
+        assert len(text) == 2, heading
+        # Up to the next bold paragraph, so one block's fence cannot be
+        # read as another's.
+        return fences(re.split(r"\n\*\*", text[1])[0])
+
+    found = {"preflight": after("**Mandatory preflight.**"),
+             "transition": after("**Transition cases.**")}
+    for name, lines in found.items():
+        assert lines, f"no fenced block for {name}"
+    return found
+
+
 def commands_of(body: str) -> list[str]:
     """The lines of every fenced block in the **Commands** field of a body."""
     field = body.split("**Commands.**", 1)
@@ -471,19 +500,23 @@ def options_named(lines) -> set[tuple[str, str]]:
     """
     found = set()
     current = ""
+    continued = False
     for line in lines:
-        # A line of its own starts a command, so what an option's value was
-        # on the line before cannot suppress the program here; `current`
-        # carries across a continued line (one ending in a backslash).
+        # A line of its own starts a command; a line continued from the one
+        # before (that one ended in a backslash) carries its program on.
+        if not continued:
+            current = ""
+        continued = line.rstrip().endswith("\\")
         previous = ""
         for word in _fence_words([line]):
             if word.rsplit("/", 1)[-1] in WRAPPERS:
                 current = previous = ""
                 continue
             name = program(word)
-            # A program name given as an option's value is that value, not
-            # another command: `--peer-reset esp32peer.py`.
-            if name and not OPTION.match(previous):
+            # The same rule as `_options`: a program name is the next
+            # command at the front of one and after `--`, and anywhere else
+            # it is an argument of the command already running.
+            if name and (not current or previous == "--"):
                 current, previous = name, word
                 continue
             previous = word
@@ -605,7 +638,9 @@ class DocumentedCommandTests(unittest.TestCase):
         # fenced blocks are the preflight reads and the commands every
         # transition case sends, and only those blocks count here, never the
         # prose around them.
-        shared = programs_named(fences(self.sections[SHARED]))
+        shared = programs_named(
+            shared_fences(self.sections[SHARED])["transition"]
+        )
         self.assertEqual({"ubertooth-util", "ubertooth-btle"}, shared)
         for name, used in sorted(self.used.items()):
             with self.subTest(name):
@@ -657,7 +692,9 @@ class DocumentedCommandTests(unittest.TestCase):
         collapses anything has to write a placeholder, or there is nothing
         for the entry to describe.
         """
-        shared = options_named(fences(self.sections[SHARED]))
+        shared = options_named(
+            shared_fences(self.sections[SHARED])["transition"]
+        )
         for name, placeholders in sorted(COLLAPSED.items()):
             passed = self.options.get(name, set())
             documented = self.named_options[name] | shared
@@ -716,7 +753,9 @@ class DocumentedCommandTests(unittest.TestCase):
         each entry is a placeholder the block writes and the options it
         stands for, so the stand-in is written down rather than assumed.
         """
-        shared = options_named(fences(self.sections[SHARED]))
+        shared = options_named(
+            shared_fences(self.sections[SHARED])["transition"]
+        )
         for name in self.catalog.names:
             passed = self.options.get(name, set())
             documented = (self.named_options[name] | shared
