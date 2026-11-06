@@ -61,7 +61,9 @@ class FakeTools:
     refusal on the list speaks instead), channel-count-ignored (a channel
     count that lines up with nothing is taken), version-several-boards (-V
     answers for the first board of a list) and replay-several-boards (-i is
-    given a list).
+    given a list). Three more add to a refusal that is otherwise right, which
+    a check for the message alone would accept: second-error-line,
+    note-after-refusal and warning-after-refusal.
     ``missing`` tools are not installed; ``switch`` False is a library from
     before b6d8ede."""
 
@@ -177,7 +179,8 @@ class FakeTools:
         if tool == "ubertooth-rx":
             refused, n_boards = self._rx_lists(flags)
             if refused:
-                return self._result(command, 1, "".join(out), "".join(err) + refused)
+                return self._result(command, 1, "".join(out),
+                                    "".join(err) + refused + self._chatter())
             if n_boards > 1 and ("V", None) in flags:
                 if "version-several-boards" in self.bugs:
                     # A fork without the guard answers for the first board of
@@ -188,7 +191,7 @@ class FakeTools:
                 return self._result(
                     command, 1, "".join(out), "".join(err)
                     + "error: -V reports one board; name one with -U, or none to"
-                      " report every board attached\n")
+                      " report every board attached\n" + self._chatter())
         if ("h", None) in flags:
             return self._result(command, 0,
                                 "".join(out) + USAGE[tool], "".join(err))
@@ -204,12 +207,12 @@ class FakeTools:
                 return self._result(
                     command, 1, "".join(out), "".join(err)
                     + "error: -i names one saved capture, so it cannot be given"
-                      " several boards to read\n")
+                      " several boards to read\n" + self._chatter())
             if "d" in files and "dump-several-boards" not in self.bugs:
                 return self._result(
                     command, 1, "".join(out), "".join(err)
                     + "error: -d writes one dump for -i to replay as one board,"
-                      " so it cannot be given several boards\n")
+                      " so it cannot be given several boards\n" + self._chatter())
         if tool == "ubertooth-dfu":
             return self._dfu(command, files, dict(flags), out, err)
         # Every check on the command line has passed, so the command asks
@@ -272,6 +275,21 @@ class FakeTools:
                               "given\n")
             words.append(part)
         return words, ""
+
+    def _chatter(self):
+        """What a refusal must not say after its own line.
+
+        The real tool prints one error: line and stops. These are the three
+        ways a regression could add to it and still look refused: a second
+        reason, a note, and a warning about a file.
+        """
+        if "second-error-line" in self.bugs:
+            return "error: no Ubertooth devices found\n"
+        if "note-after-refusal" in self.bugs:
+            return "note: give one -c channel per board\n"
+        if "warning-after-refusal" in self.bugs:
+            return "warning: the capture file was not written\n"
+        return ""
 
     def _rx_lists(self, flags):
         """The board list, then the channels for it: (refusal, n_boards)."""
@@ -566,11 +584,13 @@ class MultiBoardRefusalTests(unittest.TestCase):
                               refusal_cases.nothing_on_stdout)
                 self.assertIn(refusal_cases.NO_BOARD_NOTE,
                               refuse.forbidden_patterns)
-                self.assertTrue(all(p.startswith(("(?m)^error:", "error:",
-                                                  "Host tools", "Firmware"))
-                                    for p in refuse.output_patterns
-                                    + refuse.forbidden_patterns
-                                    if p != refusal_cases.NO_BOARD_NOTE))
+                # Exactly one error: line and no note or warning: a refusal
+                # that went on to say more would pass a check for its own
+                # message alone.
+                for pattern in refusal_cases._ONE_ERROR_ONLY:
+                    self.assertIn(pattern, refuse.forbidden_patterns)
+                # One expected message, so a case cannot quietly accept two.
+                self.assertEqual(1, len(refuse.output_patterns))
 
     def test_the_selectors_are_not_registry_serials(self):
         """No board is opened, so the selectors are invented; each must still
@@ -628,6 +648,20 @@ class MultiBoardRefusalTests(unittest.TestCase):
         self.assertEqual(
             [self._by_id("comprehensive")["rx-dump-several-boards"].name],
             failed_names(events))
+
+    def test_a_refusal_that_goes_on_to_say_more_fails(self):
+        """A refusal is its own line and nothing else. A tool that printed the
+        right message and then a second reason, a note, or a warning would
+        pass a check for the message alone, and would leave a reader unable to
+        tell which of the two sentences to act on; every case must notice."""
+        expected = sorted(self._by_id("comprehensive")[case_id].name
+                          for case_id in self.SMOKE + self.COMPREHENSIVE)
+        for bug in ("second-error-line", "note-after-refusal",
+                    "warning-after-refusal"):
+            with self.subTest(bug):
+                summary, events = run(FakeTools(bugs=(bug,)))
+                self.assertFalse(summary.passed)
+                self.assertEqual(expected, failed_names(events))
 
 
 class BluezStrayWordTests(unittest.TestCase):

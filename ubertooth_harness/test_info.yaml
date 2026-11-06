@@ -1068,9 +1068,12 @@ Refused command lines:
     per board, and -d or -V beside several boards -- and four more in
     comprehensive: an empty channel entry, a list longer than the eight boards
     a capture reads in each of -U and -c, and -i beside several boards. Each
-    requires exit 1, the tool's one error: line, and an empty standard output,
-    which is what the -V case rests on: a version answer would go there, so a
-    refusal cannot be read as an answer. Where two refusals would apply to one
+    requires exit 1 and pins the whole of what the tool said: that one error:
+    line with no second error, note or warning line, and an empty standard
+    output. Expecting the message alone would pass a tool that printed it and
+    then said something else, which a reader cannot act on; the empty standard
+    output is what the -V case rests on, since a version answer would go
+    there, so a refusal cannot be read as an answer. Where two refusals would apply to one
     command line the other message is forbidden, so the order is asserted: the
     board list is read before the channel list, and only a list longer than
     the tool takes at all is refused as too long.

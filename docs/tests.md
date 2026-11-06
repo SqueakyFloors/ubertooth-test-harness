@@ -1698,9 +1698,13 @@ for three boards (`-c` naming a count that is neither one nor one per board),
 `-d` beside several boards, and `-V` beside several boards. Comprehensive adds
 an empty channel entry, lists longer than the eight boards a capture reads (in
 each of `-U` and `-c`), and `-i` beside several boards. Each case requires
-exit 1, the tool's one `error:` line, and an **empty standard output**, which
-is the invariant the `-V` case rests on: that is where a version answer would
-go, so a refusal cannot be read as an answer. Where two refusals would apply
+exit 1 and pins the whole of what the tool said: that one `error:` line and no
+second error, note, or warning line, and an **empty standard output**. Both
+halves matter. Expecting the message alone would pass a tool that printed it
+and then went on to say something else, a refusal a reader cannot act on
+because it does not say which of two sentences to believe; and the empty
+standard output is what the `-V` case rests on, since that is where a version
+answer would go, so a refusal cannot be read as an answer. Where two refusals would apply
 to one command line, the other message is forbidden, so the order is asserted
 rather than assumed: the board list is read before the channel list (a board
 named twice beside `-c 1,2,3`, and beside `-d`), and only a list longer than

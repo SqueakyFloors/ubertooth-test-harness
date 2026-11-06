@@ -521,23 +521,33 @@ _VERSION_ONE_BOARD = (r"(?m)^error: -V reports one board; name one with -U, or "
                       r"none to report every board attached$")
 _REPLAY_ONE_BOARD = (r"(?m)^error: -i names one saved capture, so it cannot be "
                      r"given several boards to read$")
+# What the refusal must be, beyond carrying its own line: one error: line and
+# nothing else. Expecting the message alone would pass a tool that printed it
+# and then went on to say something else -- a second reason, a note about a
+# board, a warning about a file -- which is a refusal a reader cannot act on.
+# Standard output is required empty by nothing_on_stdout, so between them the
+# whole of what the tool said is pinned.
+_SECOND_ERROR = r"(?m)^error:[^\n]*\n(?:[^\n]*\n)*?error:"
+_ANY_NOTE = r"(?m)^note:"
+_ANY_WARNING = r"(?m)^warning:"
+_ONE_ERROR_ONLY = (_SECOND_ERROR, _ANY_NOTE, _ANY_WARNING)
 
 
 def _multi_board_case(case_id, label, words, patterns, *, forbidden=(),
                       seeded=(), absent=(), kept=(), expected) -> StateCase:
     """One ubertooth-rx command line the board list cannot be given.
 
-    Every case requires the one error: line, exit 1, an empty standard output
-    (so a refusal is never read as an answer), and that the command came
-    nowhere near a board: the no-devices note is forbidden, as it is in every
-    other refusal here.
+    Every case requires exit 1, that one error: line and no other error, note
+    or warning line, an empty standard output (so a refusal is never read as
+    an answer), and that the command came nowhere near a board: the no-devices
+    note is forbidden, as it is in every other refusal here.
     """
     steps = [probe_step("ubertooth-rx")]
     if seeded:
         steps.append(_seed(seeded))
     steps += [
         tool_step("refuse", "ubertooth-rx", words, patterns=patterns,
-                  forbidden=(NO_BOARD_NOTE,) + tuple(forbidden),
+                  forbidden=(NO_BOARD_NOTE,) + _ONE_ERROR_ONLY + tuple(forbidden),
                   check=nothing_on_stdout),
         _check(absent, kept),
     ]
