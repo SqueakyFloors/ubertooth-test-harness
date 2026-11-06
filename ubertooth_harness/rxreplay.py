@@ -152,6 +152,11 @@ PREAMBLE_AT = 16         # where the access code starts in the 400 symbols
 SYNC_AT = PREAMBLE_AT + 4
 BR_PACKET, LE_PACKET = 0, 1
 DISCARD = 0x20
+# The status bit that says a record's average reading is this packet's own
+# power (usb_pkt_rx.status, the fork's ubertooth_interface.h). Without it a
+# reader falls back to the strongest reading, which is what a record from a
+# board or a dump older than the measurement carries.
+SIGNAL_VALID = 0x80
 POLL, DH1 = 1, 4
 DH1_BODY = bytes(range(4))      # a made-up 4-byte body
 
@@ -163,16 +168,20 @@ LAP_DECOY = 0x3E1D07            # only in records cb_rx must skip
 # capture record, worked out once here so a case states it rather than a
 # number nobody can trace.
 #
-# Each record below carries the same three readings and no SIGNAL_VALID
-# status bit, so the strongest reading of the packet is the nearest thing to
-# its own level that the record holds, which is the figure a reader shows;
-# the fork's piece-wise model of the CC2400's curve turns this fixture's
-# RSSI_MAX into the dBm below. That makes it a known answer for a level
-# worked out from anything but the packet's own record -- the loudest of the
-# last ten records of its channel, say, which reported one packet's level for
-# another's (SqueakyFloors/ubertooth#754) -- because such a figure is not
-# this one.
-RSSI_MAX, RSSI_MIN, RSSI_AVG = -40, -90, -70
+# Each record below carries three readings and the SIGNAL_VALID status bit,
+# which says the average is this packet's own power -- the measurement
+# SqueakyFloors/ubertooth#754 put there -- so that is the reading a reader
+# shows, and the fork's piece-wise model of the CC2400's curve
+# (`cc2400_rssi_to_dbm` in its `host/libubertooth/src/ubertooth_callback.c`)
+# turns RSSI_AVG into the dBm below. Re-derive the figure from that function
+# if the fork ever retunes the curve; nothing else here can tell.
+#
+# That makes the level a known answer for a figure worked out from anything
+# but this packet's own average: the strongest reading of the packet gives
+# -82 dBm, and the loudest of the last ten records of its channel -- which
+# reported one packet's level for another's, until #754 -- is not this figure
+# either. The three readings are deliberately far apart for that reason.
+RSSI_MAX, RSSI_MIN, RSSI_AVG = -30, -90, -40
 SIGNAL_DBM = -91
 FIXTURE_AGE_S = 3600            # record times are this long before generation
 
@@ -246,8 +255,12 @@ def record_bytes(record: Record, host_time: int) -> bytes:
     # offset being the sync word's first symbol. Leave 1000 (100 ns) of slack.
     clk100ns = record.clock * 3125 + 4000 - SYNC_AT * 10 + 1000
     header = struct.pack(
-        "<BBBBIbbbB2x", record.pkt_type, record.status, record.channel, 0,
-        clk100ns, RSSI_MAX, RSSI_MIN, RSSI_AVG, 1,
+        # SIGNAL_VALID on every record: a current board sets it on any
+        # packet it took readings over, and it is what says the average is
+        # this packet's own power rather than the board's running average
+        # for the channel.
+        "<BBBBIbbbB2x", record.pkt_type, record.status | SIGNAL_VALID,
+        record.channel, 0, clk100ns, RSSI_MAX, RSSI_MIN, RSSI_AVG, 1,
     )
     return struct.pack(">I", host_time) + header + data
 

@@ -993,11 +993,14 @@ Raw receive replay:
     because that decoder's sharpest checks need a record the bench rarely
     produces -- a payload-bearing record, and one that settled the piconet's
     address part -- so on live traffic they are checks waiting for something
-    to fire on. Every record must carry the fixture's LAP with that LAP and
-    UAP as its reference address and the fixture's own signal level, and none
-    may claim a measured noise power; at least one must carry a payload, one
-    pass a payload CRC, and one pass a header HEC with a reference UAP to
-    check it against; a DH1/2-DH1 record must be among them with its
+    to fire on. Every record must carry the fixture's LAP, name it as the
+    reference LAP, and carry the fixture's own signal level, and none may
+    claim a measured noise power. Every record that carries a reference UAP
+    must name the fixture's; the records before the address part settles
+    carry none and are not asked to, since the rule is on the field a record
+    claims. At least four must carry it, at least one a payload, one a
+    passing payload CRC, and one a header HEC that passed with a reference
+    UAP to check it against; a DH1/2-DH1 record must be among them with its
     transport named ACL; the file must name the LAP, with an empty UAP mask,
     as the address it was following; and the record that settled the address
     part must carry its own header and the payload whose CRC settled it. The
@@ -1040,7 +1043,10 @@ Raw receive replay:
     ubertooth-rx's; the same checks in ubertooth-btle and ubertooth-follow are
     not covered, and nor is a capture written to a terminal, which no run has.
     The level and noise rules are pinned to this fixture's own readings, so
-    they say nothing about what a live capture reports; the distinct-figure
+    they say nothing about what a live capture reports; what they cover is a
+    level taken from the packet's own average reading rather than from
+    anything around it, and the absence of a background figure where the
+    records carry no estimate; the distinct-figure
     floors a bench capture would need are not established. Five things the
     fork's own code calls out are uncovered too: /dev/stdin
     and /dev/stderr, which are not standard output but are still identified

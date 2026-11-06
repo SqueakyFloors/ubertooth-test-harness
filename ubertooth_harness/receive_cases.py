@@ -752,16 +752,23 @@ def _capture_packets(step_id, name, file_name, header_format, packets):
 # because what they are for is making a check fire at all. On live traffic a
 # payload-bearing record turns up about 11 times in 2620 and a settled
 # address part about one run in nine, so the checks that read a payload's own
-# length field, recompute its CRC24, and hold a record's transport nibble to
+# length field, recompute its CRC-16, and hold a record's transport nibble to
 # the payload it names are checks waiting for a record; one record each is
 # what sets them going (ubertooth-test-harness#339, #344). How many of the
 # eight this libbtbb settles a UAP for, and from which one, is the library's
 # own business and would make a floor of four a check on the library's
 # bookkeeping rather than on the fields; `--settling-record` is what asks
 # about the record that matters.
-_LAP_A_RECORDS = 8
+_LAP_A_RECORDS = len(rxreplay.expected_packets(lap=rxreplay.LAP_A))
 # The DH1 the fixture carries, as libbtbb names the type.
 _PAYLOAD_TYPE = "DH1/2-DH1"
+# Records carrying the reference UAP once the address part settles. Measured
+# with the pinned libbtbb: four of the eight, the first of them the DH1 whose
+# CRC settled it. The floor is below what was measured because how many of
+# the eight the library keeps the part for is its own bookkeeping, where the
+# record that settled it is the subject of three fixes; `--settling-record`
+# is what asks about that one.
+_LAP_A_WITH_UAP = 4
 
 
 def _record_fields(step_id, name, file_name, *, following=False):
@@ -772,7 +779,7 @@ def _record_fields(step_id, name, file_name, *, following=False):
             "--reference-lap", f"{rxreplay.LAP_A:06x}",
             "--reference-uap", f"{rxreplay.UAP_A:02x}",
             "--min-packets", str(_LAP_A_RECORDS),
-            "--min-reference-uap", "1",
+            "--min-reference-uap", str(_LAP_A_WITH_UAP),
             "--min-hec-valid", "1",
             "--min-with-payload", "1",
             "--min-crc-valid", "1",
@@ -795,8 +802,10 @@ def _record_fields(step_id, name, file_name, *, following=False):
             rf"(?m)^BR/EDR records: {_LAP_A_RECORDS} in ",
             r"(?m)^BR/EDR payloads: [1-9]\d* records carry one, ",
             # The transport the payload earns, which is the field a libbtbb
-            # that stopped naming one would leave empty (#339).
-            r"(?m)^BR/EDR transports: ACL \([1-9]\d*\)",
+            # that stopped naming one would leave empty (#339). Matched
+            # wherever it sits on the line, since the summary lists the
+            # transports it found in its own order.
+            r"(?m)^BR/EDR transports: .*\bACL \([1-9]\d*\)",
             rf"(?m)^BR/EDR signal: {rxreplay.SIGNAL_DBM} to "
             rf"{rxreplay.SIGNAL_DBM} dBm$",
             r"(?m)^BR/EDR noise: no record reports a measured figure$",
@@ -1327,7 +1336,7 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
            f"that LAP and UAP {rxreplay.UAP_A:02x} as the reference address, "
            "the record that settled the UAP carrying its own header and the "
            "payload whose CRC settled it, that payload's length field and "
-           "CRC24 agreeing and its transport named ACL, every record at the "
+           "CRC-16 agreeing and its transport named ACL, every record at the "
            f"fixture's {rxreplay.SIGNAL_DBM} dBm with no measured noise, and "
            f"the file naming LAP {_A} with an empty UAP mask as the address "
            "it followed"),

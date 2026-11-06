@@ -1470,15 +1470,18 @@ same decoder the live Classic tests use
 that decoder's sharpest checks need is a record the bench rarely produces: on
 live traffic a payload-bearing record turns up about 11 times in 2620 and a
 settled address part about one run in nine, so the checks that read a
-payload's own length field, recompute its CRC24, and hold a record's transport
+payload's own length field, recompute its CRC-16, and hold a record's transport
 nibble to the payload it names are checks waiting for something to fire on.
 The harness wrote this input, so they fire on every run, with no board, in CI.
 
 What the case requires, beyond every rule the decoder applies to every
-record: each of the eight records carries LAP A, with that LAP and UAP as its
-reference address; at least one carries a payload, at least one passed a
-payload CRC, and at least one passed a header HEC with a reference UAP to
-check it against; a `DH1/2-DH1` record is among them and its transport is
+record: each of the eight records carries LAP A and names it as the reference
+LAP; each record that carries a reference UAP names UAP A, which the records
+before the address part settles do not and are not asked to -- the rule is on
+the field a record claims, which is how a capture that gave a clock up is an
+honest record rather than a wrong one; at least four carry that UAP; at least
+one carries a payload, at least one passed a payload CRC, and at least one
+passed a header HEC with a reference UAP to check it against; a `DH1/2-DH1` record is among them and its transport is
 named `ACL`; every record carries the fixture's own signal level and none
 claims a measured noise power; the file names LAP A, with an empty UAP mask,
 as the address it was following; and **the record that settled the address
@@ -1496,9 +1499,11 @@ reason. Neither of the decoder's standing rules can fail on a level that
 stopped being the packet's own: the -120 to 0 dBm range is wide enough for a
 figure taken from another packet, and the noise-power flag is how libbtbb's
 writer computes it from the two figures, so it restates the writer. Pinned
-against a known answer they bite: these records carry one recorded reading
-each, so a level worked out from the records around a packet rather than from
-its own reads as another figure
+against a known answer they bite: each of these records says its average
+reading is that packet's own power and carries three readings far apart, so a
+level taken from anything else -- the strongest reading of the packet, which
+gives -82 dBm, or the loudest of the records around it on the same channel --
+reads as another figure
 ([ubertooth#754](https://github.com/SqueakyFloors/ubertooth/pull/754)), and
 they carry no background estimate, so a record claiming a measured noise
 power is a figure made up
@@ -2535,9 +2540,15 @@ moved to the commit the fork pins. At that commit the library names a
 transport whenever it produced a payload and clears it with the payload
 wherever it drops one, so a payload-bearing record always names one, and the
 rule says so ([#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339)).
-A run that really does name a libbtbb older than that change turns the rule
-off outright, with `--any-transport`, rather than leaving a hole in it for
-every run.
+
+What that costs: a run told to build a libbtbb from before that change fails
+this rule, and no catalog case can turn it off. `--any-transport` exists, and
+the inquiry-scan case passes it, but for a different reason — a capture whose
+headers do not decode gives the nibble no type to be checked against — and
+no plan argument reaches it. Such a run is not something the harness supports
+anyway: every other rule here assumes the pinned library's clears, as the
+known limits below say. Running `bredrrecord.py` by hand on an older capture
+is where the option is for.
 
 No case here puts a floor on how many records name a transport, because
 payload-bearing records are rare on this bench (see the known limits), so a

@@ -109,6 +109,14 @@ class ParseTests(unittest.TestCase):
         self.assertIn("packet lead 0", record.radio_waits_unread)
         self.assertEqual(record.radio_waits_unread,
                          record.to_dict()["radio_waits_unread"])
+
+    def test_a_counter_line_with_nothing_after_it_is_unread_too(self):
+        """Otherwise it reads as "not reported", with nothing said, which is
+        the shape #343 is about."""
+        record = parse_report(samples.report(radio_waits=()))
+
+        self.assertIsNone(record.radio_waits)
+        self.assertEqual("nothing", record.radio_waits_unread)
         warning = watchdog.unread_waits_warning("UT (serial s)",
                                                 record.radio_waits_unread)
         self.assertIn("UT (serial s) printed radio-wait counters this harness "
@@ -569,6 +577,20 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual("warning",
                          [e for e in publisher.events if e[0] == "watchdog"][-1][1])
 
+        self.assertEqual((), monitor.after_test(invocation()).warnings)
+        self.assertEqual((), monitor.after_test(invocation()).warnings)
+
+    def test_an_unread_counter_that_ticks_over_does_not_warn_again(self):
+        """What names the wording is the line with its figures taken out: a
+        counter counts, so keyed on the whole text every read of a board
+        whose unread counter moved would be a new wording."""
+        monitor, _commands, _publisher, _clock = self.monitor({SERIAL: [
+            samples.report(radio_waits=(0,) * 7),
+            samples.report(radio_waits=(0, 0, 0, 0, 0, 0, 4)),
+            samples.report(radio_waits=(1, 0, 0, 0, 0, 0, 9)),
+        ]})
+
+        self.assertEqual(1, len(monitor.baseline().warnings))
         self.assertEqual((), monitor.after_test(invocation()).warnings)
         self.assertEqual((), monitor.after_test(invocation()).warnings)
 

@@ -476,9 +476,15 @@ def _transport_problems(record: Record) -> list[str]:
     the harness's own ``LIBBTBB_PIN`` and the README's example refs were the
     last refs it was needed for; harness #341 moved both to the commit the
     fork pins, where a payload-bearing record always names a transport, so
-    the escape went with harness #339. A run that really does name a libbtbb
-    older than that change turns the rule off outright, with
-    ``--any-transport``, rather than leaving a hole in it for every run.
+    the escape went with harness #339.
+
+    What that costs: a run told to build a libbtbb from before that change
+    fails this rule, and no catalog case can turn it off, because nothing in
+    a plan reaches ``--any-transport`` -- the cases that pass it pass it for
+    a capture whose headers do not decode, and the rest build their argv in
+    code. Such a run is not something the harness supports anyway: every
+    other rule here assumes the pinned library's clears. A caller running
+    this module by hand on an older capture has the option.
     """
     named = transport_name(record.transport)
     if not record.payload:
@@ -992,8 +998,8 @@ def main(argv: list[str] | None = None) -> int:
         "--any-transport", action="store_true",
         help="accept any transport nibble, for a capture whose headers do "
              "not decode -- the type the nibble is checked against comes "
-             "from the header -- or for a run naming a libbtbb from before "
-             "it named transports at all")
+             "from the header -- or for a capture written by a libbtbb from "
+             "before it named transports at all")
     parser.add_argument(
         "--max-span-s", type=float,
         help="the longest the records may span, which is the run that "

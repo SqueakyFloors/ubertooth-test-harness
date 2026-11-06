@@ -611,12 +611,16 @@ class ReplayRx:
                 settling = True
                 reference_uap = packet["uap"]
             known = reference_uap != bredrrecord.UAP_ANY
-            if settling and "settling-uap-late" in self.bugs:
-                # The reference read before the decoder rather than after
-                # it: the record that settled the part does not carry it.
-                known = False
             header = packet["header"] if (packet and known) else 0
             payload = packet["payload"] if (packet and known) else b""
+            carried = reference_uap
+            if settling and "settling-uap-late" in self.bugs:
+                # The reference read before the decoder rather than after
+                # it: this record does not carry the part it settled, and
+                # the record after it does. Only that field changes, which
+                # is what a revert of fork #770 does; the header and the
+                # payload stay, so the check has to notice the field.
+                carried, known = bredrrecord.UAP_ANY, False
             if settling and "settling-stale-header" in self.bugs:
                 header = 0
             if settling and "settling-no-payload" in self.bugs:
@@ -645,7 +649,7 @@ class ReplayRx:
                 "<BbbBBBhIIIH", entry["channel"], level, noise,
                 entry["errors"], (transport << 4) | bredrrecord.MOD_GFSK,
                 0, 0, entry["lap"],
-                ((reference_uap << 24) | reference_lap) & 0xFFFFFFFF,
+                ((carried << 24) | reference_lap) & 0xFFFFFFFF,
                 header, flags,
             ) + payload)
         return out

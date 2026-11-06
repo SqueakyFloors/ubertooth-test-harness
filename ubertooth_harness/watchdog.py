@@ -329,7 +329,12 @@ def parse_report(text: str) -> WatchdogRecord | None:
              if value is not None}
             if waits else None
         ),
-        radio_waits_unread=line["counters"] if line and waits is None else "",
+        # A line this reader cannot take apart, whatever it carries: a
+        # counter it has not got, and a line with nothing after the colon,
+        # which would otherwise read as "not reported" with nothing said --
+        # the silent shape #343 is about.
+        radio_waits_unread=(line["counters"] or "nothing"
+                            if line and waits is None else ""),
     )
 
 
@@ -483,6 +488,19 @@ def warnings_for(
             f"{label} recorded a processor fault {during}: {change.new_fault}."
         )
     return lines
+
+
+_DIGITS = re.compile(r"\d+")
+
+
+def _wait_shape(counters: str) -> str:
+    """A radio-wait line with its figures taken out: what names its wording.
+
+    Two reads of the same unreadable line differ only in the counts, which
+    is exactly what a counter does, so the counts cannot be part of what
+    says this is the same line as last time.
+    """
+    return _DIGITS.sub("N", counters)
 
 
 def unread_waits_warning(label: str, counters: str) -> str:
@@ -985,10 +1003,13 @@ class WatchdogMonitor:
             notes = tuple(notes_for(board.label, record, change, during))
         # Once per board per wording, however many times it is read: this says
         # the reader is behind the fork's report, which does not change during
-        # a run, and a line per read would bury the run's real findings.
+        # a run, and a line per read would bury the run's real findings. The
+        # wording is the line with its figures taken out, because the figures
+        # are what a counter does: keyed on the whole text, a counter that
+        # ticked over would be a new wording at every read.
         unread = record.radio_waits_unread
-        if unread and self._unread_waits.get(board.serial) != unread:
-            self._unread_waits[board.serial] = unread
+        if unread and self._unread_waits.get(board.serial) != _wait_shape(unread):
+            self._unread_waits[board.serial] = _wait_shape(unread)
             warnings += (unread_waits_warning(board.label, unread),)
         if partial:
             notes += (f"{board.label} read its watchdog record, but {partial}.",)
