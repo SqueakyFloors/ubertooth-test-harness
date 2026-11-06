@@ -58,7 +58,7 @@ from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.patterns import (
     APPLICATION_IMAGE,
     BTBR_IMAGE,
-    COMPILE_INFO_PATTERN,
+    BUILD_STRING_LINE,
     image_name_pattern,
 )
 from ubertooth_harness.pytools import SKIP_EXIT
@@ -101,8 +101,12 @@ _WRITTEN_REVISION = r"Verified firmware revision: (?P<value>\S+)"
 # The revision on a `ubertooth-util -v` line, whether or not it names an
 # image; which image it is comes from the pattern beside this observation.
 _REVISION = r"Firmware version:\s+(?:\S+\s+)?(?P<value>\S+)\s+\(API:"
-# The build string on a `-V` line, which is image-agnostic.
-_BUILD_REVISION = r"\bubertooth\s+(?P<value>\S+)\s+\("
+# The revision is read off the `Firmware version:` line of the `-V` answer
+# rather than the build string beside it: since #352 (fork #1230) the build
+# string is the date the image was built and names no version at all. So `-V`
+# still asks the same question the `-v` step above asked, through another
+# command, and the build string is required to be there (BUILD_STRING_LINE)
+# without being read for a revision it no longer carries.
 VERSION_TIMEOUT_S = 20.0
 
 
@@ -310,10 +314,11 @@ def _case(serial, peer, number: int, sessions: int, *,
                     f"The board reports the {BTBR_IMAGE} image at the run's "
                     "revision", BTBR_IMAGE, "btbr revision"),
         Step("verify-btbr-build",
-             f"The {BTBR_IMAGE} build string is the run's revision",
+             f"The {BTBR_IMAGE} image answers -V with the run's revision and "
+             "a build string",
              _util(serial, "-V"), timeout_s=VERSION_TIMEOUT_S,
-             output_patterns=(COMPILE_INFO_PATTERN,),
-             observe=Observation("btbr build revision", _BUILD_REVISION,
+             output_patterns=(BUILD_STRING_LINE,),
+             observe=Observation("btbr build revision", _REVISION,
                                  _revision)),
         _reset_peer("reset-peer-before", peer),
         _console_step(serial, peer, comprehensive=comprehensive),

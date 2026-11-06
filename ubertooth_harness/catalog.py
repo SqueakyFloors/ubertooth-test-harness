@@ -19,6 +19,7 @@ from ubertooth_harness import weaklink
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     FIRMWARE_PATTERN,
+    HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
     VERSION_ANSWER,
@@ -713,11 +714,12 @@ def _device_test(name, description, argv=None, extra=None):
 
 
 # ubertooth_print_host_version() in libubertooth, the first line of every
-# tool's -V answer. Anchored to its label, so a board's firmware lines under
-# it cannot stand in for it.
-_HOST_VERSION_PATTERN = (
-    r"(?m)^Host tools version: libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)$"
-)
+# tool's -V answer: patterns.HOST_VERSION_LINE, which is the one statement of
+# the two layouts the fork has printed it in (#352, fork #1230). Anchored to
+# its label, so a board's firmware lines under it cannot stand in for it.
+# Which layout a given commit must print is decided where the resolved commit
+# is known (preflight.py); a case has only the tool in front of it.
+_HOST_VERSION_PATTERN = HOST_VERSION_LINE
 # That line needs no board, but the command goes on to read every attached
 # one and exits 1 if any cannot be read -- in use by another program, or not
 # answering -- which may be a board this run does not use. The line is what
@@ -1212,7 +1214,7 @@ def builtin_catalog() -> TestCatalog:
     definitions = [
         TestDefinition(
             "Host version",
-            "Host tools version and git identity",
+            "Host tools version line",
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
             ("ubertooth-util", "-V"),

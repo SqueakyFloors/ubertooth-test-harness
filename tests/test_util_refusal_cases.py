@@ -37,16 +37,30 @@ class FakeUtil:
     Ubertooth device", as before 753269b). ``switch`` False is a library from
     before b6d8ede."""
 
-    def __init__(self, *, bugs=(), switch=True):
+    # The host tools' version, in the two layouts the fork has printed. A
+    # commit from before #352 (fork #1230) names the two library ABI versions
+    # with the commits they were built from and prints the libbtbb it loaded
+    # on a line of its own; one since names the release the build came from
+    # and prints no path line at all.
+    OLD_VERSION = ("Host tools version: libubertooth 1.1 (git-test), "
+                   "libbtbb 1.3 (git-btbb)")
+    OLD_PATH_LINE = "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+    RELEASE_VERSION = "Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)"
+
+    def __init__(self, *, bugs=(), switch=True, names_release=False):
         self.bugs = set(bugs)
         self.switch = switch
+        self.version_line = (
+            self.RELEASE_VERSION if names_release else self.OLD_VERSION
+        )
+        self.path_line = "" if names_release else self.OLD_PATH_LINE
         self.commands = []
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n")
+            return self._result(command, 0, f"{self.version_line}\n")
         if command[0] == sys.executable:
             assert Path(command[1]).name == "refusal.py" and command[2] == "probe", command
             answer = ("yes (/p/lib/libubertooth.so.1)" if self.switch else
@@ -90,8 +104,8 @@ class FakeUtil:
             # host lines, then nothing attached, exit 0 and no switch note.
             return self._result(
                 command, 0,
-                "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n"
-                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                f"{self.version_line}\n"
+                f"{self.path_line}"
                 "Firmware version: no Ubertooth attached\n")
         if "h" in given:
             return self._result(command, 0, USAGE)
@@ -217,6 +231,28 @@ class CaseTests(unittest.TestCase):
         self.assertTrue(summary.passed, summary.failure_reason)
         summary, _events = run(FakeUtil())
         self.assertTrue(summary.passed, summary.failure_reason)
+
+    def test_the_cleanup_takes_the_host_version_line_either_way(self):
+        """Every case's cleanup runs `-V` to show the tool still runs.
+
+        The line it reads was rewritten with the release names (#352, fork
+        #1230), so a cleanup tied to the old layout would fail every case of
+        this test on a build since. What the version must be is preflight's
+        business, where the resolved commit is known; here only the label
+        decides.
+        """
+        _arguments, built = cases("smoke")
+        cleanups = [
+            step for case in built for step in case.cleanup
+            if step.step_id == "host-version"
+        ]
+        self.assertTrue(cleanups)
+        cleanup = cleanups[0]
+        for line in (FakeUtil.OLD_VERSION, FakeUtil.RELEASE_VERSION):
+            with self.subTest(line=line):
+                answer = f"{line}\nFirmware version: no Ubertooth attached\n"
+                for pattern in cleanup.output_patterns:
+                    self.assertRegex(answer, pattern)
 
     def test_an_accepted_pair_fails_every_pair_case(self):
         summary, events = run(FakeUtil(bugs=("pairs-accepted",)), coverage="smoke")

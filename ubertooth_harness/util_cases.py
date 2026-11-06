@@ -60,7 +60,7 @@ from ubertooth_harness import ledblink
 from ubertooth_harness.outputfiles import find_lines, search_lines, text_lines
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    COMPILE_INFO_PATTERN,
+    BUILD_STRING_LINE,
     FIRMWARE_PATTERN,
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
@@ -850,11 +850,11 @@ _BLOCK_PATTERNS = (
     ("-s", "serial", _SERIAL_LABEL, rf"^{_SERIAL_LABEL}: {_SERIAL_RE}$"),
 )
 # The -V answer's own lines, in the order it prints them per board, after the
-# host tools' two lines (the version and the libbtbb path), neither of which
-# is about a board at all.
+# host tools' own version and, on a commit that prints one, the libbtbb path
+# line under it -- neither of which is about a board at all.
 _VERSION_REPORTS = (
     ("Firmware version", FIRMWARE_PATTERN),
-    ("Firmware build", COMPILE_INFO_PATTERN),
+    ("Firmware build", BUILD_STRING_LINE),
 )
 _VERSION_LINE = re.compile(
     r"^(?P<label>Firmware version|Firmware build) \((?P<index>\d+)\): (?P<text>.*)$"
@@ -938,16 +938,21 @@ def version_listing_check(count):
     """
     def check(stdout):
         lines = list(text_lines(stdout))
-        # The answer opens with the host tools' two lines, in that order and
-        # once each (libubertooth's ubertooth_print_host_version()); the
-        # boards follow. Fixed rather than filtered, so an answer that
-        # repeats them or leaves one out is a failure.
-        head, rest = lines[:2], lines[2:]
-        if (len(head) < 2
-                or not re.search(HOST_VERSION_LINE, head[0])
-                or not re.search(LIBBTBB_PATH_LINE, head[1])):
-            return ("the answer does not open with the host tools' version "
-                    f"and the libbtbb path: {head!r}")
+        # The answer opens with the host tools' own version
+        # (libubertooth's ubertooth_print_host_version()); the boards follow.
+        # Fixed rather than filtered, so an answer that repeats it or leaves
+        # it out is a failure.
+        if not lines or not re.search(HOST_VERSION_LINE, lines[0]):
+            return ("the answer does not open with the host tools' version: "
+                    f"{lines[:1]!r}")
+        rest = lines[1:]
+        # Older fork commits print which libbtbb was loaded on a second line
+        # of their own; since #352 a libbtbb other than the one the tools were
+        # built against is a warning on standard error instead, and there is
+        # no such line. Taken where it is there, so the boards below start at
+        # the right line either way.
+        if rest and re.search(LIBBTBB_PATH_LINE, rest[0]):
+            rest = rest[1:]
         for index in range(count):
             for label, pattern in _VERSION_REPORTS:
                 if not rest:

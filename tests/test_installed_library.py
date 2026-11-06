@@ -179,8 +179,9 @@ class ConsumerIdentityTests(unittest.TestCase):
             lines.append("Firmware version: no Ubertooth attached")
         return "\n".join(lines) + "\n"
 
-    def identity(self, text):
-        return consumer_identity(text, str(self.prefix), VERSION_LINE)
+    def identity(self, text, built_libbtbb=None):
+        return consumer_identity(text, str(self.prefix), VERSION_LINE,
+                                 built_libbtbb)
 
     def test_the_install_s_own_answer_passes(self):
         self.assertEqual(VERSION_LINE, self.identity(self.output()))
@@ -208,6 +209,56 @@ class ConsumerIdentityTests(unittest.TestCase):
         with self.assertRaises(InstalledLibraryError) as caught:
             self.identity(text)
         self.assertIn("2 'libbtbb loaded from:' lines", str(caught.exception))
+
+    NO_PATH = (f"{VERSION_LINE}\n"
+               "Firmware version: no Ubertooth attached\n")
+
+    def test_an_install_that_prints_no_path_passes_without_the_warning(self):
+        """Since #352 (fork #1230) there is no path line.
+
+        A libbtbb other than the one the tools were built against is a
+        warning instead, so the loader having reached this install is
+        established by that warning not being there -- together with the
+        install having been built against a libbtbb inside the prefix, which
+        is the other side of the comparison that warning comes from.
+        """
+        self.assertEqual(
+            VERSION_LINE, self.identity(self.NO_PATH, str(self.library.parent))
+        )
+
+    def test_a_warning_about_another_libbtbb_is_refused(self):
+        text = (f"{VERSION_LINE}\n"
+                "warning: libbtbb was loaded from /usr/lib/libbtbb.so.1, not "
+                "the /opt/run/lib these tools were built against; packets may "
+                "decode differently\n"
+                "Firmware version: no Ubertooth attached\n")
+
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.identity(text, str(self.library.parent))
+        self.assertIn("other than the one the install was built against",
+                      str(caught.exception))
+
+    def test_no_path_line_and_no_recorded_libbtbb_establishes_nothing(self):
+        """The warning is skipped when the install recorded no directory.
+
+        ubertooth_libbtbb_is_elsewhere() returns 0 with nothing to compare
+        against, so "no warning" would then say nothing at all -- which is
+        the drift #294 exists to catch.
+        """
+        for built in (None, ""):
+            with self.subTest(built=built):
+                with self.assertRaises(InstalledLibraryError) as caught:
+                    self.identity(self.NO_PATH, built)
+                self.assertIn("--built-libbtbb", str(caught.exception))
+
+    def test_a_recorded_libbtbb_outside_the_prefix_is_refused(self):
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.identity(self.NO_PATH, "/usr/lib")
+        self.assertIn("establish nothing", str(caught.exception))
+
+    def test_an_older_install_needs_no_recorded_libbtbb(self):
+        """It prints the path, which is the positive evidence itself."""
+        self.assertEqual(VERSION_LINE, self.identity(self.output()))
 
 
 class PathTests(unittest.TestCase):

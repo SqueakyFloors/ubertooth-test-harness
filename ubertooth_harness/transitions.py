@@ -1725,8 +1725,27 @@ GUARD_FIRMWARE_PATTERN = (
 )
 API_PATTERN = r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)"
 _GUARD_API_RE = re.compile(API_PATTERN)
-# Same shape the preflight compile-info check requires.
-GUARD_COMPILE_INFO_PATTERN = r"(?P<value>\bubertooth\s+\S+\s+\([^\n]*\S)"
+# The build string a board reports, in either of the two forms a build has
+# stamped into it. Since #352 (fork #1230) it is the date the image was built
+# and nothing else, under its own label; before that it was
+# "ubertooth <revision> (who@where) <date>", labelled since fork 201c3c49 and
+# bare before it, so that branch is matched wherever it sits.
+#
+# Only the value is the reading, so a labelled line has its label taken off
+# (_guard_build_string). What this read is for is unchanged either way: a
+# board reflashed with the same revision gets a new build date, which is what
+# the reading catches.
+GUARD_COMPILE_INFO_PATTERN = (
+    r"\bubertooth\s+\S+\s+\([^\n]*\S"
+    r"|(?m:^Firmware build: (?!read failed$|not reported$)\S[^\n]*)"
+)
+_BUILD_LABEL = "Firmware build: "
+
+
+def _guard_build_string(match: re.Match) -> str:
+    """The build string a GUARD_COMPILE_INFO_PATTERN match stands for."""
+    text = match.group(0).strip()
+    return text[len(_BUILD_LABEL):] if text.startswith(_BUILD_LABEL) else text
 GUARD_IDENTITY_KEY = "identity"
 GUARD_IDENTITY_PATTERN = r"Serial No:\s+(?P<value>[0-9a-fA-F]+)"
 GUARD_BOOTLOADER_KEY = "bootloader"
@@ -1807,7 +1826,7 @@ def _tolerant(pattern, convert, values=None):
 # rather than guarded.
 GUARD_STABLE_READBACK = (
     (GUARD_FIRMWARE_KEY, "-v", GUARD_FIRMWARE_PATTERN, None),
-    ("compile-info", "-V", GUARD_COMPILE_INFO_PATTERN, None),
+    ("compile-info", "-V", GUARD_COMPILE_INFO_PATTERN, _guard_build_string),
     (GUARD_IDENTITY_KEY, "-s", GUARD_IDENTITY_PATTERN, None),
     (GUARD_BOOTLOADER_KEY, "-B", GUARD_BOOTLOADER_PATTERN, None),
 )

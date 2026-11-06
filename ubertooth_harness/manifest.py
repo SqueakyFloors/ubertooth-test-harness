@@ -15,6 +15,7 @@ from typing import Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from ubertooth_harness import environment as harness_environment
+from ubertooth_harness import release as release_version
 from ubertooth_harness.events import validate_run_id
 from ubertooth_harness.planner import TestInvocation
 
@@ -140,10 +141,33 @@ class SourceRevision:
     # run took from the Ubertooth commit's own install.sh. Recorded only,
     # never resolved.
     ref_name: str | None = None
+    # The release a build of this commit reports, worked out the way the
+    # build works it out (release.py): "2026-11-DEV1+22", or the release and
+    # "+unknown" where no release tag is in reach. Empty for a commit from
+    # before the fork reported releases, whose build stamps "git-<hash>"
+    # instead, and empty for a revision a caller built by hand without
+    # asking a checkout.
+    build_version: str = ""
 
     @property
     def expected_revision(self) -> str:
-        return f"git-{self.short_commit}"
+        """The version string a build of this commit reports.
+
+        The release this commit came from where its build names one, else the
+        ``git-<hash>`` an older commit's build stamps. Compared against what
+        the installed tools, a board's firmware and a built image report
+        (patterns.same_revision).
+        """
+        return self.build_version or f"git-{self.short_commit}"
+
+    @property
+    def names_release(self) -> bool:
+        """Does a build of this commit name a release rather than a commit?
+
+        Which says how its version *lines* are laid out as well as what they
+        carry: the fork rewrote both in one change (#352).
+        """
+        return bool(self.build_version)
 
     def to_dict(self) -> dict:
         data = {
@@ -157,6 +181,8 @@ class SourceRevision:
         }
         if self.ref_name is not None:
             data["ref_name"] = self.ref_name
+        if self.build_version:
+            data["build_version"] = self.build_version
         return data
 
 
@@ -292,6 +318,16 @@ class GitRevisionResolver:
             raise ManifestError(f"resolved {name} commit is invalid: {commit}")
         short_commit = _git(path, "rev-parse", "--short", commit)
         repository = _repository_for_ref(path, requested_ref)
+        # What a build of this commit reports, worked out the way the build
+        # works it out. A commit whose build names a release carries the
+        # release name here; an older one leaves it empty and
+        # expected_revision falls back to the git-<hash> its build stamps.
+        try:
+            version = release_version.build_version(
+                path, commit, kind=name.strip(), short_commit=short_commit
+            )
+        except release_version.ReleaseVersionError as error:
+            raise ManifestError(str(error)) from error
         return SourceRevision(
             name=name.strip(),
             source_path=str(path),
@@ -300,6 +336,9 @@ class GitRevisionResolver:
             commit=commit.lower(),
             short_commit=short_commit.lower(),
             ref_name=ref_name,
+            build_version=(
+                version.value if version.names_release else ""
+            ),
         )
 
 

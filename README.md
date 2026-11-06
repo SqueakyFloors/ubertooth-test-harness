@@ -975,7 +975,7 @@ well, so it is the one to run after the gate.
 
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|
-| `Ubertooth util compositions` | `-V -s` and `-s -V` (the version answer's four lines in order, and no serial line, since `-V` ends the command whichever order it was written in) and every composable read-only report in one command | adds every other compatible read-only pair and a repeated `-U` (refused: two boards for one command) |
+| `Ubertooth util compositions` | `-V -s` and `-s -V` (the version answer's lines in order, and no serial line, since `-V` ends the command whichever order it was written in) and every composable read-only report in one command | adds every other compatible read-only pair and a repeated `-U` (refused: two boards for one command) |
 | `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`, and a stray word for `afh`, `debug`, `dfu`, `dump`, `tx`) | every rejected argument in `REJECTIONS` (64): out-of-range, non-numeric, or partly numeric `util -c -C -a -z -l -d -q` values, attached or as the next word (`-q` takes 20-120, so `-q19`, `-q121`, and `-q183` are refused), `util -z` with `-I`, `-q`, or `-x`, `-U all` with a setter or mode (the only two that run without the test's own `-U <serial>`: `-U all` is the selector, and a second `-U` would be refused for the repeat), bad advertising index, bad target/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range, `btle -a zzzz` and `-k 2`; a stray word on every built tool (fork's one argument rule: after a set or a mode, a bare `-`, after `--`, a next word that is not a value such as `util -a 7x`) refused with `error: unexpected argument`; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
 | `Radio setting transitions` | channel, PA level, squelch across an idle stop and an active-mode stop; `-c 2426` (value as the next word) and `-a0` (PA level 0) read back; setters (`-z <n>` too), `-S` and `-r` print nothing on stdout, their progress lines on stderr (fork #326) | adds USR LED; a repeated `-c`, `-C`, `-a`, `-z`, `-l`, `-d` (each refused, the setting unchanged); a value given to both `-c` and `-C` in either order (refused, the channel unchanged); `-C`, `-a`, `-z`, `-l`, `-d` values and `-a 0` as the next word, and `-c -a -z -d -l` next-word values in one command, each read back; `-a9 -v` refused with exit 1 before the report; full reset `-r` from PA 0 returns boot defaults; a set and a read of the same value in one command (`-c<MHz> -c`, `-c -c<MHz>`, `-a<level> -a`, `-l<state> -l`, `-d<state> -d`) sets it and reports the new value (fork #228, fixed in 5b45b3e) |
 | `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; `-k 1` and `-k 0` as the next word; a repeated `-k` (refused, the CRC setting unchanged); two capture files through one handle, `-q -c` and `-c -q` (first wins, extra file never created); `-r` with `-q` and with `-c` (separate handles, both written) |
@@ -996,7 +996,7 @@ well, so it is the one to run after the gate.
 | `BLE extcap in tshark` | real `tshark -i ubertooth<serial>` captures through the plugin, which it installs itself in a Wireshark configuration of its own, for `duration` from a registered nRF52840 DK advertiser: at least one row of `-T fields -e btle.advertising_address -e btle.advertising_header.pdu_type` carries the DK's address as an ADV_NONCONN_IND, tshark exits 0, no process is left, the DK is left idle and channel, squelch and LEDs are restored; not applicable where `tshark` is not installed | adds a capture filter, which Wireshark passes on as `--extcap-capture-filter` and the plugin cannot apply (its `warning:` must reach tshark and the capture must run anyway), and a capture stopped with SIGINT halfway, once a row has been decoded (exit 0 with the rows decoded so far; skipped when nothing was decoded to stop it after) |
 | `Raw receive replay` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-rx -i` on a synthetic fixture (`rxreplay.py`, built from the spec encoding, never a real capture) prints exactly the fixture's LAP/error/channel lines and skips the decoy records; `-l <LAP>` derives the UAP (CLK6 0); `-r` PCAPNG and `-q` PCAP with link type 255 and one packet per line; `-s` gives the same lines with no notice and `-h` lists it as the default sweep (fork #361); `-d` into a missing directory exits 1 with one `error: <file>: No such file or directory` line, no usage and no packet line, and the directory holds only the unchanged fixture (fork 5ac22a8); and six cases about where a capture goes and which destinations are one file: `-q -`, `/dev/stdout` and `/dev/fd/1` write the capture to the redirected stream with the packet report printed on neither stream, `/proc/self/fd/1` does the same on Linux (the one case macOS leaves out, in smoke so CI's Linux build job runs it), `/dev/fd/3` is the caller's own file so the report keeps standard output, `-q` and `-r` on one name are refused naming both options, and a `-d` naming the dump `-i` is replaying is refused, each case ending with the whole directory stated and the input's SHA-256 (fork #782) | adds `-z` (both piconets on stdout, one with its UAP, and the heading on stderr); `-l` of an ID-only LAP (no UAP); `-l -u` with the right UAP (confirmed, hop reversal) and a wrong one (nothing confirmed); `-e 0` drops the one-error access code; `-d` writes the packet records back byte for byte (and passes `rxdump.py`); `-l -q` captures one LAP; empty file exit 0; missing file exit 1 (`error: <file>: No such file or directory`); lines carry the recorded systime (fork #202); `-i <directory>` and a cut last record are reported, exit 1 (fork #203; both fixed in a55ac89); `-i -u` without `-l` refused before the input is used (fork #236, fixed in 57469f2; the bare `-u` is in Argument validation, under a lease); and five more capture-destination cases: one file under two spellings refused while `/dev/null` twice is accepted, a link, a hard link, `-` beside the name the shell pointed that stream at and `/dev/fd/3` beside the file it holds each refused as one file under two names (with two captures both asking for that stream refused by the one-capture-on-standard-output rule instead), `-r` refusing `-`, `/dev/stdout`, `/dev/fd/1` and a link to one of them, since PcapNG seeks, and a link and a hard link to the `-i` input refused, with standard output pointed at that input refusing `-q -` and warning that the bare decode's capture is lost (fork #1203) |
 | `Ubertooth util modes` | `-I` blinks every LED (sampled at jittered intervals until both phases appear, at most 60 samples or 10 s including a read in flight), `-q120` (-120 dBm) lights every LED; each returns at once, its start line on stderr (`-I`: one `note: the board is blinking; stop it with ubertooth-util -U <serial> -S ...` line; fork #326), keeps channel and PA, and `-S` ends it with the idle reset (LEDs off, 2441 MHz, squelch -120, PA kept); originals are restored; `-m` after `-r` says `no range test result yet` (fork #190) | adds `-q20` and bare `-q` (-85 dBm) running until `-S`, `-I` ending `-q` and `-q` ending `-I` (the new mode starts at 2441 MHz), `-s -I`. A failed LED read (fork #213) is retried once and the retry recorded; two in a row fail the case |
-| `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those, each line labelled with the board's index in it (`Serial No (0): <serial>`, fork #610); `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -bvps` and `-bvps` without `-U` (four lines per board), `-U all -V` and `-V` without `-U` (the host tools' two lines, the version and the libbtbb path, then each board's `Firmware version (<index>)` and `Firmware build (<index>)`, since `-V` ends the command and reports every board itself, fork f898fe5), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
+| `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those, each line labelled with the board's index in it (`Serial No (0): <serial>`, fork #610); `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -bvps` and `-bvps` without `-U` (four lines per board), `-U all -V` and `-V` without `-U` (the host tools' version, then the libbtbb path on a fork commit that prints one, then each board's `Firmware version (<index>)` and `Firmware build (<index>)`, since `-V` ends the command and reports every board itself, fork f898fe5), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
 | `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-n` runs the round trip and reports it on stdout with its progress on stderr (fork #687, 1c7f06d6; its step outlasts the tool's own 10 s deadline), and the sender's `-m` is read afterwards and must give the same result: request and reply PA levels at most `maximum PA level` (0-7, default 7; both suites of the `range` plan set 3) and copy numbers 0-15; a reply that differs from the request fails the `-n` step with the tool's own `invalid range test: mismatch on byte N`; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Passes on fork main since fork #601 (fork #26, #483), about 9 runs in 10 on a bench pair; the rest fail with `mismatch on byte 0` (fork #677) | no comprehensive profile |
 | `Capture known BLE advertiser` | `ble` plan; an Ubertooth and an nRF52840 DK with the `advertiser` role on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): the DK is flashed with `firmware/nrf52840dk` when it reports another version, and must report its registered address; for each of channels 37, 38 and 39 the DK advertises (`ADV_NONCONN_IND`, `interval`, `payload` tag) on that channel only and `ubertooth-btle -n -A<channel> -q` captures for `duration`: at least a fifth of its advertising events and no more than its interval allows, every one on that channel's RF channel, CRC right, from its address, with the harness payload (magic, channel map, tag) and a counter between the DK's counters before and after; `-n -A37` while it advertises on 38 holds none of its packets; `-f -A37 -r` (PCAPNG) holds them too; the DK is stopped and returned to its boot settings, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds every listen/advertise channel pair that must hold nothing, `-f -A38`/`-A39`, `ADV_IND` (which is scannable, so the advertiser's own scan responses to scanners nearby are counted and only their channel is checked), advertising on all three channels, a 1000 ms interval (packet bound), and no tag |
 | `Capture known BLE connection` | `ble` plan, `connection` suite; an Ubertooth and two nRF52840 DKs, one with the `central` role and one with the `peripheral` role, on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): both DKs are flashed with `firmware/nrf52840dk` when they report another version and must report their registered addresses; the peripheral advertises connectable, the central connects at `interval` with a 251-byte data length, writes 244 bytes every 50 ms, asks for `update` once connected, and remakes the link every 5 s; `ubertooth-btle -f -r` captures for `duration` and the capture must hold one CONNECT_IND between the two addresses with exactly that interval, latency 0 and a 4 s supervision timeout, a hop increment of 5-16, every data channel in the channel map, at least five packets on the connection's access address, of which at least one decodes with a correct CRC, and at least one longer than the 27 bytes a link without Data Length Extension allows; a capture that misses any of that is taken again, up to three captures; both DKs are left idle in the advertiser role, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds the same with `-q` (PCAP) and a case that reads the connection information libbtbb records in a PCAPNG: one of the recorded options must be, byte for byte, a CONNECT_IND this capture decoded from the two addresses, so the parameters a reader follows the connection with are the ones that went over the air ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21) had them copied 6 bytes early) |
@@ -1525,31 +1525,45 @@ reads as correct. One such drift cost a bench session chasing a false
 reproduction of a fork regression ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
 
 So mandatory preflight holds the host tools to one libbtbb. Every tool prints
-it on its own version line (`Host tools version: libubertooth 1.07
-(git-6a917ec), libbtbb 1.3 (git-7e1cdf0)`), where the revision in the second
-pair of brackets is what libbtbb's own build stamped into
-`btbb_get_release()`: the commit the installed library was built from. That
-string comes from a function in libbtbb, so it describes the library the tools
-load and not one they were compiled against. The `Host version` check reads
-that line and requires:
+it on its own version line, beside the tools' own version:
+`Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)`, and on a fork
+commit from before the release names, `Host tools version: libubertooth 1.07
+(git-6a917ec), libbtbb 1.3 (git-7e1cdf0)`. What libbtbb's half carries is
+`btbb_get_release()`: the release its own build names since `libbtbb#139`,
+and the commit the installed library was built from before that. Either way
+the string comes from a function in libbtbb, so it describes the library the
+tools load and not one they were compiled against. The `Host version` check
+reads that line and requires:
 
 - the libbtbb the run resolved, when it resolved one (`--libbtbb-source` and
-  `--libbtbb-ref`, with or without `--build`), by its full commit;
+  `--libbtbb-ref`, with or without `--build`), by the release a build of that
+  commit names, or by its full commit where that build stamps one. Which it
+  is comes from the libbtbb commit itself, worked out the way its build works
+  it out (`release.py`), so the two repositories may have moved over at
+  different times;
 - otherwise the `LIBBTBB_REF` the Ubertooth commit under test sets in its own
   `install.sh`, which is the only statement of which libbtbb that commit is
   meant to run against. No option is needed, so a `run-suite` started by hand
-  is held to it too. A run from a deployed runner resolves the same commit
-  already, since `scripts/deploy.sh` passes `--libbtbb-source` and
-  `--libbtbb-ref fork-pin` to every run, build or not.
+  is held to it too, with one limit: a commit is not a release name, and
+  turning one into the other needs the libbtbb checkout. So where the
+  Ubertooth commit under test reports releases, a run given no
+  `--libbtbb-source` records the check as **not checked**, with the pin and
+  `--libbtbb-source`/`--libbtbb-ref` named in the reason, rather than
+  comparing a commit against a release name and failing a run that is
+  perfectly able to measure everything else. A run from a deployed runner is
+  unaffected: `scripts/deploy.sh` passes `--libbtbb-source` and
+  `--libbtbb-ref fork-pin` to every run, build or not, so it resolves the
+  commit and the check is made.
 
 A mismatch fails preflight before any measurement, and the reason names the
 revision the tools reported, the one wanted, where that came from, and how to
-fix it. A library that cannot name a commit fails the same way: one built from
-a tarball reports a release such as `2020-12-R1`, and one built from a
-modified checkout adds a `*`, and neither says it is the pinned commit. Those
+fix it. A library that cannot name what was wanted fails the same way: against
+a commit, one built from a tarball reports a release such as `2020-12-R1` and
+one built from a modified checkout adds a `*`, and neither says it is the
+pinned commit. Those
 two can only be put right by installing a libbtbb built from a clean checkout
 of that commit, or by running with `--build`; naming a ref cannot help, since
-what the check compares is always a commit. report.md carries a "libbtbb in
+what the check compares is then a commit. report.md carries a "libbtbb in
 the tools" row with what was required and how it went: `(verified)`,
 `**failed**` with the requirement, or `**not reached**` where the check
 stopped on the tools' own Ubertooth revision before it read the libbtbb half.
@@ -1607,8 +1621,10 @@ make the board's state less knowable, not more.
 
 **What "current" means.** Not the resolved commit's bootloader, but the newest
 commit reachable from it that touched the sources the bootloader image is
-built from. The build string the bootloader carries is the whole repository's
-revision at build time, so pinning the artifact to the resolved commit would
+built from. The build string the bootloader carries is the version the whole
+repository reported at build time -- the release it came from, or a commit
+hash on a commit from before the release names -- so pinning the artifact to
+the resolved commit would
 change its identity on every unrelated commit and demand a physical write to
 every board on most days for no change in behavior. The pin, the paths it
 watches, and the sources the bootloader's own makefile names all go in the run
@@ -1645,10 +1661,12 @@ immutable resource-bound invocations. The sequencer then generates mandatory
 preflight from the selected resources; it does not depend on optional test-plan
 entries:
 
-- `Host version` once per selected host, matched to the resolved source
-  commit, and to the libbtbb those tools are linked against (see [Which
-  libbtbb the tools load](#which-libbtbb-the-tools-load));
-- firmware version, compile identity, and registered serial once per selected
+- `Host version` once per selected host, matched to the version a build of
+  the resolved commit reports (below), and to the libbtbb those tools are
+  linked against (see [Which libbtbb the tools
+  load](#which-libbtbb-the-tools-load));
+- firmware version, the same version through `-V`, and registered serial once
+  per selected
   Ubertooth, always selected by serial. The firmware version must be the
   application image (`bluetooth_rxtx`) built from the resolved commit, or the
   bare revision older firmware prints; a board left on another image, such as
@@ -1660,6 +1678,47 @@ Any mismatch prevents the first `test_started` event. This local slice verifies
 artifacts that are already installed. Building and installing the resolved ref
 on local/remote targets remains a later preparation phase; preflight cannot be
 skipped to compensate for a missing installation.
+
+### The version a build reports
+
+Every version line names the release a build came from rather than the commit
+it was built at
+([ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230),
+`ubertooth#1232`):
+
+```text
+Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
+Firmware version: bluetooth_rxtx 2026-11-DEV1+22 (API:1.58)
+Firmware build: Thu Nov  6 02:11:04 UTC 2026
+```
+
+Preflight, the guard reads and the flash and bootloader checks all compare
+what a board or an installed tool reports against what a build of the resolved
+commit *would* report, so `ubertooth_harness/release.py` works that string out
+the way the build works it out, from the resolved checkout: the nearest tag
+named `YYYY-MM-Rn`, `-RCn` or `-DEVn`, then how many commits the build is past
+it as `+N`, and `<latest release>+unknown` where no release tag is in reach --
+a clone fetched without tags, or a shallow one -- because a count from the
+start of history is not the distance from a release. Two files in the fork do
+the same thing and agree with each other on purpose,
+`host/cmake/set_release.cmake` and `firmware/version.mk`, and libbtbb's own
+`cmake/set_release.cmake` does it for `btbb_get_release()`. A `*` for a
+modified tree is never predicted: a run refuses a dirty source checkout and
+builds from a clean clone of it, so a reported `*` is a mismatch to report.
+
+**An older ref still reports a commit.** A commit from before that change
+stamps `git-<hash>`, and its version *lines* are laid out differently too, so
+the harness reads the style off the checkout at the commit it resolved rather
+than assuming one: the file that decides the string either derives a release
+name or formats a hash, and it says which in its own text. A file that does
+neither, and a tree whose firmware names releases while that file has moved,
+refuse the run rather than being guessed at -- a wrong guess would compare
+every version in the run against the wrong string. A commit with no such file
+at all is read as the hash style, which is what every such build stamped.
+
+The version the run expects is in the manifest as each source's
+`expected_revision`, and in report.md beside the ref and the commit, so a
+reader of a run sees which it was.
 
 ## BLE test devices (nRF52840 DK)
 
@@ -2489,7 +2548,7 @@ lines open and close the run, build, preflight, and each test:
 00:00:10.438     === PREFLIGHT ===
 00:00:10.439     +++ Host version +++
 00:00:10.439 [C] ubertooth-util -V
-00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] Host tools version: libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-84ab41f)
+00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
 00:00:10.465     --- Host version EXIT: passed ---
 00:00:10.466     === PREFLIGHT EXIT: passed ===
 00:00:10.466     === TEST 002-Host CLI surface: Host CLI surface on Host_Mac ===
@@ -2752,8 +2811,12 @@ resolved Ubertooth revision; the KGV must match the plan's sha256 and revision.
 The test:
 
 - checks every image's SHA-256 (against the manifest and the pinned KGV) before
-  the run starts and again before each write;
-- alternates the images so every write changes the expected revision;
+  the run starts and again before each write, and refuses a sequence whose
+  images are the same file: the images, not their versions, are what the run
+  alternates. Two images may report one release, since a version names the
+  release a build came from rather than the build, and then the revision read
+  after a write says the right release is on the board rather than which
+  build of it;
 - flashes with `ubertooth-dfu` by serial, one write at a time;
 - reads `ubertooth-util -v` after every flash and fails on any mismatch;
 - reads every other registered Ubertooth on the host before the run and after
@@ -3710,8 +3773,14 @@ directory and the library directory its file reports have to be the
 install's, and a small C program is compiled and linked with what it
 answered and then run: it calls `ubertooth_print_versions()`, which needs no
 board, and what it prints has to be the version line the build's own tools
-printed (so a library from elsewhere that answered is caught), a libbtbb loaded
-from inside the prefix, and the no-board line the switch asks for. A CMake
+printed (so a library from elsewhere that answered is caught), the install's
+own libbtbb, and the no-board line the switch asks for. How the libbtbb is
+established follows what the install says: a fork commit from before #352
+prints the path it loaded, which has to be inside the prefix; one since
+reports a libbtbb only when it is not the one it was built against, so what
+is required there is that warning's absence *and* that the install was built
+against a libbtbb inside the prefix, since the warning is skipped when the
+install recorded no directory to compare with. A CMake
 project of the same program is configured with
 `find_package(ubertooth <version> EXACT REQUIRED)`, the version being the one
 `libubertooth.pc` gave, so `ubertoothConfigVersion.cmake` is read and has to
