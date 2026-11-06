@@ -74,7 +74,8 @@ Help smoke:
   limitations: >-
     It proves almost nothing beyond "the binary runs". Host CLI surface is the
     same idea applied to every tool, with the tool's own name required in the
-    output.
+    output, so this adds no coverage to a suite that holds that one; it is
+    kept as the cheapest step a plan can hold.
   related: []
 
 Host CLI surface:

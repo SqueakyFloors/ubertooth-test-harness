@@ -283,14 +283,17 @@ ubertooth-util -U <serial> -V                  # "Firmware compile info", per bo
 ubertooth-util -U <serial> -s                  # "Device serial", per board
 ubertooth-util -U <serial> -v                  # "Guard firmware API", guard-only board
 ubertooth-util -U <serial> -B                  # "Bootloader identity", per board
-nrfdk.py identify --jlink <jlink serial>       # "nRF52840 DK probe", per DK
+nrfdk.py identify --jlink <jlink serial> [--port <serial device>]
+                                               # "nRF52840 DK probe", per DK
 esp32peer.py identify --device <serial device> --address <BD_ADDR>
                                                # "ESP32 Classic peer", per peer
 ```
 
-Each device driver also takes the port the registry names for that device
-(`nrfdk.py --port <serial device>`), and derives it from the probe's or
-bridge's serial where the registry names none.
+Each device driver is given the port the registry names for that device, and
+derives it from the probe's or bridge's serial where the registry names none.
+`nrfdk.py` takes it as `--port`, which is therefore in its command only where
+a registry names one; `esp32peer.py` takes it as `--device`, which is in
+every one of its commands either way.
 
 The host version line must name the resolved Ubertooth commit and the libbtbb
 the tools are linked against; `-v` and `-V` must report the resolved firmware
@@ -307,10 +310,22 @@ the same command and the same check
 
 **Guard Ubertooths.** A guarded test binds every other registered Ubertooth on
 the host as a `guard Ubertooth N` resource and reads each one before the test
-and after every case, with queries only and one command per read:
-`ubertooth-util -U <serial>` with `-v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z` and
-`-d`, then `ubertooth-btle -U <serial> -k` (`-V` ends the command, so it could
-not share one with the others anyway). Every read must match the baseline taken before the
+and after every case, with queries only and one command per read (`-V` ends
+the command, so it could not share one with the others anyway):
+
+```text
+ubertooth-util -U <serial> -v                 # the firmware image and revision
+ubertooth-util -U <serial> -V                 # its compile info
+ubertooth-util -U <serial> -s                 # the serial the board reports
+ubertooth-util -U <serial> -B                 # the bootloader under it
+ubertooth-util -U <serial> -C                 # the channel, in MHz
+ubertooth-util -U <serial> -a                 # the PA level
+ubertooth-util -U <serial> -z                 # the squelch
+ubertooth-util -U <serial> -d                 # all three LEDs
+ubertooth-btle  -U <serial> -k                # the CRC verify flag, last
+```
+
+Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
 is refused, which fails the check, unless that board's firmware API is the
@@ -427,7 +442,11 @@ ubertooth-util -h
 
 **Known limits.** It proves almost nothing beyond "the binary runs".
 `Host CLI surface` is the same idea applied to every tool, with the tool name
-required in the output.
+required in the output, so this entry adds no coverage to a suite that holds
+that one. It is kept as the cheapest step a plan can hold, half a second for
+one command with no board and no pattern, which is what the five removed
+identity entries were not: each of those had no implementation and no plan
+([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
 
 ## Host CLI surface
 
@@ -983,6 +1002,9 @@ ubertooth-btle -U <serial> -tnone                   # cleared
 ubertooth-btle -U <serial> -x0 -k                   # and -x32: the error allowance
 ubertooth-btle -U <serial> -p                       # a bounded receive-only run
 ubertooth-util -U <serial> -r                       # resets the address to 8e89bed6
+ubertooth-util -U <serial> -c2426 -z-60 -d1         # preset away from the values a
+                                                    # mode stop resets, so that check
+                                                    # cannot pass by default
 ```
 
 **Expected outcome.** Smoke runs 3 cases: set and read back the access
@@ -1068,6 +1090,9 @@ ubertooth-util -U <serial> -q120               # and -q20 and a bare -q: the LED
 ubertooth-util -U <serial> -r                  # no stale range-test result
 ubertooth-util -U <serial> -m                  # the result, read after it
 ubertooth-util -U <serial> -v                  # the firmware, after -r
+ubertooth-util -U <serial> -c2426 -z-60 -d1    # preset away from the values a mode
+                                               # stop resets, so that check cannot
+                                               # pass by default
 ledblink.py ubertooth-util <serial> --max-samples 60 --deadline 10 --interval 0.05
 sh -c '<read -d <count> times, <interval> apart, retrying one failed read>' \
     ubertooth-util <serial> 12 0.05
@@ -1528,6 +1553,9 @@ python -c 'import os, sys; os.chdir(sys.argv[1]); os.execvp(sys.argv[2], sys.arg
                                                        # in the case directory
 ubertooth-specan -U <serial> -d /dev/full              # Linux only
 specandump.py <case dir>/specan.bin 2430 2440
+ubertooth-util -U <serial> -c2426 -z-60 -d1    # preset away from the values
+                                                       # a mode stop resets, so that
+                                                       # check cannot pass by default
 ```
 
 **Expected outcome.** Smoke runs 1 case: a full-band sweep over 2402-2480 MHz
@@ -2656,7 +2684,7 @@ installs the plugin in a Wireshark configuration of its own and runs the real
 `tshark` against it:
 
 ```text
-nrfdk.py identify  --jlink <jlink serial> --alias <alias>
+nrfdk.py identify  --jlink <jlink serial> --alias <alias> [--port <serial device>]
 nrfdk.py ensure    --jlink <jlink serial> --alias <alias> --address <DK address> \
     --hex <nRF52840 advertiser image>
 nrfdk.py advertise --jlink <jlink serial> --alias <alias> --chmap 37 \
@@ -2678,7 +2706,7 @@ tsharkcapture.py capture ... --interrupt-after <seconds>
 
 `ensure` takes `--hex` only where the run carries the `nRF52840 advertiser`
 artifact, and every `nrfdk.py` command takes `--port <serial device>` where
-the registry names one; see "Capture known BLE advertiser" above for both.
+the registry names one; see "Capture known BLE advertiser" below for both.
 
 **Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
 pinned firmware at its registered address, then the plugin's listing names
@@ -2749,7 +2777,7 @@ receiver is for" above for what the attenuation is and is not.
 of the capture, `ubertooth-btle` takes it, and `advcapture.py` decodes it:
 
 ```text
-nrfdk.py identify  --jlink <jlink serial> --alias <alias>
+nrfdk.py identify  --jlink <jlink serial> --alias <alias> [--port <serial device>]
 nrfdk.py ensure    --jlink <jlink serial> --alias <alias> --address <DK address> \
     --hex <nRF52840 advertiser image>
 nrfdk.py advertise --jlink <jlink serial> --alias <alias> --chmap <channel> \
@@ -2764,11 +2792,11 @@ advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel>
 advcapture.py <case dir>/capture.pcap --address <DK address> --channel <channel> --absent
 ```
 
-Two options above are conditional. Every `nrfdk.py` command also takes
+Two options above are conditional, and both are written in brackets wherever
+they appear. Every `nrfdk.py` command, not only `identify`, takes
 `--port <serial device>` where the registry names one for that DK; without it
-the driver derives the VCOM0 path from the J-Link serial, which is what the
-example bench does and so what the commands above show. And `ensure` is given
-`--hex` only where the run carries the `nRF52840 advertiser` artifact. With
+the driver derives the VCOM0 path from the J-Link serial. And `ensure` is
+given `--hex` only where the run carries the `nRF52840 advertiser` artifact. With
 it, a board reporting another firmware version is flashed with that image;
 without it, a board already on the pinned version passes and one on anything
 else fails, naming the `--artifact` to run with. One image holds every role,
@@ -2829,7 +2857,7 @@ DK firmware, so the run holds the host lock.
 **Commands.** Two DKs, one capture, and `conncapture.py` reading the file:
 
 ```text
-nrfdk.py identify   --jlink <jlink serial> --alias <alias>
+nrfdk.py identify   --jlink <jlink serial> --alias <alias> [--port <serial device>]
 nrfdk.py ensure     --jlink <jlink serial> --alias <alias> --address <address> \
     --role <role> --hex <nRF52840 advertiser image>
 nrfdk.py peripheral --jlink <jlink serial> --alias <alias> --dle on --chmap 37
@@ -2969,7 +2997,7 @@ firmware, so the run holds the host lock.
 one capture across the whole window and `conncapture.py` reading it:
 
 ```text
-nrfdk.py identify   --jlink <jlink serial> --alias <alias>
+nrfdk.py identify   --jlink <jlink serial> --alias <alias> [--port <serial device>]
 nrfdk.py ensure     --jlink <jlink serial> --alias <alias> --address <address> \
     --role <role> --hex <nRF52840 advertiser image>
 nrfdk.py peripheral --jlink <jlink serial> --alias <alias> --dle on --chmap 37

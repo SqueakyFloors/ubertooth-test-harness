@@ -1238,6 +1238,13 @@ def builtin_catalog() -> TestCatalog:
             output_pattern=_HOST_VERSION_PATTERN,
             expected_returncodes=HOST_VERSION_RETURNCODES,
         ),
+        # `Host CLI surface` asks this of every tool, so this entry adds no
+        # coverage. It is kept, where the five unimplemented identity
+        # entries were removed (#347), because it is the cheapest step a
+        # plan can hold: one command, no board, no pattern, and it answers
+        # "did this build produce a runnable tool" in half a second. The
+        # five were removed for having no implementation and no plan to be
+        # the cheap version of anything.
         TestDefinition(
             "Help smoke",
             "ubertooth-util help executes",

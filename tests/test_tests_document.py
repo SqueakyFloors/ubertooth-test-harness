@@ -9,12 +9,21 @@ is not a second catalog -- there is nothing here to keep in step with
 asked whether it says so (#347).
 
 It is checked both ways round. Forward: every executable a test's cases run
-is named in its **Commands** block, or in the shared block that states the
-commands every transition case sends. Backward: every executable a
-**Commands** block names is one that test runs, so a command form nobody
-sends cannot sit there looking authoritative. Only the fenced blocks are
-read, never the prose around them: a tool mentioned in a sentence is a
-cross-reference, not a command this test sends.
+is named in its **Commands** block, unless that command is one the shared
+transition block states. Backward: every executable a **Commands** block
+names is one that test runs, so a command form nobody sends cannot sit there
+looking authoritative. Only the fenced blocks are read, never the prose
+around them: a tool mentioned in a sentence is a cross-reference, not a
+command this test sends.
+
+The shared allowance is per command, not per test and not per case: a
+command is the shared block's only when the step that sends it is one of the
+transitions helpers' (``is_shared_command``). So a section's own setter must
+be documented even where the shared restore passes the same option with
+another value, which the option names alone cannot tell apart. The other two
+shared command sets, preflight's reads and the guard reads, are no
+allowance at all: no case sends one, so each is compared with the code that
+builds it instead, in both directions.
 
 Options are compared both ways too, per program, which is what catches a
 block that names the right tool with the wrong options. What that does not
@@ -216,6 +225,18 @@ def _registry(directory):
     text = REGISTRY.read_text(encoding="utf-8")
     # The hub's is a 32-bit BrainStem serial, not a board serial.
     text = text.replace("REPLACE_WITH_ACRONAME_SERIAL", "12345678")
+    # Every nRF52840 DK in the example bench leaves `serial device` out, so
+    # the driver derives the VCOM0 path from the J-Link serial. A registry
+    # may name one, and then every `nrfdk.py` command, preflight's included,
+    # carries `--port <path>`. That is a conditional form like `ensure`'s
+    # `--hex`, and a registry without it would never produce it, so this
+    # copy names one: the document has to state the fuller command.
+    text, ports = re.subn(
+        r"(?m)^(\s*)jlink serial: (.*)$",
+        r"\1jlink serial: \2\n\1serial device: /dev/serial/by-id/dk-vcom0",
+        text,
+    )
+    assert ports, "no nRF52840 DK in the example registry to give a port to"
     for index, placeholder in enumerate(
         dict.fromkeys(re.findall(r"REPLACE_WITH_[A-Z_]+", text))
     ):
@@ -315,6 +336,82 @@ def _words(argv) -> list[str]:
     return words
 
 
+# The step IDs the transitions helpers give the commands the shared
+# transition block states: the idle stop first and last (`_stop`), the reads
+# that record the originals and the restores and their verifications
+# (`Setting.read_original`, `Setting.restore`, and the CRC pair), and the
+# serial read that confirms the board afterwards (`_identity`). They are the
+# allowance, and nothing else is.
+#
+# The step ID rather than the option name, because the two cannot be told
+# apart by name: the shared squelch restore and a squelch setter a section
+# is about are both `ubertooth-util -z<dBm>`, and only values distinguish
+# them. Matching on the name excused a section's own setter lines, so one
+# could be deleted from a Commands block with every check still passing.
+# The setting keys those helpers name their steps after, read from the
+# settings themselves, plus the CRC flag, which has its own pair.
+_SHARED_KEYS = tuple(
+    setting.key for setting in (
+        transitions.CHANNEL, transitions.CHANNEL_INDEX, transitions.PA_LEVEL,
+        transitions.SQUELCH, transitions.USR_LED, transitions.LEDS,
+    )
+) + ("crc", "access address", "watchdog")
+# The steps that are the shared block whatever they are about.
+SHARED_STEP_IDS = frozenset({"stop", "cleanup-stop", "restored-device-identity"})
+# The three things those helpers do to a setting, each named after it.
+SHARED_STEP_VERBS = ("read-original-", "restore-", "verify-restored-")
+
+
+# The shared block's read-only commands, as whole commands: the idle stop,
+# the serial read that confirms the board, the watchdog record, and each
+# setting query. A step that sends one of these IS that shared command
+# whatever its ID, which is how the stop is recognized in the several names
+# the cases give it (`establish-idle`, `mode-stop`, `cleanup-stop`). A
+# SETTER is never recognized this way, only by its step ID: the shared
+# restore and a section's own setter are the same command but for the value.
+SHARED_QUERIES = frozenset(
+    {("ubertooth-util", option)
+     for option in ("-S", "-s", "-w", "-C", "-a", "-z", "-d")}
+    | {("ubertooth-btle", "-k")}
+)
+
+
+def is_shared_command(step_id: str, argv) -> bool:
+    """Is this command one the shared transition block states?"""
+    if is_shared_step(step_id):
+        return True
+    words = list(argv)
+    # `ubertooth-util -U <serial> <query>`, and nothing more on the line.
+    if len(words) != 4 or words[1] != "-U":
+        return False
+    return (program(words[0]), words[3]) in SHARED_QUERIES
+
+
+def is_shared_step(step_id: str) -> bool:
+    """Is this step one of the commands the shared transition block states?
+
+    A test that drives two boards works the role into the ID, before it
+    (`sender-restored-device-identity`) or inside it
+    (`read-original-sender-squelch`), so the ID is read whole and again
+    without a leading word, and the setting is matched at the end. The
+    setting has to match: a bare `restore-` would also excuse a step that
+    restores something else, such as a flash image.
+    """
+    if not step_id:
+        return False
+    for candidate in (step_id, step_id.split("-", 1)[-1]):
+        if candidate in SHARED_STEP_IDS:
+            return True
+        for verb in SHARED_STEP_VERBS:
+            if not candidate.startswith(verb):
+                continue
+            setting = candidate[len(verb):]
+            if any(setting == key or setting.endswith(f"-{key}")
+                   for key in _SHARED_KEYS):
+                return True
+    return False
+
+
 def _options(argv) -> set[tuple[str, str]]:
     """(program, option) for every option a command passes to a program.
 
@@ -363,12 +460,14 @@ def programs_by_test():
     catalog = builtin_catalog()
     used: dict[str, set[str]] = {}
     options: dict[str, set[tuple[str, str]]] = {}
-    # The programs and the options a test runs from a state-changing case,
-    # which are the only ones the shared transition commands can stand in
-    # for: an allowance that followed the test would excuse a program or an
-    # option a case of another kind sends.
-    stateful: dict[str, set[tuple[str, str]]] = {}
-    stateful_programs: dict[str, set[str]] = {}
+    # The programs and the options a test runs from a command the shared
+    # transition block does NOT state, which are its section's to document.
+    # The allowance is per command, by the step ID the transitions helpers
+    # give it, so an option this test also sends from a command of its own
+    # is not excused by the shared block having a command that passes the
+    # same option with another value.
+    own: dict[str, set[tuple[str, str]]] = {}
+    own_programs: dict[str, set[str]] = {}
     with tempfile.TemporaryDirectory() as directory:
         registry = _registry(directory)
         compiler = PlanCompiler(catalog, registry)
@@ -395,15 +494,14 @@ def programs_by_test():
         )
         found = used.setdefault(invocation.test_name, set())
         for case in cases:
-            for argv in _argvs(case):
+            for step_id, argv in _argvs(case):
                 ran = set(filter(None, (program(w) for w in _words(argv))))
                 found.update(ran)
                 passed = _options(argv)
                 options.setdefault(invocation.test_name, set()).update(passed)
-                if isinstance(case, StateCase):
-                    stateful.setdefault(invocation.test_name, set()).update(
-                        passed)
-                    stateful_programs.setdefault(
+                if not is_shared_command(step_id, argv):
+                    own.setdefault(invocation.test_name, set()).update(passed)
+                    own_programs.setdefault(
                         invocation.test_name, set()).update(ran)
     # A test no committed plan names (`Host version` and `Help smoke`, whose
     # question every run asks in preflight instead) still has commands: ask
@@ -415,22 +513,27 @@ def programs_by_test():
         arguments = definition.normalize_arguments({"hosts": ["Host_Linux"]})
         found = used.setdefault(name, set())
         for case in definition.command_cases(arguments, {}, {}):
-            for argv in _argvs(case):
+            for _step_id, argv in _argvs(case):
                 found.update(filter(None, (program(w) for w in _words(argv))))
                 options.setdefault(name, set()).update(_options(argv))
-    return used, options, stateful, stateful_programs, skipped
+    return used, options, own, own_programs, skipped
 
 
 def _argvs(case):
+    """``(step ID, argv)`` for every command a case sends.
+
+    A ``CommandCase`` is one command and no step, so its ID is empty, which
+    is not a shared one: its options are its section's to document.
+    """
     if isinstance(case, CommandCase):
-        return [tuple(case.argv)]
+        return [("", tuple(case.argv))]
     if isinstance(case, FlashCase):
         return []
     assert isinstance(case, StateCase)
     out = []
     for step in tuple(case.steps) + tuple(case.cleanup):
         try:
-            out.append(step.resolve_argv(_context(case)))
+            out.append((step.step_id, step.resolve_argv(_context(case))))
         except (ValueError, LookupError) as error:
             # A command built from a value only a run records, which the
             # stand-in context cannot produce: `Two-device range test`'s two
@@ -477,10 +580,12 @@ def shared_fences(body: str) -> dict[str, list[str]]:
 
     ``transition`` holds the commands every state-changing case sends, which
     is what a section may leave out. ``preflight`` holds the run-level reads
-    the harness makes before any test, which a section may NOT leave out:
-    they are a different thing from the shared cleanup, and treating them as
-    an allowance excused `ubertooth-util -v`, `-V`, `-H` and `-B` for every
-    test at once.
+    the harness makes before any test and ``guard`` the reads a guarded test
+    makes of every other board; neither is an allowance a section may draw
+    on, because they are not the shared cleanup. Treating preflight as one
+    excused `ubertooth-util -v`, `-V`, `-H` and `-B` for every test at once.
+    Each is compared with the code that builds it instead, in both
+    directions.
     """
     def after(heading):
         text = body.split(heading, 1)
@@ -490,7 +595,8 @@ def shared_fences(body: str) -> dict[str, list[str]]:
         return fences(re.split(r"\n\*\*", text[1])[0])
 
     found = {"preflight": after("**Mandatory preflight.**"),
-             "transition": after("**Transition cases.**")}
+             "transition": after("**Transition cases.**"),
+             "guard": after("**Guard Ubertooths.**")}
     for name, lines in found.items():
         assert lines, f"no fenced block for {name}"
     return found
@@ -615,7 +721,7 @@ class DocumentedCommandTests(unittest.TestCase):
     def setUpClass(cls):
         cls.catalog = builtin_catalog()
         cls.sections = dict(sections())
-        (cls.used, cls.options, cls.stateful, cls.stateful_programs,
+        (cls.used, cls.options, cls.own, cls.own_programs,
          cls.skipped) = programs_by_test()
         cls.named = {
             name: programs_named(commands_of(body))
@@ -669,22 +775,21 @@ class DocumentedCommandTests(unittest.TestCase):
 
     def test_every_executable_a_test_runs_is_in_its_commands_block(self):
         # The shared section has no **Commands** field of its own: its
-        # fenced blocks are the preflight reads and the commands every
-        # transition case sends, and only those blocks count here, never the
-        # prose around them.
-        shared = programs_named(
-            shared_fences(self.sections[SHARED])["transition"]
+        # fenced blocks are the preflight reads, the guard reads, and the
+        # commands every transition case sends, and only those blocks count
+        # here, never the prose around them. The transition block is the
+        # only one a section may leave out, and only for the commands it
+        # really states: `own_programs` is what this test runs from a
+        # command of its own.
+        self.assertEqual(
+            {"ubertooth-util", "ubertooth-btle"},
+            programs_named(shared_fences(self.sections[SHARED])["transition"]),
         )
-        self.assertEqual({"ubertooth-util", "ubertooth-btle"}, shared)
-        for name, used in sorted(self.used.items()):
-            # The allowance follows the case, as it does for options: a
-            # program this test runs from a case of another kind has to be
-            # named, even in a test that has state-changing cases too.
-            allowed = shared & self.stateful_programs.get(name, set())
+        for name in sorted(self.used):
             with self.subTest(name):
                 undocumented = sorted(
-                    item for item in used
-                    if item not in self.named[name] and item not in allowed
+                    item for item in self.own_programs.get(name, set())
+                    if item not in self.named[name]
                 )
                 self.assertEqual(
                     [], undocumented,
@@ -771,8 +876,7 @@ class DocumentedCommandTests(unittest.TestCase):
         )
         for name, placeholders in sorted(COLLAPSED.items()):
             passed = self.options.get(name, set())
-            documented = self.named_options[name] | (
-                shared & self.stateful.get(name, set()))
+            documented = self.named_options[name]
             lines = commands_of(self.sections[name])
             for (program_name, placeholder), declared in sorted(
                 placeholders.items()
@@ -832,19 +936,16 @@ class DocumentedCommandTests(unittest.TestCase):
         each entry is a placeholder the block writes and the options it
         stands for, so the stand-in is written down rather than assumed.
         """
-        shared = options_named(
-            shared_fences(self.sections[SHARED])["transition"]
-        )
         for name in self.catalog.names:
-            passed = self.options.get(name, set())
-            # The shared transition commands stand in for what a
-            # state-changing case sends, so the allowance follows the case
-            # rather than the test: an option this test passes from a case
-            # of another kind has to be named, even in a test that has
-            # state-changing cases too.
-            allowed = shared & self.stateful.get(name, set())
-            documented = (self.named_options[name] | allowed
-                          | collapsed_options(name))
+            # The shared transition block stands in for the commands it
+            # states and nothing else, so what is compared here is what the
+            # test passes from a command of its own. An option it also
+            # sends from a shared command is still its own to document: the
+            # shared squelch restore and a squelch setter a section is
+            # about are both `ubertooth-util -z<dBm>`, and only the value
+            # tells them apart.
+            passed = self.own.get(name, set())
+            documented = self.named_options[name] | collapsed_options(name)
             by_a_driver = BY_A_DRIVER.get(name, set())
             with self.subTest(name):
                 undocumented = sorted(
@@ -875,6 +976,33 @@ class DocumentedCommandTests(unittest.TestCase):
                    for prog, option in options_named(lines)
                    if (prog, option) not in every_option),
             "the shared block names an option no test passes",
+        )
+
+    def test_the_guard_fence_matches_the_code_that_builds_the_guard_reads(self):
+        """The guard reads are the other shared command set no case argv
+        carries: `transitions.guard_steps` builds them outside
+        ``command_cases``, so the checks above cannot reach them either.
+
+        They are a table in the code, so the block is compared with that
+        table: a read added to or removed from ``GUARD_READBACK`` fails here
+        until the block says so, and a read the block invents fails too.
+        """
+        built = {("ubertooth-util", option)
+                 for _key, option, *_rest in transitions.GUARD_READBACK}
+        # The CRC read, which is the one made with the other tool and comes
+        # last (_guard_crc_step), and the selector every read carries,
+        # since a guard is always named by serial.
+        built |= {("ubertooth-btle", "-k"), ("ubertooth-btle", "-U"),
+                  ("ubertooth-util", "-U")}
+        lines = shared_fences(self.sections[SHARED])["guard"]
+        named = options_named(lines)
+        self.assertEqual(
+            [], sorted(f"{prog} {option}" for prog, option in built - named),
+            "a guard read is missing from the guard block",
+        )
+        self.assertEqual(
+            [], sorted(f"{prog} {option}" for prog, option in named - built),
+            "the guard block names a read the guard check does not make",
         )
 
     def test_the_preflight_fence_matches_the_code_that_builds_preflight(self):
