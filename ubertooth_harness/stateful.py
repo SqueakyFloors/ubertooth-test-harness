@@ -66,14 +66,10 @@ class MissingContext(LookupError):
 
 
 class Unrestorable(LookupError):
-    """A cleanup step has nothing it can do, and that is not a failure.
+    """A recorded value cannot be written back by any host tool.
 
-    Two things raise it: a recorded value no host tool can write back, and a
-    comparison whose baseline the case never got as far as recording. Either
-    way the step is reported as skipped with the reason rather than failing
-    the cleanup, because there is nothing the step could have done instead.
-    A value that is missing because a case went wrong after changing the
-    board is ``MissingContext``, which does fail.
+    The step is reported as skipped with the reason; it is not a cleanup
+    failure, because no supported command can restore the value.
     """
 
 

@@ -1596,8 +1596,9 @@ class BootloaderExpectation:
         return (
             f"{where} says its firmware has not got the bootloader read, and "
             "a test in this suite writes that board's own application image, "
-            "so the run does not require it: nothing was compared. Flash it "
-            "with this run's build, or read it by hand with ubertooth-util -B"
+            "so the run does not require it: nothing was compared. This run "
+            "does not flash that board either, so to read its bootloader run "
+            "a suite that requires its firmware and read it there"
         )
 
     def failure(self, alias: str | None, installed: BootloaderIdentity | None) -> str:
@@ -1624,14 +1625,30 @@ class BootloaderExpectation:
             # the boards whose firmware preflight requires, and this board's
             # is written by a test of the suite instead. So the reason sends
             # the operator to the programmer rather than to an option that
-            # would not reach this board.
+            # would not reach this board -- unless there is no programmer, in
+            # which case naming one would name a recovery path the registry
+            # has not got, and the shared wording for that says what to wire
+            # up instead.
+            if board is not None and not board.can_be_programmed:
+                return no_programmer_reason(board, installed, self.expected)
+            if board is None:
+                # No board record to name a programmer from, so the reason
+                # says what is wrong and stops there.
+                return (
+                    f"{where} has bootloader {installed.describe()}, and this "
+                    f"run expects {self.expected.describe()}; a test in this "
+                    "suite writes that board's own application image, so "
+                    f"--bootloader {MODE_UPDATE} does not install one there: "
+                    "install it over its programmer by hand, or run a suite "
+                    "that requires this board's firmware first"
+                )
             return (
                 f"{where} has bootloader {installed.describe()}, and this run "
                 f"expects {self.expected.describe()}; a test in this suite "
                 "writes that board's own application image, so --bootloader "
                 f"{MODE_UPDATE} does not install one there: install it over "
-                "its programmer by hand, or run the suite that requires this "
-                "board's firmware first"
+                f"{board.programmer_alias} by hand, or run a suite that "
+                "requires this board's firmware first"
             )
         if self.mode == MODE_UPDATE and board is not None and not board.can_be_programmed:
             return no_programmer_reason(board, installed, self.expected)

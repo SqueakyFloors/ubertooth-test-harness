@@ -913,13 +913,15 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
     artifact build and, in ``update`` mode, the write.
     """
     mode = args.bootloader
-    boards = tuple(getattr(args, "bootloader_boards", ()))
-    # Boards whose application image a test of the suite writes itself. They
-    # are read and compared like the rest, and never written here: `update`
-    # installs on the boards whose firmware preflight requires, and a board
-    # the suite reflashes would then have to be verified against an
+    # Two sets. `boards` is what this mode may install on; `read_boards` adds
+    # the boards whose application image a test of the suite writes itself,
+    # which are read and compared like the rest and never written here:
+    # `update` installs on the boards whose firmware preflight requires, and a
+    # board the suite reflashes would then have to be verified against an
     # application revision the run does not require (#327).
+    boards = tuple(getattr(args, "bootloader_boards", ()))
     established = frozenset(getattr(args, "bootloader_established", ()))
+    read_boards = tuple(getattr(args, "bootloader_read_boards", ())) or boards
     ubertooth = next(source for source in sources if source.name == "Ubertooth")
     if not bootloader.supported_at(ubertooth):
         # A fork commit from before `ubertooth-util -B`. Nothing can be read,
@@ -936,7 +938,7 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
                 "mode": mode, "reason": reason, "expected": None, "boards": [],
             })
         return None, None
-    if not boards and not established:
+    if not read_boards:
         if publisher is not None:
             publisher.emit("bootloader_stage_finished", "skipped", {
                 "mode": mode, "reason": "no board of this suite is read",
@@ -972,7 +974,10 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
                 "reason": (
                     "no board of this suite is installed on: a test in it "
                     "writes the application image of every Ubertooth it uses, "
-                    "so each board's bootloader is read and compared only"
+                    "so each board's bootloader is read and compared only -- "
+                    "and a board carrying firmware older than the read "
+                    "answers that it has not got the request, which "
+                    "establishes nothing about its bootloader"
                 ),
                 "expected": (
                     artifact.identity().to_dict() if artifact else None
@@ -996,7 +1001,7 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
         bootloader.BootloaderExpectation(
             mode=mode,
             expected=artifact.identity() if artifact else None,
-            boards={board.alias: board for board in boards},
+            boards={board.alias: board for board in read_boards},
             established=established,
         ),
         artifact,
@@ -1164,10 +1169,15 @@ def _run_suite(args: argparse.Namespace) -> int:
     # The rest of the suite's Ubertooths: a test in it writes their own
     # application image. Their bootloader is read and compared too, since no
     # firmware write replaces it and for one test it is the subject (#327),
-    # but it is never installed here.
+    # but it is never installed here. They are built as boards like the rest,
+    # so a reason about one can name the programmer its registry pairs with
+    # it, or say there is none.
     args.bootloader_established = PreflightPolicy(
         registry, catalog
     ).boards_establishing_firmware(invocations)
+    args.bootloader_read_boards = bootloader.boards_for_bootloader(
+        registry, tuple(needs_firmware) + tuple(args.bootloader_established)
+    )
     if args.bootloader == bootloader.MODE_UPDATE:
         without = [
             board.alias for board in args.bootloader_boards
@@ -1195,6 +1205,7 @@ def _run_suite(args: argparse.Namespace) -> int:
         )
     if (
         args.bootloader == bootloader.MODE_UPDATE
+        and args.bootloader_boards
         and not args.dry_run
         and shutil.which(bootloader.PROGRAMMER_TOOL) is None
     ):

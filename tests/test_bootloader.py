@@ -1260,6 +1260,41 @@ class EstablishedBoardExpectationTests(unittest.TestCase):
         self.assertIn("UT_A says its firmware has not got the bootloader read",
                       note)
         self.assertIn("nothing was compared", note)
+        # Not "flash it with this run's build": this run deliberately does
+        # not flash that board, and reading -B by hand against the same
+        # firmware gets the same refusal.
+        self.assertNotIn("this run's build", note)
+        self.assertIn("a suite that requires its firmware", note)
+
+    def test_a_stale_board_with_no_programmer_is_told_what_to_wire_up(self):
+        """Not a recovery path the registry has not got."""
+        expectation = bootloader.BootloaderExpectation(
+            mode=bootloader.MODE_CHECK,
+            expected=bootloader.parse_identity(FORK_LINE + "\n"),
+            boards={board.alias: board for board in
+                    bootloader.boards_for_bootloader(
+                        registry(programmer=False), ["UT_A"])},
+            established=frozenset({"UT_A"}),
+        )
+        failure = expectation.failure(
+            "UT_A", bootloader.parse_identity(FACTORY_LINE + "\n"))
+        self.assertIn("no debug programmer is registered for UT_A", failure)
+        self.assertIn("in-system programming header", failure)
+        self.assertNotIn("by hand, or run a suite", failure)
+
+    def test_a_stale_board_with_a_programmer_names_it(self):
+        expectation = bootloader.BootloaderExpectation(
+            mode=bootloader.MODE_CHECK,
+            expected=bootloader.parse_identity(FORK_LINE + "\n"),
+            boards={board.alias: board for board in
+                    bootloader.boards_for_bootloader(registry(), ["UT_A"])},
+            established=frozenset({"UT_A"}),
+        )
+        failure = expectation.failure(
+            "UT_A", bootloader.parse_identity(FACTORY_LINE + "\n"))
+        self.assertIn("--bootloader update does not install one there",
+                      failure)
+        self.assertIn("install it over Prog_A by hand", failure)
 
 
 class PreflightCompileTests(unittest.TestCase):
@@ -1553,6 +1588,23 @@ class EstablishedBoardReadTests(unittest.TestCase):
         kinds = [c.kind for c in output_of(result).checks]
         self.assertEqual(["observed", "expected"], kinds)
 
+    def test_a_read_that_did_not_finish_reaches_no_verdict(self):
+        """Whatever a timed-out read had printed is not an answer, so the
+        record must not carry a verdict the check never reached."""
+        check = self.compile(bootloader.MODE_CHECK)
+        for name, kwargs in (("timed out", {"timed_out": True}),
+                             ("canceled", {"cancelled": True})):
+            with self.subTest(name):
+                result = CommandResult(
+                    argv=check.argv, returncode=-9, stdout="",
+                    stderr=REFUSAL_LINE, duration_s=5.0,
+                    timed_out=kwargs.get("timed_out", False),
+                    cancelled=kwargs.get("cancelled", False),
+                )
+                _installed, status, reason = check.bootloader_reading(result)
+                self.assertEqual("unreadable", status)
+                self.assertIn(name, reason)
+
     def test_another_failure_of_the_read_is_still_a_failure(self):
         """A board nothing can open did not refuse the request."""
         check = self.compile(bootloader.MODE_RECORD)
@@ -1616,12 +1668,17 @@ class StageBoardTests(unittest.TestCase):
 
     @staticmethod
     def args(mode, *, boards=(), established=()):
+        read = tuple(boards) + tuple(
+            bootloader.BootloaderBoard(alias=alias, serial=SERIAL_A)
+            for alias in established
+        )
         return SimpleNamespace(
             bootloader=mode, bootloader_boards=tuple(boards),
             bootloader_established=tuple(established),
+            bootloader_read_boards=read,
         )
 
-    def stage(self, args, *, artifact=None):
+    def stage(self, args, *, artifact=None, leases=None):
         from unittest import mock
         from ubertooth_harness import cli
 
@@ -1646,7 +1703,7 @@ class StageBoardTests(unittest.TestCase):
                                   Builder):
             expectation, built_artifact = cli._bootloader_stage(
                 args, (source,), built, None, Publisher(), Path("/tmp/run"),
-                None,
+                leases,
             )
         return expectation, built_artifact, emitted
 
@@ -1656,7 +1713,9 @@ class StageBoardTests(unittest.TestCase):
         )
         self.assertIsNotNone(expectation)
         self.assertEqual(frozenset({"UT_Linux0"}), expectation.established)
-        self.assertEqual({}, dict(expectation.boards))
+        # Built as a board like any other, so a reason about it can name the
+        # programmer its registry pairs with it, or say there is none.
+        self.assertEqual(["UT_Linux0"], list(expectation.boards))
         self.assertEqual(
             [], [e for e in emitted if e[1] == "skipped"]
         )
@@ -1670,6 +1729,36 @@ class StageBoardTests(unittest.TestCase):
         (_type, status, details) = emitted[-1]
         self.assertEqual("skipped", status)
         self.assertIn("no board of this suite is read", details["reason"])
+
+    def test_check_on_such_a_suite_builds_the_artifact_and_compares(self):
+        """What the README now recommends for `testplans/power.yaml`."""
+        artifact = artifact_for()
+        expectation, built, emitted = self.stage(
+            self.args(bootloader.MODE_CHECK, established=["UT_Linux0"]),
+            artifact=artifact,
+        )
+        self.assertIs(artifact, built)
+        self.assertEqual(artifact.identity(), expectation.expected)
+        self.assertTrue(expectation.compares)
+        self.assertTrue(expectation.tolerates_refusal("UT_Linux0"))
+        self.assertEqual([], [e for e in emitted if e[1] == "skipped"])
+
+    def test_nothing_will_be_written_so_the_host_lock_goes_back_first(self):
+        """The artifact build takes minutes; another command may want the
+        host meanwhile, and only a write needs the lock."""
+        released = []
+        args = self.args(bootloader.MODE_UPDATE, established=["UT_Linux0"])
+        args.keep_host_lock = False
+
+        class Leases:
+            def release_host_lock(self):
+                released.append(True)
+
+            def holds_host_lock(self):
+                return False
+
+        self.stage(args, artifact=artifact_for(), leases=Leases())
+        self.assertEqual([True], released)
 
     def test_update_says_it_has_no_board_to_install_on_and_still_compares(self):
         """The write covers the boards whose firmware preflight requires."""

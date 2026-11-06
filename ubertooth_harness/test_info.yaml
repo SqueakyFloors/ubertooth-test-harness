@@ -1701,21 +1701,22 @@ Classic btbr console:
     board, and the only one that runs ubertooth-btbr: it refuses the option
     values the tool must refuse before it looks for a board, writes the btbr
     image, drives one console session against a registered peer, and always
-    writes the application image back. It is also where both of a board's
-    application images are held to one bootloader: the alternate image and
-    the application image must report the same -B line.
+    writes the application image back. It is also where a board's bootloader
+    is read under each of its two application images, since ubertooth-dfu
+    writes the application region only.
   theory: >-
     Five things make the answers knowable in advance. The image identity:
     ubertooth-util -v names the image the firmware was built from ahead of the
     revision, so the board must report btbr and the run's revision after the
     write and bluetooth_rxtx and the same revision after the restore. The
-    bootloader under both: ubertooth-dfu writes the application region only
-    and both images implement the -B request, so the line read with the btbr
-    image on the board and the line read after the application image is back
-    must be identical; a difference would mean a write had reached the
-    bootloader. The baseline is read after the write rather than before it,
-    because this test establishes its board's image and the board can arrive
-    carrying firmware older than the request. The
+    bootloader under each image: ubertooth-dfu writes the application region
+    only and both images implement the -B request, so -B is read once the
+    run's btbr image is on the board and again after the application image is
+    back. Reading after the write rather than before it is deliberate: this
+    test establishes its board's image, so the board can arrive carrying
+    firmware older than the request, and a reading taken then can only be a
+    refusal, which is recorded as the reading. The two are recorded and not
+    compared with each other; see ubertooth-test-harness#366. The
     peer: it is discoverable and connectable from boot, its BD_ADDR is in the
     registry and the firmware builds its device name from that address, so an
     inquiry has to hear it, a page has to reach it, and the name it answers
@@ -1755,18 +1756,19 @@ Classic btbr console:
     the connection, the once-per-opcode report of an LMP request with no
     handler, the page again with the peer reset before it, the two scan modes,
     the count of the board's own refusal lines, no hang-up on a peer that took
-    the connection, the bootloader the btbr image reports, and the split
+    the connection, and the split
     between the capture on standard output and
     the progress on standard error. Comprehensive decides 21: paging an address nothing answers must
     end in a paging timeout with no connection, and it also makes five more
     transmit runs, covering three more formats, and pages the peer once
     more. The report says how many checks
     passed, failed, and never ran. The cleanup always writes the application
-    image back, reads it, requires the bootloader line the btbr image gave,
-    and resets the peer; a cleanup failure fails the case, so the board cannot
-    be left on btbr quietly. A case that failed before the baseline read has
-    no line to compare with, and that cleanup read is skipped with the reason
-    rather than failing: what such a case needs is its restore.
+    image back, reads it, records the bootloader the application image
+    reports, and resets the peer; a cleanup failure fails the case, so the
+    board cannot be left on btbr quietly. No cleanup step wants a value the
+    steps may not have recorded, because a cleanup step that cannot run stops
+    the test, so a case that failed at its own write still reports a verified
+    restore.
   limitations: >-
     A repeat page is only a page of the peer because the session resets the
     peer first: idle tells the peer nothing, so it holds the link the last
@@ -1802,6 +1804,7 @@ Classic btbr console:
   related:
     - ubertooth-test-harness#327
     - ubertooth-test-harness#329
+    - ubertooth-test-harness#366
     - ubertooth#1075
     - ubertooth#1166
     - ubertooth#1183
@@ -2336,6 +2339,7 @@ Reset into invalid application:
     the test, so read it by hand either side.
   related:
     - ubertooth-test-harness#141
+    - ubertooth-test-harness#327
     - ubertooth#863
 
 Receive-only firmware:

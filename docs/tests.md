@@ -500,18 +500,29 @@ reflashes could not then be held to the application revision an update
 verifies. `update` on a suite whose every board is one of these says it had no
 board to install on and reads and compares them anyway.
 
-**Both of a board's application images report the same bootloader.** `Classic
-btbr console` is where that is measured, because it is the one test that puts
-the alternate `btbr` image on a board and the application image back
+**A board's bootloader under each of its two application images.** `Classic
+btbr console` is where that is read, because it is the one test that puts the
+alternate `btbr` image on a board and the application image back
 ([#329](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/329)).
 It reads `-B` once the run's own `btbr` image is on the board and again, in
-its cleanup, with the application image back, and the two lines must be
-identical. Both reads are of this run's own images, each of which implements
-the request, so neither can be firmware too old to answer; and since
-`ubertooth-dfu` writes the application region only, a difference would mean a
-write had reached the bootloader. A case that failed before the first read
-never records a baseline, and the cleanup's read is then skipped with that
-reason rather than failing: what such a case needs is its restore.
+its cleanup, with the application image back, so the run record carries the
+board's bootloader as each image reports it.
+
+The two are recorded and not compared, which is a limit of the harness rather
+than a judgement about the reading. `ubertooth-dfu` writes the application
+region only, so the two lines ought to be identical, and a difference would
+mean a write had reached the bootloader. Asserting it needs a cleanup step
+that compares against a baseline a failed case may never have recorded, and a
+cleanup step that cannot run stops the test whether it is skipped or failed,
+so a case that failed at its own write would be reported as a board left
+unrestored. The equality is worth asserting and waits on a way to say
+"compare only if there is something to compare with"
+([#366](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/366)).
+Either read may also answer that the firmware has not got the request, which
+is recorded as the reading: a fork commit with the `btbr` image but without
+`-B` answers that way, and so does a board that arrives carrying firmware
+older than the request, which this test's board can, since it establishes its
+own image.
 
 **Hardware and arguments.** One `Ubertooth` per check, selected by full
 serial. `update` also needs a `Debug programmer` paired with the board, with a
@@ -2814,11 +2825,12 @@ not this test's.
 
 **What it does.** Runs the tool's command line for the option values it must
 refuse before it looks for a board, writes the `btbr` firmware image to the
-board, checks the board reports that image and the bootloader under it, drives
-one `ubertooth-btbr` console session against a registered ESP32 Classic peer,
-and always writes the application image back and requires the same bootloader
-line from it. It is the only test that puts a firmware image other than
-`bluetooth_rxtx` on a board, and the only one that runs `ubertooth-btbr`.
+board, checks the board reports that image, records the bootloader under it,
+drives one `ubertooth-btbr` console session against a registered ESP32
+Classic peer, and always writes the application image back and records the
+bootloader under that one too. It is the only test that puts a firmware image
+other than `bluetooth_rxtx` on a board, and the only one that runs
+`ubertooth-btbr`.
 
 **Theory of operation.** `ubertooth-btbr` needs the separate `btbr` image and
 nothing else runs it, so a board is set up for one tool or for all the others.
@@ -2830,19 +2842,21 @@ revision after the write and `bluetooth_rxtx` and the same revision after the
 restore. Reading the revision alone would pass a board on either image, and
 the application-image check every other board gets would turn this board down.
 
-The bootloader under both images: `ubertooth-dfu` writes the application
+The bootloader under each image: `ubertooth-dfu` writes the application
 region only, so a board keeps its bootloader across both of this case's
 writes, and both images implement the `-B` request. `ubertooth-util -B` is
 therefore read once the run's `btbr` image is on the board and again, in the
-cleanup, with the application image back, and the two lines must be identical
+cleanup, with the application image back
 ([#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327),
 [#329](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/329)).
 Reading after the write rather than before it is deliberate: this test
 establishes its board's image, so the board can arrive carrying firmware older
-than the request, and a baseline taken then would be a refusal rather than a
-line. A case that failed before that first read has no baseline, and the
-cleanup's read is skipped with that as its reason instead of failing: what
-such a case needs is its restore.
+than the request, and a reading taken then can only be a refusal. Both are
+recorded and neither is compared with the other, for the reason under
+"Bootloader identity" above
+([#366](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/366));
+a read the firmware has not got is the reading too, so a commit with the
+`btbr` image but without `-B` records that rather than failing the case.
 
 The peer: the ESP32 Classic peer is discoverable and connectable from boot
 (see [`hardware.md`](hardware.md)), its BD_ADDR is in the registry, and the
@@ -2983,9 +2997,11 @@ end in `paging timeout` with no connection, and it also makes five more
 transmit runs, covering three more formats, and pages the peer once more. The report says how many checks passed,
 how many failed, and how many never ran, so a session that stopped early is not
 read as a pass. The cleanup always writes the application image back, reads
-it, requires the bootloader line the `btbr` image gave, and resets the peer; a
-cleanup failure fails the case, so the board cannot be left on `btbr`
-quietly.
+it, records the bootloader the application image reports, and resets the peer;
+a cleanup failure fails the case, so the board cannot be left on `btbr`
+quietly. No cleanup step wants a value the steps may not have recorded: one
+that cannot run stops the test, so a case that failed at its own write still
+reports a verified restore.
 
 The capture itself never leaves the driver. An inquiry hears every discoverable
 device in range, so passing it on would put third-party addresses and device

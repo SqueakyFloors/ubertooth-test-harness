@@ -236,6 +236,13 @@ class PreflightCheck:
             raise PreflightError(
                 f"{self.name} is not a bootloader check; it has no expectation"
             )
+        if result.timed_out or result.cancelled:
+            # The command did not finish, so whatever it had printed by then
+            # is not an answer. Said here as well as in `result_failure`, so
+            # the record cannot carry a verdict the check never reached.
+            return None, "unreadable", (
+                "command timed out" if result.timed_out else "command canceled"
+            )
         output = output_of(result)
         installed = bootloader_identity.identity_from_match(
             output.search(bootloader_identity.IDENTITY_LINE_PATTERN)
