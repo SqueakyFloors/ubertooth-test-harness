@@ -96,24 +96,20 @@ UNCOLLECTED = {
     # flash runner assembles per write rather than as steps (flash.py).
     "Flash reliability": "its case is a FlashCase, not argv",
 }
-# Programs a driver runs itself, so they are in no argv the catalog builds,
-# per test: the backward check must not call these invented, and it must not
-# excuse them anywhere else. The forward check cannot ask for them at all.
+# A program a test's Commands block names that no argv of that test carries,
+# because the command is assembled somewhere the catalog's cases cannot show
+# -- the flash runner per write, the bootloader write over a programmer. The
+# backward check must not call those invented. An entry for a program the
+# block does not name excuses nothing, and an entry for a program the test's
+# own commands run would turn off a comparison that could have been made;
+# test_every_driver_exemption_is_necessary refuses both.
+#
+# The tools a driver finds for itself (pytools.py's specan-ui and
+# btle-extcap.py, extcapcapture.py's and tsharkcapture.py's ubertooth-btle,
+# nrfdk.py's nrfutil, btbrconsole.py's ubertooth-btbr) need no entry: those
+# blocks name the driver, which is the command the harness sends, and say in
+# prose what it runs.
 BY_A_DRIVER = {
-    # pytools.py runs the installed specan-ui and the btle-extcap.py of the
-    # resolved commit; extcapcapture.py and tsharkcapture.py run
-    # ubertooth-btle behind the extcap script.
-    "Python tools": {"ubertooth-specan-ui", "btle-extcap.py"},
-    "BLE extcap interfaces": {"btle-extcap.py"},
-    "BLE extcap capture": {"btle-extcap.py", "ubertooth-btle"},
-    "BLE extcap in tshark": {"btle-extcap.py", "ubertooth-btle", "tshark",
-                             "nrfutil"},
-    # nrfdk.py flashes with nrfutil.
-    "Capture known BLE advertiser": {"nrfutil"},
-    "Capture known BLE connection": {"nrfutil"},
-    "Follow a BLE connection across its end": {"nrfutil"},
-    # btbrconsole.py drives the prompt of ubertooth-btbr.
-    "Classic btbr console": {"ubertooth-btbr"},
     # The flash runner assembles these per write (UNCOLLECTED).
     "Flash reliability": {"ubertooth-dfu", "ubertooth-util"},
     # Preflight's own read, and the bootloader write over a programmer.
@@ -353,7 +349,9 @@ def programs_by_test():
     catalog = builtin_catalog()
     used: dict[str, set[str]] = {}
     options: dict[str, set[tuple[str, str]]] = {}
-    stateful: set[str] = set()
+    # The options a test passes from a state-changing case, which are the
+    # only ones the shared transition commands can stand in for.
+    stateful: dict[str, set[tuple[str, str]]] = {}
     with tempfile.TemporaryDirectory() as directory:
         registry = _registry(directory)
         compiler = PlanCompiler(catalog, registry)
@@ -380,12 +378,13 @@ def programs_by_test():
         )
         found = used.setdefault(invocation.test_name, set())
         for case in cases:
-            if isinstance(case, StateCase):
-                stateful.add(invocation.test_name)
             for argv in _argvs(case):
                 found.update(filter(None, (program(w) for w in _words(argv))))
-                options.setdefault(invocation.test_name, set()).update(
-                    _options(argv))
+                passed = _options(argv)
+                options.setdefault(invocation.test_name, set()).update(passed)
+                if isinstance(case, StateCase):
+                    stateful.setdefault(invocation.test_name, set()).update(
+                        passed)
     # A test no committed plan names (`Host version` and `Help smoke`, whose
     # question every run asks in preflight instead) still has commands: ask
     # it for them with nothing but a host.
@@ -694,6 +693,12 @@ class DocumentedCommandTests(unittest.TestCase):
                     [], sorted(programs & self.used.get(name, set())),
                     f"{name} exempts a program its own commands run",
                 )
+                # And it has to be used: an entry for a program the block
+                # does not name excuses nothing and reads as if it did.
+                self.assertEqual(
+                    [], sorted(programs - self.named[name]),
+                    f"{name} exempts a program its block does not name",
+                )
 
     def test_every_collapsed_declaration_is_load_bearing(self):
         """COLLAPSED says what a placeholder in a block stands for, which
@@ -712,7 +717,7 @@ class DocumentedCommandTests(unittest.TestCase):
         for name, placeholders in sorted(COLLAPSED.items()):
             passed = self.options.get(name, set())
             documented = self.named_options[name] | (
-                shared if name in self.stateful else set())
+                shared & self.stateful.get(name, set()))
             lines = commands_of(self.sections[name])
             for (program_name, placeholder), declared in sorted(
                 placeholders.items()
@@ -777,11 +782,12 @@ class DocumentedCommandTests(unittest.TestCase):
         )
         for name in self.catalog.names:
             passed = self.options.get(name, set())
-            # The shared transition commands are only sent by a test built
-            # from state-changing cases, so only such a test may leave them
-            # out: a test of any other kind that gained one would have to
-            # name it.
-            allowed = shared if name in self.stateful else set()
+            # The shared transition commands stand in for what a
+            # state-changing case sends, so the allowance follows the case
+            # rather than the test: an option this test passes from a case
+            # of another kind has to be named, even in a test that has
+            # state-changing cases too.
+            allowed = shared & self.stateful.get(name, set())
             documented = (self.named_options[name] | allowed
                           | collapsed_options(name))
             by_a_driver = BY_A_DRIVER.get(name, set())

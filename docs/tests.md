@@ -272,7 +272,14 @@ ubertooth-util -U <serial> -V                  # "Firmware compile info", per bo
 ubertooth-util -U <serial> -s                  # "Device serial", per board
 ubertooth-util -U <serial> -v                  # "Guard firmware API", guard-only board
 ubertooth-util -U <serial> -B                  # "Bootloader identity", per board
+nrfdk.py identify --jlink <jlink serial>       # "nRF52840 DK probe", per DK
+esp32peer.py identify --device <serial device> --address <BD_ADDR>
+                                               # "ESP32 Classic peer", per peer
 ```
+
+Each device driver also takes the port the registry names for that device
+(`nrfdk.py --port <serial device>`), and derives it from the probe's or
+bridge's serial where the registry names none.
 
 The host version line must name the resolved Ubertooth commit and the libbtbb
 the tools are linked against; `-v` and `-V` must report the resolved firmware
@@ -908,7 +915,12 @@ ubertooth-btle -U <serial> -f -A<37|38|39> -k<0|1>     # the other mode
 ubertooth-btle -U <serial> -n -A37 -k<0|1> -r <case dir>/capture.pcapng
 ubertooth-btle -U <serial> -n -A37 -k<0|1> -q <case dir>/capture.pcap
 ubertooth-btle -U <serial> -n -A37 -k<0|1> -c <case dir>/capture-ppi.pcap
+ubertooth-btle -U <serial> -f -A37 -k<0|1> -r <case dir>/capture.pcapng
+ubertooth-btle -U <serial> -f -A37 -k<0|1> -q <case dir>/capture.pcap
+ubertooth-btle -U <serial> -f -A37 -k<0|1> -c <case dir>/capture-ppi.pcap
 ubertooth-btle -U <serial> -n -A37 -q <case dir>/capture.pcap -c <case dir>/capture-ppi.pcap
+ubertooth-btle -U <serial> -n -A37 -r <case dir>/capture.pcapng -q <case dir>/capture.pcap
+ubertooth-btle -U <serial> -n -A37 -r <case dir>/capture.pcapng -c <case dir>/capture-ppi.pcap
 capturefile.py <case dir>/capture.pcapng               # the header and link type
 capturefile.py --absent <case dir>/capture-ppi.pcap    # the file that must not exist
 ```
@@ -2202,6 +2214,8 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/<fixture>.bin \
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/no-record.bin -q <destination>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/input.d -r <case dir>/new.pcapng \
     -q <case dir>/new.pcap -d <case dir>/new.dump   # a directory as the input
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -q <case dir>/in-the-way
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -q <case dir>/ro/x.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -q <case dir>/gone/x.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/replay.bin -r <case dir>/gone/x.pcapng
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -q -                     # no -i: the board lookup
@@ -2226,10 +2240,9 @@ capturefile.py --packets <case dir>/new.pcap
 `partial`, `skipped` and `truncated` ones, which is where the three
 destinations are taken back or kept together. `<destination>` is what the
 `no-record.bin` line gives one `-q`: a symbolic link, and `/dev/null`. The
-other destinations have lines of their own above -- an existing directory, a
-read-only one, and one that is not there -- the seeded ones belong to the
-`ubertooth-btle` and `ubertooth-dump` lines, and `-q -` to the no-input
-case.
+three directory destinations have lines of their own above, the seeded ones
+belong to the `ubertooth-btle` and `ubertooth-dump` lines, and `-q -` to the
+no-input case.
 
 **Expected outcome.** Smoke runs 6 cases: `ubertooth-rx -r -q -d`,
 `ubertooth-btle -n -r -q`, and `ubertooth-dump -d` stopped at the board lookup
