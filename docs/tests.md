@@ -248,8 +248,11 @@ always fails the case. The settings read and restored this way are the channel
 `-l`), and, for BLE cases, the CRC verify flag (`ubertooth-btle -k`) and the
 access address (`-a`).
 
-These are the commands, which every such case sends and no section below
-repeats; `<serial>` is the selected board's full serial:
+These are the commands such a case sends, and no section below repeats
+them. Which of them a given case sends follows what it disturbs: the
+settings it records and restores, the CRC flag if it is a BLE case, and the
+watchdog record when a read falls due between cases. `<serial>` is the
+selected board's full serial:
 
 ```text
 ubertooth-util -U <serial> -S                 # return to idle, first and last
@@ -257,9 +260,11 @@ ubertooth-util -U <serial> -C                 # read the channel, in MHz
 ubertooth-util -U <serial> -a                 # read the PA level
 ubertooth-util -U <serial> -z                 # read the squelch
 ubertooth-util -U <serial> -d                 # read all three LEDs
+ubertooth-util -U <serial> -l                 # read the USR LED alone
 ubertooth-util -U <serial> -s                 # confirm the registered serial
 ubertooth-btle  -U <serial> -k                # read the CRC verify flag
 ubertooth-util -U <serial> -c<MHz>            # restore the channel
+ubertooth-util -U <serial> -C<index>          # or by channel index
 ubertooth-util -U <serial> -a<level>          # restore the PA level
 ubertooth-util -U <serial> -z<dBm>            # restore the squelch
 ubertooth-util -U <serial> -d<state> -l<state>  # restore the LEDs
@@ -1005,6 +1010,9 @@ ubertooth-util -U <serial> -r                       # resets the address to 8e89
 ubertooth-util -U <serial> -c2426 -z-60 -d1         # preset away from the values a
                                                     # mode stop resets, so that check
                                                     # cannot pass by default
+ubertooth-util -U <serial> -C|-a|-z|-d              # read each back, after the set
+                                                    # and after the mode stop: one
+                                                    # command each
 ```
 
 **Expected outcome.** Smoke runs 3 cases: set and read back the access
@@ -1048,6 +1056,7 @@ ubertooth-debug -U <serial> -r 0x01             # one register, for the exit sta
 ubertooth-debug -U <serial> -r 0x00 -v<0|1|2>   # each verbosity
 ubertooth-debug -U <serial> -r 0x00 -v3         # refused
 ubertooth-debug -U <serial> -r 0x100            # refused
+ubertooth-util  -U <serial> -C|-z|-d            # nothing changed: one command each
 ```
 
 **Expected outcome.** Smoke runs 1 case: the list `0x02,0x01,0x00` must
@@ -1093,6 +1102,8 @@ ubertooth-util -U <serial> -v                  # the firmware, after -r
 ubertooth-util -U <serial> -c2426 -z-60 -d1    # preset away from the values a mode
                                                # stop resets, so that check cannot
                                                # pass by default
+ubertooth-util -U <serial> -C|-a|-z            # read each back, during the mode and
+                                               # after the stop: one command each
 ledblink.py ubertooth-util <serial> --max-samples 60 --deadline 10 --interval 0.05
 sh -c '<read -d <count> times, <interval> apart, retrying one failed read>' \
     ubertooth-util <serial> 12 0.05
@@ -1295,6 +1306,8 @@ sh -c '<read -m until a result or the deadline>' ubertooth-util <sender> 10 0.25
 ubertooth-util -U <responder> -m      # the repeater keeps no result
 ubertooth-util -U <sender>    -v      # and the responder: the firmware
 ubertooth-util -U <responder> -S      # stop the repeater
+ubertooth-util -U <responder> -C      # and the sender: the channel it is left on
+ubertooth-util -U <responder> -d      # and the sender: the LEDs, during and after
 ```
 
 **Expected outcome.** One case of 35 steps. It passes when the sender's `-n`
@@ -1553,9 +1566,12 @@ python -c 'import os, sys; os.chdir(sys.argv[1]); os.execvp(sys.argv[2], sys.arg
                                                        # in the case directory
 ubertooth-specan -U <serial> -d /dev/full              # Linux only
 specandump.py <case dir>/specan.bin 2430 2440
-ubertooth-util -U <serial> -c2426 -z-60 -d1    # preset away from the values
+ubertooth-util -U <serial> -c2426 -z-60 -d1            # preset away from the values
                                                        # a mode stop resets, so that
                                                        # check cannot pass by default
+ubertooth-util -U <serial> -C|-a|-z|-d                 # read each back, after the
+                                                       # set and after the stop:
+                                                       # one command each
 ```
 
 **Expected outcome.** Smoke runs 1 case: a full-band sweep over 2402-2480 MHz
@@ -1823,6 +1839,9 @@ ubertooth-dump  -U <serial> -l -d <case dir>/after-killed-specan.bin
 ubertooth-debug -U <serial> -r 0x03 -v0
 rxdump.py <case dir>/after-killed-specan.bin full --min-records 150 \
     --types br,keep-alive --max-stale 0
+ubertooth-util -U <serial> -C|-a|-z|-d|-s      # read back after the kill, at the
+                                               # boot defaults, and in the cleanup:
+                                               # one command each
 ```
 
 **Expected outcome.** One case: a symbol dump after a killed spectrum sweep.
@@ -1941,6 +1960,9 @@ ubertooth-util -U <serial> -v                        # the board answers at once
 rxdump.py      <case dir>/dump.bin full --min-records 20
 capturefile.py --packets <case dir>/le.pcapng       # and le.pcap
 specandump.py  <case dir>/specan.bin 2402 2480
+ubertooth-util -U <serial> -C|-z                     # the 2441 MHz and -120 a
+                                                     # mode stop leaves, read
+                                                     # before the cleanup's stop
 ```
 
 **Expected outcome.** Smoke runs 2 cases: `ubertooth-dump -d` interrupted once
@@ -2237,10 +2259,11 @@ that wrote it.
 
 **Commands.** No board. A command that is accepted and then stopped at the
 board lookup must create no file; a replay really writes one, from an input
-`rxreplay.py` builds. `dfuimage.py` states the directory and makes the links
-read-only directory the cases need (the symbolic link itself is made with
-`ln -s`, and `dfuimage.py symlink` is the check that it still points where it
-did), and `capturefile.py` reads what was kept:
+`rxreplay.py` builds. `dfuimage.py` states the directory before and after, so
+a file created, truncated, or left behind is caught; `mkdir` and `chmod` make
+the read-only directory the cases need and `ln -s` the symbolic link, and
+`dfuimage.py symlink` is the check that the link still points where it did.
+`capturefile.py` reads what was kept:
 
 ```text
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -r <case dir>/new.pcapng \
@@ -3010,6 +3033,7 @@ conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <a
     --min-valid-packets 1 --min-connections 2 --min-connection-packets 3 \
     --after-update-ms <ms> --require-announced --max-quiet-ms <ms> --min-span-ms <ms>
 ubertooth-util -U <serial> -s -C      # the board answers at once, read back in idle mode
+ubertooth-util -U <serial> -w         # no new unrequested watchdog reset
 ```
 
 `ensure` takes `--hex` only where the run carries the `nRF52840 advertiser`
@@ -3387,9 +3411,16 @@ the capture files:
 
 ```text
 esp32peer.py stream <peer options> -- ubertooth-rx -U <serial> -t <duration> \
-    -l <central LAP> -u <central UAP> [-z] -q <case dir>/records.pcap \
+    -l <central LAP> -u <central UAP> -q <case dir>/records.pcap \
     -r <case dir>/records.pcapng
-esp32peer.py audio  <peer options> --type ev3 --min-frames <n> -- ubertooth-rx ...
+esp32peer.py stream <peer options> -- ubertooth-rx -U <serial> -t <duration> \
+    -l <central LAP> -u <central UAP> -r <case dir>/swapped.pcapng
+                                   # the roles exchanged, so the other LAP
+esp32peer.py stream <peer options> -- ubertooth-rx -U <serial> -t <duration> \
+    -z -r <case dir>/survey.pcapng # a survey, with no target
+esp32peer.py audio  <peer options> --type ev3 --min-frames <n> \
+    -- ubertooth-rx -U <serial> -t <duration> \
+    -l <central LAP> -u <central UAP> -r <case dir>/audio.pcapng
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 bredrrecord.py <case dir>/records.pcapng --min-packets 10 --max-access-code-errors 2 \
     --max-span-s <s> --max-backward-step-us <us> --min-hec-valid <n> \

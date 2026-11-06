@@ -21,7 +21,11 @@ command is the shared block's only when its step is one the transitions
 helpers built AND the command is the one that step should send
 (``is_shared_command``). So a section's own setter must be documented even
 where the shared restore passes the same option with another value, which
-the option names alone cannot tell apart.
+the option names alone cannot tell apart; and so must a read a section
+makes for a check of its own, even though the shared block states the same
+command, because the section is what says why it reads it there. The one
+command recognized by its form alone is the idle stop, whose step ID is its
+caller's to choose.
 
 All three shared blocks are compared with the code that builds their
 commands, in both directions: the transition block against what
@@ -426,19 +430,24 @@ def _shared_commands() -> dict:
 
 
 SHARED_COMMANDS = _shared_commands()
-# The read-only commands among them, which a step sends under whatever name
-# its case gives it: `_stop`'s step ID is the caller's to choose, so the
-# idle stop turns up as `establish-idle`, `mode-stop` and `idle-stop`. A
-# write is never recognized this way; only the step ID can place one.
+# The read-only commands among them. Each is placed by its step ID like any
+# other, with one exception: `_stop`'s step ID is its caller's to choose, so
+# the idle stop turns up as `establish-idle`, `mode-stop` and `idle-stop`
+# and is the one command `is_shared_command` recognizes by its form alone.
 SHARED_QUERIES = frozenset(
     options[0] for kind, options in SHARED_COMMANDS.values() if kind == QUERY
 )
-# Every option the shared block therefore has to name, and no other.
-SHARED_OPTIONS = frozenset(
-    {(UTIL, "-U"), (BTLE, "-U")}
-    | SHARED_QUERIES
-    | set().union(*(options for kind, options in SHARED_COMMANDS.values()
-                    if kind == WRITE))
+# Every form the shared block therefore has to state, and no other:
+# (program, option, QUERY or WRITE). The kind is part of it because an
+# option name alone cannot tell a read from a write, and the block states
+# both for most settings: `-C` reads the channel in MHz and `-C<index>`
+# restores it by index, so a comparison per name let the read stand in for
+# the write and the channel-index restore went unstated.
+SHARED_FORMS = frozenset(
+    {(prog, option, QUERY) for prog, option in SHARED_QUERIES}
+    | {(prog, option, WRITE)
+       for kind, options in SHARED_COMMANDS.values() if kind == WRITE
+       for prog, option in options}
 )
 # The BLE access address is read and restored the same way, and its step
 # IDs are `read-original-access-address` / `restore-access-address`. It is
@@ -510,10 +519,14 @@ def is_shared_command(step_id: str, argv) -> bool:
         return (_options(argv) == set(options) | {(tool, "-U")}
                 and all(len(word) > 2 and word.startswith("-")
                         for word in rest))
-    # Otherwise only a read-only command, by its whole form, which is how
-    # the idle stop is found under each of its names. Nothing longer:
-    # `ubertooth-util -U <serial> -s -C` is a section's own read.
-    return len(words) == 4 and (tool, words[3]) in SHARED_QUERIES
+    # Otherwise only the idle stop, which is the one shared command whose
+    # step ID its caller chooses (`_stop`), so it turns up as
+    # `establish-idle`, `mode-stop` and `idle-stop`. Every other shared
+    # command comes from a helper that names its own step, so the ID can be
+    # required: a read a section makes for a check of its own is that
+    # section's to document, even though the shared block states the same
+    # command (review round 15).
+    return len(words) == 4 and (tool, words[3]) == (UTIL, "-S")
 
 
 def _options(argv) -> set[tuple[str, str]]:
@@ -744,6 +757,25 @@ def programs_named(lines) -> set[str]:
             if name}
 
 
+def forms_named(lines) -> set[tuple[str, str, str]]:
+    """(program, option, QUERY or WRITE) for every form a block states.
+
+    A word that is the option alone is a read; one that carries anything
+    after the option name, a value or a placeholder for one, is a write. So
+    `-C` and `-C<index>` are two forms of one option, which is what the
+    shared transition block states for most of its settings. The selector
+    is left out: `-U <serial>` names the board for both.
+    """
+    found = set()
+    for program_name, option, word in _option_words(lines):
+        if option == "-U":
+            continue
+        rest = word[len(option):]
+        found.add((program_name, option,
+                   WRITE if rest and not rest.startswith("=") else QUERY))
+    return found
+
+
 def options_named(lines) -> set[tuple[str, str]]:
     """(program, option) for every option a Commands block names.
 
@@ -751,7 +783,13 @@ def options_named(lines) -> set[tuple[str, str]]:
     (`-<mode>`, `-<query>`, `-<setter or mode>`) and is passed over: which
     options it covers is what the prose beside the block says.
     """
-    found = set()
+    return {(program_name, option)
+            for program_name, option, _word in _option_words(lines)}
+
+
+def _option_words(lines):
+    """(program, option name, the whole word) for each option a block names."""
+    found = []
     current = ""
     continued = False
     for line in lines:
@@ -781,7 +819,9 @@ def options_named(lines) -> set[tuple[str, str]]:
             if not current or not match:
                 continue
             name = match.group("name").split("=", 1)[0]
-            found.add((current, name if name.startswith("--") else name[:2]))
+            found.append((current,
+                          name if name.startswith("--") else name[:2],
+                          word))
     return found
 
 
@@ -1109,16 +1149,20 @@ class DocumentedCommandTests(unittest.TestCase):
         classification never read the block.
         """
         lines = shared_fences(self.sections[SHARED])["transition"]
-        named = options_named(lines)
+        named = forms_named(lines)
+
+        def described(forms):
+            return sorted(f"{prog} {option}"
+                          f"{'<value>' if kind == WRITE else ''}"
+                          for prog, option, kind in forms)
+
         self.assertEqual(
-            [], sorted(f"{prog} {option}"
-                       for prog, option in SHARED_OPTIONS - named),
+            [], described(SHARED_FORMS - named),
             "the transition block leaves out a command it stands in for",
         )
         self.assertEqual(
-            [], sorted(f"{prog} {option}"
-                       for prog, option in named - SHARED_OPTIONS),
-            "the transition block names an option it does not stand in for",
+            [], described(named - SHARED_FORMS),
+            "the transition block states a form it does not stand in for",
         )
         self.assertEqual(SHARED_TOOLS, programs_named(lines))
 
@@ -1345,6 +1389,12 @@ class DocumentedCommandTests(unittest.TestCase):
             ("by-index", ("ubertooth-util", "-U", "0", "-z")),
             # More on the line than the shared read.
             ("read-back", ("ubertooth-util", "-U", serial, "-s", "-C")),
+            # A bare read a section makes for a check of its own: the
+            # shared block states the same command, but the section is
+            # what says why it reads it there.
+            ("verify-unchanged-channel", ("ubertooth-util", "-U", serial, "-C")),
+            ("mode-stopped-squelch", ("ubertooth-util", "-U", serial, "-z")),
+            ("idle-after-capture", ("ubertooth-util", "-U", serial, "-w")),
             # A command case, which has no step at all.
             ("", ("ubertooth-util", "-U", serial, "-S")),
         ]
