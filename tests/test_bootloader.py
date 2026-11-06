@@ -1472,9 +1472,19 @@ class EstablishedBoardReadTests(unittest.TestCase):
 
     @staticmethod
     def result(check, *, returncode, stdout="", stderr=""):
+        """The command's result, with the output view a run gives it.
+
+        The view is attached, as the executor attaches it, so a caller can
+        read back the checks `result_failure` recorded against it; without
+        one, every `output_of` call makes a fresh view of its own.
+        """
+        from ubertooth_harness.outputfiles import CommandOutput
+
         return CommandResult(argv=check.argv, returncode=returncode,
                              stdout=stdout, stderr=stderr, duration_s=0.01,
-                             timed_out=False)
+                             timed_out=False,
+                             output=CommandOutput(stdout=stdout,
+                                                  stderr=stderr))
 
     def test_the_read_covers_it_and_accepts_the_refusal_as_the_reading(self):
         check = self.compile(bootloader.MODE_CHECK)
@@ -1507,6 +1517,41 @@ class EstablishedBoardReadTests(unittest.TestCase):
         self.assertIn("has bootloader no version block", failure)
         self.assertIn("--bootloader update does not install one there",
                       failure)
+
+    def test_both_answers_record_one_check_that_passed(self):
+        """A check that found nothing counts against the run wherever it is
+        read back, so a board that legitimately refused the read must not
+        leave one behind."""
+        from ubertooth_harness.outputfiles import output_of
+        from ubertooth_harness.report import _check_failed
+
+        check = self.compile(bootloader.MODE_CHECK)
+        for name, result in (
+            ("answered", self.result(check, returncode=0,
+                                     stdout=FORK_LINE + "\n")),
+            ("refused", self.result(check, returncode=1, stderr=REFUSAL_LINE)),
+        ):
+            with self.subTest(name):
+                self.assertEqual("", check.result_failure(result))
+                checks = output_of(result).checks
+                self.assertEqual(1, len(checks))
+                self.assertEqual("observed", checks[0].kind)
+                self.assertFalse(_check_failed(checks[0]))
+        # A board that answered with something else is the case that does
+        # come out against the run.
+        stale = self.result(check, returncode=0, stdout=FACTORY_LINE + "\n")
+        self.assertNotEqual("", check.result_failure(stale))
+        (recorded,) = output_of(stale).checks
+        self.assertTrue(_check_failed(recorded))
+
+    def test_a_board_the_suite_does_not_write_records_the_line_as_before(self):
+        from ubertooth_harness.outputfiles import output_of
+
+        check = self.compile(bootloader.MODE_CHECK, established=False)
+        result = self.result(check, returncode=0, stdout=FORK_LINE + "\n")
+        self.assertEqual("", check.result_failure(result))
+        kinds = [c.kind for c in output_of(result).checks]
+        self.assertEqual(["observed", "expected"], kinds)
 
     def test_another_failure_of_the_read_is_still_a_failure(self):
         """A board nothing can open did not refuse the request."""

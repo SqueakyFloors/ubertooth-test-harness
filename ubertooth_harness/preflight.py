@@ -120,19 +120,29 @@ class PreflightCheck:
             # exit status.
             output = output_of(result)
             line = bootloader_identity.IDENTITY_LINE_PATTERN
-            found = output.search(line)
-            output.note_pattern("observed", self.name, line, found)
-            for pattern in self.expected_patterns:
-                if pattern != line:
-                    output.note_pattern(
-                        "expected", self.name, pattern, output.search(pattern)
-                    )
             if self.bootloader.tolerates_refusal(self.resource_alias):
-                refusal = bootloader_identity.REFUSED_PATTERN
-                output.note_pattern(
-                    "observed", f"{self.name} refused", refusal,
-                    output.search(refusal),
-                )
+                # One recorded check, for the two answers this board may give:
+                # the line, or its firmware saying it has not got the request
+                # (`patterns`). Recording the line on its own as well would
+                # leave an observed check that found nothing every time such a
+                # board legitimately refused the read, and a check that found
+                # nothing counts against the run wherever it is read back
+                # (report.md's output files, `ubertooth-harness validate`).
+                # Which of the two answers came is in the bootloader_identity
+                # record and in the transcript.
+                for pattern in self.expected_patterns:
+                    output.note_pattern(
+                        "observed", self.name, pattern, output.search(pattern)
+                    )
+            else:
+                output.note_pattern("observed", self.name, line,
+                                    output.search(line))
+                for pattern in self.expected_patterns:
+                    if pattern != line:
+                        output.note_pattern(
+                            "expected", self.name, pattern,
+                            output.search(pattern),
+                        )
             _installed, _status, reason = self.bootloader_reading(result)
             return f"{self.name}: {reason}" if reason else ""
         if result.returncode not in self.accepted_returncodes:
