@@ -132,6 +132,8 @@ def driver_argv(serial: str, dk: Mapping, arguments: Mapping):
             "--max-restarts", str(arguments["maximum restarts"]),
             "--max-capture-bytes",
             str(arguments["capture file limit"] * 1024 * 1024),
+            "--max-total-capture-bytes",
+            str(arguments["capture budget"] * 1024 * 1024),
         ]
         if dk["port"]:
             command += ["--dk-port", dk["port"]]
@@ -182,5 +184,5 @@ def _soak_case(serial: str, dk: Mapping, arguments: Mapping) -> StateCase:
 
 def address_soak_cases(arguments, resources, resource_identities):
     serial = _serial(resource_identities, TEST_NAME)
-    dk = _advertiser(resources, resource_identities)
+    dk = _advertiser(resources, resource_identities, TEST_NAME)
     return (_ensure_case(dk), _soak_case(serial, dk, arguments))

@@ -125,6 +125,10 @@ ERROR_LINE = re.compile(r"^\s*error:\s*(.+?)\s*$")
 # wording settled. Counted, never acted on, so a run says whether the old
 # signal would have fired at all.
 LEGACY_DEATH_LINE = re.compile(r"libUSB Error|could not open Ubertooth device")
+# The warning libubertooth prints when it finds the board still in a mode a
+# killed capture left it in (fork e657807): evidence that the restart path
+# met that state and cleared it.
+MODE_WARNING = "is still in mode"
 
 POLL_S = 0.1
 # A board read is two control transfers; a board that has gone takes the
@@ -155,10 +159,37 @@ MAX_OTHER_ADDRESSES = 10000
 # so a run of days would otherwise leave a file of gigabytes in the run
 # directory; 0 means no limit.
 DEFAULT_CAPTURE_LIMIT_BYTES = 256 * 1024 * 1024
+# How much of the captures the whole run keeps. The per-file limit above
+# bounds one file; this bounds the run, because what the captures cost is the
+# channel's traffic and not the advertiser's: the lab bench measured 1.3 MB
+# of records in 30 seconds on channel 37, which is tens of gigabytes over
+# three days. Past the budget the oldest complete capture and its transcript
+# are removed, newest kept, and what was removed is recorded -- every figure
+# the verdict rests on is already counted as the records arrive, so what a
+# run loses is the oldest bytes to look at by hand, not its result. 0 means
+# no budget.
+DEFAULT_CAPTURE_BUDGET_BYTES = 4 * 1024 * 1024 * 1024
+# And a cap on how many attempts' files are kept, for the other way a run
+# fills a filesystem: a board that stops capturing in the first hour of a
+# three-day run restarts every minute or so, and each attempt would leave a
+# pair of files behind.
+MAX_KEPT_ATTEMPTS = 64
+# How many attempts the summary carries in full; progress.jsonl holds them all.
+MAX_SUMMARY_ATTEMPTS = 40
 # How long a capture is given to open its file before the schedule starts
 # against it. Bounded by the liveness timeout as well, so this never delays
 # the rule that notices a capture which never starts at all.
 CAPTURE_READY_TIMEOUT_S = 10.0
+# The narrowest presence window and the shortest sampling interval a run may
+# be asked for: a window is held per reader per period for the whole run, and
+# a sample is a record written and synced.
+MIN_WINDOW_S = 0.1
+MIN_SAMPLE_EVERY_S = 1.0
+# How long into an off period the advertiser may still be heard. The stop is
+# a shell command and the packets already on the air, and already in the
+# tool's own buffers, arrive after it; what is judged is the rest of the
+# period.
+OFF_SETTLE_S = 2.0
 # How long after a probe or a restart the advertiser must be heard again,
 # beyond the configured detection deadline: one whole off period can fall in
 # between, and the schedule is not re-aligned by a restart.
@@ -168,6 +199,16 @@ EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 EXIT_CONFIGURATION = 3
+
+
+def say(*text) -> None:
+    """Print one line and flush it.
+
+    A soak's own progress lines are read while it runs, and the harness kills
+    this process about two seconds after it cancels a step, so an unflushed
+    line is a line nobody sees.
+    """
+    print(*text, flush=True)
 
 
 class SoakError(RuntimeError):
@@ -192,6 +233,13 @@ class PcapTail:
 
     HEADER_LEN = 24
     RECORD_HEADER_LEN = 16
+    # The longest record this will wait for. A corrupt record header claiming
+    # a huge length would otherwise make the reader hold every later read
+    # until that many bytes arrived, which on a run of days is the whole
+    # capture in memory. The file's own snaplen is 262144 and an LE record is
+    # a few hundred bytes, so anything past this is a broken file, not a
+    # record that has not finished arriving.
+    MAX_RECORD_LEN = 262144
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -238,6 +286,14 @@ class PcapTail:
         self.handle = handle
         return True
 
+    def open_header(self) -> bool:
+        """Has the tool written the file's header yet?
+
+        Separate from ``poll`` on purpose: the readiness wait asks this, and a
+        poll would read the records behind the header and throw them away.
+        """
+        return self._open()
+
     def poll(self) -> list[tuple[float, bytes]]:
         """(capture time in epoch seconds, record) for every whole record."""
         if not self._open():
@@ -249,6 +305,13 @@ class PcapTail:
         while len(self._pending) >= self.RECORD_HEADER_LEN:
             seconds, fraction, caplen, _length = struct.unpack(
                 self.endian + "IIII", self._pending[:self.RECORD_HEADER_LEN])
+            if caplen > self.MAX_RECORD_LEN:
+                self.error = (f"{self.path.name} has a record claiming {caplen} "
+                              f"bytes, more than {self.MAX_RECORD_LEN}; the file "
+                              "is not readable from here on")
+                self._pending.clear()
+                self.close()
+                return found
             end = self.RECORD_HEADER_LEN + caplen
             if len(self._pending) < end:
                 break  # the rest of this record has not arrived yet
@@ -303,6 +366,7 @@ class TranscriptReader(threading.Thread):
         self.error_lines = 0
         self.last_error = ""
         self.legacy_death_lines = 0
+        self.mode_warning = False
 
     def run(self) -> None:
         with self.log_path.open("wb") as log:
@@ -328,6 +392,8 @@ class TranscriptReader(threading.Thread):
             self.last_error = error.group(1)
         if LEGACY_DEATH_LINE.search(text):
             self.legacy_death_lines += 1
+        if MODE_WARNING in text:
+            self.mode_warning = True
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +563,7 @@ class Options:
     max_memory_growth_kb: int | None
     restart_probe: bool
     capture_limit_bytes: int
+    capture_budget_bytes: int
     term_grace_s: float
     restart_min_interval_s: float
 
@@ -539,11 +606,20 @@ def check_timings(options: Timings | Options) -> None:
             f"'liveness timeout' ({options.liveness_timeout_s:g}s) is not "
             f"longer than the {options.off_s:g}s the advertiser is off, so the "
             "schedule's own silence would restart the capture")
-    if options.max_gap_s < options.off_s + options.detect_within_s:
+    # A gap is measured inside one on period, from its start to its end, so
+    # the limit has to sit between the detection deadline -- every period's
+    # leading gap is at least the time to its first sighting -- and the
+    # period's own length, past which no gap could ever reach it.
+    if options.max_gap_s < options.detect_within_s:
         raise SoakError(
-            f"'maximum gap' ({options.max_gap_s:g}s) is shorter than an off "
-            f"period and a detection deadline ({options.off_s:g}s + "
-            f"{options.detect_within_s:g}s), which every period crosses")
+            f"'maximum gap' ({options.max_gap_s:g}s) is shorter than 'detect "
+            f"within' ({options.detect_within_s:g}s), so the wait for the "
+            "first packet of a period would fail it")
+    if options.max_gap_s >= options.on_s:
+        raise SoakError(
+            f"'maximum gap' ({options.max_gap_s:g}s) is not shorter than the "
+            f"{options.on_s:g}s the advertiser is on, so no gap inside a period "
+            "could ever reach it")
     cycle = options.on_s + options.off_s
     if options.duration_s < 2 * cycle:
         raise SoakError(
@@ -553,6 +629,18 @@ def check_timings(options: Timings | Options) -> None:
         raise SoakError(
             f"'sample every' ({options.sample_every_s:g}s) leaves fewer than "
             f"three samples in {options.duration_s:g}s")
+    # Both of these are bounded below as well, because the run holds a window
+    # per reader per period and writes a record per sample: a millisecond
+    # either way is legal as a duration and would cost a long run hundreds of
+    # millions of windows, or a synced write every poll.
+    if options.window_s < MIN_WINDOW_S:
+        raise SoakError(
+            f"'presence window' ({options.window_s:g}s) is shorter than "
+            f"{MIN_WINDOW_S:g}s; a run holds a window per reader per period")
+    if options.sample_every_s < MIN_SAMPLE_EVERY_S:
+        raise SoakError(
+            f"'sample every' ({options.sample_every_s:g}s) is shorter than "
+            f"{MIN_SAMPLE_EVERY_S:g}s; each sample is a synced record")
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +824,10 @@ class Attempt:
     transcript_dropped: int = 0
     records: int = 0
     mode_warning: bool = False
+    # The capture and the transcript this attempt left, and whether the run's
+    # budget has since taken them away again.
+    bytes_kept: int = 0
+    files_removed: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -757,16 +849,13 @@ class Attempt:
             "transcript_dropped_lines": self.transcript_dropped,
             "records": self.records,
             "found_board_in_a_mode": self.mode_warning,
+            "bytes_kept": self.bytes_kept,
+            "files_removed": self.files_removed,
         }
 
 
 class Capture:
     """The capture process, its transcript reader, and its capture tail."""
-
-    # The warning libubertooth prints when it finds the board still in a mode
-    # a killed capture left it in (fork e657807): evidence that the restart
-    # path met that state and cleared it.
-    MODE_WARNING = "is still in mode"
 
     def __init__(self, options: Options, index: int, sink: LineSink,
                  clock=time.monotonic, max_log_bytes: int = MAX_LOG_BYTES):
@@ -883,17 +972,23 @@ class Capture:
             self.attempt.legacy_death_lines = self.reader.legacy_death_lines
             self.attempt.transcript_lines = self.reader.lines
             self.attempt.transcript_dropped = self.reader.dropped_lines
+            # Read from the lines themselves, not from the log file: the
+            # transcript budget belongs to the whole run, so a later
+            # attempt's log can be empty while its warning was printed.
+            self.attempt.mode_warning = self.reader.mode_warning
         if self.process is not None and self.process.stdout is not None:
             try:
                 self.process.stdout.close()
             except OSError:
                 pass
         self.attempt.records = self.tail.records
-        try:
-            text = self.log_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            text = ""
-        self.attempt.mode_warning = self.MODE_WARNING in text
+        kept = 0
+        for path in (self.capture_path, self.log_path):
+            try:
+                kept += path.stat().st_size
+            except OSError:
+                continue
+        self.attempt.bytes_kept = kept
         return self.attempt
 
     def close(self) -> None:
@@ -926,6 +1021,9 @@ class Soak:
         self.rss_max = None
         self.minute_packets: dict[int, int] = {}
         self.other_packets = 0
+        self.attempt_text_packets = 0
+        self.captures_removed = 0
+        self.capture_bytes_removed = 0
         self.other_addresses: set = set()
         self.structural_packets = 0
         self.text_packets = 0
@@ -940,6 +1038,16 @@ class Soak:
         self.forced_stops = 0
         self.schedule_errors = 0
         self.canceled = ""
+        # When the schedule started, which is what the duration measures.
+        self.window_start = 0.0
+        # The capture record clock, anchored to the host's (record_time).
+        self._record_anchor = None
+        self.record_reanchors = 0
+        self.record_drift_max_s = 0.0
+        # Half a window: a record placed further from the host's reading than
+        # that could fall in the wrong window, which is what the comparison
+        # counts.
+        self.reanchor_s = max(0.25, options.window_s / 2)
         # Shared by every attempt, so restarts and file rotations cannot
         # multiply what the transcript costs (MAX_LOG_BYTES).
         self.transcript_budget = MAX_LOG_BYTES
@@ -956,7 +1064,7 @@ class Soak:
         self.probe_recovered = None
         self.probe_period_index = None
         self.last_packet_at = 0.0
-        self.last_restart_at = -DEFAULT_RESTART_MIN_INTERVAL_S
+        self.last_restart_at = -options.restart_min_interval_s
         self.reset_next_restart = False
         self.progress = None
         self.problems: list[str] = []
@@ -999,6 +1107,11 @@ class Soak:
     def elapsed(self) -> float:
         return self.clock() - self.start_mono
 
+    @property
+    def window_elapsed(self) -> float:
+        """How long the schedule has been running, which the duration bounds."""
+        return self.elapsed - self.window_start
+
     def period(self) -> Period | None:
         return self.periods[-1] if self.periods else None
 
@@ -1039,6 +1152,41 @@ class Soak:
 
     # -- the readers ------------------------------------------------------
 
+    def record_time(self, epoch: float) -> float:
+        """A capture record's time on this run's own timeline.
+
+        The time in a record is the board's clock, anchored once when the
+        capture's first packet arrived and advanced by the board's own
+        counter (libubertooth's ``now_ns_from_clk100ns``). Over hours that
+        walks away from the host clock -- the crystal's drift, and a whole
+        clock period if a quiet gap loses a wrap, which the fork itself warns
+        about -- and the windows this is compared in are seconds wide. So the
+        record clock is used for the resolution between records, anchored to
+        the host time the record was read, and re-anchored whenever the two
+        have drifted more than half a window apart. Every re-anchor is
+        counted and the largest drift is reported, so a run says what its
+        capture clock did rather than hiding it.
+
+        What this does not do is make the two readers independent in their
+        clocks: both end up on the host's timeline, which is the honest
+        position, because what the parity comparison is about is the decode
+        -- the printed line against the record's own bytes and CRC -- and
+        never was about whose clock was right.
+        """
+        host = self.clock() - self.start_mono
+        if self._record_anchor is None:
+            self._record_anchor = (epoch, host)
+            return host
+        anchor_epoch, anchor_host = self._record_anchor
+        at = anchor_host + (epoch - anchor_epoch)
+        drift = host - at
+        if abs(drift) > self.reanchor_s:
+            self.record_reanchors += 1
+            self.record_drift_max_s = max(self.record_drift_max_s, abs(drift))
+            self._record_anchor = (epoch, host)
+            return host
+        return at
+
     def period_at(self, at: float) -> Period | None:
         """The period a sighting belongs to, by its own time.
 
@@ -1066,6 +1214,7 @@ class Soak:
                     self.other_addresses.add(address)
                 continue
             self.text_packets += 1
+            self.attempt_text_packets += 1
             period = self.period_at(seen)
             if period is not None:
                 period.text.see(seen, period.started, self.options.window_s)
@@ -1073,9 +1222,18 @@ class Soak:
     def read_structural(self) -> None:
         if self.capture is None:
             return
-        for epoch, data in self.capture.poll_records():
+        records = self.capture.poll_records()
+        if records:
+            # Any record at all is the capture working, whether or not
+            # libbtbb printed an AdvA line for it: the liveness rule is about
+            # a capture that has stopped producing, and a run that watched
+            # only the text would restart a healthy capture of traffic that
+            # decodes to something else.
+            self.last_packet_at = max(self.last_packet_at,
+                                      self.clock() - self.start_mono)
+        for epoch, data in records:
             self.records_seen += 1
-            at = epoch - self.started_wall
+            at = self.record_time(epoch)
             packet = advcapture.parse_advertising(data)
             if packet is None:
                 # Either not an advertising packet or its CRC is wrong; the
@@ -1113,6 +1271,8 @@ class Soak:
     def start_capture(self, reason: str, *, planned: bool = True) -> None:
         self.note_capture_gap(planned)
         self.capture_index += 1
+        self._record_anchor = None
+        self.attempt_text_packets = 0
         self.capture = Capture(self.options, self.capture_index, self.sink,
                                clock=self.clock,
                                max_log_bytes=max(0, self.transcript_budget))
@@ -1141,8 +1301,7 @@ class Soak:
         while self.clock() < deadline and not self.canceled:
             if self.capture is None or not self.capture.running():
                 return None
-            self.capture.poll_records()
-            if self.capture.tail.link_type is not None or self.capture.tail.error:
+            if self.capture.tail.open_header() or self.capture.tail.error:
                 return self.clock() - started
             time.sleep(POLL_S)
         return None
@@ -1164,9 +1323,51 @@ class Soak:
         self.attempts.append(attempt)
         if attempt.forced and not kill:
             self.forced_stops += 1
+        if attempt.returncode is not None and not attempt.signalled:
+            # It had already gone before anything was asked of it. For a
+            # restart that is counted where the restart is; here it catches
+            # the last attempt, whose death nothing else would notice.
+            if reason.startswith("the run finished") or reason.startswith(
+                    "the run was stopped"):
+                self.unexplained_exits += 1
         self.record(attempt.to_dict())
         self.capture = None
+        self.prune_captures()
         return attempt
+
+    def prune_captures(self) -> None:
+        """Keep the newest captures inside the run's budget.
+
+        Only complete attempts are considered, so the capture being written
+        is never touched. Each removal is recorded with the file's size, so
+        the run says what it had and what it let go.
+        """
+        options = self.options
+        kept = [attempt for attempt in self.attempts if not attempt.files_removed]
+        while kept:
+            total = sum(attempt.bytes_kept for attempt in kept)
+            over_budget = (options.capture_budget_bytes > 0
+                           and total > options.capture_budget_bytes)
+            if not over_budget and len(kept) <= MAX_KEPT_ATTEMPTS:
+                return
+            oldest = kept.pop(0)
+            removed = 0
+            for name in (oldest.capture, oldest.log):
+                path = options.out / name
+                try:
+                    removed += path.stat().st_size
+                    path.unlink()
+                except OSError:
+                    continue
+            oldest.files_removed = True
+            self.captures_removed += 1
+            self.capture_bytes_removed += removed
+            self.record({"record": "capture_removed", "index": oldest.index,
+                          "capture": oldest.capture, "log": oldest.log,
+                          "bytes": removed,
+                          "reason": ("the run's capture budget"
+                                     if over_budget else
+                                     f"more than {MAX_KEPT_ATTEMPTS} attempts")})
 
     def rotate_if_large(self) -> None:
         """Start a new capture file once this one is big enough.
@@ -1188,7 +1389,7 @@ class Soak:
         if size < self.options.capture_limit_bytes:
             return
         reason = f"the capture file reached {size} bytes"
-        print(f"capture {self.capture_index}: {reason}, starting another file")
+        say(f"capture {self.capture_index}: {reason}, starting another file")
         self.stop_capture(reason)
         self.rotations += 1
         self.start_capture(reason)
@@ -1276,13 +1477,21 @@ class Soak:
         try:
             return self._run()
         finally:
+            # However the run ends -- an error nobody expected, a disk that
+            # filled under the progress file -- the tool does not outlive it
+            # holding the board.
+            if self.capture is not None:
+                try:
+                    self.stop_capture("the run ended unexpectedly")
+                except Exception:  # noqa: BLE001 - the teardown comes first
+                    self.capture.signal_tool(signal.SIGKILL)
             self.advertiser.close()
             if self.progress is not None:
                 self.progress.close()
 
     def _run(self) -> int:
         options = self.options
-        print(f"soak: {options.duration_s:g}s, channel {options.channel}, advertiser "
+        say(f"soak: {options.duration_s:g}s, channel {options.channel}, advertiser "
               f"{options.address} every {options.interval_ms} ms, schedule "
               f"{options.on_s:g}s on / {options.off_s:g}s off")
         answers, reason = board_answers(options.serial)
@@ -1292,15 +1501,20 @@ class Soak:
         self.advertiser.open()
         status = self.advertiser.configure(options)
         self.counter_before = status["counter"]
-        print(f"advertiser: {status['fw']} at {options.address}, counter "
+        say(f"advertiser: {status['fw']} at {options.address}, counter "
               f"{self.counter_before}")
 
         self.start_capture("the run started")
+        # The duration the plan asked for is the window the schedule runs
+        # over, so it is measured from here: the board read, the watchdog
+        # read, the advertiser's settings and the capture's own start-up
+        # come before it and are not part of it.
+        self.window_start = self.elapsed
         period = self.open_period("on")
         next_sample = self.elapsed + options.sample_every_s
         next_switch = period.started + options.on_s
 
-        while self.elapsed < options.duration_s and not self.canceled:
+        while self.window_elapsed < options.duration_s and not self.canceled:
             time.sleep(POLL_S)
             self.read_text()
             self.read_structural()
@@ -1321,9 +1535,9 @@ class Soak:
                 self.sample()
                 next_sample = now + options.sample_every_s
             if (self.probe_at is not None and not self.probe_done
-                    and now >= self.probe_at):
+                    and self.window_elapsed >= self.probe_at):
                 self.probe_done = True
-                print(f"probe: SIGKILL at {now:.1f}s, with no stop sent to the board")
+                say(f"probe: SIGKILL at {now:.1f}s, with no stop sent to the board")
                 self.restart("the restart probe", kill=True, probe=True)
                 continue
             self.check_liveness()
@@ -1364,7 +1578,7 @@ class Soak:
         if not self.capture.running():
             self.capture.finish()
             attempt = self.capture.attempt
-            print(f"capture {attempt.index} exited {attempt.returncode} by itself"
+            say(f"capture {attempt.index} exited {attempt.returncode} by itself"
                   + (f"; last error: {attempt.last_error}" if attempt.last_error else ""))
             self.restart(f"the process exited {attempt.returncode}")
             return
@@ -1372,12 +1586,16 @@ class Soak:
         if quiet >= options.liveness_timeout_s:
             if self.elapsed - self.last_restart_at < options.restart_min_interval_s:
                 return
-            had_packets = self.capture.tail.records > 0 or self.text_packets > 0
+            # This attempt's own packets, not the run's: a run whose first
+            # capture worked would otherwise never reach the reset rung,
+            # however many later captures heard nothing.
+            had_packets = (self.capture.tail.records > 0
+                           or self.attempt_text_packets > 0)
             # Nothing at all from this attempt: a clean restart has not
             # brought the capture back, so the next one is preceded by a
             # board reset (#703's ladder).
             self.reset_next_restart = not had_packets and self.restarts > 0
-            print(f"capture {self.capture_index}: no packet for {quiet:.1f}s, restarting")
+            say(f"capture {self.capture_index}: no packet for {quiet:.1f}s, restarting")
             self.restart(f"no packet for {quiet:.1f}s")
 
     def read_board_after(self) -> None:
@@ -1457,11 +1675,52 @@ class Soak:
             }
         return found
 
+    def off_periods(self) -> list[Period]:
+        """Off periods worth judging, by the same rule as the on ones."""
+        return [period for period in self.periods
+                if period.state == "off" and period.ended is not None
+                and not period.schedule_error and not period.capture_gap
+                and not period.cut_by_duration
+                and period.seconds >= self.options.off_s * 0.9]
+
+    def off_quiet(self) -> dict:
+        """Was the advertiser really quiet when it was told to stop?
+
+        Without this the schedule is only half checked: a DK that accepts
+        `adv stop` and keeps advertising would meet every detection, gap and
+        rate objective, and the run would report a controlled schedule it
+        never had. Packets already on the air or already in the capture's
+        buffers arrive just after the stop, so what is judged is the rest of
+        the period: a sighting more than OFF_SETTLE_S into it, by either
+        reader.
+        """
+        periods = self.off_periods()
+        # Never more than half the period, so a short schedule still has a
+        # stretch that is judged: a settle time longer than the off period
+        # would leave nothing to look at and read as quiet whatever happened.
+        settle = min(OFF_SETTLE_S, self.options.off_s / 2)
+        noisy = []
+        for period in periods:
+            settled = period.started + settle
+            for name in ("text", "structural"):
+                side = getattr(period, name)
+                if side.last is not None and side.last > settled:
+                    noisy.append(period.index)
+                    break
+        return {"periods": len(periods), "noisy": len(noisy),
+                "settle_s": round(settle, 3)}
+
     def gaps(self) -> dict:
         periods = self.on_periods()
         text = [period.text.max_gap for period in periods]
         structural = [period.structural.max_gap for period in periods]
-        over = sum(1 for gap in structural if gap > self.options.max_gap_s)
+        # Either reader: a tool that stopped printing its AdvA line partway
+        # through an on period is as much a fault as a capture that stopped
+        # recording, and judging the records alone would leave the text
+        # reader's gap reported and unjudgeable.
+        over = sum(1 for period in periods
+                   if max(period.text.max_gap, period.structural.max_gap)
+                   > self.options.max_gap_s)
         return {
             "text_max_s": round(max(text), 3) if text else None,
             "structural_max_s": round(max(structural), 3) if structural else None,
@@ -1571,6 +1830,12 @@ class Soak:
                     f"{found['sustained']} of {found['periods']} on periods "
                     f"({found['sustained_share']:.2f}), below "
                     f"{options.min_detection_share:.2f}")
+        quiet = self.off_quiet()
+        if quiet["periods"] and quiet["noisy"]:
+            problems.append(
+                f"the advertiser was still heard more than {quiet['settle_s']:g}s "
+                f"into {quiet['noisy']} of {quiet['periods']} off period(s), so "
+                "it did not stop when it was told to")
         parity = self.parity()
         if parity["disagreements"] > parity["allowance"]:
             problems.append(
@@ -1581,9 +1846,10 @@ class Soak:
         gaps = self.gaps()
         if gaps["periods_over_limit"]:
             problems.append(
-                f"{gaps['periods_over_limit']} on period(s) held a gap with no "
-                f"advertiser packet longer than {options.max_gap_s:g}s (longest "
-                f"{gaps['structural_max_s']}s)")
+                f"{gaps['periods_over_limit']} judged period(s) held a gap with "
+                f"no advertiser packet longer than {options.max_gap_s:g}s "
+                f"(longest {gaps['structural_max_s']}s structural, "
+                f"{gaps['text_max_s']}s text)")
         rate = self.rate()
         if rate["minutes"] and rate["mean"] < options.min_packets_per_minute:
             problems.append(
@@ -1598,6 +1864,13 @@ class Soak:
         if self.restarts > options.max_restarts:
             problems.append(
                 f"{self.restarts} unplanned restart(s), more than {options.max_restarts}")
+        if self.unexplained_exits > options.max_restarts:
+            # Judged in its own right, because the last attempt's death is
+            # not a restart: the run ends, and nothing else would notice that
+            # the capture had already gone.
+            problems.append(
+                f"the capture process died {self.unexplained_exits} time(s) with "
+                f"nothing asking it to, more than {options.max_restarts}")
         if self.forced_stops:
             problems.append(
                 f"{self.forced_stops} capture(s) did not stop on SIGTERM within "
@@ -1644,6 +1917,11 @@ class Soak:
             "text": {"advertiser_packets": self.text_packets,
                       "other_packets": self.other_packets,
                       "other_addresses": len(self.other_addresses)},
+            "captures": {"removed": self.captures_removed,
+                          "removed_bytes": self.capture_bytes_removed,
+                          "budget_bytes": self.options.capture_budget_bytes,
+                          "file_limit_bytes": self.options.capture_limit_bytes,
+                          "kept_attempts": MAX_KEPT_ATTEMPTS},
             "transcript": {"kept_bytes": self.transcript_bytes,
                             "budget_bytes": MAX_LOG_BYTES,
                             "dropped_lines": self.transcript_dropped_lines},
@@ -1652,6 +1930,10 @@ class Soak:
                             "records_not_advertiser_crc_valid": self.crc_dropped,
                             "payload_matches": self.payload_matches},
             "detection": self.detection(),
+            "off_quiet": self.off_quiet(),
+            "record_clock": {"reanchors": self.record_reanchors,
+                              "largest_drift_s": round(self.record_drift_max_s, 3),
+                              "reanchor_at_s": self.reanchor_s},
             "parity": self.parity(),
             "gaps": self.gaps(),
             "rate_per_minute": self.rate(),
@@ -1667,9 +1949,24 @@ class Soak:
                           "unrequested_resets": self.watchdog_resets,
                           "where": self.watchdog_where},
             "board_after": self.board_after,
-            "attempts": [attempt.to_dict() for attempt in self.attempts],
+            # Bounded: a board that stopped capturing early in a long run
+            # leaves thousands of attempts, and the first and the last of
+            # them are what a reader needs. progress.jsonl holds every one.
+            "attempts": self.attempt_summaries(),
+            "attempt_count": len(self.attempts),
             "canceled": self.canceled,
         }
+
+    def attempt_summaries(self) -> list:
+        """Every attempt, or the first and last of them when there are many."""
+        attempts = [attempt.to_dict() for attempt in self.attempts]
+        if len(attempts) <= MAX_SUMMARY_ATTEMPTS:
+            return attempts
+        keep = MAX_SUMMARY_ATTEMPTS // 2
+        left_out = len(attempts) - 2 * keep
+        return (attempts[:keep]
+                + [{"record": "attempts_left_out", "count": left_out}]
+                + attempts[-keep:])
 
     def report(self, final: Attempt) -> int:
         summary = self.summary()
@@ -1681,7 +1978,7 @@ class Soak:
         rate = summary["rate_per_minute"]
         memory = summary["memory"]
         left_out = summary["schedule"]["on_periods_left_out"]
-        print(f"schedule: {summary['schedule']['periods']} periods, "
+        say(f"schedule: {summary['schedule']['periods']} periods, "
               f"{left_out['ran']} of them on, "
               f"{summary['schedule']['on_periods_judged']} judged "
               f"({left_out['ended_by_the_run']} ended by the run, "
@@ -1689,50 +1986,58 @@ class Soak:
               f"schedule failure, {left_out['capture_gap']} with a capture gap)")
         for name in ("text", "structural"):
             found = detection[name]
-            print(f"{name} reader: {summary[name]['advertiser_packets']} advertiser "
+            say(f"{name} reader: {summary[name]['advertiser_packets']} advertiser "
                   f"packets, {found['detected']}/{found['periods']} periods detected "
                   f"within {self.options.detect_within_s:g}s, {found['sustained']} "
                   f"sustained, first detection {found['first_detection_s']}s")
-        print(f"other traffic: {self.other_packets} packets from "
+        say(f"other traffic: {self.other_packets} packets from "
               f"{len(self.other_addresses)} other address(es), never recorded")
-        print(f"transcript: {self.transcript_bytes} of {MAX_LOG_BYTES} bytes kept, "
+        say(f"captures: {self.captures_removed} attempt(s) removed to stay inside "
+            f"the run's budget ({self.capture_bytes_removed} bytes)")
+        say(f"transcript: {self.transcript_bytes} of {MAX_LOG_BYTES} bytes kept, "
               f"{self.transcript_dropped_lines} line(s) past the budget read but "
               "not kept")
-        print(f"parity: {parity['windows_both']} windows both, "
+        say(f"parity: {parity['windows_both']} windows both, "
               f"{parity['windows_text_only']} text only, "
               f"{parity['windows_structural_only']} structural only, allowance "
               f"{parity['allowance']}")
-        print(f"gaps: longest {gaps['structural_max_s']}s structural, "
+        quiet = summary["off_quiet"]
+        say(f"off periods: {quiet['periods']} judged, {quiet['noisy']} still heard "
+            f"more than {quiet['settle_s']:g}s in")
+        say(f"record clock: {self.record_reanchors} re-anchor(s), largest drift "
+            f"{self.record_drift_max_s:.3f}s (re-anchored past "
+            f"{self.reanchor_s:g}s)")
+        say(f"gaps: longest {gaps['structural_max_s']}s structural, "
               f"{gaps['text_max_s']}s text, limit {self.options.max_gap_s:g}s, "
               f"{gaps['periods_over_limit']} period(s) over it")
-        print(f"rate: {rate['mean']} packets a minute over {rate['minutes']} minute(s) "
+        say(f"rate: {rate['mean']} packets a minute over {rate['minutes']} minute(s) "
               f"(min {rate['min']}, max {rate['max']})")
-        print(f"memory: first {memory['first_kb']} KiB, last {memory['last_kb']} KiB, "
+        say(f"memory: first {memory['first_kb']} KiB, last {memory['last_kb']} KiB, "
               f"growth {memory['growth_kb']} KiB over {memory['samples']} sample(s)")
-        print(f"process: {len(self.attempts)} attempt(s), {self.rotations} planned "
+        say(f"process: {len(self.attempts)} attempt(s), {self.rotations} planned "
               f"file rotation(s), {self.restarts} restart(s), "
               f"{self.probe_restarts} probe, {self.unexplained_exits} unexplained "
               f"exit(s), {self.forced_stops} forced stop(s), {self.board_resets} "
               f"board reset(s)")
-        print(f"final stop: {final.signalled or 'none'} exit {final.returncode}"
+        say(f"final stop: {final.signalled or 'none'} exit {final.returncode}"
               + (f", last error: {final.last_error}" if final.last_error else ""))
-        print(f"compatibility: {sum(a.error_lines for a in self.attempts)} error line(s), "
+        say(f"compatibility: {sum(a.error_lines for a in self.attempts)} error line(s), "
               f"{sum(a.legacy_death_lines for a in self.attempts)} line(s) matching the "
               "older capture-died wording")
-        print(f"watchdog: {self.watchdog_resets} unrequested reset(s) over "
+        say(f"watchdog: {self.watchdog_resets} unrequested reset(s) over "
               f"{len(self.watchdog_reads)} read(s)"
               + ("; " + "; ".join(self.watchdog_where) if self.watchdog_where else ""))
         if self.options.restart_probe:
             probe = summary["process"]["probe_recovered"]
-            print("restart probe: " + (
+            say("restart probe: " + (
                 "recovered" if probe
                 else "did not recover" if probe is False
                 else "no whole advertiser on period followed it, so whether it "
                      "recovered is not established"))
         self.problems = self.judge()
         for problem in self.problems:
-            print(f"FAIL: {problem}")
-        print(f"SOAK VERDICT: {'fail' if self.problems else 'pass'}")
+            say(f"FAIL: {problem}")
+        say(f"SOAK VERDICT: {'fail' if self.problems else 'pass'}")
         return EXIT_FAIL if self.problems else EXIT_PASS
 
 
@@ -1769,6 +2074,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--restart-probe", action="store_true")
     parser.add_argument("--max-capture-bytes", type=int,
                         default=DEFAULT_CAPTURE_LIMIT_BYTES)
+    parser.add_argument("--max-total-capture-bytes", type=int,
+                        default=DEFAULT_CAPTURE_BUDGET_BYTES)
     parser.add_argument("--term-grace", type=float, default=DEFAULT_TERM_GRACE_S)
     parser.add_argument("--restart-min-interval", type=float,
                         default=DEFAULT_RESTART_MIN_INTERVAL_S)
@@ -1803,6 +2110,7 @@ def options_from(args) -> Options:
         max_memory_growth_kb=args.max_memory_growth_kb,
         restart_probe=args.restart_probe,
         capture_limit_bytes=args.max_capture_bytes,
+        capture_budget_bytes=args.max_total_capture_bytes,
         term_grace_s=args.term_grace,
         restart_min_interval_s=args.restart_min_interval,
     )
@@ -1836,11 +2144,11 @@ def main(argv=None, dk=None) -> int:
         return soak.run()
     except SoakError as error:
         print(f"error: {error}", file=sys.stderr)
-        print("SOAK VERDICT: configuration")
+        say("SOAK VERDICT: configuration")
         return EXIT_CONFIGURATION
     except nrfdk.NrfDkError as error:
         print(f"error: advertiser: {error}", file=sys.stderr)
-        print("SOAK VERDICT: configuration")
+        say("SOAK VERDICT: configuration")
         return EXIT_CONFIGURATION
 
 

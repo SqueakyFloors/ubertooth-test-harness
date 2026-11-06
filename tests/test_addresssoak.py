@@ -53,6 +53,9 @@ state = os.environ.get("FAKE_BTLE_STATE", "")
 exit_after = float(os.environ.get("FAKE_BTLE_EXIT_AFTER", "0"))
 exit_code = int(os.environ.get("FAKE_BTLE_EXIT_CODE", "0"))
 pad = int(os.environ.get("FAKE_BTLE_PAD_BYTES", "0"))
+# Stamp the records this far from the host clock, which is what the board's
+# own clock drifting (or losing a wrap) does over a long capture.
+offset = float(os.environ.get("FAKE_BTLE_TIME_OFFSET", "0"))
 if os.environ.get("FAKE_BTLE_IGNORE_SIGTERM"):
     signal.signal(signal.SIGTERM, lambda *a: None)
 
@@ -87,8 +90,12 @@ while True:
         if mode in ("both", "records", "badcrc"):
             data = fake_advertiser.record(
                 address, counter=counter, valid_crc=mode != "badcrc", pad=pad)
+            # After the first couple of seconds, which is a clock that
+            # stepped rather than one that was always offset: an anchor
+            # absorbs a constant offset, and a step is the fault.
+            stamp = now + (offset if now - started > 2 else 0)
             handle.write(fake_advertiser.pcap_record(
-                data, int(now), int((now % 1) * 1e9)))
+                data, int(stamp), int((stamp % 1) * 1e9)))
         if mode in ("both", "text", "badcrc"):
             sys.stdout.write(fake_advertiser.text_block(address))
             sys.stdout.flush()
@@ -184,7 +191,7 @@ class SoakTestCase(unittest.TestCase):
             "--sample-every": "1", "--presence-window": "0.25",
             "--presence-windows": "2", "--liveness-timeout": "2",
             "--detect-within": "0.75", "--min-detection-share": "0.9",
-            "--max-gap": "2", "--min-packets-per-minute": "1",
+            "--max-gap": "0.9", "--min-packets-per-minute": "1",
             "--max-disagreement-share": "0.5", "--max-restarts": "0",
             "--restart-min-interval": "0.2", "--term-grace": "1",
         }
@@ -462,7 +469,11 @@ class LivenessTests(SoakTestCase):
 class ProbeTests(SoakTestCase):
 
     def test_the_probe_kills_the_capture_once_and_requires_recovery(self):
-        code, out, _err = self.run_soak(duration=6, restart_probe=True)
+        # A liveness timeout well clear of what starting a capture costs, so
+        # a loaded machine cannot turn the probe's own gap into a second,
+        # unplanned restart and make this test's subject disappear.
+        code, out, _err = self.run_soak(duration=8, restart_probe=True,
+                                        liveness_timeout=4)
         summary = self.summary()
         self.assertEqual(1, summary["process"]["probe_restarts"])
         self.assertEqual(0, summary["process"]["restarts"])
@@ -533,6 +544,103 @@ class RotationTests(SoakTestCase):
         self.assertEqual(0, self.summary()["process"]["rotations"])
 
 
+class BudgetTests(SoakTestCase):
+    """The run's own disk budget: newest captures kept, removals recorded."""
+
+    def test_the_oldest_captures_are_removed_to_stay_inside_the_budget(self):
+        # Each attempt leaves a capture and a transcript, and a long run has
+        # many; the figures are counted as the records arrive, so what a run
+        # gives up past its budget is the oldest bytes to read by hand.
+        self.set_tool(PAD_BYTES="8192")
+        code, out, _err = self.run_soak(max_capture_bytes=2048,
+                                        max_total_capture_bytes=4096)
+        self.assertEqual(addresssoak.EXIT_PASS, code, out)
+        summary = self.summary()
+        self.assertGreater(summary["captures"]["removed"], 0)
+        self.assertGreater(summary["captures"]["removed_bytes"], 0)
+        self.assertIn("removed to stay inside", out)
+        # The oldest attempt's files are gone and the newest are there.
+        attempts = summary["attempts"]
+        self.assertTrue(attempts[0]["files_removed"])
+        self.assertFalse((self.out / attempts[0]["capture"]).exists())
+        self.assertFalse(attempts[-1]["files_removed"])
+        self.assertTrue((self.out / attempts[-1]["capture"]).is_file())
+        # And the removals are in the progress file, with what they cost.
+        removals = [record for record in self.progress()
+                    if record["record"] == "capture_removed"]
+        self.assertTrue(removals)
+        self.assertIn("budget", removals[0]["reason"])
+
+    def test_no_budget_removes_nothing(self):
+        self.set_tool(PAD_BYTES="8192")
+        self.run_soak(max_capture_bytes=2048, max_total_capture_bytes=0)
+        self.assertEqual(0, self.summary()["captures"]["removed"])
+
+
+class OffPeriodTests(SoakTestCase):
+    """The other half of the schedule: silence when the advertiser is off."""
+
+    def test_an_advertiser_that_ignores_the_stop_fails_the_run(self):
+        # The hole this closes: a DK that accepts `adv stop` and keeps
+        # advertising met every detection, gap and rate objective, and the
+        # run reported a controlled schedule it never had. The fake firmware
+        # answers OK and leaves the state file alone, which is exactly that.
+        class Deaf(ScheduledFirmware):
+            def handle(self, line):
+                if line == "adv stop":
+                    FakeFirmware.handle(self, line)
+                    return ["OK"]  # the state file is left saying "on"
+                return super().handle(line)
+
+        self.firmware = Deaf(self.state, address=ADDRESS)
+        code, out, _err = self.run_soak()
+        self.assertEqual(addresssoak.EXIT_FAIL, code)
+        self.assertIn("did not stop when it was told to", out)
+        quiet = self.summary()["off_quiet"]
+        self.assertGreater(quiet["noisy"], 0)
+        self.assertEqual(quiet["periods"], quiet["noisy"])
+
+    def test_a_healthy_run_has_quiet_off_periods(self):
+        self.run_soak()
+        quiet = self.summary()["off_quiet"]
+        self.assertGreater(quiet["periods"], 0)
+        self.assertEqual(0, quiet["noisy"])
+
+
+class RecordClockTests(SoakTestCase):
+    """The capture clock is anchored to the host's, and says when it drifted."""
+
+    def test_a_healthy_run_needs_no_re_anchor(self):
+        self.run_soak()
+        clock = self.summary()["record_clock"]
+        self.assertEqual(0, clock["reanchors"])
+        self.assertEqual(0.0, clock["largest_drift_s"])
+
+    def test_a_record_clock_that_runs_away_is_re_anchored_and_reported(self):
+        # The record clock is the board's, anchored once per attempt and
+        # advanced by the board's own counter, so it drifts from the host's
+        # over hours and jumps a whole period if a quiet gap loses a wrap.
+        # Here the fake tool steps its records forward by the 327.68 s the
+        # fork's own warning names as one lost wrap, partway through the run.
+        self.set_tool(TIME_OFFSET="327.68")
+        code, out, _err = self.run_soak()
+        clock = self.summary()["record_clock"]
+        self.assertGreater(clock["reanchors"], 0)
+        self.assertGreater(clock["largest_drift_s"], 1.0)
+        self.assertIn("record clock:", out)
+        # And the sightings still land in the periods they belong to, so the
+        # run still passes: what the step costs is the window the record it
+        # landed on was re-anchored into, which is inside the allowance, and
+        # a note saying it happened. Without the re-anchor every record after
+        # the step would have been five minutes out of its period.
+        self.assertEqual(addresssoak.EXIT_PASS, code, out)
+        parity = self.summary()["parity"]
+        self.assertLessEqual(parity["disagreements"], parity["allowance"])
+        detection = self.summary()["detection"]
+        self.assertEqual(detection["structural"]["periods"],
+                         detection["structural"]["detected"])
+
+
 class ConfigurationTests(SoakTestCase):
 
     def test_a_busy_board_is_a_configuration_failure_and_is_not_reset(self):
@@ -587,7 +695,7 @@ class VerdictTests(unittest.TestCase):
             "--sample-every": "30", "--presence-window": "2",
             "--presence-windows": "5", "--liveness-timeout": "60",
             "--detect-within": "10", "--min-detection-share": "0.9",
-            "--max-gap": "90", "--min-packets-per-minute": "10",
+            "--max-gap": "15", "--min-packets-per-minute": "10",
             "--max-disagreement-share": "0.02", "--max-restarts": "0",
         }
         values.update({key: str(value) for key, value in overrides.items()})
@@ -744,6 +852,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(29.5, soak.gaps()["structural_max_s"])
         self.assertTrue(any("gap with no advertiser packet longer than 10s"
                             in problem for problem in problems), problems)
+        self.assertEqual(1, soak.gaps()["periods_over_limit"])
 
     def test_the_rate_floor_is_measured_over_the_minutes_the_advertiser_was_on(self):
         soak = self.healthy()
@@ -834,7 +943,7 @@ class TimingTests(unittest.TestCase):
         values = {
             "duration_s": 600.0, "on_s": 30.0, "off_s": 30.0, "window_s": 2.0,
             "windows_needed": 5, "liveness_timeout_s": 60.0,
-            "detect_within_s": 10.0, "max_gap_s": 90.0, "sample_every_s": 30.0,
+            "detect_within_s": 10.0, "max_gap_s": 15.0, "sample_every_s": 30.0,
         }
         values.update(overrides)
         return addresssoak.Timings(**values)
@@ -847,7 +956,12 @@ class TimingTests(unittest.TestCase):
             ({"detect_within_s": 40.0}, "'detect within' (40s) is longer"),
             ({"windows_needed": 40}, "sustained presence"),
             ({"liveness_timeout_s": 30.0}, "'liveness timeout' (30s) is not longer"),
-            ({"max_gap_s": 30.0}, "'maximum gap' (30s) is shorter"),
+            ({"max_gap_s": 5.0}, "'maximum gap' (5s) is shorter than 'detect "
+                                 "within'"),
+            ({"max_gap_s": 30.0}, "'maximum gap' (30s) is not shorter than the "
+                                  "30s"),
+            ({"window_s": 0.05}, "'presence window' (0.05s) is shorter"),
+            ({"sample_every_s": 0.5}, "'sample every' (0.5s) is shorter"),
             ({"duration_s": 60.0}, "less than two 60s schedule cycles"),
             ({"sample_every_s": 300.0}, "'sample every' (300s) leaves fewer"),
         ):
@@ -865,7 +979,7 @@ class TimingTests(unittest.TestCase):
             "--advertiser-off", "30", "--sample-every", "30",
             "--presence-window", "2", "--presence-windows", "5",
             "--liveness-timeout", "60", "--detect-within", "10",
-            "--min-detection-share", "0.9", "--max-gap", "90",
+            "--min-detection-share", "0.9", "--max-gap", "15",
             "--min-packets-per-minute", "10", "--max-disagreement-share", "0.02",
             "--max-restarts", "0",
         ])

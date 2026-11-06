@@ -2319,17 +2319,30 @@ allowance that is a share of the windows either reader saw it in, so the
 allowance scales with the run instead of being a count that is strict at one
 duration and meaningless at another.
 
+**The schedule is checked in both directions.** The on periods are where
+detection is measured; the off periods are where the schedule itself is
+checked. An advertiser that accepts `adv stop` and keeps advertising would
+otherwise meet every detection, gap and rate objective, and the run would
+report a controlled schedule it never had. So in each judged off period the
+advertiser must fall quiet: a sighting by either reader more than two seconds
+into it (or half the period, whichever is less, so a short schedule still has
+something judged) fails the run. The two seconds are for the packets already
+on the air and already in the tool's buffers when the stop lands.
+
 **Timing relationships are checked before any board is leased.** The
 figures below constrain each other, and a run holds an Ubertooth and a DK for
 hours, so a plan whose own figures contradict each other has to fail when the
-plan loads rather than on the bench. Five relationships are refused
+plan loads rather than on the bench. Eight relationships are refused
 (`addresssoak.check_timings`, raised through the catalog's
 `check_arguments`): a detection deadline longer than the advertiser is on
 for; sustained presence (`presence windows` × `presence window`) that does
 not fit in an on period; a liveness timeout no longer than the off period; a
-gap limit shorter than an off period plus a detection deadline, which every
-period crosses; a duration shorter than two schedule cycles; and a sampling
-interval that would leave fewer than three samples. The driver makes the same
+gap limit below the detection deadline, which every period's wait for its
+first packet would fail, or as long as an on period, which no gap inside one
+could ever reach; a duration shorter than two schedule cycles; a sampling
+interval that would leave fewer than three samples; and a presence window or
+a sampling interval too short to run for days (a window is held per reader
+per period, and each sample is a synced record). The driver makes the same
 checks from the same code when it is run by hand.
 
 **Hardware and arguments.** One `Ubertooth`, selected by serial and receiving

@@ -22,6 +22,16 @@ plan: BLE address parity and soak
 # The four suites differ only in how long they run and in the figures that
 # follow from that; what each one checks is the same.
 suites:
+  # A gap is measured inside one on period, so `maximum gap` sits between
+  # `detect within` and `advertiser on`; a limit as long as a period could
+  # never fail, and one below the detection deadline would fail on every
+  # period's wait for its first packet (addresssoak.check_timings).
+  #
+  # `capture budget` is what keeps a long run inside the host's disk: the
+  # capture holds every advertiser on the channel, not only ours, so the
+  # total is the channel's traffic (docs/hardware.md has the measured rate).
+  # Past the budget the oldest complete capture is removed, newest kept.
+  #
   # The short functional run: everything the long suites do, in about a
   # minute of capture, so a change to the driver or the catalog can be tried
   # on the bench without booking the boards for hours. It is also the suite
@@ -45,12 +55,13 @@ suites:
         liveness timeout: 25s
         detect within: 5s
         minimum detection share: 0.9
-        maximum gap: 20s
+        maximum gap: 8s
         minimum packets per minute: 10
         maximum window disagreement share: 0.05
         maximum restarts: 0
         restart probe: true
         capture file limit: 64
+        capture budget: 1024
 
   # Four hours: the setup validation run. Long enough to find a capture that
   # dies, a reader that drifts, or a board that resets itself, and short
@@ -73,12 +84,13 @@ suites:
         liveness timeout: 1m
         detect within: 10s
         minimum detection share: 0.95
-        maximum gap: 90s
+        maximum gap: 15s
         minimum packets per minute: 10
         maximum window disagreement share: 0.02
         maximum restarts: 0
         restart probe: false
         capture file limit: 256
+        capture budget: 4096
 
   # A day. The same figures as the four-hour run, sampled less often because
   # a progress record a minute over a day is 1440 of them and that is
@@ -100,12 +112,13 @@ suites:
         liveness timeout: 1m
         detect within: 10s
         minimum detection share: 0.95
-        maximum gap: 90s
+        maximum gap: 15s
         minimum packets per minute: 10
         maximum window disagreement share: 0.02
         maximum restarts: 0
         restart probe: false
         capture file limit: 256
+        capture budget: 4096
 
   # Three days: the release-candidate soak #703 asks for before a release.
   # It holds one Ubertooth and one DK for the whole window, so it is booked
@@ -127,9 +140,10 @@ suites:
         liveness timeout: 1m
         detect within: 10s
         minimum detection share: 0.95
-        maximum gap: 90s
+        maximum gap: 15s
         minimum packets per minute: 10
         maximum window disagreement share: 0.02
         maximum restarts: 0
         restart probe: false
         capture file limit: 512
+        capture budget: 8192

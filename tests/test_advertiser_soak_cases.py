@@ -80,11 +80,11 @@ class CaseTests(unittest.TestCase):
             "advertiser on": "20s", "advertiser off": "40s", "sample every": "2m",
             "presence window": "3s", "presence windows": 4,
             "liveness timeout": "90s", "detect within": "15s",
-            "minimum detection share": 0.8, "maximum gap": "2m",
+            "minimum detection share": 0.8, "maximum gap": "15s",
             "minimum packets per minute": 25,
             "maximum window disagreement share": 0.1, "maximum restarts": 2,
             "maximum memory growth": 4096, "restart probe": True,
-            "capture file limit": 64,
+            "capture file limit": 64, "capture budget": 512,
         })[1].steps[-1].resolve_argv(CONTEXT)
         self.assertTrue(argv[1].endswith("addresssoak.py"))
         found = options(argv)
@@ -102,12 +102,13 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(90.0, found.liveness_timeout_s)
         self.assertEqual((15.0, 0.8),
                          (found.detect_within_s, found.min_detection_share))
-        self.assertEqual((120.0, 25), (found.max_gap_s, found.min_packets_per_minute))
+        self.assertEqual((15.0, 25), (found.max_gap_s, found.min_packets_per_minute))
         self.assertEqual(0.1, found.max_disagreement_share)
         self.assertEqual(2, found.max_restarts)
         self.assertEqual(4096, found.max_memory_growth_kb)
         self.assertTrue(found.restart_probe)
         self.assertEqual(64 * 1024 * 1024, found.capture_limit_bytes)
+        self.assertEqual(512 * 1024 * 1024, found.capture_budget_bytes)
 
     def test_the_defaults_leave_the_optional_figures_out(self):
         argv = self.cases()[1].steps[-1].resolve_argv(CONTEXT)
@@ -194,7 +195,7 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(addresssoak.Timings(
             duration_s=14400.0, on_s=30.0, off_s=30.0, window_s=2.0,
             windows_needed=5, liveness_timeout_s=60.0, detect_within_s=10.0,
-            max_gap_s=90.0, sample_every_s=30.0), found)
+            max_gap_s=15.0, sample_every_s=30.0), found)
         addresssoak.check_timings(found)
 
     def test_every_relationship_the_driver_refuses_fails_the_plan(self):
@@ -202,9 +203,12 @@ class ArgumentTests(unittest.TestCase):
             ({"detect within": "40s"}, "is longer than the 30s"),
             ({"presence windows": 40}, "sustained presence"),
             ({"liveness timeout": "30s"}, "is not longer than the 30s"),
-            ({"maximum gap": "30s"}, "is shorter than an off period"),
+            ({"maximum gap": "5s"}, "is shorter than 'detect within'"),
+            ({"maximum gap": "30s"}, "is not shorter than the 30s"),
+            ({"presence window": "50ms"}, "'presence window' (0.05s) is shorter"),
             ({"duration": "1m"}, "less than two 60s schedule cycles"),
             ({"sample every": "2h"}, "leaves fewer than three samples"),
+            ({"sample every": "500ms"}, "'sample every' (0.5s) is shorter"),
         ):
             with self.subTest(**extra):
                 with self.assertRaises(CatalogError) as caught:
@@ -219,6 +223,7 @@ class ArgumentTests(unittest.TestCase):
                       {"maximum window disagreement share": -0.1},
                       {"maximum restarts": -1}, {"maximum memory growth": 0},
                       {"restart probe": "yes"}, {"capture file limit": 0},
+                      {"capture budget": 0}, {"capture budget": -1},
                       {"advertiser on": "30"}, {"sample every": "0s"}):
             with self.subTest(**extra):
                 with self.assertRaises(CatalogError):

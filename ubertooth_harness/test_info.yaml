@@ -1566,9 +1566,10 @@ BLE address parity soak:
     run the harness has to kill outright can leave the capture tool holding
     the board, which the case's own cleanup then stops. What the captures
     cost the host is the channel's traffic rather than the advertiser's, so a
-    long run on a crowded channel wants its free space checked first; the
-    tool's own transcript is bounded for the whole run, so the figures hold
-    but the per-packet text past the budget is not kept.
+    long run has a disk budget as well as a per-file limit: past it the oldest
+    complete capture is removed, newest kept, and the removal is recorded.
+    The tool's own transcript is bounded for the whole run the same way, so
+    the figures hold but the per-packet text past the budget is not kept.
   related:
     - ubertooth-test-harness#350
     - ubertooth#703

@@ -1766,7 +1766,10 @@ def builtin_catalog() -> TestCatalog:
                 "minimum detection share": ArgumentRule(_share, default=0.9),
                 # The longest silence allowed inside an on period, and the
                 # floor on the rate over the minutes the advertiser was on.
-                "maximum gap": ArgumentRule(_duration, default="90s"),
+                # A gap is measured inside one period, so the limit has to
+                # sit between `detect within` and `advertiser on`
+                # (_check_address_soak).
+                "maximum gap": ArgumentRule(_duration, default="15s"),
                 "minimum packets per minute": ArgumentRule(
                     _nonnegative_integer, default=10),
                 # How far the two readers may differ: a share of the windows
@@ -1791,6 +1794,12 @@ def builtin_catalog() -> TestCatalog:
                 # every advertiser on the channel, so this is what keeps a
                 # run of days out of the host's disk.
                 "capture file limit": ArgumentRule(_positive_integer, default=256),
+                # And how much of the captures the whole run keeps, in MiB.
+                # Past it the oldest complete capture and transcript are
+                # removed, newest kept: every figure is counted as the
+                # records arrive, so what a run loses is the oldest bytes to
+                # read by hand rather than its result.
+                "capture budget": ArgumentRule(_positive_integer, default=4096),
             }),
             MappingProxyType({"Ubertooth": "Ubertooth", "advertiser": "nRF52840 DK"}),
             check_arguments=_check_address_soak,

@@ -108,7 +108,10 @@ run**, because the total is the channel's traffic, not the advertiser's.
 Measured on this bench on 2026-11-05, channel 37, over a 30-second capture:
 1.3 MB of capture and 14 MB of the tool's own transcript, with 40116 packets
 from 6652 other addresses beside the advertiser's 225. At that rate three
-days of capture is on the order of ten gigabytes. The transcript has a
+days of capture is on the order of ten gigabytes, which is why a long run has
+a disk budget as well as a per-file limit: past it the oldest complete
+capture is removed and the newest kept, each removal recorded. The transcript
+has a
 run-wide budget of 64 MiB that restarts and file rotations cannot multiply
 (`addresssoak.MAX_LOG_BYTES`); every line is still read either way, so the
 figures do not change, and the run reports how much it kept. The run also
