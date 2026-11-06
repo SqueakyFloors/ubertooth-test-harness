@@ -832,10 +832,15 @@ flashes an ESP32 peer, so a run fails instead when one reports a version
 older than the test needs. The hashes above let a bench confirm it holds the
 same image this repository's sources produce. Each was built as its firmware
 README says; a reproducible build is not claimed, so compare the version
-first and the hash second. The same sources do build the same peer image
-twice, but the ESP32 image holds the line numbers its error checks report,
-so even a comment added above one of them gives a different hash for the
-same version.
+first and the hash second. For the ESP32 image, that is not a caution but a
+measurement: CI built identical peer sources on two runs and got two hashes
+(`6741480e…` and `f47da7bc…`, 2026-11-06). ESP-IDF's
+`CONFIG_APP_REPRODUCIBLE_BUILD` is off by default and this firmware does not
+ask for it, so the image carries a compile date and time; the sources also
+hold the line numbers their error checks report, so even a comment added
+above one of them moves the hash for the same version. A bench whose copy
+hashes differently from the table has to be judged on the version it
+reports.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
