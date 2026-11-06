@@ -266,9 +266,19 @@ EOF
         "$il_work/pc-consumer" > "$il_work/pc-consumer.txt" 2>&1 \
         || { cat "$il_work/pc-consumer.txt"; return 1; }
     cat "$il_work/pc-consumer.txt"
+    # The libbtbb the install was built against, which is what it compares
+    # the libbtbb it loaded with. An install since fork #1230 prints no path
+    # line and reports a libbtbb only when the two differ, so that comparison
+    # having had both sides is part of what the check needs.
+    il_btbb_libdir=$(pkg-config --variable=libdir libbtbb)
+    [ -n "$il_btbb_libdir" ] || {
+        echo "error: libbtbb.pc answered no libdir, so there is nothing to" \
+             "say which libbtbb the install was built against" >&2
+        return 1; }
+    echo "libbtbb.pc: libdir $il_btbb_libdir"
     .venv/bin/python -m ubertooth_harness.installedlib consumer-identity \
         "$il_work/pc-consumer.txt" --prefix "$il_prefix" \
-        --version-line "$il_version"
+        --version-line "$il_version" --built-libbtbb "$il_btbb_libdir"
 
     step "a CMake project finds the installed ubertooth package"
     mkdir -p "$il_work/cmake-consumer"

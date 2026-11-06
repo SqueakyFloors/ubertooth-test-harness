@@ -42,7 +42,8 @@ class FakeUtil:
     # with the commits they were built from and prints the libbtbb it loaded
     # on a line of its own; one since names the release the build came from
     # and prints no path line at all.
-    OLD_VERSION = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0"
+    OLD_VERSION = ("Host tools version: libubertooth 1.1 (git-test), "
+                   "libbtbb 1.3 (git-btbb)")
     OLD_PATH_LINE = "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
     RELEASE_VERSION = "Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)"
 

@@ -33,6 +33,13 @@ The rule, as those files state it:
   clean clone of it, so a reported ``*`` is a mismatch to report rather than
   something to predict.
 
+Two of these are per repository rather than shared. The Ubertooth fork's two
+files both look again at the tag name git found, because a glob cannot say
+"digits and then nothing"; libbtbb's does not, and takes what git gives it.
+And the floor lives in both of the fork's files, so they are compared: with no
+release tag in reach, a tree whose tools and firmware named different floors
+would report two versions, and this cannot predict both.
+
 **Older refs still report a commit.** The harness tests older commits of the
 fork as well, and before this change a build stamped ``git-<hash>``. So the
 style is read off the checkout at that commit rather than assumed: the file
@@ -87,6 +94,14 @@ FIRMWARE_VERSION_FILE = {"Ubertooth": "firmware/version.mk"}
 _RELEASE_STYLE_MARKER = RELEASE_TAG_GLOBS[0]
 _COMMIT_STYLE_MARKER = '"git-${GIT_VERSION}'
 _LATEST_RELEASE_RE = re.compile(r'^set\(LATEST_RELEASE\s+"([^"]+)"\)', re.M)
+# The same floor as the firmware's own file names it, which has to agree.
+_FIRMWARE_LATEST_RELEASE_RE = re.compile(
+    r"^UBERTOOTH_LATEST_RELEASE\s*:?=\s*(\S+)", re.M
+)
+# Repositories whose version file makes no second check on the tag name git
+# found. libbtbb's asks git with the same globs and takes whatever comes back,
+# so a tag a glob lets through is the release it reports.
+NO_TAG_FORM_CHECK = frozenset({"libbtbb"})
 
 # The two styles a build reports in.
 RELEASE_STYLE = "release"
@@ -168,14 +183,22 @@ def latest_release(text: str) -> str:
     return found.group(1) if found else DEFAULT_LATEST_RELEASE
 
 
-def release_name(source_path: Path | str, commit: str, floor: str) -> str:
-    """The release name a build at ``commit`` reports, as the build derives it."""
+def release_name(source_path: Path | str, commit: str, floor: str, *,
+                 check_tag_form: bool = True) -> str:
+    """The release name a build at ``commit`` reports, as the build derives it.
+
+    ``check_tag_form`` is the second look at the name git found, which a glob
+    cannot do: the Ubertooth fork's two files both make it, and libbtbb's does
+    not. So a libbtbb whose nearest matching tag is `2026-11-R1-local` is
+    predicted as that tag, because that is what its own build reports -- being
+    faithful to each file matters more than the rule being the same in both.
+    """
     path = Path(source_path)
     matches: list[str] = []
     for glob in RELEASE_TAG_GLOBS:
         matches += ["--match", glob]
     tag = _git(path, "describe", "--tags", "--abbrev=0", *matches, commit)
-    if not tag or not RELEASE_TAG_FORM.match(tag):
+    if not tag or (check_tag_form and not RELEASE_TAG_FORM.match(tag)):
         # No release tag in reach, or a tag a glob let through that is not a
         # release name after all. Either way the distance is not known.
         return f"{floor}+{UNKNOWN_DISTANCE}"
@@ -198,17 +221,33 @@ def build_version(
 
     A commit with no version file at all, and a repository the harness does
     not build, are read as commit style: that is what every such build stamps,
-    and it is what the harness required before releases were named. A file
-    that is there and derives the string in a third way is refused instead, as
-    is a tree whose firmware names releases while its host file has gone --
-    the host file moved, and reading the absence as "old" would compare every
-    version in the run against the wrong string.
+    and it is what the harness required before releases were named. Three
+    things are refused instead of guessed at, because a wrong guess would
+    compare every version in the run against the wrong string: a file that is
+    there and derives the string in a third way; a tree whose firmware names
+    releases while its host file has gone, which means the host file moved;
+    and a path git will not answer about at all, which says nothing either
+    way.
     """
-    text = version_file_text(source_path, commit, kind)
+    path = Path(source_path)
+    text = version_file_text(path, commit, kind)
     if text is None:
+        # "That commit has no such file" and "git would not answer about this
+        # path at all" look the same from one failed command, and they mean
+        # opposite things: the first is an older commit, the second says
+        # nothing. Ask git for the commit itself to tell them apart, so a
+        # caller that passed a path git cannot read is refused rather than
+        # being handed a commit hash the build never stamps.
+        if kind in VERSION_FILES and _git(
+            path, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}"
+        ) is None:
+            raise ReleaseVersionError(
+                f"git would not answer about {commit[:12]} in {path}, so the "
+                "version a build of it reports is not known"
+            )
         firmware = FIRMWARE_VERSION_FILE.get(kind)
         if firmware is not None and _git(
-            Path(source_path), "show", f"{commit}:{firmware}"
+            path, "show", f"{commit}:{firmware}"
         ) is not None:
             raise ReleaseVersionError(
                 f"{kind} {commit[:12]} has {firmware}, so its build names a "
@@ -220,12 +259,33 @@ def build_version(
     else:
         style = version_style(text, kind, commit)
     if style == RELEASE_STYLE:
+        floor = latest_release(text)
+        firmware = FIRMWARE_VERSION_FILE.get(kind)
+        if firmware is not None:
+            # The firmware and the bootloader read their floor from their own
+            # file, so the two have to agree or the same tree would report
+            # one version from its tools and another from its images -- and
+            # only in the "+unknown" case, which is where a drift would hide
+            # longest. Checked rather than assumed, as the harness checks the
+            # libbtbb pin and the DFU part table.
+            other = _git(path, "show", f"{commit}:{firmware}")
+            found = _FIRMWARE_LATEST_RELEASE_RE.search(other or "")
+            if found is not None and found.group(1) != floor:
+                raise ReleaseVersionError(
+                    f"{kind} {commit[:12]} names {floor} as its latest release "
+                    f"in {VERSION_FILES[kind]} and {found.group(1)} in "
+                    f"{firmware}; with no release tag in reach its tools and "
+                    "its firmware would report different versions, and this "
+                    "cannot predict both"
+                )
         return BuildVersion(
-            release_name(source_path, commit, latest_release(text)), style
+            release_name(source_path, commit, floor,
+                         check_tag_form=kind not in NO_TAG_FORM_CHECK),
+            style,
         )
     digits = short_commit
     if not digits:
-        digits = _git(Path(source_path), "rev-parse", "--short", commit) or ""
+        digits = _git(path, "rev-parse", "--short", commit) or ""
     if not digits:
         raise ReleaseVersionError(
             f"{kind} {commit[:12]} stamps a commit hash, which this checkout "

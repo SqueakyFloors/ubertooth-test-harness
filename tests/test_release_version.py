@@ -180,6 +180,44 @@ class ReleaseNameTests(unittest.TestCase):
 
         self.assertEqual("2020-12-R1+1", tree.version().value)
 
+    def test_libbtbb_takes_the_tag_its_globs_matched(self):
+        """Its own file makes no second check on the name git found.
+
+        The fork's two files do, so `2026-11-R1-local` is no release there;
+        libbtbb's asks git with the same globs and takes what comes back, and
+        being faithful to each file matters more than the rule being the same
+        in both.
+        """
+        tree = Checkout(self.root / "libbtbb-odd-tag", kind="libbtbb")
+        tree.commit("work")
+        tree.tag("2026-11-R1-local")
+        tree.commit("more")
+
+        self.assertEqual("2026-11-R1-local+1", tree.version().value)
+
+    def test_the_two_fork_files_have_to_name_one_floor(self):
+        """With no release tag in reach the floor is the whole answer.
+
+        The tools read it from one file and the firmware and bootloader from
+        another, so a tree that bumped one alone would report two versions
+        and neither could be predicted.
+        """
+        tree = Checkout(self.root / "two-floors")
+        tree.write(release.FIRMWARE_VERSION_FILE["Ubertooth"],
+                   "UBERTOOTH_LATEST_RELEASE := 2026-10-R1\n")
+        head = tree.commit("a firmware floor of its own")
+
+        with self.assertRaises(release.ReleaseVersionError) as caught:
+            tree.version(head)
+        self.assertIn("2020-12-R1", str(caught.exception))
+        self.assertIn("2026-10-R1", str(caught.exception))
+
+        # The same tree with the two in step derives the floor as before.
+        tree.write(release.FIRMWARE_VERSION_FILE["Ubertooth"],
+                   "UBERTOOTH_LATEST_RELEASE := 2020-12-R1\n")
+        agreed = tree.commit("the floors agree")
+        self.assertEqual("2020-12-R1+unknown", tree.version(agreed).value)
+
 
 class CommitStyleTests(unittest.TestCase):
     """What a commit from before the release names reports: git-<hash>."""
@@ -316,14 +354,21 @@ class PartsTests(unittest.TestCase):
                 GitRevisionResolver().resolve("Ubertooth", tree.path, "HEAD")
             self.assertIn("dirty", str(caught.exception))
 
-    def test_a_path_that_is_no_checkout_reports_a_hash(self):
+    def test_a_path_git_will_not_answer_about_is_refused(self):
+        """"No such file" and "no answer at all" mean opposite things.
+
+        Both come back from one failed command, so the commit itself is asked
+        for: a caller that passed a path git cannot read is refused rather
+        than handed the commit hash an older build would have stamped.
+        """
         with tempfile.TemporaryDirectory() as directory:
             os.makedirs(Path(directory) / "empty")
-            version = release.build_version(
-                Path(directory) / "empty", "a" * 40, kind="Ubertooth",
-                short_commit="aaaaaaa",
-            )
-        self.assertEqual("git-aaaaaaa", version.value)
+            with self.assertRaises(release.ReleaseVersionError) as caught:
+                release.build_version(
+                    Path(directory) / "empty", "a" * 40, kind="Ubertooth",
+                    short_commit="aaaaaaa",
+                )
+        self.assertIn("would not answer", str(caught.exception))
 
 
 if __name__ == "__main__":

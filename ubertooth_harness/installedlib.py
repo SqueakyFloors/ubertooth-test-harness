@@ -21,9 +21,10 @@ the version line has to be the one the build's own tools print, which names
 the version the install was built at, so a system library that answered
 instead is caught; the libbtbb it loaded has to be the install's -- by the
 path it prints where it prints one, and otherwise by printing no warning
-about having loaded another, which is how the fork reports that since #352;
-and, the program being run with the no-devices switch, it has to say that no
-Ubertooth is attached.
+about having loaded another, which is how the fork reports that since #352,
+together with `--built-libbtbb` naming a libbtbb inside the prefix, without
+which that warning could not have been reached; and, the program being run
+with the no-devices switch, it has to say that no Ubertooth is attached.
 
 `under-prefix` requires the path a configure log reports after a marker to be
 inside the prefix, and `same-path` requires two paths to be one directory.
@@ -211,12 +212,23 @@ def under_prefix(text: str, prefix: str, marker: str) -> Path:
     return path
 
 
-def consumer_identity(text: str, prefix: str, version_line: str) -> str:
+def consumer_identity(text: str, prefix: str, version_line: str,
+                      built_libbtbb: str | None = None) -> str:
     """What a program built against the install printed, or raise.
 
     ``version_line`` is the line the build's own tools print, which names the
-    libubertooth revision: a program that printed another one was built or
-    linked against another library.
+    version the install was built at: a program that printed another one was
+    built or linked against another library.
+
+    ``built_libbtbb`` is the libbtbb the install was configured against, which
+    the install records as ``BTBB_BUILD_LIBDIR`` and the configure names on
+    its own libbtbb line. It is required for an install that prints no path
+    line, and must be inside the prefix: that install reports the libbtbb it
+    loaded only when it is not the one it was built against
+    (``ubertooth_libbtbb_is_elsewhere``), and that comparison is made against
+    nothing when the recorded directory is empty. So the absence of the
+    warning says the loader reached this install's libbtbb only once the
+    install is known to have been built against one, which is what this pins.
     """
     lines = [line.rstrip() for line in text.splitlines()]
     if version_line.strip() not in lines:
@@ -245,6 +257,21 @@ def consumer_identity(text: str, prefix: str, version_line: str) -> str:
             raise InstalledLibraryError(
                 "the program says it loaded a libbtbb other than the one the "
                 f"install was built against: {elsewhere[0]!r}")
+        # And the comparison that warning comes from has to have had both
+        # sides: it is skipped silently when the install recorded no libbtbb
+        # directory, and then no warning says nothing at all.
+        if not built_libbtbb:
+            raise InstalledLibraryError(
+                "the program printed no libbtbb path, so the only thing that "
+                "would report another libbtbb is the warning it did not "
+                "print; that comparison is made against the directory the "
+                "install was built with, so --built-libbtbb must name it")
+        built, root = resolved(built_libbtbb), resolved(prefix)
+        if root not in built.parents and root != built:
+            raise InstalledLibraryError(
+                f"the install was built against a libbtbb in {built}, which "
+                f"is not in {root}, so a program loading that one would print "
+                "no warning and this would establish nothing")
     if _NO_BOARD not in lines:
         raise InstalledLibraryError(
             f"the program did not print {_NO_BOARD!r}; it was to be run with "
@@ -297,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     consumer.add_argument("output", type=Path)
     consumer.add_argument("--prefix", required=True)
     consumer.add_argument("--version-line", required=True)
+    consumer.add_argument("--built-libbtbb", default=None)
     inside = sub.add_parser(
         "under-prefix", help="a path a log reports is in the prefix")
     inside.add_argument("log", type=Path)
@@ -320,7 +348,8 @@ def main(argv: list[str] | None = None) -> int:
             print(fork_pin(args.module.read_text(errors="replace")))
         elif args.command == "consumer-identity":
             print(consumer_identity(args.output.read_text(errors="replace"),
-                                    args.prefix, args.version_line))
+                                    args.prefix, args.version_line,
+                                    args.built_libbtbb))
         elif args.command == "under-prefix":
             print(under_prefix(args.log.read_text(errors="replace"),
                                args.prefix, args.marker))

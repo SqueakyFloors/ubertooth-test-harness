@@ -850,8 +850,8 @@ _BLOCK_PATTERNS = (
     ("-s", "serial", _SERIAL_LABEL, rf"^{_SERIAL_LABEL}: {_SERIAL_RE}$"),
 )
 # The -V answer's own lines, in the order it prints them per board, after the
-# host tools' two lines (the version and the libbtbb path), neither of which
-# is about a board at all.
+# host tools' own version and, on a commit that prints one, the libbtbb path
+# line under it -- neither of which is about a board at all.
 _VERSION_REPORTS = (
     ("Firmware version", FIRMWARE_PATTERN),
     ("Firmware build", BUILD_STRING_LINE),

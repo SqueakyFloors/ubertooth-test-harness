@@ -13,9 +13,13 @@ FIRMWARE_PATTERN = r"Firmware version:\s+\S+"
 # the two lines libubertooth prints when it has nothing to show, which say so
 # in its own words (ubertooth_version.c).
 NO_BUILD_STRING = r"(?:read failed|not reported)"
-COMPILE_INFO_PATTERN = rf"(?!{NO_BUILD_STRING}$)\S"
+# A build string, as a fragment: one character of it, with the two lines above
+# ruled out. On its own it matches almost anything, which is the point -- a
+# build string has no shape to hold it to any more -- so it is only ever used
+# where a label comes before it, and the name says it is a fragment.
+_BUILD_STRING = rf"(?!{NO_BUILD_STRING}$)\S"
 # That line whole, where a caller matches it rather than the value on it.
-BUILD_STRING_LINE = rf"(?m)^Firmware build: {COMPILE_INFO_PATTERN}"
+BUILD_STRING_LINE = rf"(?m)^Firmware build: {_BUILD_STRING}"
 
 # The other lines of the `-V` answer, which libubertooth prints for every tool
 # (host/libubertooth/src/ubertooth_version.c): the host tools' own version,
@@ -24,12 +28,21 @@ BUILD_STRING_LINE = rf"(?m)^Firmware build: {COMPILE_INFO_PATTERN}"
 # command, so this answer is the whole of what a command line carrying it
 # prints; the build string used to come out bare, with no label.
 #
-# The version on that first line is a release name now and was
-# "libubertooth <abi> (git-<hash>), libbtbb <abi> (git-<hash>)" before, so
-# only the label is required here; which version it must carry is
-# preflight.host_version_patterns()'s business, where the resolved commit says
-# which layout to expect.
-HOST_VERSION_LINE = r"(?m)^Host tools version: \S"
+# The whole of that first line, in the two layouts the fork has printed it
+# in. Since #352 (fork #1230) it names the release the build came from with
+# libbtbb's beside it; before that it named the two library ABI versions, each
+# with the commit it was built from. Exactly one of the two, to the end of the
+# line: anything else is not the line libubertooth prints.
+#
+# Which of them a given commit must print, and which versions it must carry,
+# is preflight.host_version_patterns()'s business, where the resolved commit
+# is known. A case has only the tool in front of it, so it requires one of the
+# two -- and this is the one statement of what they are, so a case cannot hold
+# the line to a different strictness from the next case's.
+HOST_VERSION_LINE = (
+    r"(?m)^Host tools version: (?:\S+ \(libbtbb \S+\)"
+    r"|libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\))$"
+)
 # Which libbtbb was loaded, which the host version line could not say. Older
 # fork commits print it for every `-V`, with "unknown" where the path could
 # not be found; since #352 a libbtbb other than the one the tools were built
@@ -48,13 +61,14 @@ VERSION_ANSWER = (
     # line and an optional path line: no build prints a release name and a
     # path line, and a pattern that took both would pass an answer no fork
     # commit produces.
-    r"(?:libubertooth [^\n]*\nlibbtbb loaded from: \S[^\n]*"
-    r"|\S+[ \t]+\(libbtbb[ \t]+[^)\n]*\))\n"
+    r"(?:libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)"
+    r"\nlibbtbb loaded from: \S[^\n]*"
+    r"|\S+ \(libbtbb [^)\n]*[^)\s]\))\n"
     # Not "read failed" or "unavailable, <reason>", which is what the line
     # carries when the board answered nothing; the build line below is not
     # printed at all then, so this only says so in the pattern as well.
     r"Firmware version: (?!read failed$|unavailable, )\S[^\n]*\n"
-    rf"Firmware build: {COMPILE_INFO_PATTERN}"
+    rf"Firmware build: {_BUILD_STRING}"
 )
 
 # `ubertooth-util -v` names the image the build came from when the firmware
@@ -64,7 +78,7 @@ VERSION_ANSWER = (
 # the harness only reads the revision off a board.
 IMAGE_NAME_PATTERN = r"(?:\S+\s+)?"
 FIRMWARE_VERSION_RE = re.compile(
-    rf"Firmware version:\s+(?:(?P<image>\S+)\s+)?(?P<revision>\S+)\s+\(API:"
+    r"Firmware version:\s+(?:(?P<image>\S+)\s+)?(?P<revision>\S+)\s+\(API:"
 )
 # The image name every test but the ubertooth-btbr one needs on a board, and
 # the alternate image that one flashes. A board carrying `btbr` runs none of

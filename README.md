@@ -3773,8 +3773,14 @@ directory and the library directory its file reports have to be the
 install's, and a small C program is compiled and linked with what it
 answered and then run: it calls `ubertooth_print_versions()`, which needs no
 board, and what it prints has to be the version line the build's own tools
-printed (so a library from elsewhere that answered is caught), a libbtbb loaded
-from inside the prefix, and the no-board line the switch asks for. A CMake
+printed (so a library from elsewhere that answered is caught), the install's
+own libbtbb, and the no-board line the switch asks for. How the libbtbb is
+established follows what the install says: a fork commit from before #352
+prints the path it loaded, which has to be inside the prefix; one since
+reports a libbtbb only when it is not the one it was built against, so what
+is required there is that warning's absence *and* that the install was built
+against a libbtbb inside the prefix, since the warning is skipped when the
+install recorded no directory to compare with. A CMake
 project of the same program is configured with
 `find_package(ubertooth <version> EXACT REQUIRED)`, the version being the one
 `libubertooth.pc` gave, so `ubertoothConfigVersion.cmake` is read and has to

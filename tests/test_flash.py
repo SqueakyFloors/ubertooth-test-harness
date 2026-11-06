@@ -408,7 +408,7 @@ class FlashRunnerTests(unittest.TestCase):
                 run_flash(executor, clock, request, directory)
             self.assertEqual([], executor.commands)
 
-    def test_two_images_of_one_release_are_allowed(self):
+    def test_two_images_of_one_release_are_allowed_and_recorded(self):
         """They are different files, which is what the run alternates."""
         with tempfile.TemporaryDirectory() as directory:
             request, artifacts = self.prepare_request(directory, flashes=2)
@@ -429,10 +429,35 @@ class FlashRunnerTests(unittest.TestCase):
             # each write says the right release is on the board. What it no
             # longer says is which of two builds of that release, which is
             # what the sha256 of each image is for.
-            summary = run_flash(executor, clock, request, directory)
+            sink = CollectEventSink()
+            summary = run_flash(executor, clock, request, directory, sink=sink)
             self.assertTrue(summary.passed, summary.failure_reason)
             self.assertEqual(2, summary.verified_flashes)
             self.assertEqual("2026-11-DEV1+22", summary.final_revision)
+            # The run says so, so a reader of it does not have to work it out
+            # from the plan's own revisions.
+            (start,) = [e for e in sink.events
+                        if e.event_type == "flash_run_started"]
+            self.assertIs(False,
+                          start.details["revisions_tell_images_apart"])
+            self.assertEqual(["2026-11-DEV1+22"],
+                             start.details["repeated_revisions"])
+
+    def test_images_of_two_releases_say_nothing_about_discrimination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, artifacts = self.prepare_request(directory, flashes=2)
+            clock = FakeClock()
+            executor = FakeExecutor(
+                clock,
+                {str(a.path): a.expected_revision for a in artifacts.values()},
+            )
+            sink = CollectEventSink()
+
+            run_flash(executor, clock, request, directory, sink=sink)
+
+            (start,) = [e for e in sink.events
+                        if e.event_type == "flash_run_started"]
+            self.assertNotIn("revisions_tell_images_apart", start.details)
 
     def test_stops_if_artifact_changes_during_run(self):
         with tempfile.TemporaryDirectory() as directory:

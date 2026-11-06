@@ -936,8 +936,14 @@ class MultiBoardCaseTests(unittest.TestCase):
         self.assertEqual("", check(answer(*boards, head=HEAD[:1])))
         self.assertEqual("", check(answer(*boards, head=(
             "Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)",))))
-        # A missing or reordered opening line is not that answer.
-        for head in ((), HEAD[::-1]):
+        # A missing or reordered opening line is not that answer, and neither
+        # is a line that carries something other than one of the two layouts
+        # the fork prints: the label alone does not make it that line.
+        for head in ((), HEAD[::-1], ("Host tools version: 1.1", HEAD[1]),
+                     ("Host tools version: 2026-11-DEV1+22", HEAD[1]),
+                     ("Host tools version: 2026-11-DEV1+22 (libbtbb)",),
+                     ("Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1)"
+                      " and more",)):
             self.assertIn("does not open with the host tools' version",
                           check(answer(*boards, head=head)), head)
         # A repeated head line lands where board 0's version should be.

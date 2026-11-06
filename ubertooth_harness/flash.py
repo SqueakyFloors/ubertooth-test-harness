@@ -26,6 +26,33 @@ class FlashCancelled(HarnessError):
     """
 
 
+def _revision_discrimination(request) -> dict:
+    """Whether the revision read after a write tells the images apart.
+
+    The images of a sequence must be different files, and need not report
+    different versions: a version names the release a build came from rather
+    than the build (#352, fork #1230). Where two of them report one release,
+    the read-back after a write confirms that release and nothing more -- the
+    file's sha256, checked before every write, is what says which image was
+    written. Recorded rather than refused, and recorded rather than left for a
+    reader to work out from the plan.
+    """
+    revisions = [
+        request.artifacts[label].expected_revision
+        for label in request.step.image_sequence
+        if label in request.artifacts
+    ]
+    repeated = sorted({
+        revision for revision in revisions if revisions.count(revision) > 1
+    })
+    if not repeated:
+        return {}
+    return {
+        "revisions_tell_images_apart": False,
+        "repeated_revisions": repeated,
+    }
+
+
 @dataclass(frozen=True)
 class FirmwareArtifact:
     label: str
@@ -355,6 +382,13 @@ class FlashReliabilityRunner:
                 "serials": list(request.targets),
                 "requested_flashes": request.step.flashes,
                 "guard_serials": list(request.guard_serials),
+                # What the read-back after each write can tell apart. Two
+                # images of one release are a sequence this allows since #352
+                # (fork #1230), and then the revision read says the right
+                # release is on the board and not which image put it there,
+                # so a reader of the run has to be able to see that rather
+                # than infer it from the plan's own revisions.
+                **_revision_discrimination(request),
             },
         )
         if token.is_cancelled():
