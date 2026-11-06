@@ -610,12 +610,20 @@ class ProbeTests(SoakTestCase):
         self.assertGreaterEqual(summary["process"]["restarts"],
                                 summary["process"]["unexplained_exits"] - 1)
         # Every attempt kept its own exit status, its last error line, and
-        # its own capture file and transcript.
-        for attempt in summary["attempts"][:-1]:
-            self.assertEqual(1, attempt["returncode"])
-            self.assertIn("libusb returned -1", attempt["last_error"])
+        # its own capture file and transcript. An attempt either died of its
+        # own accord -- exit 1 and nothing asked it to -- or the run stopped
+        # it: a liveness timeout can fire in the moment before the tool
+        # exits, and then the stop is what ended it.
+        died = 0
+        for attempt in summary["attempts"]:
             self.assertTrue((self.out / attempt["capture"]).is_file())
             self.assertTrue((self.out / attempt["log"]).is_file())
+            if attempt["signalled"]:
+                continue
+            self.assertEqual(1, attempt["returncode"])
+            self.assertIn("libusb returned -1", attempt["last_error"])
+            died += 1
+        self.assertGreater(died, 0)
 
 
 class RotationTests(SoakTestCase):
