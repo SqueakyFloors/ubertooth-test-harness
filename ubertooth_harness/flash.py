@@ -135,7 +135,6 @@ class FlashReliabilityRunner:
             )
 
         hashes = {}
-        revisions = []
         for label in request.step.image_sequence:
             artifact = request.artifacts.get(label)
             if artifact is None:
@@ -157,9 +156,28 @@ class FlashReliabilityRunner:
                 )
             if not artifact.expected_revision:
                 raise HarnessError(f"expected revision is required for {label}")
-            revisions.append(artifact.expected_revision)
-        if len(set(revisions)) != len(revisions):
-            raise HarnessError("image sequence must use distinct expected revisions")
+        # The images must be different files. What used to be required here
+        # was a distinct expected revision per image, on the reasoning that
+        # alternating between two images has to change what the board
+        # reports. Since #352 (fork #1230) a version names the release a
+        # build came from rather than the build, so two images can be the
+        # same release and different files -- and it is the file, by its
+        # sha256, that tells them apart. The revision read back after each
+        # write is then what it says it is: the right release is on the
+        # board, not which of two builds of it.
+        repeated = sorted(
+            {digest for digest in hashes.values()
+             if list(hashes.values()).count(digest) > 1}
+        )
+        if repeated:
+            same = sorted(
+                label for label, digest in hashes.items() if digest in repeated
+            )
+            raise HarnessError(
+                "image sequence must use images that differ: "
+                + ", ".join(same) + " are the same file, so alternating "
+                "between them writes the same bytes every time"
+            )
         return hashes
 
     def _execute_command(

@@ -728,6 +728,45 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertEqual(1, finished.details["failed_guard_checks"])
         self.assertIn("| 0 + 1 guard check |", report)
 
+    def test_a_build_string_that_is_only_a_date_is_read_and_compared(self):
+        """Since #352 (fork #1230) the build string is the build date alone.
+
+        The reading is what the line carries with the label taken off, so a
+        reflash of the same release -- which gets a new date -- still fails
+        the guard, which is what this read is for.
+        """
+        date = "Thu Nov  6 02:11:04 UTC 2026"
+        guard = FakeUbertooth(serial=B, compile_info=date)
+        bench = Bench(FakeUbertooth(serial=A, compile_info=date), guard)
+        invocation = guarded_invocation("Radio setting transitions")
+
+        summary, events, _report = run_guarded(invocation, bench)
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        reads = [
+            event for event in events
+            if event.event_type == "step_finished"
+            and event.details["stage"] == "guard"
+            and event.details["step_name"].endswith("compile-info")
+        ]
+        self.assertTrue(reads)
+        self.assertEqual({date}, {read.details["observed"] for read in reads})
+
+    def test_a_new_build_date_on_a_guard_fails_the_check(self):
+        date = "Thu Nov  6 02:11:04 UTC 2026"
+        bench = Bench(
+            FakeUbertooth(serial=A, compile_info=date),
+            FakeUbertooth(serial=B, compile_info=date),
+            leak=leak_once(B, GUARD_CHANGES["compile-info"]),
+        )
+        invocation = guarded_invocation("Radio setting transitions")
+
+        summary, events, _report = run_guarded(invocation, bench)
+
+        self.assertEqual("failed", summary.status)
+        self.assertEqual(["guard Ubertooth 1 compile-info"],
+                         failed_guard_reads(events))
+
     def test_only_the_changed_guard_is_named(self):
         bench = Bench(
             FakeUbertooth(serial=A), FakeUbertooth(serial=B), FakeUbertooth(serial=C),

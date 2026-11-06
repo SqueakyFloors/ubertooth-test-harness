@@ -4,31 +4,52 @@ import re
 
 
 FIRMWARE_PATTERN = r"Firmware version:\s+\S+"
-COMPILE_INFO_PATTERN = r"\bubertooth\s+\S+\s+\("
+# What a board's build string says. Since the fork reported releases (#352,
+# fork #1230) it is the date the image was built and nothing else, because the
+# version beside it already names the release and who built an image says
+# nothing a reader of it needs; before that it was
+# "ubertooth git-<hash> (who@where) <date>". Either reads as a build string,
+# so a run of an older ref is checked the same way; what is not accepted is
+# the two lines libubertooth prints when it has nothing to show, which say so
+# in its own words (ubertooth_version.c).
+NO_BUILD_STRING = r"(?:read failed|not reported)"
+COMPILE_INFO_PATTERN = rf"(?!{NO_BUILD_STRING}$)\S"
+# That line whole, where a caller matches it rather than the value on it.
+BUILD_STRING_LINE = rf"(?m)^Firmware build: {COMPILE_INFO_PATTERN}"
 
-# The two other lines of the `-V` answer, which libubertooth prints for every
-# tool (host/libubertooth/src/ubertooth_version.c): the host tools' own
-# version, and the board's build string under its own label. Since fork
-# f898fe5 (SqueakyFloors/ubertooth#813) `-V` is the version command and ends
-# the command, so this answer is the whole of what a command line carrying it
+# The other lines of the `-V` answer, which libubertooth prints for every tool
+# (host/libubertooth/src/ubertooth_version.c): the host tools' own version,
+# and the board's build string under its own label. Since fork f898fe5
+# (SqueakyFloors/ubertooth#813) `-V` is the version command and ends the
+# command, so this answer is the whole of what a command line carrying it
 # prints; the build string used to come out bare, with no label.
-HOST_VERSION_LINE = r"(?m)^Host tools version: libubertooth \S+"
-# Which libbtbb was loaded, which the host version line cannot say; "unknown"
-# where the path could not be found, so the line is always there.
+#
+# The version on that first line is a release name now and was
+# "libubertooth <abi> (git-<hash>), libbtbb <abi> (git-<hash>)" before, so
+# only the label is required here; which version it must carry is
+# preflight.host_version_patterns()'s business, where the resolved commit says
+# which layout to expect.
+HOST_VERSION_LINE = r"(?m)^Host tools version: \S"
+# Which libbtbb was loaded, which the host version line could not say. Older
+# fork commits print it for every `-V`, with "unknown" where the path could
+# not be found; since #352 a libbtbb other than the one the tools were built
+# against is a one-line warning on standard error instead, and there is no
+# such line at all.
 LIBBTBB_PATH_LINE = r"(?m)^libbtbb loaded from: \S"
-# The whole `-V` answer for one board, as the four consecutive lines
-# libubertooth prints, in its order: a pattern per line would pass an answer
-# whose lines arrived in any order or with others between them. It is not
-# anchored to the end of the output, because a tool may put a warning or a
-# note on standard error beside it.
+# The whole `-V` answer for one board, as the consecutive lines libubertooth
+# prints, in its order: a pattern per line would pass an answer whose lines
+# arrived in any order or with others between them. It is not anchored to the
+# end of the output, because a tool may put a warning or a note on standard
+# error beside it. The libbtbb path line is optional, since only older
+# commits print one, and it may not stand anywhere else.
 VERSION_ANSWER = (
-    r"(?m)^Host tools version: libubertooth \S+[^\n]*\n"
-    r"libbtbb loaded from: \S[^\n]*\n"
+    r"(?m)^Host tools version: \S[^\n]*\n"
+    r"(?:libbtbb loaded from: \S[^\n]*\n)?"
     # Not "read failed" or "unavailable, <reason>", which is what the line
     # carries when the board answered nothing; the build line below is not
     # printed at all then, so this only says so in the pattern as well.
     r"Firmware version: (?!read failed$|unavailable, )\S[^\n]*\n"
-    rf"Firmware build: [^\n]*{COMPILE_INFO_PATTERN}"
+    rf"Firmware build: {COMPILE_INFO_PATTERN}"
 )
 
 # `ubertooth-util -v` names the image the build came from when the firmware
@@ -123,10 +144,14 @@ def revision_pattern(expected: str) -> str:
     expected hash, or the expected hash is a prefix of it. Either way the
     shorter one must be at least GIT_SHORT_HASH_MIN digits long.
 
-    A revision that is not a plain git hash (a tag, or a hash carrying the
-    ``*`` marker a modified source adds) is matched exactly. The caller
-    supplies what must follow, so a ``*`` marker on the reported revision
-    still fails to match.
+    A revision that is not a plain git hash is matched exactly: a release name
+    (``2026-11-DEV1+22``, which is what every build reports since #352), a
+    tag, or a hash carrying the ``*`` marker a modified source adds. A release
+    name is one string the whole way through -- the tag the build came from
+    and how many commits it is past it -- so there is no shorter form of it to
+    accept, and a build one commit further on is a different version, which is
+    the point of it. The caller supplies what must follow, so a ``*`` marker
+    on the reported revision still fails to match.
     """
     match = _GIT_HASH_REVISION.match(expected)
     if match is None:
@@ -178,9 +203,13 @@ def image_name_pattern(image: str) -> str:
 def compile_info_pattern(expected: str) -> str:
     """`ubertooth-util -V` output for firmware built from ``expected``.
 
-    The image name the firmware reports comes before the build string
-    (`bluetooth_rxtx: ubertooth git-1c7f06d6 (...)`), so the pattern starts
-    at the build string itself.
+    Only for a commit whose build stamps a commit hash: its build string
+    carried the revision ("ubertooth git-1c7f06d6 (who@where) <date>"), and
+    the image name the firmware reports comes before it, so the pattern starts
+    at the build string itself. Since #352 the build string is the build date
+    alone and names no version, so a run of a newer ref reads the version off
+    the `Firmware version:` line of the same `-V` answer instead
+    (preflight.firmware_identity_patterns).
     """
     return rf"\bubertooth\s+{revision_pattern(expected)}\s+\("
 

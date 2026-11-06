@@ -297,18 +297,41 @@ and every guard read matching. It stops when that is not true.
 **What it does.** Runs `ubertooth-util -V` and requires the host tools version
 line.
 
-**Theory of operation.** `ubertooth_print_host_version()` prints the
-libubertooth and libbtbb versions with their git identities as the first line
-of every tool's `-V` answer. The check is anchored to that label, so firmware
-lines printed under it cannot stand in for it. The same line is what preflight
-compares against the resolved host sources, which is how a run proves the
-tools under test are the ones the manifest names.
+**Theory of operation.** `ubertooth_print_host_version()` prints the host
+tools' own version as the first line of every tool's `-V` answer. The check is
+anchored to that label, so firmware lines printed under it cannot stand in for
+it. The same line is what preflight compares against the resolved host
+sources, which is how a run proves the tools under test are the ones the
+manifest names.
+
+The line has two layouts, because what a build reports changed
+([ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230),
+`#1232`). A build now names the release it came from, with libbtbb's beside
+it:
+
+```text
+Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
+```
+
+Before that it named the two library ABI versions, each with the commit it was
+built from, and printed the libbtbb it loaded on a line of its own:
+
+```text
+Host tools version: libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-84ab41f)
+libbtbb loaded from: /usr/local/lib/libbtbb.so.1
+```
+
+This case has only the tool in front of it, so it requires one of the two.
+Which one a given commit must print is decided where the resolved commit is
+known: preflight works the version string out the way the build works it out
+(`release.py`) and requires the layout that goes with it, so a run of an older
+ref is still held to the old line and a run of a newer one cannot pass by
+printing it.
 
 **Hardware and arguments.** No board role. `hosts:` only. The command runs
 with a 20 s timeout.
 
-**Expected outcome.** One case. The line
-`Host tools version: libubertooth <v> (<id>), libbtbb <v> (<id>)` must appear.
+**Expected outcome.** One case. One of the two lines above must appear.
 Exit 0 and exit 1 both pass: the command goes on to read every attached board
 and exits 1 if any cannot be read, which may be a board this run does not use.
 
@@ -402,9 +425,20 @@ name it.
 compile identity from one board.
 
 **Theory of operation.** Not established. `Ubertooth identity` checks the
-whole `ubertooth-util -V` answer, the compile-info pattern among it, and the
-guard readback uses the same `Firmware build:` line, whose build timestamp
-also catches a reflash of the same revision.
+whole `ubertooth-util -V` answer, the build line among it, and the guard
+readback uses the same `Firmware build:` line, whose build date also catches a
+reflash of the same revision.
+
+That line carries the date the image was built and nothing else since
+[ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
+(`#1232`); before it, it was
+`ubertooth <revision> (<who>@<where>) <date>`, so a board flashed from an
+older commit reports a revision there too. Nothing reads a version off it any
+more: preflight's per-board `-V` check reads the revision off the
+`Firmware version:` line of the same answer, which is the same question the
+`-v` check asks through the other command, and requires the build line to
+carry a build string rather than the `read failed` or `not reported`
+libubertooth prints when it has none.
 
 **Hardware and arguments.** One `Ubertooth`.
 
@@ -444,13 +478,24 @@ installs another one over a programmer on its in-system programming header.
 `ubertooth-util -B` is what reports which one that is, in one line:
 
 ```text
+Bootloader: 2.00 2026-11-DEV1+22, CRC32:0x9d2fe1b4
 Bootloader: 2.00 git-1a2b3c4, CRC32:0x9d2fe1b4
 Bootloader: no version block (factory or earlier, treated as 1.x), CRC32:0x5f0a73c1
 ```
 
-The first form comes from a 48-byte version block the fork's bootloader
-carries at a fixed offset; the second is every board as shipped. The CRC-32 is
+The first two forms come from a 48-byte version block the fork's bootloader
+carries at a fixed offset; the last is every board as shipped. The CRC-32 is
 of the whole region, worked out on the board, and is on the line either way.
+
+The build string in the block is the version the tree reported when the
+bootloader was built: the release it came from since
+[ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
+(`#1232`), and a commit hash before that, which is the second form and is what
+a board flashed from an older commit carries. The harness works out which one
+a build at the pin reports the way the makefile works it out (`release.py`)
+and compares that: a release name for equality, since there is no shorter form
+of one to accept, and a hash as an abbreviation of the commit, since two
+checkouts need not abbreviate to the same length.
 
 Preflight reads it for every board whose firmware the run requires, after the
 firmware checks, since firmware older than the read refuses it. What the run
@@ -552,8 +597,9 @@ own.
 guarded (every command is read-only and selects by serial).
 
 **Expected outcome.** Six cases: firmware version, the whole `-V` answer (its
-four lines in the fork's order: host version, libbtbb path, firmware version,
-firmware build), device serial, part ID, board ID, and the four-query
+lines in the fork's order: the host version, then the libbtbb path on a commit
+that prints one, then firmware version and firmware build), device serial,
+part ID, board ID, and the four-query
 readback composition. A case failure does not stop the others. The `-V` case
 keeps its `firmware-compile-info` id and its `Firmware compile info` name,
 although it now covers more than that line: the id is what a run's records
@@ -843,9 +889,9 @@ the index case's step count grows with the number of boards. Smoke: `-U all
 same, and `-N` plus one `-U<index> -s` per board agree with the listing.
 Comprehensive adds the four identity queries listed per board in index
 order, both with `-U all` and with no selector; `-V` reporting every board
-itself, also both ways, as the host tools' two lines (the version and the
-libbtbb path) followed by each board's firmware version and build under its
-index; `-C` without `-U` refusing to
+itself, also both ways, as the host tools' version (followed by the libbtbb
+path on a commit that prints one) and then each board's firmware version and
+build under its index; `-C` without `-U` refusing to
 pick a board (exit 1 with `error: multiple Ubertooth devices found; select
 one with -U <index|serial>` and one `Device <index>: <serial>` line per
 board, and no channel read); and an index past the last board refused with
@@ -3560,19 +3606,33 @@ name it.
 **What it does.** Writes firmware to a board many times in a row, alternating
 two images, and verifies every write.
 
-**Theory of operation.** Alternating the images is what makes each write
-verifiable: every flash changes the expected revision, so reading
-`ubertooth-util -v` afterward distinguishes a successful write from a board
-that simply still holds what it had. Both images are pinned by SHA-256, the
-test build against the run manifest and the known-good image against the
-plan's own hash, checked before the run and again before each write, so a
-corrupted or swapped file cannot be mistaken for a flash failure. Every other
+**Theory of operation.** What makes each write verifiable is the pair of
+images. Both are pinned by SHA-256, the test build against the run manifest
+and the known-good image against the plan's own hash, checked before the run
+and again before each write, so a corrupted or swapped file cannot be mistaken
+for a flash failure; `ubertooth-dfu -d ... -r` reads its own write back
+against the file it wrote; and `ubertooth-util -v` afterwards must report the
+revision the image just written carries.
+
+The images have to be different files, and that is the whole of what the
+sequence requires. It used to require a distinct expected revision per image
+as well, on the reasoning that every write has to change what the board
+reports. Since
+[ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
+(`#1232`) a version names the release a build came from rather than the
+build, so two images can be one release and two files -- and it is the file,
+by its SHA-256, that tells them apart. The revision read after each write is
+then what it says it is: the right release is on the board. Which of two
+builds of that release it is, it does not say, and with the published
+known-good image on one side of the alternation (a different release) it does
+not have to. Every other
 registered board on the host is read before the run and after every flash, so
 a write that reached the wrong board is caught rather than inferred.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, plus
 every other registered board. Required: `platforms:`, `flashes:` (the total
-number of writes), `image sequence:` (at least two distinct image labels),
+number of writes), `image sequence:` (at least two image labels, naming
+files that differ),
 `KGV sha256:`, and `KGV revision:`. The images are supplied as artifacts named
 after the labels: the run's own build provides `test build` (`--build
 --with-firmware`, or the controller's and the GUI's `with_firmware` option),

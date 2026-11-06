@@ -928,10 +928,16 @@ class MultiBoardCaseTests(unittest.TestCase):
             "Firmware build (1): ubertooth git-x (u@h) ts",
         )
         self.assertEqual("", check(answer(*boards)))
-        # The host tools' two lines open the answer, in that order and once
-        # each: a missing, repeated, or reordered one is not that answer.
-        for head in ((), HEAD[:1], HEAD[::-1],
-                     ("Host tools version: 1.1", HEAD[1])):
+        # The host tools' own version opens the answer. The libbtbb path line
+        # below it is only printed by fork commits before #352 (fork #1230),
+        # which report a libbtbb other than the one the tools were built
+        # against as a warning on standard error instead, so an answer
+        # without it is that answer too.
+        self.assertEqual("", check(answer(*boards, head=HEAD[:1])))
+        self.assertEqual("", check(answer(*boards, head=(
+            "Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)",))))
+        # A missing or reordered opening line is not that answer.
+        for head in ((), HEAD[::-1]):
             self.assertIn("does not open with the host tools' version",
                           check(answer(*boards, head=head)), head)
         # A repeated head line lands where board 0's version should be.
@@ -959,9 +965,14 @@ class MultiBoardCaseTests(unittest.TestCase):
         # the fork prints only when one board is attached.
         self.assertIn("line is not", check(answer(
             *(line.replace(" (0)", "").replace(" (1)", "") for line in boards))))
-        # A value that is not a build string fails on its own line.
+        # A build string is the date the image was built since #352 (fork
+        # #1230) and was "ubertooth <revision> (who@where) <date>" before, so
+        # the line is required to carry something rather than to carry a
+        # shape; a blank one fails on its own line.
+        self.assertEqual("", check(answer(
+            *boards[:3], "Firmware build (1): Thu Nov  6 02:11:04 UTC 2026")))
         self.assertIn("board 1 Firmware build line", check(answer(
-            *boards[:3], "Firmware build (1): not a build string")))
+            *boards[:3], "Firmware build (1): ")))
 
     def test_smoke_passes_on_fork_main_and_guards_hold(self):
         bench = MultiBench((A, B))

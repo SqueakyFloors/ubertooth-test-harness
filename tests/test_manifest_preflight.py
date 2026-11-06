@@ -29,9 +29,11 @@ from ubertooth_harness.preflight import (
     HOST_VERSION_LABEL,
     LIBBTBB_BUILT_ORIGIN,
     LIBBTBB_RESOLVED_ORIGIN,
+    LibbtbbIdentity,
     PreflightCheck,
     PreflightError,
     PreflightPolicy,
+    firmware_identity_patterns,
     host_version_patterns,
     libbtbb_identity,
 )
@@ -1153,6 +1155,224 @@ class RevisionAbbreviationTests(unittest.TestCase):
 
         self.assertIn("identity mismatch for UT_Linux0", reason)
         self.assertIn("git\\-other", reason)
+
+
+class ReleaseVersionLineTests(unittest.TestCase):
+    """The version lines as the fork prints them since #352 (fork #1230).
+
+        Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
+        Firmware version: bluetooth_rxtx 2026-11-DEV1+22 (API:1.58)
+        Firmware build: Thu Nov  6 02:11:04 UTC 2026
+
+    The library ABI numbers and the parenthesized commits have gone, the
+    libbtbb path line has gone, and the build string is the build date. Which
+    layout a commit prints is decided by the resolved commit, so a run of an
+    older ref is still held to the old one.
+    """
+
+    RELEASE = "2026-11-DEV1+22"
+    LIBBTBB_RELEASE = "2020-12-R1+79"
+    ANSWER = (
+        f"Host tools version: {RELEASE} (libbtbb {LIBBTBB_RELEASE})\n"
+        f"Firmware version: bluetooth_rxtx {RELEASE} (API:1.58)\n"
+        "Firmware build: Thu Nov  6 02:11:04 UTC 2026\n"
+    )
+
+    @staticmethod
+    def source(name, build_version, commit="a" * 40, source_path="/src"):
+        return SourceRevision(
+            name=name, source_path=source_path, repository="example",
+            requested_ref="HEAD", commit=commit, short_commit=commit[:7],
+            build_version=build_version,
+        )
+
+    def check(self, patterns, *, libbtbb=None, name="Host version"):
+        return PreflightCheck(
+            check_id="preflight-001-host-version", name=name,
+            host="Host_Linux", resource_alias=None,
+            resource_identity=MappingProxyType({}), argv=HOST_VERSION_ARGV,
+            expected_patterns=patterns, expected_revision=self.RELEASE,
+            accepted_returncodes=(0, 1), libbtbb=libbtbb,
+        )
+
+    @staticmethod
+    def result(output, argv=HOST_VERSION_ARGV):
+        return CommandResult(argv, 0, output, "", 0.01, False)
+
+    def test_the_release_line_passes_and_an_older_layout_does_not(self):
+        ubertooth = self.source("Ubertooth", self.RELEASE)
+        libbtbb = self.source("libbtbb", self.LIBBTBB_RELEASE, commit="b" * 40)
+        check = self.check(host_version_patterns(ubertooth, libbtbb))
+
+        self.assertEqual("", check.result_failure(self.result(self.ANSWER)))
+        # A build of this commit reports a release, so the layout a commit
+        # before the change prints is not that answer.
+        older = (
+            f"Host tools version: libubertooth 1.1 (git-aaaaaaa), "
+            f"libbtbb 1.3 (git-bbbbbbb)\n"
+        )
+        self.assertIn("identity mismatch",
+                      check.result_failure(self.result(older)))
+
+    def test_another_release_fails_and_the_marker_fails_with_it(self):
+        check = self.check(
+            host_version_patterns(self.source("Ubertooth", self.RELEASE))
+        )
+        for version in ("2026-11-DEV1+23", "2026-11-DEV1", "2026-11-DEV1+22*",
+                        "2026-11-DEV1+220", "2020-12-R1+unknown"):
+            with self.subTest(version=version):
+                answer = self.ANSWER.replace(
+                    f"Host tools version: {self.RELEASE}",
+                    f"Host tools version: {version}", 1,
+                )
+                self.assertIn("identity mismatch",
+                              check.result_failure(self.result(answer)))
+
+    def test_the_firmware_lines_cannot_stand_in_for_the_host_line(self):
+        """The version on them is the same string, so the label is required."""
+        check = self.check(
+            host_version_patterns(self.source("Ubertooth", self.RELEASE))
+        )
+        firmware_only = self.ANSWER.split("\n", 1)[1]
+
+        self.assertIn("identity mismatch",
+                      check.result_failure(self.result(firmware_only)))
+
+    def test_the_libbtbb_half_is_read_off_the_new_line(self):
+        identity = LibbtbbIdentity(
+            self.LIBBTBB_RELEASE, LIBBTBB_RESOLVED_ORIGIN, "fix it",
+            names_release=True,
+        )
+        check = self.check(
+            host_version_patterns(self.source("Ubertooth", self.RELEASE)),
+            libbtbb=identity,
+        )
+
+        self.assertEqual("", check.result_failure(self.result(self.ANSWER)))
+        other = self.ANSWER.replace(self.LIBBTBB_RELEASE, "2020-12-R1+80")
+        reason = check.result_failure(self.result(other))
+        self.assertIn("report libbtbb 2020-12-R1+80", reason)
+        self.assertIn(self.LIBBTBB_RELEASE, reason)
+
+    def test_a_resolved_libbtbb_is_required_by_its_release(self):
+        ubertooth = self.source("Ubertooth", self.RELEASE)
+        libbtbb = self.source("libbtbb", self.LIBBTBB_RELEASE, commit="b" * 40)
+
+        identity = libbtbb_identity(ubertooth, libbtbb, built=True)
+
+        self.assertTrue(identity.required)
+        self.assertTrue(identity.names_release)
+        self.assertEqual(self.LIBBTBB_RELEASE, identity.expected_revision)
+        self.assertEqual(LIBBTBB_BUILT_ORIGIN, identity.origin)
+
+    def test_a_commit_style_libbtbb_under_the_new_line_is_still_a_commit(self):
+        """The two repositories moved separately, so the line may carry either.
+
+        The Ubertooth commit decides the layout; what libbtbb's half must
+        carry comes from the libbtbb commit.
+        """
+        ubertooth = self.source("Ubertooth", self.RELEASE)
+        older_libbtbb = self.source("libbtbb", "", commit="b" * 40)
+
+        identity = libbtbb_identity(ubertooth, older_libbtbb)
+
+        self.assertEqual("git-" + "b" * 40, identity.expected_revision)
+        self.assertTrue(identity.names_release)
+        check = self.check(
+            host_version_patterns(ubertooth), libbtbb=identity
+        )
+        answer = self.ANSWER.replace(
+            f"(libbtbb {self.LIBBTBB_RELEASE})", "(libbtbb git-bbbbbbb)"
+        )
+        self.assertEqual("", check.result_failure(self.result(answer)))
+
+    def test_a_pin_with_no_libbtbb_checkout_is_recorded_as_not_checked(self):
+        """A commit, and the line may carry a release the pin cannot give.
+
+        Turning a commit into the release a build of it names needs that
+        checkout, which a run given no --libbtbb-source has not got. So the
+        run says so and measures everything else, rather than comparing a
+        commit against a release name and failing for no reason.
+        """
+        pin = "52b2afcb0c4b8b03412dac759aad88debdfb18e2"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source"
+            commit = make_git_repo(path, install_sh=f'LIBBTBB_REF="{pin}"\n')
+            ubertooth = self.source(
+                "Ubertooth", self.RELEASE, commit=commit, source_path=str(path)
+            )
+
+            identity = libbtbb_identity(ubertooth)
+
+            self.assertFalse(identity.required)
+            self.assertEqual(["libbtbb_not_checked"],
+                             list(identity.to_details()))
+            (reason,) = identity.to_details().values()
+            self.assertIn(pin, reason)
+            self.assertIn("--libbtbb-source", reason)
+            # Nothing is compared, so any library passes the check.
+            check = self.check(
+                host_version_patterns(ubertooth), libbtbb=identity
+            )
+            self.assertEqual("", check.result_failure(self.result(
+                self.ANSWER.replace(self.LIBBTBB_RELEASE, "1999-01-R1+3")
+            )))
+
+    def test_an_older_ref_still_has_its_pin_checked_by_commit(self):
+        pin = "52b2afcb0c4b8b03412dac759aad88debdfb18e2"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source"
+            commit = make_git_repo(path, install_sh=f'LIBBTBB_REF="{pin}"\n')
+            ubertooth = self.source(
+                "Ubertooth", "", commit=commit, source_path=str(path)
+            )
+
+            identity = libbtbb_identity(ubertooth)
+
+            self.assertTrue(identity.required)
+            self.assertFalse(identity.names_release)
+            self.assertEqual(f"git-{pin}", identity.expected_revision)
+
+    def test_minus_V_reads_the_firmware_version_where_the_build_string_cannot(self):
+        """The build string names no version now, so the same answer's own
+        `Firmware version:` line is what the second command reads."""
+        patterns = firmware_identity_patterns(self.RELEASE, names_release=True)
+        check = self.check(patterns, name="Firmware compile info")
+
+        self.assertEqual("", check.result_failure(self.result(self.ANSWER)))
+        # Another revision on that line fails, and the reason names both.
+        other = self.ANSWER.replace(
+            f"bluetooth_rxtx {self.RELEASE}", "bluetooth_rxtx 2026-11-DEV1+21"
+        )
+        reason = check.result_failure(self.result(other))
+        self.assertIn("runs 2026-11-DEV1+21", reason)
+        self.assertIn(self.RELEASE, reason)
+        # A board with nothing to show for its build string fails too.
+        for missing in ("read failed", "not reported"):
+            with self.subTest(missing=missing):
+                answer = self.ANSWER.replace(
+                    "Thu Nov  6 02:11:04 UTC 2026", missing
+                )
+                self.assertIn("identity mismatch",
+                              check.result_failure(self.result(answer)))
+
+    def test_an_older_ref_reads_the_revision_off_the_build_string(self):
+        patterns = firmware_identity_patterns("git-1c7f06d", names_release=False)
+        self.assertEqual((compile_info_pattern("git-1c7f06d"),), patterns)
+
+    def test_the_manifest_records_the_release_a_build_reports(self):
+        source = self.source("Ubertooth", self.RELEASE)
+
+        self.assertEqual(self.RELEASE, source.expected_revision)
+        self.assertTrue(source.names_release)
+        self.assertEqual(self.RELEASE, source.to_dict()["build_version"])
+        self.assertEqual(self.RELEASE, source.to_dict()["expected_revision"])
+        # An older commit records no build_version and falls back to the hash
+        # its build stamps, which is what every run did before #352.
+        older = self.source("Ubertooth", "")
+        self.assertEqual("git-aaaaaaa", older.expected_revision)
+        self.assertFalse(older.names_release)
+        self.assertNotIn("build_version", older.to_dict())
 
 
 if __name__ == "__main__":

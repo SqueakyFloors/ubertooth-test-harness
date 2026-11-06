@@ -280,9 +280,10 @@ def plan_build(
                  source.commit),
                 timeout_s=120.0,
             ),
-            # The fork's version stamp uses `git diff-index`, which does not
-            # refresh file stat data; a fresh checkout can then look modified
-            # and stamp the build "git-<sha>*".
+            # The fork's version stamp asks git whether the tree is modified
+            # without refreshing file stat data first; a fresh checkout can
+            # then look modified and stamp the build with the `*` a modified
+            # tree gets, which no expectation predicts.
             BuildCommand(
                 f"{name}-refresh-index",
                 f"Refresh {source.name} file index",

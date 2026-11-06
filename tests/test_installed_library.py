@@ -209,6 +209,30 @@ class ConsumerIdentityTests(unittest.TestCase):
             self.identity(text)
         self.assertIn("2 'libbtbb loaded from:' lines", str(caught.exception))
 
+    def test_an_install_that_prints_no_path_passes_without_the_warning(self):
+        """Since #352 (fork #1230) there is no path line.
+
+        A libbtbb other than the one the tools were built against is a
+        warning instead, so the loader having reached this install is
+        established by that warning not being there.
+        """
+        text = (f"{VERSION_LINE}\n"
+                "Firmware version: no Ubertooth attached\n")
+
+        self.assertEqual(VERSION_LINE, self.identity(text))
+
+    def test_a_warning_about_another_libbtbb_is_refused(self):
+        text = (f"{VERSION_LINE}\n"
+                "warning: libbtbb was loaded from /usr/lib/libbtbb.so.1, not "
+                "the /opt/run/lib these tools were built against; packets may "
+                "decode differently\n"
+                "Firmware version: no Ubertooth attached\n")
+
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.identity(text)
+        self.assertIn("other than the one the install was built against",
+                      str(caught.exception))
+
 
 class PathTests(unittest.TestCase):
 
