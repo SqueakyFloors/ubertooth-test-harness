@@ -465,31 +465,40 @@ SHARED_TOOLS = frozenset({UTIL, BTLE})
 SERIAL = re.compile(r"[0-9a-fA-F]{32}")
 
 
-def shared_expectation(step_id: str):
+def shared_expectation(step_id: str, roles=()):
     """``(kind, options)`` a step with this ID must send to be the shared
     command, or None when the ID names no shared command.
 
     A test that drives two boards works the role into the ID, before it
     (`sender-restored-device-identity`) or inside it
-    (`read-original-sender-squelch`), so the ID is read whole, again
-    without a leading word, and again with one word taken out of the middle
-    of a `<verb>-<role>-<setting>` form.
+    (`read-original-sender-squelch`), so the ID is read whole and again
+    with the role taken out. ``roles`` is what the invocation binds, so
+    only a word that is one of ITS roles may be taken out: stripping any
+    word let a section's own step pass under a borrowed name, and
+    `read-original-debug-channel` is the one a reviewer found.
     """
     if not step_id:
         return None
-    candidates = [step_id, step_id.split("-", 1)[-1]]
+    candidates = [step_id]
+    words = {role.lower().replace(" ", "-") for role in roles}
+    for role in words:
+        if step_id.startswith(f"{role}-"):
+            candidates.append(step_id[len(role) + 1:])
     for candidate in tuple(candidates):
         for verb in ("read-original-", "restore-", "verify-restored-"):
-            if candidate.startswith(verb):
-                setting = candidate[len(verb):]
-                candidates.append(verb + setting.split("-", 1)[-1])
+            if not candidate.startswith(verb):
+                continue
+            setting = candidate[len(verb):]
+            for role in words:
+                if setting.startswith(f"{role}-"):
+                    candidates.append(verb + setting[len(role) + 1:])
     for candidate in candidates:
         if candidate in SHARED_COMMANDS:
             return SHARED_COMMANDS[candidate]
     return None
 
 
-def is_shared_command(step_id: str, argv) -> bool:
+def is_shared_command(step_id: str, argv, roles=()) -> bool:
     """Is this command one the shared transition block states?
 
     Only a step of a state-changing case can be: the shared block states
@@ -506,7 +515,7 @@ def is_shared_command(step_id: str, argv) -> bool:
         return False
     if len(words) < 4 or words[1] != "-U" or not SERIAL.fullmatch(words[2]):
         return False
-    expectation = shared_expectation(step_id)
+    expectation = shared_expectation(step_id, roles)
     if expectation is not None:
         # The ID says which shared command this is, so the command has to
         # be it.
@@ -616,7 +625,8 @@ def programs_by_test():
                 found.update(ran)
                 passed = _options(argv)
                 options.setdefault(invocation.test_name, set()).update(passed)
-                if not is_shared_command(step_id, argv):
+                if not is_shared_command(step_id, argv,
+                                         invocation.resources):
                     own.setdefault(invocation.test_name, set()).update(passed)
                     own_programs.setdefault(
                         invocation.test_name, set()).update(ran)
@@ -748,7 +758,11 @@ def _fence_words(lines):
     """
     for line in lines:
         for word in line.replace("|", " ").replace("#", " ").split():
-            yield word.strip(",;`.)([]")
+            # A colon too: `# -c: restore the channel` would otherwise
+            # read as `-c:`, a form of `-c` carrying a value, which is one
+            # way a comment could satisfy the per-form comparison of the
+            # transition block for a line somebody had deleted.
+            yield word.strip(",;`.:)([]")
 
 
 def programs_named(lines) -> set[str]:
@@ -785,6 +799,59 @@ def options_named(lines) -> set[tuple[str, str]]:
     """
     return {(program_name, option)
             for program_name, option, _word in _option_words(lines)}
+
+
+def _commands(lines):
+    """The commands a fenced block states, one list of words each.
+
+    A line that is a continuation (the line before ended in a backslash) or
+    only a comment belongs to the command above it. Comment text is cut
+    here, unlike everywhere else in this module: a comment states further
+    FORMS of the command beside it, which is the right thing to read when
+    comparing option sets and the wrong thing when comparing one command.
+    """
+    found: list[list[str]] = []
+    continued = False
+    for line in lines:
+        text = line.split("#", 1)[0]
+        starts = (not continued and line.strip()
+                  and not line.strip().startswith("#"))
+        continued = text.rstrip().endswith("\\")
+        words = text.replace("\\", " ").split()
+        if starts or not found:
+            found.append([])
+        found[-1].extend(word.strip(",;`.:)([]") for word in words)
+    return [words for words in found if words]
+
+
+def command_forms(lines) -> set[tuple[str, tuple[str, ...]]]:
+    """(program, the option names and subcommand it is given) per command.
+
+    Values are dropped, so `-U <serial> -v` and `--jlink <serial>` compare
+    as `-U -v` and `--jlink`; a word that is not an option is kept only
+    where a driver takes it as a subcommand, directly after the program.
+    Two lines that differ only in their comment therefore compare as one
+    command, which is what the preflight block's two `-v` reads are.
+    """
+    found = set()
+    for words in _commands(lines):
+        # The program is the first word that names one, so the interpreter
+        # in front of a harness driver's path is passed over exactly as a
+        # reader passes over it in the block.
+        start = next((index for index, word in enumerate(words)
+                      if program(word)), None)
+        if start is None:
+            continue
+        kept = []
+        for offset, word in enumerate(words[start + 1:]):
+            match = OPTION.match(word)
+            if match:
+                option = match.group("name").split("=", 1)[0]
+                kept.append(option if option.startswith("--") else option[:2])
+            elif offset == 0:
+                kept.append(word)
+        found.add((program(words[start]), tuple(kept)))
+    return found
 
 
 def _option_words(lines):
@@ -1010,8 +1077,9 @@ class DocumentedCommandTests(unittest.TestCase):
             paragraph,
             f'"{HOW_TO_READ}" must have a paragraph defining {PEER_PLACEHOLDER}',
         )
-        named = {word.strip(",.`") for word in paragraph.split()
-                 if word.strip(",.`").startswith("--")}
+        named = {word for word in (item.strip(",;`.:)([]") for item in
+                                   paragraph.split())
+                 if word.startswith("--")}
         self.assertEqual(
             sorted(declared), sorted(named),
             f"the {PEER_PLACEHOLDER} paragraph and what the blocks collapse "
@@ -1221,20 +1289,29 @@ class DocumentedCommandTests(unittest.TestCase):
                 resource = registry.get(alias)
                 argvs.append(build(1, "Host_Linux", resource, revision).argv)
 
-        built = set()
+        built = command_forms(
+            [" ".join(argv).replace("#", "") for argv in argvs]
+        )
         programs = set()
         for argv in argvs:
-            built |= _options(argv)
             programs |= set(filter(None, (program(w) for w in _words(argv))))
         lines = shared_fences(self.sections[SHARED])["preflight"]
-        named = options_named(lines)
+        named = command_forms(lines)
+
+        def described(forms):
+            return sorted(f"{prog} {' '.join(words)}" for prog, words in forms)
+
+        # Per command, not per option: the distinguishing part of a
+        # preflight read is its selector rather than a value, so comparing
+        # option names let one line of the block stand in for another and
+        # four of its seven lines could be deleted unremarked.
         self.assertEqual(
-            [], sorted(f"{prog} {option}" for prog, option in built - named),
-            "preflight sends these and the preflight block does not name them",
+            [], described(built - named),
+            "preflight sends these and the preflight block does not state them",
         )
         self.assertEqual(
-            [], sorted(f"{prog} {option}" for prog, option in named - built),
-            "the preflight block names an option preflight does not send",
+            [], described(named - built),
+            "the preflight block states a command preflight does not send",
         )
         self.assertEqual([], sorted(programs - programs_named(lines)))
         self.assertEqual([], sorted(programs_named(lines) - programs))
@@ -1347,7 +1424,8 @@ class DocumentedCommandTests(unittest.TestCase):
             # from a setter.
             ("read-original-squelch", ("ubertooth-util", "-U", serial, "-z")),
             ("restore-squelch", ("ubertooth-util", "-U", serial, "-z-120")),
-            # A two-board test works the role into the ID.
+            # A two-board test works the role into the ID, and the role
+            # has to be one the invocation binds.
             ("sender-read-original-crc", ("ubertooth-btle", "-U", serial, "-k")),
             ("responder-restored-device-identity",
              ("ubertooth-util", "-U", serial, "-s")),
@@ -1389,6 +1467,11 @@ class DocumentedCommandTests(unittest.TestCase):
             ("by-index", ("ubertooth-util", "-U", "0", "-z")),
             # More on the line than the shared read.
             ("read-back", ("ubertooth-util", "-U", serial, "-s", "-C")),
+            # A word that is not one of this invocation's roles, which is
+            # how a section's own step could take a shared name:
+            # `Debug registers` binds no `debug` role.
+            ("read-original-debug-channel",
+             ("ubertooth-util", "-U", serial, "-C")),
             # A bare read a section makes for a check of its own: the
             # shared block states the same command, but the section is
             # what says why it reads it there.
@@ -1398,12 +1481,15 @@ class DocumentedCommandTests(unittest.TestCase):
             # A command case, which has no step at all.
             ("", ("ubertooth-util", "-U", serial, "-S")),
         ]
+        # The roles a two-board invocation binds, which is what may be
+        # taken out of a step ID.
+        roles = ("sender", "responder")
         for step_id, argv in shared:
             with self.subTest(step_id, argv=argv):
-                self.assertTrue(is_shared_command(step_id, argv))
+                self.assertTrue(is_shared_command(step_id, argv, roles))
         for step_id, argv in own:
             with self.subTest(step_id, argv=argv):
-                self.assertFalse(is_shared_command(step_id, argv))
+                self.assertFalse(is_shared_command(step_id, argv, roles))
 
 
 if __name__ == "__main__":

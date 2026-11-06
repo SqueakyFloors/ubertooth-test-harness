@@ -49,13 +49,17 @@ with the tool it wraps; the interpreter in front of it is the harness's own
 environment and is left out.
 
 `<peer options>` is the one placeholder several sections share. It is the
-eleven options every `esp32peer.py` session carries to bring the pair's link
-up: `--acceptor`, `--acceptor-address`, `--acceptor-alias`, `--initiator`,
+eleven options an `esp32peer.py stream` session carries to bring the pair's
+link up and stream across it: `--acceptor`, `--acceptor-address`, `--acceptor-alias`, `--initiator`,
 `--initiator-address`, `--initiator-alias`, `--period`, `--payload`,
 `--min-seconds`, `--min-writes`, and `--timeout`. "Capture known Classic
 device" writes them out with values; every later section collapses them,
 because what differs between those tests is the tool inside the session and
-not the session.
+not the session. `esp32peer.py audio` holds the link without streaming
+across it, so its session carries the eight that bring the link up and name
+the boards and none of the three stream settings (`--payload`, `--period`,
+`--min-writes`); the placeholder stands for that session's own eight where
+it is written on an `audio` line.
 
 The commands every transition case shares (the
 idle stop, the reads it records, the restores, and the guard reads) are in
