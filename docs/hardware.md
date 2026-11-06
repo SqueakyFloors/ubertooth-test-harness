@@ -731,9 +731,13 @@ Neither is a required check, because each image is gigabytes. The peer step
 builds once and compares nothing: nothing in the harness flashes an ESP32
 peer, so a missing version bump fails a run on the bench rather than leaving
 the old image in place with nothing to say so. It does check that the image
-carries `UTESP_FW_VERSION`, that every setting `sdkconfig.defaults` asks for
-came back out of Kconfig as it was asked for, and that the build warned
-about none of the firmware's own files.
+carries `UTESP_FW_VERSION`; that each setting `sdkconfig.defaults` asks for
+by value came back out of Kconfig verbatim and each one it asks to stay off
+did not come back on; and that neither configuring nor building warned about
+the firmware's own files, which is also what catches a withdrawn option that
+now disables nothing. The
+[firmware README](../firmware/esp32-classic-peer/README.md#without-installing-the-sdk)
+has the whole rule, and what it does not reach.
 
 ### Which Ubertooth firmware, and why
 

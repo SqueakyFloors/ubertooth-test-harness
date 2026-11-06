@@ -93,18 +93,32 @@ IDF_WORKSPACE=~/idf-ci scripts/ci.sh firmware-esp32   # keep the build directory
 IDF_IMAGE=idf-local:test scripts/ci.sh firmware-esp32 # another toolchain image
 ```
 
-It copies these sources into the workspace, configures them for `esp32`,
-builds them, and then checks three things: that every setting
-`sdkconfig.defaults` asks for came back out of Kconfig as it was asked for
-(an option that was renamed or withdrawn is otherwise ignored with a warning
-nobody reads, and the image runs with another radio, log, or partition
-configuration than this directory describes), that the build warned about
-none of the files in this directory, and that the image carries
-`UTESP_FW_VERSION`, which is the string a peer's shell reports and a run
-checks it by. ESP-IDF's own warnings are left alone: they are Espressif's to
-fix, not this repository's. The repository is mounted read-only, so a build
-writes nothing into the working tree, and the copy is what `set-target`
-writes `sdkconfig` into.
+It copies these sources into the workspace, configures them for `esp32`, and
+builds them. The copy is what `set-target` writes `sdkconfig` into; the
+repository itself is mounted read-only.
+
+Then it checks three things. **The resolved configuration**, because an
+option that was renamed or withdrawn is otherwise ignored and the image then
+runs with another radio, log, or partition configuration than this directory
+describes, which no compiler can catch. The two polarities are checked
+differently, since Kconfig writes them differently: a default that asks for a
+value (`=y`, or a number) must come back verbatim, and a default written `=n`
+must not come back as `=y`. Demanding a line for a disabled option would fail
+on a correct resolution, because Kconfig writes one as a comment and may
+leave a disabled member of a choice out altogether. What that leaves is an
+`=n` option that was withdrawn, which disables nothing; the warning check
+catches it, because the line ESP-IDF prints about a symbol it does not know
+names this directory's own `sdkconfig.defaults`.
+
+**A warning about this directory's own files**, from configuring or from
+building. ESP-IDF's own warnings are left alone, being Espressif's to fix and
+not this repository's; a message counts when it names a path inside the copy
+of these sources, which every spelling of such a path holds and no ESP-IDF
+path does. A warning that names only something in the build directory, a
+linked object among them, is outside that.
+
+**The firmware version**: the image must carry `UTESP_FW_VERSION`, the string
+a peer's shell reports and a run checks it by.
 
 The sources are built once and compared with nothing. The DK's step builds
 the commit a pull request is against as well, because `nrfdk.py ensure`
@@ -113,7 +127,10 @@ the version left alone would never reach a board. Nothing in the harness
 flashes a peer: a run fails when a peer reports a version older than the
 test needs, so there a missing bump is loud on the bench instead of silent.
 The image's SHA-256 is printed and compared with nothing either, since this
-image is not reproducible (its error checks carry their own line numbers);
+image is not reproducible: ESP-IDF's `CONFIG_APP_REPRODUCIBLE_BUILD` is off
+by default and this firmware does not ask for it, so the image carries a
+compile date and time, and these sources also hold the line numbers their
+error checks report.
 [`docs/hardware.md`](../../docs/hardware.md) records the hash of the image a
 bench was flashed with, for that bench to confirm its copy.
 

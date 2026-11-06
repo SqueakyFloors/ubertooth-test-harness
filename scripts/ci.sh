@@ -835,8 +835,9 @@ run_firmware_dk() {
 # carries under the ESP-IDF license for use with Espressif hardware; it is
 # pulled and never committed or republished, and no image built here is
 # published either. The firmware README's License section covers what a built
-# image links. Needs docker; IDF_WORKSPACE keeps the sources and the build
-# directory across runs, and IDF_IMAGE replaces the image.
+# image links. Needs docker; IDF_WORKSPACE keeps the toolchain's own build
+# directory across runs (the sources are copied again every time), and
+# IDF_IMAGE replaces the image.
 #
 # This is not part of `all`: the image is gigabytes and the firmware changes
 # rarely, so the ESP32 peer firmware workflow runs it on a change under
@@ -865,20 +866,28 @@ run_firmware_esp32() {
     workspace=${IDF_WORKSPACE:-$WORK/esp}
     # The sources every build compiles, copied out of the read-only mount:
     # `idf.py set-target` writes the resolved configuration into the project
-    # directory, and the working tree is not a build's to write to.
+    # directory, and the working tree is not a build's to write to. The copy
+    # is made again on every run; IDF_WORKSPACE keeps the toolchain's own
+    # build directory across runs, which is what costs time to rebuild.
     src=$workspace/utesp-src
     build=$workspace/utesp-build
     bin=$build/esp32-classic-peer.bin
-    log=$workspace/build.log
+    log=$workspace/toolchain.log
+    # What every path of these sources holds, in an absolute path and in one
+    # spelled from the build directory alike, and what no ESP-IDF path holds:
+    # how a compiler message is attributed below.
+    marker=${src##*/}/
     mkdir -p "$workspace"
+    : > "$log"
 
     # Every toolchain command runs in that image, whose entry point puts the
     # pinned tools on PATH and activates ESP-IDF's own Python environment
-    # before running what it is given. The repository is mounted read-only,
-    # so a build cannot write into the working tree, and everything written
-    # goes to the workspace. git is told the mounted tree is safe to use,
-    # since the container is root and the directory belongs to whoever ran
-    # this.
+    # before running what it is given. Everything written goes to the
+    # workspace. The repository is mounted read-only as a precaution rather
+    # than a need: the sources are copied on the host and no command here
+    # reads under it, so a command that did could not write to the working
+    # tree. git is told the mounted tree is safe to use, since the container
+    # is root and the directory belongs to whoever ran this.
     esp() {
         docker run --rm \
             -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory \
@@ -887,45 +896,102 @@ run_firmware_esp32() {
             "$image" bash -c "$1"
     }
 
+    # A toolchain command whose output the warning check below reads, kept in
+    # one file while it still reaches the job log as it arrives. The
+    # command's own status comes from a file: sh has no pipefail, so a
+    # pipeline's status is tee's, and the `if` is what keeps set -e from
+    # ending the script on a command that failed.
+    code=$workspace/.toolchain-exit
+    esp_logged() {
+        rm -f "$code"
+        { if esp "$1"; then echo 0 > "$code"; else echo $? > "$code"; fi; } \
+            2>&1 | tee -a "$log"
+        if [ ! -f "$code" ]; then
+            echo "error: a toolchain command did not report a status" >&2
+            return 1
+        fi
+        return "$(cat "$code")"
+    }
+
     step "ESP-IDF $version toolchain ($image)"
-    esp 'idf.py --version; cmake --version | head -1; xtensa-esp32-elf-gcc --version | head -1'
+    # set -e, so a missing idf.py ends this rather than being read as a
+    # toolchain that answered. The two version lines that go through `head`
+    # report its status instead; a compiler that is not there is caught by
+    # the configure and build steps a moment later.
+    esp 'set -e; idf.py --version; cmake --version | head -1; xtensa-esp32-elf-gcc --version | head -1'
 
     step "the peer sources, in the one place every build compiles them from"
-    rm -rf "$src"
+    rm -rf "$src" "$build"
     mkdir -p "$src"
     cp -R "$repo/$ESP_FIRMWARE/." "$src/"
     # What a developer's tree may hold beside the sources, all of it
     # generated and all of it git-ignored: `set-target` writes the resolved
     # configuration here, and this step judges the one this ESP-IDF resolves
-    # rather than one left over from another.
+    # rather than one left over from another. The build directory is removed
+    # above as well, so no check below can be satisfied by an older image.
     rm -rf "$src/build" "$src/sdkconfig" "$src/sdkconfig.old"
     ls "$src"
 
     step "configure $ESP_FIRMWARE for $ESP_TARGET"
-    esp "idf.py -C $src -B $build set-target $ESP_TARGET"
+    if ! esp_logged "idf.py -C '$src' -B '$build' set-target $ESP_TARGET"; then
+        echo "error: $ESP_FIRMWARE did not configure with ESP-IDF $version" >&2
+        return 1
+    fi
 
-    # Every default that is not a plain `=n` has to come back out of Kconfig
-    # verbatim. An option that was renamed or withdrawn is otherwise ignored
-    # with a warning nobody reads, and the image then builds and runs with
-    # another radio, log, or partition configuration than this directory
-    # asks for, which no compiler can catch. `=n` defaults are left out of
-    # the comparison: Kconfig writes a disabled option as a comment, and a
-    # disabled member of a choice may not be written at all.
+    # What Kconfig made of the defaults this firmware sets. An option that
+    # was renamed or withdrawn is otherwise ignored, and the image then
+    # builds and runs with another radio, log, or partition configuration
+    # than this directory describes, which no compiler can catch.
+    #
+    # The two polarities are checked differently, because Kconfig writes them
+    # differently. A default that asks for a value (`=y`, or a number) has to
+    # come back verbatim. A default written `=n` is checked the other way
+    # round, that the option did not come back on: Kconfig writes a disabled
+    # option as a comment rather than as `=n`, and a disabled member of a
+    # choice may not be written at all, so demanding a line would fail on a
+    # correct resolution while demanding its absence cannot. What that leaves
+    # is an `=n` option that was withdrawn, which disables nothing and is
+    # caught by the warning check below: the configure output names this
+    # directory's own sdkconfig.defaults in the line it prints about a symbol
+    # it does not know.
     step "the resolved configuration holds every default this firmware sets"
     wanted=$workspace/wanted
+    unwanted=$workspace/unwanted
     missing=$workspace/missing
-    grep -E '^CONFIG_[A-Z0-9_]+=' "$src/sdkconfig.defaults" | grep -v '=n$' \
-        > "$wanted" || [ $? = 1 ]
-    if [ ! -s "$wanted" ]; then
+    resolved=$src/sdkconfig
+    if [ ! -f "$src/sdkconfig.defaults" ]; then
+        echo "error: $ESP_FIRMWARE holds no sdkconfig.defaults, so it is not" \
+             "the firmware directory it was" >&2
+        return 1
+    fi
+    if [ ! -f "$resolved" ]; then
+        echo "error: configuring left no sdkconfig in $src, so there is no" \
+             "resolved configuration to check" >&2
+        return 1
+    fi
+    grep -E '^CONFIG_[A-Z0-9_]+=' "$src/sdkconfig.defaults" > "$wanted.all" \
+        || [ $? = 1 ]
+    grep -v '=n$' "$wanted.all" > "$wanted" || [ $? = 1 ]
+    grep '=n$' "$wanted.all" > "$unwanted" || [ $? = 1 ]
+    if [ ! -s "$wanted.all" ]; then
         echo "error: $ESP_FIRMWARE/sdkconfig.defaults sets nothing this step" \
              "can check, so it is not the defaults file it was" >&2
         return 1
     fi
     : > "$missing"
     while IFS= read -r setting; do
-        grep -qxF "$setting" "$src/sdkconfig" ||
+        grep -qxF "$setting" "$resolved" ||
             printf '%s\n' "$setting" >> "$missing"
     done < "$wanted"
+    # The same loop for the other polarity: these must not have come back on.
+    # An `if`, not an `&&` list, whose failing first command set -e would
+    # read as this step's own failure.
+    while IFS= read -r setting; do
+        on="${setting%=n}=y"
+        if grep -qxF "$on" "$resolved"; then
+            printf '%s (it resolved to %s)\n' "$setting" "$on" >> "$missing"
+        fi
+    done < "$unwanted"
     if [ -s "$missing" ]; then
         cat "$missing" >&2
         echo "error: ESP-IDF $version did not resolve the settings above as" \
@@ -934,48 +1000,29 @@ run_firmware_esp32() {
              "flashing an image configured some other way" >&2
         return 1
     fi
-    echo "all $(wc -l < "$wanted" | tr -d ' ') of them"
+    echo "all $(wc -l < "$wanted" | tr -d ' ') asked for by value, and" \
+         "$(wc -l < "$unwanted" | tr -d ' ') asked to stay off"
 
     step "build $ESP_FIRMWARE for $ESP_TARGET"
-    # The output is kept for the warning check below while it still reaches
-    # the job log as it arrives. The build's own status comes from a file:
-    # sh has no pipefail, so the pipeline's status is tee's, and the `if`
-    # is what keeps set -e from ending the script on a build that failed.
-    code=$workspace/.build-exit
-    rm -f "$code"
-    { if esp "idf.py -C $src -B $build build"
-      then echo 0 > "$code"
-      else echo $? > "$code"
-      fi; } 2>&1 | tee "$log"
-    if [ ! -f "$code" ]; then
-        echo "error: the build did not report a status" >&2
-        return 1
-    fi
-    if [ "$(cat "$code")" != 0 ]; then
+    if ! esp_logged "idf.py -C '$src' -B '$build' build"; then
         echo "error: $ESP_FIRMWARE did not build with ESP-IDF $version" >&2
         return 1
     fi
 
-    # A compiler warning about the peer's own sources. ESP-IDF's own
-    # warnings are Espressif's and not this repository's to fix, so a line
-    # counts only when it names one of these files, by directory and name
-    # together so that it counts whether the compiler spelled the path from
-    # the root or from the build directory.
+    # A warning about this directory's own files, from configuring or from
+    # building. ESP-IDF's own warnings are Espressif's and not this
+    # repository's to fix, so a line counts only when it names a path inside
+    # the copy of these sources, which every spelling of such a path holds
+    # and no ESP-IDF path does. What that cannot see is a warning that names
+    # only something in the build directory, a linked object among them.
     step "no compiler warning in the peer's own sources"
-    ours=$workspace/ours
     warnings=$workspace/warnings
     hits=$workspace/warning-hits
-    (cd "$src" && find . -name '*.c' -o -name '*.h') | sed 's/^\.//' > "$ours"
-    if [ ! -s "$ours" ]; then
-        echo "error: no C sources in $src, so a warning in them could not" \
-             "be found" >&2
-        return 1
-    fi
     grep -F 'warning:' "$log" > "$warnings" || [ $? = 1 ]
-    grep -F -f "$ours" "$warnings" > "$hits" || [ $? = 1 ]
+    grep -F "$marker" "$warnings" > "$hits" || [ $? = 1 ]
     if [ -s "$hits" ]; then
         cat "$hits" >&2
-        echo "error: the build warned about the lines above in" \
+        echo "error: the toolchain warned about the lines above in" \
              "$ESP_FIRMWARE, which is built with none of them: fix them, or" \
              "say in the source why the warning is the right answer" >&2
         return 1
@@ -988,7 +1035,8 @@ run_firmware_esp32() {
     # test keeps that pin and this header in step; this is the other half,
     # that the built image carries it.
     step "the image carries the pinned firmware version"
-    fw=$(sed -n 's/^#define UTESP_FW_VERSION "\(.*\)".*/\1/p' "$src/main/peer.h")
+    fw=$(sed -n 's/^#define UTESP_FW_VERSION "\([^"]*\)".*/\1/p' \
+        "$src/main/peer.h")
     if [ -z "$fw" ]; then
         echo "error: no UTESP_FW_VERSION in $ESP_FIRMWARE/main/peer.h" >&2
         return 1
@@ -1005,11 +1053,13 @@ run_firmware_esp32() {
     fi
     echo "firmware version: $fw"
 
-    # Printed and compared with nothing. This image is not reproducible: its
-    # error checks carry their own line numbers, so a comment added above one
-    # of them gives another hash for the same version. docs/hardware.md
-    # records the hash of the image a bench was flashed with, for that bench
-    # to confirm its copy, and a build here is not that image.
+    # Printed and compared with nothing. ESP-IDF's reproducible-build option
+    # is off by default and this firmware does not ask for it, so the image
+    # carries a compile date and time and two builds of one tree differ;
+    # these sources also hold the line numbers their error checks report.
+    # docs/hardware.md records the hash of the image a bench was flashed
+    # with, for that bench to confirm its copy, and a build here is not that
+    # image.
     step "the image this build produced"
     if command -v sha256sum > /dev/null 2>&1; then
         sha256sum "$bin"

@@ -3786,12 +3786,15 @@ it needs ESP-IDF, so it builds in Espressif's own image for the version
 writes the resolved configuration into the project directory and the working
 tree is mounted read-only. Then it checks that the image carries
 `UTESP_FW_VERSION`, the string a peer's shell reports and a run checks it by;
-that every setting `sdkconfig.defaults` asks for came back out of Kconfig as
-it was asked for, since an option that was renamed or withdrawn is otherwise
-ignored with a warning nobody reads and the image runs with another radio,
-log, or partition configuration than its sources describe; and that the build
-warned about none of that directory's own files, ESP-IDF's own warnings being
-Espressif's to fix rather than this repository's.
+that each setting `sdkconfig.defaults` asks for by value came back out of
+Kconfig verbatim and each one it asks to stay off did not come back on, since
+an option that was renamed or withdrawn is otherwise ignored and the image
+then runs with another radio, log, or partition configuration than its
+sources describe; and that neither configuring nor building warned about that
+directory's own files, ESP-IDF's own warnings being Espressif's to fix rather
+than this repository's. That last check is also what catches a withdrawn
+option the configuration check cannot see, since the line ESP-IDF prints
+about a symbol it does not know names the firmware's own defaults file.
 
 It builds once and compares nothing with another commit, because nothing in
 the harness flashes a peer: a run fails when a peer reports a version older
@@ -3802,9 +3805,11 @@ printed and compared with nothing either: this image is not reproducible, so
 for that bench to confirm its copy. That toolchain image is several
 gigabytes, so this workflow too runs only on a change under
 `firmware/esp32-classic-peer` (or to `scripts/ci.sh` or the workflow itself),
-weekly, and on request, and it is not a required check; it is a workflow of
-its own because GitHub filters paths per workflow, so a DK change would
-otherwise pull Espressif's image and a peer change Nordic's.
+weekly, and on request, and it is not a required check. It is a workflow of
+its own because GitHub filters paths per workflow: a change confined to one
+firmware directory then pulls only that vendor's image, where one job for
+both would always pull both. A `scripts/ci.sh` change still starts both, and
+is meant to, since either firmware step can be the one it breaks.
 `scripts/ci.sh firmware-esp32` is the same build on any host with docker, and
 `scripts/local-ci.sh firmware-esp32` runs it against an exact commit.
 

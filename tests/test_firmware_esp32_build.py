@@ -49,10 +49,12 @@ IMAGE = f"espressif/idf:{IDF_VERSION}"
 # project directory, `build` the image in the build directory.
 #
 # $FAKE_SDKCONFIG replaces the configuration `set-target` resolves, which is
-# how a test drops a setting the defaults file asks for.
-# $FAKE_BUILD_OUTPUT is a file of lines the build prints, for the warning
-# check. $FAKE_BIN_PAYLOAD is the image every build leaves, and
-# $FAKE_DOCKER_EXIT fails the build like one that does not compile.
+# how a test drops a setting the defaults file asks for or turns one on that
+# it asks to stay off. $FAKE_CONFIGURE_OUTPUT and $FAKE_BUILD_OUTPUT are
+# files of lines those two stages print, for the warning check.
+# $FAKE_BIN_PAYLOAD is the image every build leaves. $FAKE_CONFIGURE_EXIT and
+# $FAKE_DOCKER_EXIT fail those two stages, like sources that do not configure
+# or do not compile.
 FAKE_DOCKER = textwrap.dedent("""\
     #!/bin/sh
     printf '%s\\n' "$*" >> "$FAKE_LOG"
@@ -61,6 +63,11 @@ FAKE_DOCKER = textwrap.dedent("""\
     project=${project%% *}
     out=${all##*-B }
     out=${out%% *}
+    # The step quotes those two paths inside the string it hands `bash -c`,
+    # so that a workspace with a space in its name reaches idf.py whole; the
+    # shell in the container strips the quotes, and so does this.
+    project=$(printf '%s' "$project" | sed "s/^'//; s/'$//")
+    out=$(printf '%s' "$out" | sed "s/^'//; s/'$//")
     case "$all" in
         *set-target*)
             if [ -n "${FAKE_SDKCONFIG:-}" ]; then
@@ -73,6 +80,9 @@ FAKE_DOCKER = textwrap.dedent("""\
                     sed -e 's/^\\(CONFIG_[A-Z0-9_]*\\)=n$/# \\1 is not set/' \\
                     > "$project/sdkconfig"
             fi
+            [ -z "${FAKE_CONFIGURE_OUTPUT:-}" ] || cat "$FAKE_CONFIGURE_OUTPUT"
+            code=${FAKE_CONFIGURE_EXIT:-0}
+            [ "$code" = 0 ] || exit "$code"
             mkdir -p "$out" ;;
         *" build"*)
             builds=$(cat "$FAKE_BUILDS" 2>/dev/null || echo 0)
@@ -169,8 +179,10 @@ class FirmwareStepTests(unittest.TestCase):
         # Out of tree, from a copy of this tree's sources: `set-target`
         # writes the resolved configuration into the project directory, and
         # the working tree is mounted read-only.
-        self.assertIn(f"-C {self.workspace}/utesp-src", build)
-        self.assertIn(f"-B {self.workspace}/utesp-build", build)
+        # Quoted inside the string the container's shell runs, so a
+        # workspace with a space in its name reaches idf.py whole.
+        self.assertIn(f"-C '{self.workspace}/utesp-src'", build)
+        self.assertIn(f"-B '{self.workspace}/utesp-build'", build)
         self.assertEqual(
             (FIRMWARE / "main" / "peer.h").read_text(),
             (self.workspace / "utesp-src" / "main" / "peer.h").read_text())
@@ -180,10 +192,14 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertIn("firmware-esp32 passed", result.stdout)
 
     def test_the_repository_is_mounted_read_only(self):
-        # A build that could write into the working tree would leave the
-        # repository dirty; nothing under firmware/ is generated.
-        self.run_step()
+        # A precaution rather than a need: the sources are copied on the
+        # host, so no command reads under the mount. A command that did
+        # could not write into the working tree, and nothing under firmware/
+        # is generated.
+        result = self.run_step()
 
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertTrue(self.commands())
         for command in self.commands():
             self.assertIn(f"-v {REPO}:{REPO}:ro", command)
 
@@ -203,6 +219,13 @@ class FirmwareStepTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual(1, len(self.builds()), self.builds())
+
+    def test_a_configure_failure_fails_the_step(self):
+        result = self.run_step(FAKE_CONFIGURE_EXIT="2")
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("did not configure with ESP-IDF", result.stderr)
+        self.assertEqual(0, len(self.builds()), self.builds())
 
     def test_a_build_failure_fails_the_step(self):
         result = self.run_step(FAKE_DOCKER_EXIT="1")
@@ -228,7 +251,7 @@ class FirmwareStepTests(unittest.TestCase):
 
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn(warning, result.stderr)
-        self.assertIn("the build warned about the lines above in "
+        self.assertIn("the toolchain warned about the lines above in "
                       "firmware/esp32-classic-peer", result.stderr)
 
     def test_a_warning_named_by_a_path_from_the_build_directory_counts(self):
@@ -241,6 +264,63 @@ class FirmwareStepTests(unittest.TestCase):
 
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn(warning, result.stderr)
+
+    def test_a_configure_warning_about_the_peers_own_files_fails_the_step(self):
+        # The one line that catches a default this step cannot check for
+        # itself: a setting that was withdrawn and so disables nothing. The
+        # line names this directory's own defaults file.
+        warning = (f"warning: unknown kconfig symbol "
+                   f"'CONFIG_BT_HFP_WBS_ENABLE' assigned to 'n' in "
+                   f"{self.workspace}/utesp-src/sdkconfig.defaults")
+        result = self.run_step(
+            FAKE_CONFIGURE_OUTPUT=self.build_output(warning))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn(warning, result.stderr)
+        self.assertIn("the toolchain warned about the lines above in "
+                      "firmware/esp32-classic-peer", result.stderr)
+
+    def test_a_default_that_resolved_on_instead_of_off_fails_the_step(self):
+        # The polarity Kconfig does not write as a line: BLE is off in this
+        # firmware so the whole radio goes to Classic, and an image with it
+        # on is not the one these sources describe.
+        defaults = (FIRMWARE / "sdkconfig.defaults").read_text().splitlines()
+        resolved = self.directory / "sdkconfig"
+        resolved.write_text("".join(
+            f"{line}\n" if not line.endswith("=n")
+            else f"{line[:-1]}y\n" if line.startswith("CONFIG_BT_BLE_ENABLED")
+            else f"# {line.split('=')[0]} is not set\n"
+            for line in defaults if line.startswith("CONFIG_")))
+
+        result = self.run_step(FAKE_SDKCONFIG=str(resolved))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("CONFIG_BT_BLE_ENABLED=n (it resolved to "
+                      "CONFIG_BT_BLE_ENABLED=y)", result.stderr)
+        self.assertIn("did not resolve the settings above", result.stderr)
+        self.assertEqual(0, len(self.builds()), self.builds())
+
+    def test_a_default_asked_to_stay_off_and_left_out_passes(self):
+        # Kconfig writes a disabled option as a comment, and a disabled
+        # member of a choice may not be written at all, so demanding a line
+        # for it would fail on a correct resolution.
+        defaults = (FIRMWARE / "sdkconfig.defaults").read_text().splitlines()
+        resolved = self.directory / "sdkconfig"
+        resolved.write_text("".join(
+            f"{line}\n" for line in defaults
+            if line.startswith("CONFIG_") and not line.endswith("=n")))
+
+        result = self.run_step(FAKE_SDKCONFIG=str(resolved))
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_a_configuration_that_was_not_written_fails_with_its_own_reason(self):
+        absent = self.directory / "no-such-sdkconfig"
+
+        result = self.run_step(FAKE_SDKCONFIG=str(absent))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("configuring left no sdkconfig", result.stderr)
 
     def test_a_warning_in_esp_idfs_own_sources_does_not_fail_the_step(self):
         # Those are Espressif's to fix, not this repository's, and failing on
@@ -285,10 +365,15 @@ class FirmwareStepTests(unittest.TestCase):
         result = self.run_step()
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        wanted = [line for line in
-                  (FIRMWARE / "sdkconfig.defaults").read_text().splitlines()
-                  if line.startswith("CONFIG_") and not line.endswith("=n")]
-        self.assertIn(f"all {len(wanted)} of them", result.stdout)
+        settings = [line for line in
+                    (FIRMWARE / "sdkconfig.defaults").read_text().splitlines()
+                    if line.startswith("CONFIG_")]
+        off = [line for line in settings if line.endswith("=n")]
+        # Both polarities are counted, so a defaults file that grew a setting
+        # this step does not look at shows up here.
+        self.assertIn(f"all {len(settings) - len(off)} asked for by value, "
+                      f"and {len(off)} asked to stay off", result.stdout)
+        self.assertTrue(off, settings)
 
     def test_a_default_the_resolved_configuration_drops_fails_the_step(self):
         # An option that was renamed or withdrawn is ignored with a warning
@@ -339,16 +424,31 @@ class FirmwareStepTests(unittest.TestCase):
             self.assertIn("idf-local:test", command)
             self.assertNotIn(IMAGE, command)
 
-    def test_a_developers_build_directory_is_not_carried_into_the_build(self):
-        # Both are git-ignored products of a local build, and a stale
-        # configuration would make the check above judge another ESP-IDF's
-        # resolution.
-        self.run_step()
+    def test_the_build_compiles_the_configuration_this_run_resolved(self):
+        # The copy the build compiles holds the sdkconfig configuring just
+        # wrote, and nothing from an earlier build of it.
+        result = self.run_step()
 
-        copied = self.workspace / "utesp-src"
-        self.assertFalse((copied / "build").exists())
-        self.assertFalse((copied / "sdkconfig").is_dir())
-        self.assertNotIn("./sdkconfig.old", self.compiled(1))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        files = self.compiled(1)
+        self.assertIn("./sdkconfig", files)
+        self.assertNotIn("./sdkconfig.old", files)
+        self.assertEqual([], [name for name in files
+                              if name.startswith("./build/")], files)
+
+    def test_a_local_builds_leftovers_are_removed_before_configuring(self):
+        # A developer's tree may hold these three, all git-ignored products
+        # of a local build: a stale configuration would make the check above
+        # judge another ESP-IDF's resolution, and a stale image could satisfy
+        # the version check. They cannot be seeded here, because the step
+        # copies from this repository's own working tree and seeding them
+        # would dirty it, so this reads the script.
+        text = CI.read_text()
+        self.assertIn(
+            'rm -rf "$src/build" "$src/sdkconfig" "$src/sdkconfig.old"', text)
+        # And the build directory itself, so no check can be satisfied by the
+        # image an earlier run with the same IDF_WORKSPACE left.
+        self.assertIn('rm -rf "$src" "$build"', text)
 
     def test_the_firmware_build_is_not_part_of_the_other_check_sets(self):
         # It needs docker and gigabytes of downloads: `all` must stay the
