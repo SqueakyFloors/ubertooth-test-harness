@@ -60,6 +60,8 @@ READ_TIMEOUT_S = 10.0
 def record_argv(serial: str) -> tuple[str, ...]:
     """The firmware watchdog record read of one board."""
     return ("ubertooth-util", "-U", serial, "-w")
+
+
 # How long a long test runs between reads. Reads happen between cases, never
 # beside a running command, so a test whose cases are longer than this is read
 # as often as its cases allow.

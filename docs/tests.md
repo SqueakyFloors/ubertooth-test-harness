@@ -2169,7 +2169,7 @@ did), and `capturefile.py` reads what was kept:
 
 ```text
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -r <case dir>/new.pcapng \
-    -q <case dir>/new.pcap -d <case dir>/new.dump
+    -q <case dir>/kept.pcap -d <case dir>/new.dump
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -r <case dir>/new.pcapng -q <case dir>/kept.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -c <case dir>/new-ppi.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump -d <case dir>/new.dump      # and a seeded file
@@ -2878,8 +2878,7 @@ firmware, so the run holds the host lock.
 one capture across the whole window and `conncapture.py` reading it:
 
 ```text
-nrfdk.py identify|ensure|peripheral|central|status|idle --jlink <jlink serial> \
-    --alias <alias> ...
+nrfdk.py identify|ensure|peripheral|central|status|idle ... --jlink <jlink serial> --alias <alias>
 ubertooth-btle -U <serial> -f -A37 -r <case dir>/capture-<n>.pcapng
 conncapture.py <case dir>/capture-<n>.pcapng --central <address> --peripheral <address> \
     --interval-units <n> --latency 0 --timeout-units 400 --min-data-packets 5 \
@@ -4262,7 +4261,7 @@ sees short captures should widen `BOARD_SETUP_S` rather than the duration.
 paths.
 
 **Theory of operation.** Not established. `Host CLI surface` covers `-h` and
-`-V` on every tool the build installs, and `Help smoke` covers the
+`-V` on every C host tool the fork builds, and `Help smoke` covers the
 single-tool case.
 
 **Hardware and arguments.** No board role. `hosts:` only.
@@ -4488,7 +4487,8 @@ reads the flash back; `ubertooth-dfu` is the tool under test:
 ```text
 ubertooth-dfu -U <serial> -d <test image> -r
 ubertooth-dfu -U <serial> -u <case dir>/readback.bin -r
-ubertooth-dfu -U <serial> -s <case dir>/image.bin        # and a .dfu, refused
+ubertooth-dfu -s <case dir>/image.bin                    # and a .dfu, refused:
+                                                         # signing needs no board
 ubertooth-dfu -U <serial> -d <case dir>/<variant>.dfu -r # each bad image, refused
 dfuimage.py make|strip|copy|same|absent ...
 dfuimage.py check-readback <case dir>/readback.bin <test image> --reported <read-back range>

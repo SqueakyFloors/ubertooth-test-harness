@@ -123,17 +123,30 @@ WRAPPERS = frozenset({"env", "sh", "bash", "timeout", "python", "python3",
 # collapsed form covers, so the forward check knows the block does document
 # them. Written down here rather than assumed, so a block cannot hide an
 # option behind a placeholder nobody declared.
-COLLAPSED: dict[str, set[tuple[str, str]]] = {}
+COLLAPSED: dict[str, dict[str, set[tuple[str, str]]]] = {}
 # Steps whose command the stand-in context cannot build, filled in as the
 # cases are read and asserted below, so a step that starts dropping out of
 # the comparison is a failure rather than a silence.
 DROPPED: list[str] = []
 
 
-def _collapsed(test, program_name, *options):
-    COLLAPSED.setdefault(test, set()).update(
+def _collapsed(test, program_name, placeholder, *options):
+    """Declare that ``placeholder``, on a line of ``test``'s Commands block
+    that runs ``program_name``, stands for ``options``.
+
+    The placeholder is part of the declaration so it can be checked: an
+    entry has to point at a form the block really writes, not at any
+    bracketed word the block happens to contain
+    (test_every_collapsed_declaration_is_load_bearing).
+    """
+    COLLAPSED.setdefault(test, {}).setdefault(placeholder, set()).update(
         (program_name, option) for option in options
     )
+
+
+def collapsed_options(test) -> set[tuple[str, str]]:
+    """Every (program, option) a test's placeholders stand for."""
+    return set().union(*COLLAPSED.get(test, {}).values()) if test in COLLAPSED else set()
 
 
 # An option word, in argv or in a Commands block: a dash and a letter, so a
@@ -150,23 +163,21 @@ OPTION = re.compile(r"^(?P<name>-{1,2}[A-Za-z][A-Za-z0-9-]*)")
 # for one would excuse it if somebody took it out of the block
 # (test_every_collapsed_declaration_is_load_bearing).
 #
-# `-<setter or mode>`, the one `ubertooth-util` option Argument validation
-# writes only as a placeholder.
-_collapsed("Argument validation", "ubertooth-util", "-S")
 # `-<mode>`: the modes Util mode refusals pairs with `-i`.
-_collapsed("Util mode refusals", "ubertooth-util", "-I", "-e", "-n", "-t")
+_collapsed("Util mode refusals", "ubertooth-util", "-<mode>",
+           "-I", "-e", "-n", "-t")
 # `<refusal>`: the file option, the later value, the repeat or the stray
 # word each refusal case writes after the tool.
-_collapsed("Refused command lines", "ubertooth-btle", "-A", "-a", "-f", "-h")
-_collapsed("Refused command lines", "ubertooth-rx", "-c", "-h", "-l", "-u", "-z")
-_collapsed("Refused command lines", "ubertooth-dump", "-U", "-h")
-_collapsed("Refused command lines", "ubertooth-specan", "-h", "-l", "-u")
-_collapsed("Refused command lines", "ubertooth-dfu", "-d", "-h")
-_collapsed("Refused command lines", "ubertooth-follow", "-e")
+_collapsed("Refused command lines", "ubertooth-btle", "<refusal>", "-A", "-a", "-f", "-h")
+_collapsed("Refused command lines", "ubertooth-rx", "<refusal>", "-c", "-h", "-l", "-u", "-z")
+_collapsed("Refused command lines", "ubertooth-dump", "<refusal>", "-U", "-h")
+_collapsed("Refused command lines", "ubertooth-specan", "<refusal>", "-h", "-l", "-u")
+_collapsed("Refused command lines", "ubertooth-dfu", "<refusal>", "-d", "-h")
+_collapsed("Refused command lines", "ubertooth-follow", "<refusal>", "-e")
 # The helper forms a block collapses with `...`.
-_collapsed("DFU image checks", "dfuimage.py",
+_collapsed("DFU image checks", "dfuimage.py", "...",
            "--allow", "--before", "--mode", "--read-only")
-_collapsed("DFU images", "dfuimage.py",
+_collapsed("DFU images", "dfuimage.py", "...",
            "--guard", "--read-only", "--readback", "--revision")
 # `<peer options>`: the ports, addresses, aliases and stream settings every
 # peer session carries, per test, since each one holds the link differently.
@@ -176,12 +187,12 @@ _PEER = ("--acceptor", "--acceptor-address", "--acceptor-alias", "--initiator",
 for _test in ("Follow Classic Bluetooth piconet", "Classic capture record fields",
               "Recover AFH map", "Bluetooth inquiry scan",
               "Follow Classic piconet over HCI"):
-    _collapsed(_test, "esp32peer.py", *_PEER)
+    _collapsed(_test, "esp32peer.py", "<peer options>", *_PEER)
 # `nrfdk.py <subcommand> ... --jlink <serial> --alias <alias> ...`: the
 # options the role commands carry beyond the two every line names.
-_collapsed("BLE extcap in tshark", "nrfdk.py",
+_collapsed("BLE extcap in tshark", "nrfdk.py", "...",
            "--address", "--chmap", "--interval", "--payload")
-_collapsed("Follow a BLE connection across its end", "nrfdk.py",
+_collapsed("Follow a BLE connection across its end", "nrfdk.py", "...",
            "--address", "--autoupdate", "--chmap", "--cycle", "--dle",
            "--interval", "--payload", "--peer", "--period", "--role")
 
@@ -268,14 +279,17 @@ def _words(argv) -> list[str]:
     inside one argument, so the script is split too.
     """
     words = []
-    previous = ""
+    previous = shell = ""
     for word in argv:
         words.append(word)
-        if previous == "-c" and word:
+        if word.rsplit("/", 1)[-1] in ("sh", "bash"):
+            shell = word
+        if shell and previous == "-c" and word:
             try:
                 words.extend(shlex.split(word))
             except ValueError:
                 words.extend(word.split())
+            shell = ""
         previous = word
     return words
 
@@ -620,6 +634,18 @@ class DocumentedCommandTests(unittest.TestCase):
                     f"{name}'s Commands block names these and it runs none of them",
                 )
 
+    def test_every_driver_exemption_is_necessary(self):
+        # BY_A_DRIVER excuses a program from both directions for one test,
+        # which is only honest where no argv of that test carries it: an
+        # entry for a program the test does run would turn the comparison
+        # off for something the checks could have made.
+        for name, programs in sorted(BY_A_DRIVER.items()):
+            with self.subTest(name):
+                self.assertEqual(
+                    [], sorted(programs & self.used.get(name, set())),
+                    f"{name} exempts a program its own commands run",
+                )
+
     def test_every_collapsed_declaration_is_load_bearing(self):
         """COLLAPSED says what a placeholder in a block stands for, which
         excuses those options from the forward check, so every entry has to
@@ -631,32 +657,40 @@ class DocumentedCommandTests(unittest.TestCase):
         collapses anything has to write a placeholder, or there is nothing
         for the entry to describe.
         """
-        for name, declared in sorted(COLLAPSED.items()):
+        shared = options_named(fences(self.sections[SHARED]))
+        for name, placeholders in sorted(COLLAPSED.items()):
             passed = self.options.get(name, set())
-            literal = self.named_options[name]
-            with self.subTest(name):
-                self.assertEqual(
-                    [], sorted(f"{prog} {option}"
-                               for prog, option in declared
-                               if (prog, option) not in passed),
-                    f"{name} declares collapsed options it never passes",
-                )
-                self.assertEqual(
-                    [], sorted(f"{prog} {option}"
-                               for prog, option in declared
-                               if (prog, option) in literal),
-                    f"{name} declares collapsed options its block already names",
-                )
-                self.assertLessEqual(
-                    {prog for prog, _option in declared}, self.named[name],
-                    f"{name} declares a collapsed form for a program its "
-                    "block does not name",
-                )
-                self.assertRegex(
-                    " ".join(commands_of(self.sections[name])), r"<[^>]+>",
-                    f"{name} declares a collapsed form but its block writes "
-                    "no placeholder",
-                )
+            documented = self.named_options[name] | shared
+            lines = commands_of(self.sections[name])
+            for placeholder, declared in sorted(placeholders.items()):
+                with self.subTest(name, placeholder=placeholder):
+                    self.assertEqual(
+                        [], sorted(f"{prog} {option}"
+                                   for prog, option in declared
+                                   if (prog, option) not in passed),
+                        f"{name} declares collapsed options it never passes",
+                    )
+                    self.assertEqual(
+                        [], sorted(f"{prog} {option}"
+                                   for prog, option in declared
+                                   if (prog, option) in documented),
+                        f"{name} declares collapsed options already documented",
+                    )
+                    self.assertLessEqual(
+                        {prog for prog, _option in declared}, self.named[name],
+                        f"{name} declares a collapsed form for a program its "
+                        "block does not name",
+                    )
+                    # The declaration points at a form the block writes, on
+                    # a line that runs that program.
+                    programs = {prog for prog, _option in declared}
+                    self.assertTrue(
+                        [line for line in lines
+                         if placeholder in line
+                         and programs & programs_named([line])],
+                        f"{name}: no line runs {sorted(programs)} with "
+                        f"{placeholder!r} on it",
+                    )
 
     def test_every_section_names_at_least_one_command(self):
         # Otherwise the forward checks pass on an empty block: for a test
@@ -686,7 +720,7 @@ class DocumentedCommandTests(unittest.TestCase):
         for name in self.catalog.names:
             passed = self.options.get(name, set())
             documented = (self.named_options[name] | shared
-                          | COLLAPSED.get(name, set()))
+                          | collapsed_options(name))
             by_a_driver = BY_A_DRIVER.get(name, set())
             with self.subTest(name):
                 undocumented = sorted(

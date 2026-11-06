@@ -1900,7 +1900,8 @@ CLI usage smoke:
   purpose: >-
     A catalog entry for exercising host tool usage paths. No implementation
     yet, and superseded in practice: Host CLI surface covers -h and -V on
-    every tool the build installs, and Help smoke covers the single-tool case.
+    every C host tool the fork builds, and Help smoke covers the single-tool
+    case.
   theory: >-
     Not established.
   hardware: >-
