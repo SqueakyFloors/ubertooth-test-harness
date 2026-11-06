@@ -158,6 +158,22 @@ DH1_BODY = bytes(range(4))      # a made-up 4-byte body
 LAP_A, UAP_A = 0x5A3C96, 0x6B   # piconet with headers: LAP and UAP decode
 LAP_B = 0x0F1E2D                # ID packets only: LAP decodes, no UAP
 LAP_DECOY = 0x3E1D07            # only in records cb_rx must skip
+
+# The signal level every packet of this fixture reports, on screen and in a
+# capture record, worked out once here so a case states it rather than a
+# number nobody can trace.
+#
+# Each record below carries the same three readings and no SIGNAL_VALID
+# status bit, so the strongest reading of the packet is the nearest thing to
+# its own level that the record holds, which is the figure a reader shows;
+# the fork's piece-wise model of the CC2400's curve turns this fixture's
+# RSSI_MAX into the dBm below. That makes it a known answer for a level
+# worked out from anything but the packet's own record -- the loudest of the
+# last ten records of its channel, say, which reported one packet's level for
+# another's (SqueakyFloors/ubertooth#754) -- because such a figure is not
+# this one.
+RSSI_MAX, RSSI_MIN, RSSI_AVG = -40, -90, -70
+SIGNAL_DBM = -91
 FIXTURE_AGE_S = 3600            # record times are this long before generation
 
 
@@ -231,7 +247,7 @@ def record_bytes(record: Record, host_time: int) -> bytes:
     clk100ns = record.clock * 3125 + 4000 - SYNC_AT * 10 + 1000
     header = struct.pack(
         "<BBBBIbbbB2x", record.pkt_type, record.status, record.channel, 0,
-        clk100ns, -40, -90, -70, 1,
+        clk100ns, RSSI_MAX, RSSI_MIN, RSSI_AVG, 1,
     )
     return struct.pack(">I", host_time) + header + data
 
@@ -328,23 +344,27 @@ def packet_record_indices(lap: int | None = None,
 
 # --- output checks ------------------------------------------------------------
 
-# The noise figure and the ratio beside it are either both figures or both
-# the word `none`: the ratio comes from the noise, so a line with one of each
-# is malformed and does not count as a packet. The fixture's records set no
-# NOISE_ESTIMATE status bit, so there is no background for this channel and a
-# current ubertooth-rx prints `none` for both (fork 532adc19).
+# The noise figure and the ratio beside it: `none` for both, required rather
+# than allowed for. The ratio comes from the noise, so a line with one of each
+# is malformed; and these records set no NOISE_ESTIMATE status bit, so there
+# is no background figure for the packet's channel and the word is what a
+# current ubertooth-rx prints for both (fork 532adc19, and
+# SqueakyFloors/ubertooth#909, which made an unmeasured background a figure no
+# receiver reports instead of one that reads like a measurement). A live
+# capture's packet can carry either, which is why receive_cases' pattern
+# accepts a figure there and this one does not: a replay of this fixture has
+# nothing to measure a background from, so a build that went back to printing
+# one here is a build that made a figure up.
 #
-# The level column is a figure in every line of a replay of this fixture, and
-# that is pinned rather than allowed for: the column reads `none` only where
-# the board's own reading is at the top of the radio's scale (fork
-# SqueakyFloors/ubertooth#1192), and these records carry a fixed strongest
-# reading far below it. A live capture can print `none` there, which is why
-# receive_cases' pattern accepts it and this one does not.
-_NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
+# The level column is pinned the same way, to the fixture's own figure: it
+# reads `none` only where the board's own reading is at the top of the radio's
+# scale (SqueakyFloors/ubertooth#1192), and these records carry a strongest
+# reading far below it.
+_NOISE_AND_SNR = r"n=none snr=none"
 
 PACKET_LINE = re.compile(
     rf"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{{6}}) "
-    rf"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ {_NOISE_AND_SNR}$"
+    rf"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s={SIGNAL_DBM} {_NOISE_AND_SNR}$"
 )
 UAP_LINE = re.compile(r"UAP = 0x(?P<uap>[0-9a-f]+) found after \d+ total packets")
 # libbtbb works the UAP out from the packets' CRCs and says so. Since libbtbb

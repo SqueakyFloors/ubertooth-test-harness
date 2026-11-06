@@ -450,7 +450,7 @@ class PlanTests(ControllerTestCase):
             return suite
 
         suite = await release(other)
-        self.assertAlmostEqual(659.6, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(660.2, suite["estimated_s"], delta=0.2)
         self.assertEqual(
             [{"name": "Recover AFH map",
               "reason": f"runs on {named}, not on {other}",
@@ -466,7 +466,7 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(0, suite["unestimated_tests"])
         # The host the step names, and no target at all, count every step.
         for suite in (await release(named), await release()):
-            self.assertAlmostEqual(1179.6, suite["estimated_s"], delta=0.2)
+            self.assertAlmostEqual(1180.2, suite["estimated_s"], delta=0.2)
             self.assertEqual([], suite["omitted_tests"])
             self.assertEqual(0.0, suite["omitted_estimated_s"])
             self.assertEqual(

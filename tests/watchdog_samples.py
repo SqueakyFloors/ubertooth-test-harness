@@ -3,9 +3,17 @@
 The first two were captured from a lab board on 2026-10-29 (firmware
 `git-d8e8c549`, API 1.54): one read with host tools from the same tree, one
 with an older build that prints neither the capture transfer errors nor the
-radio waits. The rest are built from those with ``report()``, and the refusals
-use libubertooth's own wording.
+radio waits. The radio-wait line of the first carries the sixth counter the
+fork's report has gained since that capture (`packet lead`,
+SqueakyFloors/ubertooth#1081, `util_report.c`), and ``FIVE_COUNTERS`` is the
+line exactly as the capture had it. The rest are built from those with
+``report()``, and the refusals use libubertooth's own wording.
 """
+
+# The radio-wait counters the tool prints, in its order and wording
+# (util_report.c). The sixth arrived with SqueakyFloors/ubertooth#1081.
+WAIT_LABELS = ("synthesizer lock", "unlock", "oscillator", "state machine",
+               "packet bytes", "packet lead")
 
 # A board that has reset itself, read with host tools from the firmware's tree.
 FULL = """Last boot cause: watchdog
@@ -14,8 +22,16 @@ Unrequested watchdog resets since power-on: 3 (in 56 boots)
   the last was in BLE follow mode, running a control request
 Now in idle mode, not in a wait
 Capture transfer errors since power-on: 0
-Radio waits that gave up since boot: synthesizer lock 0, unlock 0, oscillator 0, state machine 0, packet bytes 0
+Radio waits that gave up since boot: synthesizer lock 0, unlock 0, oscillator 0, state machine 0, packet bytes 0, packet lead 0
 """
+
+# The same line as the capture of 2026-10-29 had it, before the fork's report
+# gained its sixth counter: a board read with host tools from before
+# SqueakyFloors/ubertooth#1081, which the reader still takes.
+FIVE_COUNTERS = FULL.replace(", packet lead 0\n", "\n")
+# FULL without its radio-wait line at all, which is where a read that printed
+# the record and then failed stops.
+WITHOUT_WAITS = FULL[:FULL.index("Radio waits that gave up")]
 
 # The same board read with older host tools: no transfer-error or radio-wait
 # line, and a wait whose name that build does not have.
@@ -78,13 +94,18 @@ def report(
     last="in BLE follow mode, waiting for the 16 MHz crystal oscillator",
     fault="",
     transfer_errors=0,
-    radio_waits=(0, 0, 0, 0, 0),
+    radio_waits=(0, 0, 0, 0, 0, 0),
 ):
     """One `-w` report, in the order and wording the tool prints it.
 
     ``transfer_errors`` or ``radio_waits`` of None leaves that line out, as
     host tools older than the one that added it do. ``fault`` is the text
     after "Last processor fault: ".
+
+    ``radio_waits`` carries one count per counter the tool prints, so five of
+    them is a board read with host tools from before `packet lead`
+    (SqueakyFloors/ubertooth#1081) and more than six is a counter this
+    harness has not got.
     """
     lines = [f"Last boot cause: {cause}"]
     lines.append(
@@ -104,8 +125,10 @@ def report(
     if transfer_errors is not None:
         lines.append(f"Capture transfer errors since power-on: {transfer_errors}")
     if radio_waits is not None:
-        names = ("synthesizer lock", "unlock", "oscillator", "state machine",
-                 "packet bytes")
+        names = WAIT_LABELS + tuple(
+            f"counter {index}"
+            for index in range(len(WAIT_LABELS), len(radio_waits))
+        )
         counts = ", ".join(
             f"{name} {value}" for name, value in zip(names, radio_waits)
         )
@@ -116,9 +139,7 @@ def report(
 # `-w` makes two control reads: the record, then the radio waits. The record
 # printed and the second read failed, so the command exits non-zero with a
 # whole record on standard output.
-RECORD_THEN_FAILED = FULL.replace(
-    "Radio waits that gave up since boot: synthesizer lock 0, unlock 0, "
-    "oscillator 0, state machine 0, packet bytes 0\n",
+RECORD_THEN_FAILED = WITHOUT_WAITS + (
     "error: the Ubertooth did not answer in time (libusb -7)\n"
-    "error: radio wait timeouts read failed\n",
+    "error: radio wait timeouts read failed\n"
 )

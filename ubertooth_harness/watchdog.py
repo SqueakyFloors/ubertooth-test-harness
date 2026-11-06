@@ -75,13 +75,16 @@ MAX_SEARCHES = 3
 # transfer errors and radio waits stop at 65535, which no board has reached).
 RESET_CAP = 255
 
-# The radio waits, in the words `-w` prints them with.
+# The radio waits, in the words `-w` prints them with, in the order the fork
+# prints them. A build older than the counter it added prints a shorter line
+# and the names it has not got are simply absent from a read.
 WAIT_NAMES = {
     "fs_lock": "synthesizer lock",
     "fs_unlock": "unlock",
     "oscillator": "oscillator",
     "state_machine": "state machine",
     "packet_bytes": "packet bytes",
+    "packet_lead": "packet lead",
 }
 
 # What a read found.
@@ -125,10 +128,26 @@ _FAULT = re.compile(
 _TRANSFER_ERRORS = re.compile(
     r"(?m)^Capture transfer errors since power-on: (?P<count>\d+)\s*$"
 )
+# The radio-wait line, in two parts so that a line this reader cannot take
+# apart is still seen as the line it is.
+#
+# The counters are read by name and in order, because that is how the fork
+# prints them, and the last one is optional: `packet lead` arrived with
+# SqueakyFloors/ubertooth#1081, and a board read with host tools from before it
+# prints the five without it. Anything else after the last counter fails the
+# counter match while the line match still holds, which is what makes the next
+# counter the fork adds loud rather than silent: this reader ended at `packet
+# bytes` for as long as that sixth counter had been printed, so every read
+# recorded no figures at all and still looked healthy
+# (SqueakyFloors/ubertooth-test-harness#343).
+_RADIO_WAIT_LINE = re.compile(
+    r"(?m)^Radio waits that gave up since boot: (?P<counters>.*?)\s*$"
+)
 _RADIO_WAITS = re.compile(
-    r"(?m)^Radio waits that gave up since boot: synthesizer lock (?P<fs_lock>\d+), "
+    r"^synthesizer lock (?P<fs_lock>\d+), "
     r"unlock (?P<fs_unlock>\d+), oscillator (?P<oscillator>\d+), "
-    r"state machine (?P<state_machine>\d+), packet bytes (?P<packet_bytes>\d+)\s*$"
+    r"state machine (?P<state_machine>\d+), packet bytes (?P<packet_bytes>\d+)"
+    r"(?:, packet lead (?P<packet_lead>\d+))?$"
 )
 # "in idle mode, not in a wait", or the clause the firmware's own image uses
 # when it records no mode at all.
@@ -199,6 +218,10 @@ class WatchdogRecord:
     ``transfer_errors`` and ``radio_waits`` are None when the host tools that
     read the board did not print those lines; a build older than the one that
     added them reports the rest without them.
+
+    ``radio_waits_unread`` holds the counters of a radio-wait line that was
+    printed and that this reader could not take apart, which is a reader
+    behind the fork's report rather than anything about the board.
     """
 
     boot_cause: str
@@ -217,6 +240,7 @@ class WatchdogRecord:
     fault_address: str | None = None
     transfer_errors: int | None = None
     radio_waits: Mapping[str, int] | None = None
+    radio_waits_unread: str = ""
 
     @property
     def causes(self) -> tuple[str, ...]:
@@ -258,6 +282,7 @@ class WatchdogRecord:
             "fault": self.fault,
             "transfer_errors": self.transfer_errors,
             "radio_waits": dict(self.radio_waits) if self.radio_waits else None,
+            "radio_waits_unread": self.radio_waits_unread,
         }
 
 
@@ -276,7 +301,8 @@ def parse_report(text: str) -> WatchdogRecord | None:
     now = _NOW.search(text)
     fault = _FAULT.search(text)
     transfer = _TRANSFER_ERRORS.search(text)
-    waits = _RADIO_WAITS.search(text)
+    line = _RADIO_WAIT_LINE.search(text)
+    waits = _RADIO_WAITS.match(line["counters"]) if line else None
     last_mode, last_wait = _where(last["where"]) if last else (None, "")
     mode, wait = _where(now["where"]) if now else (None, "")
     return WatchdogRecord(
@@ -296,9 +322,14 @@ def parse_report(text: str) -> WatchdogRecord | None:
         ),
         transfer_errors=int(transfer["count"]) if transfer else None,
         radio_waits=(
-            {name: int(value) for name, value in waits.groupdict().items()}
+            # A counter the line did not carry is absent rather than zero: a
+            # shorter line is an older build, which says nothing about that
+            # counter either way.
+            {name: int(value) for name, value in waits.groupdict().items()
+             if value is not None}
             if waits else None
         ),
+        radio_waits_unread=line["counters"] if line and waits is None else "",
     )
 
 
@@ -452,6 +483,23 @@ def warnings_for(
             f"{label} recorded a processor fault {during}: {change.new_fault}."
         )
     return lines
+
+
+def unread_waits_warning(label: str, counters: str) -> str:
+    """A radio-wait line this reader could not take apart.
+
+    Not about the board: the board printed its counters and this reader could
+    not read them, so those figures went unchecked for the whole run. It is
+    said out loud because the quiet version of it is what
+    SqueakyFloors/ubertooth-test-harness#343 was -- the fork added a sixth
+    counter, the pattern stopped matching, and every read since recorded no
+    figures at all while the run still read as healthy.
+    """
+    return (
+        f"{label} printed radio-wait counters this harness cannot read: "
+        f"{counters!r}. Those counters go unchecked for this run; the reader "
+        "needs the fork's current report (watchdog.py, WAIT_NAMES)."
+    )
 
 
 def notes_for(
@@ -768,6 +816,9 @@ class WatchdogMonitor:
         self._state: dict[str, str] = {}
         self._issues: dict[tuple, ForkIssue] = {}
         self._counted: dict[tuple, int] = {}
+        # Per board: the radio-wait counters this reader could not take apart,
+        # so the warning about them is said once rather than at every read.
+        self._unread_waits: dict[str, str] = {}
         self._lost: set[str] = set()
         # Boards whose firmware has shown it has no such request. A board
         # flashed to an image that does have it leaves the set at its next
@@ -932,6 +983,13 @@ class WatchdogMonitor:
             change = compare(self._baseline.get(board.serial), record)
             warnings = tuple(warnings_for(board.label, record, change, during))
             notes = tuple(notes_for(board.label, record, change, during))
+        # Once per board per wording, however many times it is read: this says
+        # the reader is behind the fork's report, which does not change during
+        # a run, and a line per read would bury the run's real findings.
+        unread = record.radio_waits_unread
+        if unread and self._unread_waits.get(board.serial) != unread:
+            self._unread_waits[board.serial] = unread
+            warnings += (unread_waits_warning(board.label, unread),)
         if partial:
             notes += (f"{board.label} read its watchdog record, but {partial}.",)
         self._baseline[board.serial] = record
