@@ -985,7 +985,11 @@ Raw receive replay:
     -l, replay into PCAPNG and into PCAP (link type 255, the fixture's packet
     count), a -d file that cannot be opened (exit 1, one error line, no usage
     text, nothing created or changed anywhere in the directory), and -s
-    decoding the same as without it. Six smoke cases are about where a
+    decoding the same as without it. The -l case also requires the start of
+    the CLK1-27 search that follows a discovered UAP, and forbids a CLK6
+    note, which libbtbb reports only for a UAP the caller stated;
+    comprehensive's correct -u requires that note, at offset 0, with the
+    candidates after it. Six smoke cases are about where a
     capture goes: -q - writes a readable PCAP to the redirected stream with
     the packet report printed on neither stream, /dev/stdout and /dev/fd/1
     mean that stream too and so does /proc/self/fd/1 on Linux, /dev/fd/3 is
@@ -1026,6 +1030,9 @@ Raw receive replay:
     - ubertooth#782
     - ubertooth#1203
     - ubertooth-test-harness#333
+    - libbtbb#137
+    - ubertooth#1135
+    - ubertooth-test-harness#341
 
 Refused command lines:
   purpose: >-
@@ -1658,10 +1665,12 @@ Classic capture record fields:
     records are rare here. A record naming no transport passes, and that is a
     real gap rather than only backward compatibility: at the libbtbb the fork
     pins, a payload-bearing record always names one, so a library that stopped
-    filling the field in would pass here. It is accepted because the harness's
-    own pin predates that change and names no transport at all, so a strict
-    default would fail every payload-bearing record of a run built at the
-    harness's own pin; harness #339 tightens it once the pin moves. The survey
+    filling the field in would pass here. What it covers is a run that names
+    a libbtbb from before that change, which names no transport at all; a run
+    that takes the fork's pin has named transports since it, and the harness's
+    own pin and the example refs named an older one until harness #341 moved
+    them. Harness #339 drops the escape, and keeps it because that changes the
+    rule a live capture is judged by. The survey
     case
     cannot assert whose records it reads. The flag rules assume the libbtbb
     this harness pins. The error flags do fire, on a clear board as well as an
