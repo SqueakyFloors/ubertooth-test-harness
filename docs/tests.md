@@ -2367,6 +2367,36 @@ parity one is: the text reader's time is when the host read a line, so one
 delayed flush should not fail three days of work. The two seconds are for the packets already
 on the air and already in the tool's buffers when the stop lands.
 
+Two things keep that check from being quietly empty, which would be worse
+than a check that fails. **A rollover does not cost its off period.** The
+capture file is rolled over at the start of an off period on purpose, so on a
+busy channel with a small `capture file limit` every off period holds a gap;
+throwing those periods away left nothing judged, and an advertiser that took
+`adv stop` and kept advertising would have passed with the schedule half
+checked. So such a period is judged from the moment something was listening
+again instead, and only a rollover that left no stretch at all, or an
+unplanned gap — where the capture's own health is in question — takes the
+period out. **And a population of none fails.** If no off period that was
+meant to complete could be judged, whatever emptied it, the run fails saying
+the stop was never measured, rather than reporting a schedule it did not
+check; a population too small for the `minimum detection share`, counted the
+way the on periods are, fails too.
+
+**An allowance is never the whole population.** Each one is a share with a
+floor of one, so a short run has slack too — but capped one below the number
+of periods judged, so a comparison resting on one or two of them can still
+fail. Without the cap the floor made the off-period and gap checks
+structurally unfailable on the short suite, which judges one or two off
+periods and is the suite a change to the driver is tried on.
+
+What the parity comparison really bounds is worth stating in windows, because
+both neighbours are checked: a reader can lose two consecutive windows
+anywhere with nothing recorded, three give one disagreement, and the floor
+absorbs that, so four consecutive windows in one place — eight seconds at the
+long suites' two-second window — is where parity starts to bite. A reader
+losing a fraction of windows everywhere is caught by sustained presence
+rather than by parity, which is why both objectives are there.
+
 **Timing relationships are checked before any board is leased.** The
 figures below constrain each other, and a run holds an Ubertooth and a DK for
 hours, so a plan whose own figures contradict each other has to fail when the
@@ -2467,8 +2497,11 @@ quiet in every judged off period; the capture process died of its own accord
 no more often than the restart budget allows; there were no more unplanned
 restarts than the budget; the final
 stop was a clean one (SIGTERM, within its grace, no kill needed); every
-schedule command reached the DK; and the board answered every read
-afterwards. Each failed objective is its own `FAIL:` line and the step
+schedule command inside the window reached the DK; the run's capture budget
+was kept; and the board answered every read afterwards. The closing
+stop-and-read is counted apart and is not one of these: it runs after the
+last period, which the duration ended and nothing judged, so a DK that
+hiccups in the final second of a three-day run affected no measurement. Each failed objective is its own `FAIL:` line and the step
 requires `SOAK VERDICT: pass`.
 
 What is reported either way, and is the point of running it: packets per

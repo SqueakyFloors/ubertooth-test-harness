@@ -76,7 +76,13 @@ reviewable while it runs and after the client that started it has gone: the
 run directory, not this process, holds the record. A capture file that
 reaches ``--max-capture-bytes`` is rolled over to the next attempt, at the
 start of an off period so the changeover falls in a silence the schedule
-already has.
+already has; the off period is still judged, from the moment something was
+listening again. ``--max-total-capture-bytes`` bounds the rest, removing the
+oldest complete capture and keeping the newest, and ``progress.jsonl`` and
+each transcript have budgets of their own, so no file here grows with the
+length of the run. A file the budget needs gone and cannot remove ends the
+run: writing captures past the budget for the hours it had left is the one
+thing the budget is there to prevent.
 
 Only counts, the known advertiser's own address, and the harness's own
 figures are printed or recorded. Another device's address never leaves the
@@ -202,6 +208,12 @@ MAX_WATCHDOG_WHERE = 20
 # How many distinct unreadable-capture reasons the summary names; the count
 # is kept whole.
 MAX_CAPTURE_ERRORS = 20
+# What progress.jsonl may grow to. A sample a second over three days is a
+# quarter of a million records, and the plan chooses both figures, so the
+# file needs a bound of its own: past it the records are counted and the run
+# reports what it kept, as the transcript does. summary.json holds the
+# figures whatever happened to this file.
+MAX_PROGRESS_BYTES = 64 * 1024 * 1024
 # How long a capture is given to open its file before the schedule starts
 # against it. Bounded by the liveness timeout as well, so this never delays
 # the rule that notices a capture which never starts at all.
@@ -546,6 +558,12 @@ class Period:
     # is not counted against the share of its periods a run has to be able
     # to judge.
     cut_by_duration: bool = False
+    # When something was listening again, for a period a capture came back
+    # inside. The off-period check judges only the stretch past its settle
+    # time, so a gap that ended before that stretch began left the part
+    # being judged fully captured -- which is what a file rolled over at the
+    # start of an off period is, by design.
+    listening_from: float | None = None
 
     @property
     def capture_gap(self) -> bool:
@@ -1207,6 +1225,12 @@ class Soak:
         self.attempts_forgotten = 0
         self.captures_removed = 0
         self.capture_bytes_removed = 0
+        # Files the budget needs gone and cannot remove: the run stops.
+        self.capture_budget_stuck: list = []
+        self.progress_bytes = 0
+        self.progress_records_dropped = 0
+        # The closing stop-and-read, which no period is judged on.
+        self.closing_error = None
         self.other_addresses: set = set()
         self.structural_packets = 0
         self.text_packets = 0
@@ -1279,7 +1303,17 @@ class Soak:
         if self.progress is None:
             return
         entry = {"at_s": round(self.clock() - self.start_mono, 3), **entry}
-        self.progress.write(json.dumps(entry, sort_keys=True) + "\n")
+        line = json.dumps(entry, sort_keys=True) + "\n"
+        # Bounded like the transcript, and for the same reason: a plan may
+        # ask for a sample a second over three days, and nothing else here
+        # stops the file that holds them from growing with the run. Past the
+        # budget the records are counted rather than written, and the run
+        # reports what it kept; summary.json carries the figures either way.
+        if self.progress_bytes + len(line) > MAX_PROGRESS_BYTES:
+            self.progress_records_dropped += 1
+            return
+        self.progress_bytes += len(line)
+        self.progress.write(line)
         self.progress.flush()
         try:
             os.fsync(self.progress.fileno())
@@ -1482,6 +1516,11 @@ class Soak:
         self.capture.start()
         ready = self.wait_until_capturing()
         self.last_packet_at = self.elapsed
+        period = self.period()
+        if period is not None and period.ended is None:
+            # The moment something was listening again, which is what says
+            # whether the stretch an off period is judged on was captured.
+            period.listening_from = self.elapsed
         self.record({"record": "capture_started", "index": self.capture_index,
                      "pid": self.capture.attempt.pid, "reason": reason,
                      "ready_s": None if ready is None else round(ready, 3),
@@ -1600,6 +1639,7 @@ class Soak:
         # returned on, so one of them cannot disable the budget for the rest
         # of a run of days.
         skipped: list = []
+        over_budget = False
         # Never the last one standing: the newest capture is the one a reader
         # of a failed run wants, and "newest kept" is what this promises.
         while len(kept) > 1:
@@ -1607,7 +1647,7 @@ class Soak:
             over_budget = (options.capture_budget_bytes > 0
                            and total > options.capture_budget_bytes)
             if not over_budget and len(kept) <= MAX_KEPT_ATTEMPTS:
-                return
+                break
             oldest = kept.pop(0)
             removed = 0
             left = []
@@ -1645,6 +1685,25 @@ class Soak:
                           "reason": ("the run's capture budget"
                                      if over_budget else
                                      f"more than {MAX_KEPT_ATTEMPTS} attempts")})
+        # Over the budget with nothing left that can be removed. Recording it
+        # and carrying on would leave the run writing captures past the
+        # budget for however long it had left, which is the one thing the
+        # budget is there to prevent, so the run stops and fails instead.
+        total = sum(attempt.bytes_kept for attempt in kept + skipped)
+        if (options.capture_budget_bytes > 0
+                and total > options.capture_budget_bytes
+                and skipped and not self.capture_budget_stuck):
+            self.capture_budget_stuck = sorted(
+                name for attempt in skipped
+                for name in (attempt.capture, attempt.log))
+            self.record({"record": "capture_budget_stuck",
+                          "bytes_kept": total,
+                          "budget": options.capture_budget_bytes,
+                          "files": self.capture_budget_stuck})
+            say(f"the capture budget cannot be kept: {total} bytes on disk against "
+                f"{options.capture_budget_bytes}, and "
+                f"{len(self.capture_budget_stuck)} file(s) could not be removed; "
+                "stopping the run")
 
     def rotate_if_large(self) -> None:
         """Start a new capture file once this one is big enough.
@@ -1657,7 +1716,9 @@ class Soak:
         then falls in a silence the test already expects, instead of
         appearing as a gap in a period being judged.
         """
-        if self.capture is None or self.options.capture_limit_bytes <= 0:
+        if (self.capture is None or self.options.capture_limit_bytes <= 0
+                or self.capture_budget_stuck):
+            # Another file is another file nothing can remove.
             return
         try:
             size = self.capture.capture_path.stat().st_size
@@ -1859,6 +1920,10 @@ class Soak:
                 self.restart("the restart probe", kill=True, probe=True)
                 continue
             self.check_liveness()
+            if self.capture_budget_stuck:
+                # Nothing it could do next stays inside the budget it was
+                # given, so the window ends here and the verdict says why.
+                break
 
         if self.period() is not None and self.period().ended is None:
             self.period().cut_by_duration = True
@@ -1882,8 +1947,14 @@ class Soak:
             self.advertiser.stop()
             self.counter_after = self.advertiser.status()["counter"]
         except SoakError as error:
-            self.schedule_errors += 1
-            self.record({"record": "schedule_error", "when": "the run finished",
+            # Counted apart from the schedule's own failures, and not a
+            # failure: this pair of commands runs after the last period,
+            # which the duration ended and which nothing judged, so a DK
+            # that hiccups in the final second of a three-day run affected
+            # no measurement. A transition inside the window is the one that
+            # means the schedule is not known.
+            self.closing_error = str(error)
+            self.record({"record": "closing_error", "when": "the run finished",
                          "reason": str(error)})
         self.read_watchdog_now("after the run")
         self.read_board_after()
@@ -1905,6 +1976,9 @@ class Soak:
             # The ladder is about a capture that brings nothing back,
             # however it fails: a tool that exits at once reaches the reset
             # rung as a silent one does.
+            # After `finish`, so the records written between the last poll
+            # and the exit are counted: an attempt that did bring something
+            # back has not earned a board reset.
             self.reset_next_restart = self.needs_a_reset()
             self.restart(f"the process exited {attempt.returncode}")
             return
@@ -2014,13 +2088,96 @@ class Soak:
             }
         return found
 
+    def allowance(self, periods: int) -> int:
+        """How many of `periods` comparisons may go the wrong way.
+
+        A share of the population, because the text reader's times are when
+        the host read a stdio block and one late flush should not end three
+        days of work -- with a floor of one, so a short run has that much
+        slack too, and never the whole population, so a comparison with one
+        or two judged periods can still fail. Without that cap the floor made
+        the off-period and gap checks structurally unfailable on the short
+        suite: one judged period, allowance one.
+        """
+        if periods <= 0:
+            return 0
+        share = math.ceil((1.0 - self.options.min_detection_share) * periods)
+        return min(max(1, share), periods - 1)
+
+    def off_settle_s(self) -> float:
+        # Never more than half the period, so a short schedule still has a
+        # stretch that is judged: a settle time longer than the off period
+        # would leave nothing to look at and read as quiet whatever happened.
+        return min(OFF_SETTLE_S, self.options.off_s / 2)
+
+    def off_judged_from(self, period: Period) -> float | None:
+        """When this off period's judged stretch begins, or None if it has none.
+
+        An off period is judged on the time past its settle point, because
+        the packets already on the air and already in the tool's buffers
+        arrive just after the stop. A capture that came back inside the
+        period moves that start later: the stretch has to be one something
+        was listening to.
+
+        This is what keeps the check from being emptied. A capture file is
+        rolled over at the start of an off period on purpose, so on a busy
+        channel with a small `capture file limit` every off period holds a
+        gap; discarding those periods left nothing judged, and an advertiser
+        that took `adv stop` and kept advertising would have passed with the
+        schedule half checked. An unplanned gap still disqualifies the
+        period, because then the capture's own health is in question.
+        """
+        if (period.state != "off" or period.ended is None
+                or period.schedule_error or period.cut_by_duration
+                or period.seconds < self.options.off_s * 0.9):
+            return None
+        start = period.started + self.off_settle_s()
+        if period.unplanned_gaps:
+            return None
+        if period.planned_gaps:
+            if period.listening_from is None:
+                return None
+            start = max(start, period.listening_from)
+        # A stretch of nothing is not a quiet period, it is an unmeasured one.
+        return start if start < period.ended else None
+
     def off_periods(self) -> list[Period]:
-        """Off periods worth judging, by the same rule as the on ones."""
+        """Off periods with a stretch this run can judge them on."""
         return [period for period in self.periods
-                if period.state == "off" and period.ended is not None
-                and not period.schedule_error and not period.capture_gap
-                and not period.cut_by_duration
-                and period.seconds >= self.options.off_s * 0.9]
+                if self.off_judged_from(period) is not None]
+
+    def off_period_counts(self) -> dict:
+        """How many off periods ran, and why each one left out was left out.
+
+        The off periods are judged in their own right (`off_quiet`), so what
+        was left out of that judgement has to be reported and held to a floor
+        as the on periods are. A capture rolled over at the start of every
+        off period, which a small `capture file limit` on a busy channel
+        does, would otherwise leave nothing judged and the schedule only half
+        checked -- an advertiser that takes `adv stop` and keeps advertising
+        would pass.
+        """
+        ran = [period for period in self.periods if period.state == "off"]
+        return {
+            "ran": len(ran),
+            "ended_by_the_run": sum(1 for period in ran if period.cut_by_duration),
+            "cut_short": sum(1 for period in ran if not period.cut_by_duration
+                             and (period.ended is None
+                                  or period.seconds < self.options.off_s * 0.9)),
+            "schedule_error": sum(1 for period in ran if period.schedule_error),
+            "capture_gap": sum(1 for period in ran if period.capture_gap),
+            "planned_capture_gap": sum(
+                1 for period in ran
+                if period.planned_gaps and not period.unplanned_gaps
+                and not period.cut_by_duration and not period.schedule_error
+                and period.seconds >= self.options.off_s * 0.9),
+            # A rollover that left no stretch to judge: the period is not in
+            # the judged population and the run says which of them it was.
+            "rollover_left_nothing": sum(
+                1 for period in ran
+                if period.planned_gaps and not period.unplanned_gaps
+                and self.off_judged_from(period) is None),
+        }
 
     def off_quiet(self) -> dict:
         """Was the advertiser really quiet when it was told to stop?
@@ -2034,27 +2191,19 @@ class Soak:
         reader.
         """
         periods = self.off_periods()
-        # Never more than half the period, so a short schedule still has a
-        # stretch that is judged: a settle time longer than the off period
-        # would leave nothing to look at and read as quiet whatever happened.
-        settle = min(OFF_SETTLE_S, self.options.off_s / 2)
         noisy = []
         for period in periods:
-            settled = period.started + settle
+            # Per period, because a capture that came back inside one moves
+            # the start of the stretch that can be judged (`off_judged_from`).
+            settled = self.off_judged_from(period)
             for name in ("text", "structural"):
                 side = getattr(period, name)
                 if side.last is not None and side.last > settled:
                     noisy.append(period.index)
                     break
-        # With an allowance, like every other comparison here: the text
-        # reader's time is when the host read a line, so one stdio flush
-        # delayed past the settle time would otherwise fail a three-day run
-        # of 4320 off periods.
-        allowance = (0 if not periods else
-                     max(1, math.ceil(
-                         (1.0 - self.options.min_detection_share) * len(periods))))
         return {"periods": len(periods), "noisy": len(noisy),
-                "settle_s": round(settle, 3), "allowance": allowance}
+                "settle_s": round(self.off_settle_s(), 3),
+                "allowance": self.allowance(len(periods))}
 
     def gaps(self) -> dict:
         periods = self.on_periods()
@@ -2067,14 +2216,8 @@ class Soak:
         over = sum(1 for period in periods
                    if max(period.text.max_gap, period.structural.max_gap)
                    > self.options.max_gap_s)
-        # With an allowance, like detection, parity and the off periods: the
-        # text reader's gap is measured on when the host read a stdio block,
-        # and one outlier should not end three days of work.
-        allowance = (0 if not periods else
-                     max(1, math.ceil(
-                         (1.0 - self.options.min_detection_share) * len(periods))))
         return {
-            "allowance": allowance,
+            "allowance": self.allowance(len(periods)),
             "text_max_s": round(max(text), 3) if text else None,
             "structural_max_s": round(max(structural), 3) if structural else None,
             "structural_median_s": (round(statistics.median(structural), 3)
@@ -2234,6 +2377,30 @@ class Soak:
                     f"({found['sustained_share']:.2f}), below "
                     f"{options.min_detection_share:.2f}")
         quiet = self.off_quiet()
+        off_counts = self.off_period_counts()
+        off_meant = off_counts["ran"] - off_counts["ended_by_the_run"]
+        if off_meant > 0 and not quiet["periods"]:
+            # Nothing credited here, unlike the share floor below: whatever
+            # emptied the population, including the run's own file rollovers,
+            # the schedule's other half went unmeasured, and a soak that
+            # cannot say the advertiser stopped when it was told has not
+            # checked the schedule it reports.
+            problems.append(
+                f"none of the {off_meant} advertiser off period(s) meant to "
+                f"complete could be judged ({off_counts['cut_short']} cut short, "
+                f"{off_counts['schedule_error']} with a schedule failure, "
+                f"{off_counts['capture_gap']} with a capture gap), so whether the "
+                "advertiser stopped when it was told was never measured")
+        elif off_meant > 0:
+            usable = quiet["periods"] + off_counts["planned_capture_gap"]
+            if usable < options.min_detection_share * off_meant:
+                problems.append(
+                    f"only {quiet['periods']} of {off_meant} advertiser off periods "
+                    f"could be judged ({off_counts['cut_short']} cut short, "
+                    f"{off_counts['schedule_error']} with a schedule failure, "
+                    f"{off_counts['capture_gap']} with a capture gap, of which "
+                    f"{off_counts['planned_capture_gap']} were the run's own doing), "
+                    f"below {options.min_detection_share:.2f}")
         if quiet["periods"] and quiet["noisy"] > quiet["allowance"]:
             problems.append(
                 f"the advertiser was still heard more than {quiet['settle_s']:g}s "
@@ -2321,6 +2488,12 @@ class Soak:
                 f"{self.sink.dropped} line(s) of the tool's output were dropped "
                 "before they were read, so the text reader's figures are "
                 "incomplete")
+        if self.capture_budget_stuck:
+            problems.append(
+                f"the run's capture budget could not be kept: "
+                f"{len(self.capture_budget_stuck)} file(s) could not be removed "
+                f"({', '.join(self.capture_budget_stuck[:3])}), so the run stopped "
+                "rather than write captures past the budget it was given")
         if self.canceled:
             problems.append(f"the run was stopped by {self.canceled}")
         return problems + list(self.extra_problems)
@@ -2336,7 +2509,9 @@ class Soak:
                           "on_periods": self.on_period_counts()["ran"],
                           "on_periods_judged": len(self.on_periods()),
                           "on_periods_left_out": self.on_period_counts(),
+                          "off_periods_left_out": self.off_period_counts(),
                           "errors": self.schedule_errors,
+                          "closing_error": self.closing_error,
                           "transitions": self.advertiser.transitions,
                           "retries": self.advertiser.retries},
             "advertiser_counter": {"before": self.counter_before,
@@ -2352,7 +2527,11 @@ class Soak:
                           "removed_bytes": self.capture_bytes_removed,
                           "budget_bytes": self.options.capture_budget_bytes,
                           "file_limit_bytes": self.options.capture_limit_bytes,
-                          "kept_attempts": MAX_KEPT_ATTEMPTS},
+                          "kept_attempts": MAX_KEPT_ATTEMPTS,
+                          "budget_stuck_files": list(self.capture_budget_stuck)},
+            "progress": {"kept_bytes": self.progress_bytes,
+                          "budget_bytes": MAX_PROGRESS_BYTES,
+                          "records_not_written": self.progress_records_dropped},
             "transcript": {"kept_bytes": self.transcript_bytes,
                             "budget_bytes": MAX_LOG_BYTES,
                             "dropped_lines": self.transcript_dropped_lines,
@@ -2455,10 +2634,19 @@ class Soak:
         say(f"transcript: {self.transcript_bytes} of {MAX_LOG_BYTES} bytes kept, "
               f"{self.transcript_dropped_lines} line(s) past the budget read but "
               "not kept")
-        say(f"parity: {parity['windows_both']} windows both, "
-              f"{parity['windows_text_only']} text only, "
-              f"{parity['windows_structural_only']} structural only, allowance "
-              f"{parity['allowance']}")
+        say(f"progress: {self.progress_bytes} of {MAX_PROGRESS_BYTES} bytes kept, "
+            f"{self.progress_records_dropped} record(s) past the budget not "
+            "written (every figure is in summary.json)")
+        # The judged figure first and named as such: the text-only and
+        # structural-only counts include every window a buffer split at a
+        # boundary, which is exactly what the allowance does not apply to, so
+        # a line without `disagreements` reads as a healthy run sitting on
+        # its limit.
+        say(f"parity: {parity['disagreements']} of {parity['windows_seen']} windows "
+            f"disagree (allowance {parity['allowance']}); "
+            f"{parity['windows_both']} windows both, "
+            f"{parity['windows_text_only']} text only, "
+            f"{parity['windows_structural_only']} structural only")
         quiet = summary["off_quiet"]
         say(f"off periods: {quiet['periods']} judged, {quiet['noisy']} still heard "
             f"more than {quiet['settle_s']:g}s in (allowance {quiet['allowance']})")

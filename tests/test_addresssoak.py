@@ -751,6 +751,40 @@ class BudgetTests(SoakTestCase):
         self.assertFalse(first.files_removed)
         self.assertEqual(0, soak.captures_removed)
         self.assertTrue((self.out / first.capture).is_file())
+        # And the run says so and fails, rather than carrying on writing
+        # captures past the budget for however long it had left.
+        self.assertTrue(soak.capture_budget_stuck)
+        problems = soak.judge()
+        self.assertTrue(any("capture budget could not be kept" in problem
+                            for problem in problems), problems)
+
+    def test_a_stuck_budget_stops_the_rollovers_too(self):
+        soak = self.built_soak(budget=1)
+        soak.capture_budget_stuck = ["capture-0001.pcap"]
+        soak.capture = SilentCapture()
+        before = soak.rotations
+        soak.rotate_if_large()
+        self.assertEqual(before, soak.rotations)
+
+    def test_progress_records_stop_at_their_budget(self):
+        """The file a long run is followed with has a bound of its own.
+
+        A plan may ask for a sample a second over three days, which is a
+        quarter of a million records; nothing else here stops that file from
+        growing with the run.
+        """
+        soak = self.built_soak(budget=0)
+        soak.progress = (self.out / "progress.jsonl").open("w", encoding="utf-8")
+        self.addCleanup(soak.progress.close)
+        addresssoak.MAX_PROGRESS_BYTES, saved = 200, addresssoak.MAX_PROGRESS_BYTES
+        self.addCleanup(setattr, addresssoak, "MAX_PROGRESS_BYTES", saved)
+        for index in range(40):
+            soak.record({"record": "sample", "index": index})
+        self.assertTrue(soak.progress_records_dropped)
+        self.assertLessEqual(soak.progress_bytes, 200)
+        summary = {"progress": {"records_not_written": soak.progress_records_dropped}}
+        self.assertEqual(soak.progress_records_dropped,
+                         summary["progress"]["records_not_written"])
 
     def built_soak(self, budget):
         """A Soak with an output directory and no run behind it."""
@@ -1150,6 +1184,31 @@ class VerdictTests(unittest.TestCase):
                             for problem in problems), problems)
 
     def test_an_off_period_the_advertiser_was_heard_in_is_allowed_one(self):
+        # One late sighting among several judged periods is the stdio flush
+        # the allowance is for. It takes more than one judged period for the
+        # allowance to exist at all: see the test below.
+        soak = self.soak()
+        seen = self.seen_throughout()
+        for index in range(4):
+            self.add_period(soak, "on", index=index, text=seen, structural=seen)
+        for index in (4, 5, 6):
+            self.add_period(soak, "off", index=index, seconds=self.OFF)
+        noisy = soak.periods[-1]
+        noisy.structural.see(noisy.started + 20.0, noisy.started, 2.0)
+        quiet = soak.off_quiet()
+        self.assertEqual(3, quiet["periods"])
+        self.assertEqual(1, quiet["noisy"])
+        self.assertEqual(1, quiet["allowance"])
+        self.assertEqual([], soak.judge())
+
+    def test_the_only_judged_off_period_has_no_allowance(self):
+        """The allowance is never the whole population.
+
+        The floor of one used to be unconditional, so a run with one judged
+        off period had an allowance of one and the check could not fail
+        however the advertiser behaved -- which is what the short suite has,
+        and the suite a driver change is tried on.
+        """
         soak = self.soak()
         seen = self.seen_throughout()
         for index in range(4):
@@ -1159,8 +1218,58 @@ class VerdictTests(unittest.TestCase):
         quiet = soak.off_quiet()
         self.assertEqual(1, quiet["periods"])
         self.assertEqual(1, quiet["noisy"])
-        self.assertEqual(1, quiet["allowance"])
-        self.assertEqual([], soak.judge())
+        self.assertEqual(0, quiet["allowance"])
+        problems = soak.judge()
+        self.assertTrue(any("did not stop when it was told to" in problem
+                            for problem in problems), problems)
+
+    def test_rotations_that_empty_the_off_periods_fail_the_run(self):
+        """A file rolled over in every off period leaves nothing judged.
+
+        The rollover is the run's own doing, so crediting it against a share
+        floor the way the on periods do would let an advertiser that takes
+        `adv stop` and keeps advertising pass: nothing would be judged and
+        nothing would complain. So an empty judged population fails on its
+        own, whatever emptied it.
+        """
+        soak = self.soak()
+        seen = self.seen_throughout()
+        for index in range(4):
+            self.add_period(soak, "on", index=index, text=seen, structural=seen)
+        for index in (4, 5, 6):
+            period = self.add_period(soak, "off", index=index, seconds=self.OFF)
+            # A rollover whose capture never came back inside the period:
+            # there is no stretch anything was listening to.
+            period.planned_gaps = 1
+            period.listening_from = None
+        self.assertEqual(0, soak.off_quiet()["periods"])
+        self.assertEqual(3, soak.off_period_counts()["rollover_left_nothing"])
+        problems = soak.judge()
+        self.assertTrue(any("never measured" in problem for problem in problems),
+                        problems)
+
+    def test_a_rollover_leaves_the_rest_of_its_off_period_judged(self):
+        """The rollover itself does not cost the period.
+
+        It happens at the start of an off period by design, so throwing the
+        period away would mean a busy channel with a small capture file
+        limit judged no off period at all. What is judged is the stretch
+        from when something was listening again.
+        """
+        soak = self.soak()
+        seen = self.seen_throughout()
+        for index in range(4):
+            self.add_period(soak, "on", index=index, text=seen, structural=seen)
+        period = self.add_period(soak, "off", index=4, seconds=self.OFF)
+        period.planned_gaps = 1
+        period.listening_from = period.started + 5.0
+        self.assertEqual([period], soak.off_periods())
+        # A sighting inside the gap is not held against it; one after the
+        # capture came back is.
+        period.structural.see(period.started + 1.0, period.started, 2.0)
+        self.assertEqual(0, soak.off_quiet()["noisy"])
+        period.structural.see(period.started + 20.0, period.started, 2.0)
+        self.assertEqual(1, soak.off_quiet()["noisy"])
 
     def test_several_noisy_off_periods_fail(self):
         soak = self.soak()

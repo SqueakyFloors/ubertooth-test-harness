@@ -2456,10 +2456,16 @@ reviewable while it runs and after the client has gone. Each capture attempt
 keeps its own `capture-NNNN.pcap` and the tool's own transcript in
 `btle-NNNN.log`, and a capture file that reaches the plan's `capture file
 limit` is rolled over at the start of an off period, so no one file grows
-without bound. The transcript has a run-wide budget instead (64 MiB, shared
-across every attempt, so restarts and rotations cannot multiply it); every
-line is read whether or not it is kept, so the figures do not change, and the
-run reports how much it kept. What the captures themselves cost is the
+without bound, and the run's whole `capture budget` bounds the rest: past it
+the oldest complete capture and its transcript are removed, the newest always
+kept, and each removal is recorded. A file the budget needs gone and cannot
+remove ends the run with that as the reason, rather than writing captures past
+the budget for however long the run had left. The transcript and
+`progress.jsonl` have run-wide budgets instead (64 MiB each, the transcript
+shared across every attempt so restarts and rotations cannot multiply it);
+every line is read whether or not it is kept, so the figures do not change,
+`summary.json` holds them whatever happened to either file, and the run
+reports how much of each it kept. What the captures themselves cost is the
 channel's traffic rather than the advertiser's, so check the host's free space
 before booking a long run; [`docs/hardware.md`](docs/hardware.md) has the
 measured rate. The short suite also asks for a `restart probe`:

@@ -1542,11 +1542,18 @@ BLE address parity soak:
     floor, at least one captured
     packet carried the harness payload tag, no restart beyond the budget
     happened, the final stop was a clean one, the advertiser's schedule was
-    applied throughout, and the board answered every read afterwards. A period
+    applied throughout the window, the run's capture budget was kept, and the
+    board answered every read afterwards. An on period
     is judged only if the advertiser was known to be on for the whole of it
     and something was listening throughout, and the run must be able to judge
     that same share of the periods it ran, so a capture that kept dying fails
-    rather than passing on the few periods it covered. Every
+    rather than passing on the few periods it covered. An off period is judged
+    from the moment something was listening again, so the capture file
+    rollover that happens at the start of one does not cost it; a run that
+    could judge no off period at all fails saying the stop was never
+    measured, since a check nothing was measured against would otherwise read
+    as a pass. No allowance is ever the whole population it applies to, so a
+    comparison resting on one or two judged periods can still fail. Every
     figure is reported with its distribution -- packets per reader, periods
     detected and sustained, longest gap, packets a minute, resident memory,
     restarts and their causes, and watchdog reads -- so a run says what
