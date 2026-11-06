@@ -18,15 +18,26 @@ cross-reference, not a command this test sends.
 
 Options are compared both ways too, per program, which is what catches a
 block that names the right tool with the wrong options. What that does not
-compare: option *values*, argument order, a helper's positional subcommand
-(``refusal.py probe`` written as ``refusal.py sniff`` passes), a cluster of
-short options, where only the first is read (``ubertooth-util -vspb`` is
-``-v``, so the ``-s -p -b`` of it are compared in neither direction), and
-whether a form a block collapses behind a placeholder covers every case it
-stands for -- ``COLLAPSED`` says which options a placeholder stands for, and
-the prose beside the block says the rest. A misspelled program is caught
-only for a ``ubertooth-*`` name and for the programs ``program`` knows: a
-fence word such as ``tshrk`` is not a program to it, so it is invisible.
+compare:
+
+- option *values*, and argument order;
+- a *combination*: a line that puts options this test does pass to this
+  program on one command nobody sends passes both directions, since each
+  pair is in the set;
+- a helper's positional subcommand (``refusal.py probe`` written as
+  ``refusal.py sniff`` passes);
+- a cluster of short options, where only the first is read
+  (``ubertooth-util -vspb`` is ``-v``, so the ``-s -p -b`` of it are
+  compared in neither direction);
+- whether a form a block collapses behind a placeholder covers every case
+  it stands for. ``COLLAPSED`` says which options a placeholder stands for,
+  and the prose beside the block says the rest;
+- a program ``program`` does not know, in either direction: a
+  ``ubertooth-*`` name is caught by its prefix, but a misspelled ``tshrk``
+  is not a program to it, and the setup utilities it knows are the three the
+  cases use today (``ln``, ``chmod``, ``mkdir``), so a case that starts
+  running ``cp`` or ``rm`` would not have to be documented until that list
+  grows.
 
 What it cannot see at all:
 
@@ -123,7 +134,7 @@ WRAPPERS = frozenset({"env", "sh", "bash", "timeout", "python", "python3",
 # collapsed form covers, so the forward check knows the block does document
 # them. Written down here rather than assumed, so a block cannot hide an
 # option behind a placeholder nobody declared.
-COLLAPSED: dict[str, dict[str, set[tuple[str, str]]]] = {}
+COLLAPSED: dict[str, dict[tuple[str, str], set[tuple[str, str]]]] = {}
 # Steps whose command the stand-in context cannot build, filled in as the
 # cases are read and asserted below, so a step that starts dropping out of
 # the comparison is a failure rather than a silence.
@@ -139,9 +150,9 @@ def _collapsed(test, program_name, placeholder, *options):
     bracketed word the block happens to contain
     (test_every_collapsed_declaration_is_load_bearing).
     """
-    COLLAPSED.setdefault(test, {}).setdefault(placeholder, set()).update(
-        (program_name, option) for option in options
-    )
+    COLLAPSED.setdefault(test, {}).setdefault(
+        (program_name, placeholder), set()
+    ).update((program_name, option) for option in options)
 
 
 def collapsed_options(test) -> set[tuple[str, str]]:
@@ -342,6 +353,7 @@ def programs_by_test():
     catalog = builtin_catalog()
     used: dict[str, set[str]] = {}
     options: dict[str, set[tuple[str, str]]] = {}
+    stateful: set[str] = set()
     with tempfile.TemporaryDirectory() as directory:
         registry = _registry(directory)
         compiler = PlanCompiler(catalog, registry)
@@ -368,6 +380,8 @@ def programs_by_test():
         )
         found = used.setdefault(invocation.test_name, set())
         for case in cases:
+            if isinstance(case, StateCase):
+                stateful.add(invocation.test_name)
             for argv in _argvs(case):
                 found.update(filter(None, (program(w) for w in _words(argv))))
                 options.setdefault(invocation.test_name, set()).update(
@@ -385,7 +399,7 @@ def programs_by_test():
             for argv in _argvs(case):
                 found.update(filter(None, (program(w) for w in _words(argv))))
                 options.setdefault(name, set()).update(_options(argv))
-    return used, options, skipped
+    return used, options, stateful, skipped
 
 
 def _argvs(case):
@@ -582,7 +596,7 @@ class DocumentedCommandTests(unittest.TestCase):
     def setUpClass(cls):
         cls.catalog = builtin_catalog()
         cls.sections = dict(sections())
-        cls.used, cls.options, cls.skipped = programs_by_test()
+        cls.used, cls.options, cls.stateful, cls.skipped = programs_by_test()
         cls.named = {
             name: programs_named(commands_of(body))
             for name, body in cls.sections.items()
@@ -697,10 +711,14 @@ class DocumentedCommandTests(unittest.TestCase):
         )
         for name, placeholders in sorted(COLLAPSED.items()):
             passed = self.options.get(name, set())
-            documented = self.named_options[name] | shared
+            documented = self.named_options[name] | (
+                shared if name in self.stateful else set())
             lines = commands_of(self.sections[name])
-            for placeholder, declared in sorted(placeholders.items()):
-                with self.subTest(name, placeholder=placeholder):
+            for (program_name, placeholder), declared in sorted(
+                placeholders.items()
+            ):
+                with self.subTest(name, program=program_name,
+                                  placeholder=placeholder):
                     self.assertEqual(
                         [], sorted(f"{prog} {option}"
                                    for prog, option in declared
@@ -718,14 +736,15 @@ class DocumentedCommandTests(unittest.TestCase):
                         f"{name} declares a collapsed form for a program its "
                         "block does not name",
                     )
-                    # The declaration points at a form the block writes, on
-                    # a line that runs that program.
-                    programs = {prog for prog, _option in declared}
+                    # The declaration points at a form the block writes:
+                    # a line that runs THIS program and carries THIS
+                    # placeholder, so one tool's `<refusal>` line cannot
+                    # stand in for another tool's declaration.
                     self.assertTrue(
                         [line for line in lines
                          if placeholder in line
-                         and programs & programs_named([line])],
-                        f"{name}: no line runs {sorted(programs)} with "
+                         and program_name in programs_named([line])],
+                        f"{name}: no line runs {program_name} with "
                         f"{placeholder!r} on it",
                     )
 
@@ -758,7 +777,12 @@ class DocumentedCommandTests(unittest.TestCase):
         )
         for name in self.catalog.names:
             passed = self.options.get(name, set())
-            documented = (self.named_options[name] | shared
+            # The shared transition commands are only sent by a test built
+            # from state-changing cases, so only such a test may leave them
+            # out: a test of any other kind that gained one would have to
+            # name it.
+            allowed = shared if name in self.stateful else set()
+            documented = (self.named_options[name] | allowed
                           | collapsed_options(name))
             by_a_driver = BY_A_DRIVER.get(name, set())
             with self.subTest(name):

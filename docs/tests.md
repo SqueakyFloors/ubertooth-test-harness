@@ -1035,21 +1035,26 @@ must say so rather than print values or fail.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
 
-**Commands.** The modes, the stop, and the LED sampler that watches `-I`
-blink (`ledblink.py`, which runs `ubertooth-util -d` at jittered intervals
-until both phases appear, at most 60 samples or 10 s):
+**Commands.** The modes, the stop, and two LED samplers: `ledblink.py` for
+the one case that watches `-I` blink, and a fixed-count shell loop for the
+cases whose LEDs should simply be on and stay on.
 
 ```text
 ubertooth-util -U <serial> -I                  # identify, and -s -I
 ubertooth-util -U <serial> -q120               # and -q20 and a bare -q: the LED spectrum
 ubertooth-util -U <serial> -r                  # no stale range-test result
 ubertooth-util -U <serial> -m                  # the result, read after it
-ledblink.py ubertooth-util <serial> --max-samples 60 --deadline 10 --interval 0.05
 ubertooth-util -U <serial> -v                  # the firmware, after -r
+ledblink.py ubertooth-util <serial> --max-samples 60 --deadline 10 --interval 0.05
+sh -c '<read -d <count> times, <interval> apart, retrying one failed read>' \
+    ubertooth-util <serial> 12 0.05
 ```
 
-A failed LED read is retried once inside the sampler, and the retry is
-recorded.
+`ledblink.py` reads `ubertooth-util -d` at jittered intervals until both
+phases of the blink appear, at most 60 samples or 10 s, and retries one
+failed read. The shell loop is the steady-LED sampler the seven other mode
+cases use: it reads `-d` a fixed number of times and retries a read that
+failed once.
 
 **Expected outcome.** Smoke runs 3 cases: `-I` blinks until `-S`, `-q120`
 lights every LED, and `-m` reports no range-test result after a reset.
@@ -1238,7 +1243,9 @@ ubertooth-util -U <sender>    -c2410  # and the responder, onto one channel
 ubertooth-util -U <responder> -e      # the repeater
 ubertooth-util -U <responder> -v      # it still answers USB
 ubertooth-util -U <sender>    -n      # the round trip
-ubertooth-util -U <sender>    -m      # polled until the result is there
+sh -c '<read -m until a result or the deadline>' ubertooth-util <sender> 10 0.25
+ubertooth-util -U <responder> -m      # the repeater keeps no result
+ubertooth-util -U <sender>    -v      # and the responder: the firmware
 ubertooth-util -U <responder> -S      # stop the repeater
 ```
 
@@ -1492,7 +1499,10 @@ ubertooth-specan -U <serial> -v -l 2402 -u 2420
 ubertooth-specan -U <serial> -g -l 2402 -u 2420
 ubertooth-specan -U <serial> -G -l 2402 -u 2420        # the 3D form
 ubertooth-specan -U <serial> -l 2430 -u 2440 -d <case dir>/specan.bin
-ubertooth-specan -U <serial> -l 2430 -u 2440 -d -x.bin # the file named -x.bin
+python -c 'import os, sys; os.chdir(sys.argv[1]); os.execvp(sys.argv[2], sys.argv[2:])' \
+    <case dir> ubertooth-specan -U <serial> -l 2430 -u 2440 -d -x.bin
+                                                       # the file named -x.bin,
+                                                       # in the case directory
 ubertooth-specan -U <serial> -d /dev/full              # Linux only
 specandump.py <case dir>/specan.bin 2430 2440
 ```
@@ -2109,7 +2119,8 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -q - -c <case dir>/extra.pcap
                                         # about on stderr and never created
 refusal.py probe <tool>                   # opens every case: can the switch be used
 refusal.py seed <case dir> <names>        # the files a case must find unchanged
-refusal.py files <case dir>               # the directory before the refusal
+refusal.py files <case dir>               # the cleanup: the directory as it
+                                          # ends up, after the check
 refusal.py check <case dir> --absent <files> --kept <files>
 ```
 
@@ -2186,6 +2197,8 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -r <case dir>/new.pcapng \
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -r <case dir>/new.pcapng -q <case dir>/kept.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -c <case dir>/new-ppi.pcap
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dump -d <case dir>/new.dump      # and a seeded file
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/<fixture>.bin \
+    -r <case dir>/new.pcapng -q <case dir>/new.pcap -d <case dir>/new.dump
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/no-record.bin -q <destination>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx   -i <case dir>/input.d -r <case dir>/new.pcapng \
     -q <case dir>/new.pcap -d <case dir>/new.dump   # a directory as the input
@@ -2200,6 +2213,7 @@ mkdir <case dir>/ro                            # read-only, and in-the-way,
                                                # file is expected
 ln -s target.pcap <case dir>/link.pcap         # the link a case must not follow
 dfuimage.py symlink <case dir>/link.pcap --to target.pcap   # it still points there
+dfuimage.py state <case dir>                   # before the command, and after
 dfuimage.py state <case dir> --before <directory before> --allow <files>
 dfuimage.py not-root
 chmod 555|755 <case dir>/ro
@@ -2208,11 +2222,14 @@ refusal.py seed <case dir> <names>
 capturefile.py --packets <case dir>/new.pcap
 ```
 
-`<destination>` is each one the replay cases try: a new file, `/dev/null`,
-a symbolic link, an existing directory, a read-only directory, and a
-directory that is not there. The seeded destinations belong to the
-`ubertooth-btle` and `ubertooth-dump` lines above, and `-q -` to the
-no-input case, which has a line of its own.
+`<fixture>` is each input `rxreplay.py` builds: `replay.bin`, and the
+`partial`, `skipped` and `truncated` ones, which is where the three
+destinations are taken back or kept together. `<destination>` is what the
+`no-record.bin` line gives one `-q`: a symbolic link, and `/dev/null`. The
+other destinations have lines of their own above -- an existing directory, a
+read-only one, and one that is not there -- the seeded ones belong to the
+`ubertooth-btle` and `ubertooth-dump` lines, and `-q -` to the no-input
+case.
 
 **Expected outcome.** Smoke runs 6 cases: `ubertooth-rx -r -q -d`,
 `ubertooth-btle -n -r -q`, and `ubertooth-dump -d` stopped at the board lookup
@@ -2354,6 +2371,11 @@ chmod 555|755 <case dir>/ro        # read-only for the signing, back afterwards
 chmod 600 <case dir>/image.dfu     # the mode a replacement must keep
 refusal.py probe ubertooth-dfu     # opens every case: can the switch be used
 ```
+
+Two forms stand outside `<variant>`: `-d <case dir>/missing.dfu -r` and
+`-s <case dir>/missing.bin`, which name a file that is not there, and
+`dfuimage.py make corrupt <case dir>/synthetic.dfu <case dir>/corrupt.bin`,
+which writes a `.bin` rather than a `.dfu`.
 
 `<variant>` is each image `dfuimage.py make` builds from the synthetic one.
 Those the check must refuse: a wrong CRC, a truncated file, a binary with no
