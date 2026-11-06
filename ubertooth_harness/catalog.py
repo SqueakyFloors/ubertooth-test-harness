@@ -1214,7 +1214,7 @@ def builtin_catalog() -> TestCatalog:
     definitions = [
         TestDefinition(
             "Host version",
-            "Host tools version and git identity",
+            "Host tools version line",
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
             ("ubertooth-util", "-V"),

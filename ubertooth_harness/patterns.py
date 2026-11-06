@@ -61,9 +61,12 @@ VERSION_ANSWER = (
     # line and an optional path line: no build prints a release name and a
     # path line, and a pattern that took both would pass an answer no fork
     # commit produces.
+    # The two halves are written exactly as HOST_VERSION_LINE writes them, so
+    # the same line is not held to two strictnesses; what this adds is the
+    # path line each layout does or does not come with.
     r"(?:libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)"
     r"\nlibbtbb loaded from: \S[^\n]*"
-    r"|\S+ \(libbtbb [^)\n]*[^)\s]\))\n"
+    r"|\S+ \(libbtbb \S+\))\n"
     # Not "read failed" or "unavailable, <reason>", which is what the line
     # carries when the board answered nothing; the build line below is not
     # printed at all then, so this only says so in the pattern as well.

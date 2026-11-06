@@ -313,7 +313,7 @@ def libbtbb_version_pattern(expected_revision: str, *,
 
     Both versions are on the one line, libbtbb's second, and what it carries
     is ``btbb_get_release()``: the release libbtbb's own build names since
-    its #139, and before that the commit the installed library was built
+    `libbtbb#139`, and before that the commit the installed library was built
     from. ``names_release`` is about the *line*, which the Ubertooth commit
     decides; which of the two ``expected_revision`` is comes from the libbtbb
     side (``libbtbb_identity``).

@@ -33,10 +33,18 @@ The rule, as those files state it:
   clean clone of it, so a reported ``*`` is a mismatch to report rather than
   something to predict.
 
-Two of these are per repository rather than shared. The Ubertooth fork's two
-files both look again at the tag name git found, because a glob cannot say
-"digits and then nothing"; libbtbb's does not, and takes what git gives it.
-And the floor lives in both of the fork's files, so they are compared: with no
+Two of these are read off the file rather than fixed, because they differ
+between commits of one repository and not only between repositories:
+
+* whether the tag name git handed back is looked at again. The fork's two
+  files do; libbtbb's does at a recent commit and not at the commit the fork
+  pins, so a tag a glob let through is the release one of them reports and no
+  release at all to the other.
+* the floor a tree with no release tag in reach reports. The fork names one
+  and reports ``<floor>+unknown``; libbtbb names one at the commit the fork
+  pins and names none at a later one, where the answer is ``unknown`` alone.
+
+Where the fork's two files both name a floor they are compared: with no
 release tag in reach, a tree whose tools and firmware named different floors
 would report two versions, and this cannot predict both.
 
@@ -68,12 +76,10 @@ RELEASE_TAG_GLOBS = (
 # checked here too: "2026-11-R1-local" matches the first glob and is not a
 # release. Both of the fork's own files do the same.
 RELEASE_TAG_FORM = re.compile(r"\A[0-9]{4}-[0-9]{2}-(?:R|RC|DEV)[0-9]+\Z")
-# What a tree with no release tag in reach reports after the release name,
-# instead of a distance it cannot know.
+# What a tree with no release tag in reach reports in place of a distance it
+# cannot know: after the floor its own file names, or on its own where that
+# file names none.
 UNKNOWN_DISTANCE = "unknown"
-# The release a checkout reports when its own file does not say; every commit
-# that derives a release name sets it, so this is only a floor.
-DEFAULT_LATEST_RELEASE = "2020-12-R1"
 
 # Which file decides the version string, per repository. The Ubertooth fork's
 # firmware works the same string out in firmware/version.mk, and the two agree
@@ -98,10 +104,16 @@ _LATEST_RELEASE_RE = re.compile(r'^set\(LATEST_RELEASE\s+"([^"]+)"\)', re.M)
 _FIRMWARE_LATEST_RELEASE_RE = re.compile(
     r"^UBERTOOTH_LATEST_RELEASE\s*:?=\s*(\S+)", re.M
 )
-# Repositories whose version file makes no second check on the tag name git
-# found. libbtbb's asks git with the same globs and takes whatever comes back,
-# so a tag a glob lets through is the release it reports.
-NO_TAG_FORM_CHECK = frozenset({"libbtbb"})
+# Whether a file looks again at the tag name git handed it. A glob cannot say
+# "digits and then nothing", so a tag like "2026-11-R1-local" matches the
+# first glob and is not a release; a file that re-checks reads such a name as
+# no release tag at all. This is the regular expression the check is made
+# with, which is the one thing every version of it has in common -- the fork
+# holds it in a variable (RELEASE_TAG_FORM) and libbtbb writes it inline in a
+# function -- and it is read off the file rather than assumed per repository,
+# because libbtbb's own commits differ: the commit the fork pins makes no such
+# check and a later one does.
+_TAG_FORM_CHECK_MARKER = "-(R|RC|DEV)[0-9]+$"
 
 # The two styles a build reports in.
 RELEASE_STYLE = "release"
@@ -177,21 +189,37 @@ def version_style(text: str, kind: str, commit: str) -> str:
     )
 
 
-def latest_release(text: str) -> str:
-    """The release the file names as its floor (LATEST_RELEASE)."""
+def latest_release(text: str) -> str | None:
+    """The release the file names as its floor (LATEST_RELEASE), or None.
+
+    None where it names none, which is not the same as a default: a file with
+    no floor has no release to stand in for one, and reports the distance as
+    the whole answer (``unknown``). libbtbb's file named a floor at the commit
+    the fork pins and names none at a later one, so this is read rather than
+    assumed.
+    """
     found = _LATEST_RELEASE_RE.search(text)
-    return found.group(1) if found else DEFAULT_LATEST_RELEASE
+    return found.group(1) if found else None
 
 
-def release_name(source_path: Path | str, commit: str, floor: str, *,
+def tag_form_checked(text: str) -> bool:
+    """Does the file look again at the tag name git handed it?"""
+    return _TAG_FORM_CHECK_MARKER in text
+
+
+def release_name(source_path: Path | str, commit: str, floor: str | None, *,
                  check_tag_form: bool = True) -> str:
     """The release name a build at ``commit`` reports, as the build derives it.
 
-    ``check_tag_form`` is the second look at the name git found, which a glob
-    cannot do: the Ubertooth fork's two files both make it, and libbtbb's does
-    not. So a libbtbb whose nearest matching tag is `2026-11-R1-local` is
-    predicted as that tag, because that is what its own build reports -- being
-    faithful to each file matters more than the rule being the same in both.
+    ``check_tag_form`` is the second look at the name git found, and ``floor``
+    is the release that stands in when no release tag is in reach. Both are
+    read off the file that decides the string (``build_version``) rather than
+    fixed per repository, because libbtbb's own commits differ in both: the
+    commit the fork pins names a floor and makes no second check, and a later
+    one makes the check and names no floor.
+
+    With no floor there is no release to name, so the answer is the distance
+    alone -- ``unknown`` -- which is what such a build reports.
     """
     path = Path(source_path)
     matches: list[str] = []
@@ -201,7 +229,7 @@ def release_name(source_path: Path | str, commit: str, floor: str, *,
     if not tag or (check_tag_form and not RELEASE_TAG_FORM.match(tag)):
         # No release tag in reach, or a tag a glob let through that is not a
         # release name after all. Either way the distance is not known.
-        return f"{floor}+{UNKNOWN_DISTANCE}"
+        return f"{floor}+{UNKNOWN_DISTANCE}" if floor else UNKNOWN_DISTANCE
     ahead = _git(path, "rev-list", "--count", f"{tag}..{commit}")
     # Nothing to count is the same answer as none: the release name alone.
     if not ahead or not ahead.isdigit():
@@ -261,7 +289,7 @@ def build_version(
     if style == RELEASE_STYLE:
         floor = latest_release(text)
         firmware = FIRMWARE_VERSION_FILE.get(kind)
-        if firmware is not None:
+        if firmware is not None and floor is not None:
             # The firmware and the bootloader read their floor from their own
             # file, so the two have to agree or the same tree would report
             # one version from its tools and another from its images -- and
@@ -280,7 +308,7 @@ def build_version(
                 )
         return BuildVersion(
             release_name(source_path, commit, floor,
-                         check_tag_form=kind not in NO_TAG_FORM_CHECK),
+                         check_tag_form=tag_form_checked(text)),
             style,
         )
     digits = short_commit

@@ -306,7 +306,7 @@ manifest names.
 
 The line has two layouts, because what a build reports changed
 ([ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230),
-`#1232`). A build now names the release it came from, with libbtbb's beside
+`ubertooth#1232`). A build now names the release it came from, with libbtbb's beside
 it:
 
 ```text
@@ -431,7 +431,7 @@ reflash of the same revision.
 
 That line carries the date the image was built and nothing else since
 [ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
-(`#1232`); before it, it was
+(`ubertooth#1232`); before it, it was
 `ubertooth <revision> (<who>@<where>) <date>`, so a board flashed from an
 older commit reports a revision there too. Nothing reads a version off it any
 more: preflight's per-board `-V` check reads the revision off the
@@ -490,7 +490,7 @@ of the whole region, worked out on the board, and is on the line either way.
 The build string in the block is the version the tree reported when the
 bootloader was built: the release it came from since
 [ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
-(`#1232`), and a commit hash before that, which is the second form and is what
+(`ubertooth#1232`), and a commit hash before that, which is the second form and is what
 a board flashed from an older commit carries. The harness works out which one
 a build at the pin reports the way the makefile works it out (`release.py`)
 and compares that: a release name for equality, since there is no shorter form
@@ -3620,7 +3620,7 @@ sequence requires. It used to require a distinct expected revision per image
 as well, on the reasoning that every write has to change what the board
 reports. Since
 [ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
-(`#1232`) a version names the release a build came from rather than the
+(`ubertooth#1232`) a version names the release a build came from rather than the
 build, so two images can be one release and two files -- and it is the file,
 by its SHA-256, that tells them apart. The revision read after each write is
 then what it says it is: the right release is on the board. Which of two

@@ -1529,7 +1529,7 @@ it on its own version line, beside the tools' own version:
 `Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)`, and on a fork
 commit from before the release names, `Host tools version: libubertooth 1.07
 (git-6a917ec), libbtbb 1.3 (git-7e1cdf0)`. What libbtbb's half carries is
-`btbb_get_release()`: the release its own build names since libbtbb's `#139`,
+`btbb_get_release()`: the release its own build names since `libbtbb#139`,
 and the commit the installed library was built from before that. Either way
 the string comes from a function in libbtbb, so it describes the library the
 tools load and not one they were compiled against. The `Host version` check
@@ -1684,7 +1684,7 @@ skipped to compensate for a missing installation.
 Every version line names the release a build came from rather than the commit
 it was built at
 ([ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230),
-fork `#1232`):
+`ubertooth#1232`):
 
 ```text
 Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
