@@ -161,6 +161,36 @@
       <h2 id="history-heading">History</h2>
     </div>
     <div class="panel-body">
+      <form id="history-filters" class="history-filters" role="search" aria-labelledby="history-heading" novalidate>
+        <div class="field">
+          <label for="history-target">Target</label>
+          <select id="history-target" name="target">
+            <option value="" selected>Any target</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="history-status">Status</label>
+          <select id="history-status" name="status">
+            <option value="" selected>Any status</option>
+            <option value="running">running</option>
+            <option value="passed">passed</option>
+            <option value="failed">failed</option>
+            <option value="canceled">canceled</option>
+            <option value="error">error</option>
+            <option value="lost">lost</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="history-ref">Ref</label>
+          <input type="search" id="history-ref" name="ref" list="history-refs"
+                 placeholder="Any ref" autocomplete="off" spellcheck="false">
+          <datalist id="history-refs"></datalist>
+        </div>
+        <div class="field history-filter-actions">
+          <button type="submit" id="history-apply">Apply</button>
+          <button type="button" id="history-clear">Clear</button>
+        </div>
+      </form>
       <div class="table-wrap">
         <table class="history">
           <caption>Runs, newest first</caption>
@@ -178,6 +208,10 @@
           </thead>
           <tbody id="history"></tbody>
         </table>
+      </div>
+      <div class="history-more">
+        <button type="button" id="history-older" hidden>Load older</button>
+        <p id="history-count" class="hint" role="status" tabindex="-1"></p>
       </div>
       <p id="history-empty" class="empty">No runs yet.</p>
       <div id="failures" class="subpanel" hidden>

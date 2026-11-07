@@ -1107,11 +1107,65 @@ class PageWiringTests(unittest.TestCase):
 
     def test_script_wires_to_the_controller_endpoints(self):
         for endpoint in (
-            '"/api/refs"', "`/api/plans${query}`", '"/api/runs"', "/api/targets/${",
+            '"/api/refs"', "`/api/plans${query}`",
+            "`/api/runs?${query.toString()}`", "/api/targets/${",
             "/ws/live", "/report.md", "/cancel", "`/api/runs/${encodeURIComponent(runId)}`",
         ):
             self.assertIn(endpoint, self.js)
         self.assertIn('"Content-Type"] = "application/json"', self.js)
+
+    def test_the_history_is_drawn_one_page_at_a_time(self):
+        # The newest 50, then a page at a time behind the controller's own
+        # cursor, which carries the run of the instant the page ended on.
+        self.assertIn("const HISTORY_PAGE = 50;", self.js)
+        body = self.js[self.js.index("function historyQuery(cursor)"):
+                       self.js.index("function takeRunPage(")]
+        self.assertIn('limit: String(HISTORY_PAGE)', body)
+        self.assertIn('query.set("before", cursor.created_at)', body)
+        self.assertIn('query.set("before_run_id", cursor.run_id)', body)
+        # A page that is the oldest leaves no cursor, and the button goes.
+        self.assertIn('state.historyCursor = data.has_more', self.js)
+        self.assertIn('$("history-older").hidden = !state.historyCursor;', self.js)
+
+    def test_the_history_filters_reach_the_controller_and_the_live_updates(self):
+        for name in ("history-target", "history-status", "history-ref"):
+            self.assertIn(f'id="{name}"', self.html)
+        query = self.js[self.js.index("function historyQuery(cursor)"):
+                        self.js.index("function takeRunPage(")]
+        self.assertIn('for (const name of ["target", "status", "ref"])', query)
+        # The same three comparisons on a live update, so a run that starts
+        # or finishes lands in the rows where the next page would put it.
+        matches = self.js[self.js.index("function matchesFilters(run)"):
+                          self.js.index("function historyQuery(cursor)")]
+        for comparison in (
+            "run.target !== filters.target", "run.status !== filters.status",
+            "run.ref !== filters.ref",
+        ):
+            self.assertIn(comparison, matches)
+
+    def test_the_pager_keeps_the_keyboard_and_announces_the_count(self):
+        # The count line is a status region, and takes focus when the button
+        # it sits beside goes away under the keyboard.
+        self.assertRegex(
+            self.html, r'id="history-count"[^>]*role="status"[^>]*tabindex="-1"'
+        )
+        self.assertIn('const hadFocus = document.activeElement === button;', self.js)
+        self.assertIn(
+            'if (hadFocus) (state.historyCursor ? button : $("history-count")).focus();',
+            self.js,
+        )
+
+    def test_the_history_panel_fits_a_narrow_window(self):
+        # The filters wrap onto their own lines rather than shrinking to a
+        # few characters, and the table keeps its own horizontal scroll.
+        filters = self.css[self.css.index(".history-filters {"):
+                           self.css.index(".history-filter-actions {")]
+        self.assertIn("flex-wrap: wrap", filters)
+        self.assertIn("flex: 1 1 11rem", filters)
+        self.assertIn("overflow-x: auto", self.css)
+        more = self.css[self.css.index(".history-more {"):
+                        self.css.index(".history-more .hint")]
+        self.assertIn("flex-wrap: wrap", more)
 
     def test_only_runnable_plans_are_offered_to_start(self):
         # The plan <select> is filled from plans that load and are runnable;

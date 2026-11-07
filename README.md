@@ -72,7 +72,8 @@ it through an SSH tunnel; nothing is exposed on the network.
    ref on the target first" and "Flash the firmware to the boards first"
    ticked (the two "Build … too" boxes follow what the suite needs), and
    press Run. The Live run card ticks off
-   each test; History keeps every run with its `report.md`.
+   each test; History keeps every run with its `report.md`, newest 50 first,
+   with Target, Status and Ref filters and Load older behind them.
 
 If it does not connect:
 

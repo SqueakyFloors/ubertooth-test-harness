@@ -446,6 +446,27 @@ button.primary:disabled:hover { background: var(--primary); }
 
 /* ----- history ---------------------------------------------------------- */
 
+/* The filters above the table: a row on a wide window, stacked on a narrow
+   one, where each control still spans the panel rather than shrinking to a
+   few characters. */
+.history-filters {
+  display: flex; flex-wrap: wrap; gap: 0.7rem 0.9rem;
+  align-items: end; margin: 0 0 0.9rem;
+}
+.history-filters .field { flex: 1 1 11rem; }
+.history-filters .field > label { font-size: 0.85rem; }
+.history-filters select, .history-filters input { width: 100%; }
+.history-filter-actions {
+  flex: 0 0 auto; display: flex; flex-direction: row; gap: 0.5rem;
+}
+
+/* The pager under the table: the button and the line that counts the rows. */
+.history-more {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.9rem;
+  margin-top: 0.75rem;
+}
+.history-more .hint { margin: 0; }
+
 .table-wrap {
   overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-small);
 }

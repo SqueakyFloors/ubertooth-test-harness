@@ -135,7 +135,8 @@ applied to the target.
 python -m ubertooth_harness controller --port 8765 \
   [--results-dir ~/.local/share/ubertooth-harness/controller/runs] \
   [--ubertooth-repo https://github.com/SqueakyFloors/ubertooth.git] \
-  [--plans-dir testplans]
+  [--plans-dir testplans] \
+  [--keep-runs DAYS]
 ```
 
 `--ubertooth-repo` is the repository whose branches and tags the GUI offers
@@ -314,10 +315,21 @@ word and symbol (colour only reinforces it).
   page; while the runner is not connected the file is listed as `name (on
   the target)` and is not a link. The view is linkable as
   `/ui/#run=<run_id>`, and `/ui/#run=<run_id>&file=<path>` opens that file.
-- **History:** every run, newest first, with started/finished times, ref,
+- **History:** the newest 50 runs, with started/finished times, ref,
   plan/suite, target and status, a link to its `report.md`, and for a run
   that did not pass a failure summary (each failed phase or test with its
-  reason and last output lines, then the run's own reason).
+  reason and last output lines, then the run's own reason). **Load older**
+  adds the next 50, oldest last, and goes once the oldest run is on the
+  page; the line beside it counts the rows against the whole history. Above
+  the table, **Target**, **Status** and **Ref** filter the list; each change
+  fetches the newest page for those filters, and a run that starts or
+  finishes while a page is open joins or leaves the rows by the same
+  comparisons. The filters offer every registered target and every target or
+  ref the loaded rows name, beside the refs `GET /api/refs` lists; the ref
+  box takes any name. On a narrow window the filters stack and the table
+  scrolls sideways. A keyboard reaches each control in turn, and when Load
+  older runs out the focus moves to the line that says so rather than back
+  to the document.
 
 Every HTTP response carries `Content-Security-Policy: default-src 'self';
 script-src 'self'; style-src 'self'; connect-src 'self' ws://<host>;
@@ -411,7 +423,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |
 | `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, stage estimates and planned invocations (at most 600 of them, since this answer carries one list per host; the whole list stays at `GET /api/runs/{run_id}`), `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one, which a run that flashes its boards has not got: flashing the run's build is not a learned stage) |
 | `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, or once a host is still starting (its outcome says so, and the child its runner may still accept is cancelled as it arrives); 409 when nothing is running and nothing is starting; when no child could be cancelled, the one status every host gave (409 busy, 503 runner away, 504 no answer) or 409 where they differ |
-| `GET /api/runs[?target=HOST]` | runs, newest first |
+| `GET /api/runs[?limit=N][&before=<created_at>][&before_run_id=ID][&target=HOST][&status=STATUS][&ref=REF]` | one page of the run history, newest first: at most `limit` runs (50 by default, 500 at most) ordered by `(created_at, run_id)` descending. `has_more` says whether anything is behind the page, and `next_before` with `next_before_run_id` is the cursor for the next one, so paging holds no position in the controller and a run that starts in between is neither served twice nor missed. `before` alone (the created_at stamp) sits before every run of that instant, which may repeat one but loses none. `total` is every stored run and `matching` every run the filters match. The three filters compare exactly: the target's registry name, the run's status, the ref it named. Listing reads only the runs' own records, so `event_count` and `malformed_lines` are `null` for a run whose stored `run.jsonl` has not been read since the controller started; `GET /api/runs/{run_id}` reads it and reports them. 422 for a limit outside the range, a `before` that is not such a stamp, a `before_run_id` without a `before`, or a target, status or ref that could not be one |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `GET /api/runs/{run_id}/files` | the output files the run recorded, each with its path, stream, size, line count, SHA-256, where it came from (`owner`), the checks that read it, and `readable`: whether this host holds the file itself |
@@ -521,4 +533,32 @@ skipped and counted (`malformed_lines`). A run or cancel request whose callers
 all timed out (504) is kept for a grace period (60 s) so a late answer still
 takes effect, then dropped. Overlapping cancels of one run share the
 outstanding request, and each caller has its own timeout.
+
+### What startup reads, and how long runs are kept
+
+Starting up reads one `run.json` per stored run and no `run.jsonl` at all,
+except for a run still `running`, whose stored sequence numbers are what
+recognizes its runner's replay after a reconnect. A finished run's records
+are read when something asks for them: its own `GET /api/runs/{run_id}`, its
+failure summary, a report rebuilt by a late record, or the durations learned
+from it. They are counted on the run then. So listing the history costs one
+small record per run however many records those runs hold, and
+`event_count` and `malformed_lines` are `null` until a run's records are
+read.
+
+Run directories are kept for ever by default: nothing is deleted unless
+`--keep-runs DAYS` asks for it. With a window, the controller removes a
+finished run's directory once it is that many days old, dated by when it
+finished or else by when it was created, at startup and then every hour. A
+run that is still `running` is never removed, nor is one whose stamps cannot
+be read, nor anything that is not a run directory of its own: the name must
+be a flat directory name beside the other runs, not a symbolic link, and the
+`run.json` in it must record that same run. A group record whose every run
+has been removed goes with them; the learned durations
+([estimates.json](#learned-durations)) and the `groups/` directory itself
+stay. Anything that cannot be removed is logged and kept, with the run still
+listed. A browser open on a pruned run's row gets 404 for its `report.md`
+until it reloads.
+
+### Strict decoding and target state
 

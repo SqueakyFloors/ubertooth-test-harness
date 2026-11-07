@@ -24,6 +24,13 @@ commit listed for that ref, and the runner runs exactly that commit, so a
 stale or differently configured runner checkout cannot substitute another
 one; the commit is recorded in ``run.json``.
 
+The history is read a page at a time, newest first
+(``GET /api/runs?limit=&before=``), and listing it reads only the runs' own
+``run.json`` records: a finished run's ``run.jsonl`` is parsed when
+something asks for its records, not to draw a table of runs. Run
+directories are kept for ever unless ``--keep-runs DAYS`` asks for a
+retention window, which never removes a running run (``prune_runs``).
+
 Target runners connect to ``/ws/runner`` and speak protocol v7
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
@@ -50,6 +57,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import sys
 import time
@@ -122,6 +130,26 @@ DEFAULT_REPLY_TIMEOUT_S = 10.0
 # is kept so a late answer still takes effect; afterwards it is dropped.
 DEFAULT_LATE_REPLY_GRACE_S = 60.0
 DEFAULT_MONITOR_INTERVAL_S = 1.0
+# How often an optional retention window is applied while the service runs
+# (it is also applied once at startup).
+DEFAULT_PRUNE_INTERVAL_S = 3600.0
+# GET /api/runs: how many runs one page holds by default, and at most. The
+# history is paged newest first, so a client that wants more asks for the
+# next page rather than one unbounded answer.
+DEFAULT_RUN_PAGE = 50
+MAX_RUN_PAGE = 500
+# ?before=<created_at>: an ISO-8601 stamp as the controller writes it. Only
+# the shape is checked; the comparison is lexicographic, which is time order
+# for these stamps because every one is UTC with the same field widths.
+_TIMESTAMP_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.+-]{5,20}$")
+# ?status=<status>: a run's status comes from its runner (passed, failed,
+# canceled) or from the controller (running, error, lost), so the filter
+# checks the shape of a status rather than a fixed list, and a status no
+# stored run has simply matches nothing.
+_STATUS_RE = re.compile(r"^[a-z][a-z ]{0,30}[a-z]$")
+# ?ref=<ref>: the ref a run named, matched exactly. A ref name can hold most
+# characters, so only the length and control characters are refused.
+MAX_REF_CHARS = 256
 LIVE_QUEUE_LIMIT = 1000
 # File page requests outstanding to one target. A reader pages through a file
 # one request at a time, so this is generous; it bounds what any process that
@@ -211,6 +239,33 @@ def _log(message: str) -> None:
 
 def valid_identifier(value) -> bool:
     return isinstance(value, str) and bool(_ID_RE.fullmatch(value))
+
+
+def _retention_days(days: float | None) -> float | None:
+    """Check a ``--keep-runs DAYS`` window; None keeps every run for ever."""
+    if days is None:
+        return None
+    if isinstance(days, bool) or not isinstance(days, (int, float)):
+        raise ControllerConfigError(f"invalid retention window {days!r}")
+    days = float(days)
+    if not days > 0 or days != days or days == float("inf"):
+        raise ControllerConfigError(
+            f"invalid retention window {days!r}: it must be more than 0 days"
+        )
+    return days
+
+
+def _timestamp(value) -> datetime.datetime | None:
+    """One of the controller's own ISO-8601 stamps as a UTC time, or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
 
 
 # ----- state ---------------------------------------------------------------
@@ -322,6 +377,12 @@ class Run:
     # Its durations are already in the estimate store; see Controller.learn.
     learned_durations: bool = False
     seen: set = dataclasses.field(default_factory=set, repr=False)
+    # Whether ``seen`` and the last-record fields below hold what the stored
+    # run.jsonl holds. A run the controller starts has nothing stored, so it
+    # is true from the first; a finished run loaded at startup has its
+    # transcript read only when something asks for its records, so until
+    # then this is false and those fields say nothing about it.
+    transcript_read: bool = True
     last_event_sequence: int | None = None
     last_event_type: str | None = None
     duplicate_events: int = 0
@@ -337,12 +398,18 @@ class Run:
 
     def view(self) -> dict:
         data = self.record()
+        # The four record counts are what the stored run.jsonl holds, so
+        # they are null for a finished run whose records have not been read
+        # since this controller started: listing the history does not read
+        # them, and reporting zero would read as a run that recorded
+        # nothing. GET /api/runs/{run_id} reads them, and then reports them.
         data.update(
-            event_count=len(self.seen),
+            transcript_read=self.transcript_read,
+            event_count=len(self.seen) if self.transcript_read else None,
             last_event_sequence=self.last_event_sequence,
             last_event_type=self.last_event_type,
             duplicate_events=self.duplicate_events,
-            malformed_lines=self.malformed_lines,
+            malformed_lines=self.malformed_lines if self.transcript_read else None,
         )
         return data
 
@@ -451,12 +518,20 @@ class Controller:
         clock: Callable[[], float] = time.monotonic,
         ref_source: GitRefSource | None = None,
         plans_dir: Path | str = DEFAULT_PLANS_DIR,
+        keep_runs_days: float | None = None,
+        prune_interval_s: float = DEFAULT_PRUNE_INTERVAL_S,
     ):
         self.results_dir = Path(results_dir).expanduser().resolve()
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.reply_timeout_s = reply_timeout_s
         self.late_reply_grace_s = late_reply_grace_s
         self.monitor_interval_s = monitor_interval_s
+        # How long a finished run's directory is kept, or None to keep every
+        # run for ever, which is the default: nothing is deleted unless an
+        # operator asks for a retention window.
+        self.keep_runs_days = _retention_days(keep_runs_days)
+        self.prune_interval_s = prune_interval_s
+        self._pruned_at: float | None = None
         self.log = log
         self.clock = clock
         # Lists the refs a run may name; None refuses every run.
@@ -493,6 +568,10 @@ class Controller:
         self._tasks: set[asyncio.Task] = set()
         self._load_runs()
         self._load_groups()
+        # A retention window is applied once here, so a controller started
+        # with one does not serve what it is about to remove, and then every
+        # prune_interval_s from the monitor.
+        self.prune_runs()
 
     # ----- results store ---------------------------------------------------
 
@@ -520,25 +599,50 @@ class Controller:
                 # recording the end and learning from it. The monitor picks
                 # it up once the service is serving.
                 self._unlearned.append(run.run_id)
-            self._load_events(run)
+            # Only a run that may still receive records needs its
+            # transcript now: the sequence numbers in it are what
+            # recognizes a runner's replay after a reconnect. A finished
+            # run's records are read when something asks for them
+            # (``_read_transcript``), so starting up with months of runs
+            # costs one small record each and parses no transcript.
+            run.transcript_read = False
+            if run.active:
+                self._read_transcript(run)
             self.runs[run.run_id] = run
 
-    def _load_events(self, run: Run) -> None:
+    def _log_bytes(self, run: Run) -> bytes:
+        """The stored run.jsonl, with a partial trailing line dropped.
+
+        An interrupted append leaves a line that is not a record; it is
+        truncated here, once, by whichever read reaches the file first. A
+        file that is there but cannot be read raises, so nothing mistakes it
+        for a run that recorded nothing.
+        """
         path = run.directory / RUN_LOG
         try:
             data = path.read_bytes()
         except FileNotFoundError:
-            return
+            return b""
         if data and not data.endswith(b"\n"):
-            # Drop a partial line left by an interrupted append.
             keep = data.rfind(b"\n") + 1
             with path.open("r+b") as stream:
                 stream.truncate(keep)
             data = data[:keep]
-        for event in self._parse_events(run, data):
+        return data
+
+    def _note_transcript(self, run: Run, events: Sequence[dict]) -> None:
+        """Take a stored run's own records into what it knows about them."""
+        for event in events:
             run.seen.add(event.get("sequence"))
             run.last_event_sequence = event.get("sequence")
             run.last_event_type = event.get("event_type")
+        run.transcript_read = True
+
+    def _read_transcript(self, run: Run) -> None:
+        """Read this run's stored records once, if they have not been read."""
+        if run.transcript_read:
+            return
+        self._note_transcript(run, self._parse_events(run, self._log_bytes(run)))
 
     def _parse_events(self, run: Run, data: bytes) -> list[dict]:
         """Records of a stored run.jsonl; malformed lines are skipped and counted."""
@@ -583,6 +687,205 @@ class Controller:
             json.dumps(run.record(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         os.replace(temporary, run.directory / RUN_RECORD)
+
+    # ----- history ---------------------------------------------------------
+
+    def run_page(
+        self,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+        before_run_id: str | None = None,
+        target: str | None = None,
+        status: str | None = None,
+        ref: str | None = None,
+    ) -> dict:
+        """One page of the run history, newest first.
+
+        The history is ordered by ``(created_at, run_id)`` descending, which
+        is newest first: ``created_at`` is a UTC ISO-8601 stamp the
+        controller writes, so comparing those strings compares times, and
+        the run ID settles two runs stamped in the same millisecond.
+
+        ``before`` (with ``before_run_id`` for that tie) is the cursor: the
+        page holds the runs that come after it in that order. The answer
+        carries the cursor for the next page, so a client pages through
+        without holding a position the controller has to keep for it, and
+        nothing is served twice or missed when a run starts in between.
+
+        Only the runs' own summaries are read: no stored transcript is
+        parsed to list the history.
+        """
+        limit = self._page_limit(limit)
+        if target is not None and not valid_identifier(target):
+            raise ControllerError("target must be a registry host name", 422)
+        if status is not None and not _STATUS_RE.fullmatch(status):
+            raise ControllerError(
+                "status must be a run status such as running, passed, failed, "
+                "canceled, error or lost",
+                422,
+            )
+        if ref is not None and (
+            len(ref) > MAX_REF_CHARS or any(character < " " for character in ref)
+        ):
+            raise ControllerError(
+                f"ref must be a ref name of at most {MAX_REF_CHARS} characters", 422
+            )
+        cursor = self._page_cursor(before, before_run_id)
+        matching = [
+            run for run in self.runs.values()
+            if (target is None or run.target == target)
+            and (status is None or run.status == status)
+            and (ref is None or run.ref == ref)
+        ]
+        matching.sort(key=lambda run: (run.created_at, run.run_id), reverse=True)
+        older = matching if cursor is None else [
+            run for run in matching if (run.created_at, run.run_id) < cursor
+        ]
+        page = older[:limit]
+        more = len(older) > len(page)
+        last = page[-1] if page else None
+        return {
+            "runs": [run.view() for run in page],
+            "limit": limit,
+            # Every stored run, every run the filters match, and the page's
+            # own length: what "50 of 1234 runs" is read from.
+            "total": len(self.runs),
+            "matching": len(matching),
+            "returned": len(page),
+            "has_more": more,
+            "next_before": last.created_at if more and last else None,
+            "next_before_run_id": last.run_id if more and last else None,
+            "filters": {"target": target, "status": status, "ref": ref},
+        }
+
+    def _page_limit(self, limit: int | None) -> int:
+        if limit is None:
+            return DEFAULT_RUN_PAGE
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ControllerError("limit must be a whole number of runs", 422)
+        if not 1 <= limit <= MAX_RUN_PAGE:
+            raise ControllerError(
+                f"limit must be between 1 and {MAX_RUN_PAGE} runs", 422
+            )
+        return limit
+
+    def _page_cursor(
+        self, before: str | None, before_run_id: str | None
+    ) -> tuple[str, str] | None:
+        """The ordering position a page starts after, or None for the newest."""
+        if before is None:
+            if before_run_id is not None:
+                raise ControllerError(
+                    "before_run_id names the run of a before cursor; it needs before",
+                    422,
+                )
+            return None
+        if not _TIMESTAMP_RE.fullmatch(before) or _timestamp(before) is None:
+            raise ControllerError(
+                "before must be the created_at stamp of a run, as this API "
+                "reports it (for example 2026-01-02T03:04:05.678+00:00)",
+                422,
+            )
+        if before_run_id is not None and not valid_identifier(before_run_id):
+            raise ControllerError("before_run_id must be a run ID", 422)
+        # Without a run ID the cursor sits before every run of that instant,
+        # so a page boundary in the middle of two runs stamped alike repeats
+        # one rather than losing one.
+        return (before, before_run_id or "")
+
+    # ----- retention -------------------------------------------------------
+
+    def prune_runs(self, now: datetime.datetime | None = None) -> list[str]:
+        """Remove run directories older than the retention window.
+
+        Nothing is removed without ``keep_runs_days``: run directories are
+        kept for ever by default. A run is removed only when every check
+        passes, so anything unexpected is kept:
+
+        - it is one of this controller's stored runs, and not still running;
+        - its age, from when it finished or else when it was created, is
+          past the window;
+        - its directory is a direct child of the results directory, is not a
+          symbolic link, and holds the run record whose ID is its name.
+
+        Returns the run IDs removed. Never raises: a directory that cannot
+        be removed is logged and kept, with the run still listed.
+        """
+        if self.keep_runs_days is None:
+            return []
+        current = now or datetime.datetime.now(datetime.timezone.utc)
+        cutoff = current - datetime.timedelta(days=self.keep_runs_days)
+        removed = []
+        for run in list(self.runs.values()):
+            if run.active:
+                continue  # a running run is never pruned
+            when = _timestamp(run.finished_at) or _timestamp(run.created_at)
+            if when is None or when > cutoff:
+                # Undatable runs are kept: nothing is deleted on a guess.
+                continue
+            if self._remove_run_directory(run):
+                removed.append(run.run_id)
+                del self.runs[run.run_id]
+                if run.run_id in self._unlearned:
+                    self._unlearned.remove(run.run_id)
+        if removed:
+            self._prune_groups()
+            self.log(
+                f"retention: removed {len(removed)} run directory/directories "
+                f"older than {self.keep_runs_days:g} day(s)"
+            )
+        self._pruned_at = self.clock()
+        return removed
+
+    def _remove_run_directory(self, run: Run) -> bool:
+        """Delete one stored run directory, or log why it was left alone."""
+        try:
+            directory = self._run_directory(run.run_id)
+        except _Violation as error:
+            self.log(f"retention: keeping run {run.run_id}: {error}")
+            return False
+        try:
+            if directory != run.directory.resolve():
+                raise OSError(
+                    f"{run.directory} is not the run directory of {run.run_id}"
+                )
+            if directory.is_symlink() or not directory.is_dir():
+                raise OSError("not a directory of its own")
+            record = directory / RUN_RECORD
+            if record.is_symlink() or not record.is_file():
+                raise OSError(f"no {RUN_RECORD} of its own")
+            stored = json.loads(record.read_text(encoding="utf-8"))
+            if not isinstance(stored, dict) or stored.get("run_id") != run.run_id:
+                raise OSError(f"{RUN_RECORD} does not record run {run.run_id}")
+            shutil.rmtree(directory)
+        except (OSError, ValueError) as error:
+            self.log(f"retention: keeping run {run.run_id}: {error}")
+            return False
+        return True
+
+    def _prune_groups(self) -> None:
+        """Forget group records whose every run has been removed."""
+        for group in list(self.groups.values()):
+            if any(run_id in self.runs for run_id in group.run_ids()):
+                continue
+            path = self.groups_dir / f"{group.group_id}.json"
+            try:
+                if path.is_symlink() or not path.is_file():
+                    raise OSError("not a group record of its own")
+                view = self.view_group(group)
+                path.unlink()
+            except OSError as error:
+                self.log(f"retention: keeping group {group.group_id}: {error}")
+                continue
+            del self.groups[group.group_id]
+            # As when a group is forgotten for starting nothing: a browser
+            # that was sent this group is told it is gone, rather than left
+            # with a group the history no longer lists.
+            message = {"type": "group", "group": view, "removed": True}
+            for subscriber in list(self._subscribers):
+                if subscriber.wants_group(group.group_id):
+                    subscriber.offer(message)
 
     # ----- run groups ------------------------------------------------------
 
@@ -697,6 +1000,17 @@ class Controller:
         Never raises. Returns ``(report written, report problem or None)``.
         """
         problem = None
+        # The records decide whether there is a report to compile, so a run
+        # whose transcript has not been read since startup is read now:
+        # treating its records as absent would replace a real report with a
+        # short one saying there were none. A transcript that cannot be read
+        # leaves the stored report alone for the same reason.
+        try:
+            self._read_transcript(run)
+        except OSError as error:
+            problem = f"could not read {RUN_LOG}: {error}"
+            self.log(f"run {run.run_id}: {problem}; left {REPORT} as it was")
+            return run.report, problem
         if run.seen:
             try:
                 if write_report(run.directory) is not None:
@@ -745,11 +1059,16 @@ class Controller:
             return False, problem
 
     def read_events(self, run: Run) -> list[dict]:
-        try:
-            data = (run.directory / RUN_LOG).read_bytes()
-        except FileNotFoundError:
-            return []
-        return self._parse_events(run, data)
+        """Every stored record of a run, parsed.
+
+        Also what reads a finished run's transcript for the first time since
+        startup, since whatever asks for the records has paid for the read
+        anyway: its sequence numbers and last record are noted on the run.
+        """
+        events = self._parse_events(run, self._log_bytes(run))
+        if not run.transcript_read:
+            self._note_transcript(run, events)
+        return events
 
     # ----- live fan-out ----------------------------------------------------
 
@@ -1226,6 +1545,14 @@ class Controller:
             if event["run_id"] != run_id:
                 raise _Violation(f"event record run_id {event['run_id']} != {run_id}")
             run = self._run_for(target, run_id)
+            if not run.transcript_read:
+                # A run that outlived a controller restart is loaded with
+                # its records read, so this is a runner reporting records
+                # for a run that was stored as finished. Its stored sequence
+                # numbers are what recognizes a replay, so they are read
+                # before this record is weighed against them; the flag keeps
+                # the read off the path of every other record.
+                await asyncio.to_thread(self._read_transcript, run)
             sequence = event["sequence"]
             if sequence in run.seen:
                 run.duplicate_events += 1  # replay after a reconnect
@@ -1400,11 +1727,21 @@ class Controller:
             try:
                 self.check_heartbeats()
                 self.expire_pending()
+                self.prune_due()
             except Exception as error:  # noqa: BLE001 - the watchdog must run
                 # Expiry writes group records now, so a results directory
                 # that cannot be written must not take the heartbeat and
                 # offline detection down with it.
                 self.log(f"could not expire pending requests: {error}")
+
+    def prune_due(self) -> list[str]:
+        """Apply the retention window if it is due; nothing without one."""
+        if self.keep_runs_days is None:
+            return []
+        now = self.clock()
+        if self._pruned_at is not None and now - self._pruned_at < self.prune_interval_s:
+            return []
+        return self.prune_runs()
 
     def check_heartbeats(self) -> None:
         now = self.clock()
@@ -2333,7 +2670,12 @@ ENDPOINTS = {
     "POST /api/run-groups/{group_id}/cancel": (
         "cancel every active run of a group: {reason}"
     ),
-    "GET /api/runs": "runs, newest first (?target=HOST)",
+    "GET /api/runs": (
+        "one page of the run history, newest first: ?limit=N (50 by "
+        f"default, {MAX_RUN_PAGE} at most) and ?before=<created_at>"
+        "[&before_run_id=ID] for the next page, with ?target=HOST, "
+        "?status=STATUS and ?ref=REF filters"
+    ),
     "GET /api/runs/{run_id}": (
         "one run with its events, failure summary, planned invocations and "
         "learned stage estimates"
@@ -2515,13 +2857,18 @@ def create_app(controller: Controller):
         return {"group": controller.view_group(group), "canceled": canceled}
 
     @app.get("/api/runs")
-    async def list_runs(target: str | None = None):
-        runs = [
-            run for run in controller.runs.values()
-            if target is None or run.target == target
-        ]
-        runs.sort(key=lambda run: (run.created_at, run.run_id), reverse=True)
-        return {"runs": [run.view() for run in runs]}
+    async def list_runs(
+        target: str | None = None,
+        status: str | None = None,
+        ref: str | None = None,
+        limit: int | None = None,
+        before: str | None = None,
+        before_run_id: str | None = None,
+    ):
+        return controller.run_page(
+            limit=limit, before=before, before_run_id=before_run_id,
+            target=target, status=status, ref=ref,
+        )
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str):

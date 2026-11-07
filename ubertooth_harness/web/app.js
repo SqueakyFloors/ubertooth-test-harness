@@ -51,6 +51,15 @@
   const state = {
     targets: new Map(),
     runs: new Map(),
+    // The history: the run IDs the loaded pages hold (the rows), the
+    // filters those pages were asked for, the cursor the next page starts
+    // after (null once the oldest run is on the page), and the counts the
+    // last page reported.
+    historyIds: new Set(),
+    historyFilters: { target: "", status: "", ref: "" },
+    historyCursor: null,
+    historyMatching: 0,
+    historyTotal: 0,
     plans: [],
     // The target the plan list on display was loaded for, the one a load is
     // under way for, and a token so a slower answer for a target already
@@ -177,6 +186,8 @@
             el("dt", { text: "Active run" }), el("dd", {}, active))));
     }));
     renderTargetSelect();
+    // A newly registered target is a history filter choice too.
+    renderHistoryChoices();
   }
 
   function renderTargetSelect() {
@@ -248,6 +259,8 @@
         .find((value) => value && state.refOptions.has(value));
       if (preferred) select.value = preferred;
       status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}.`;
+      // The listed refs are the history ref filter's suggestions too.
+      renderHistoryChoices();
     } catch (error) {
       state.refOptions = new Map();
       select.replaceChildren(el("option", { value: "", text: "(refs unavailable)" }));
@@ -1146,17 +1159,100 @@
 
   // ----- history -----------------------------------------------------------
 
+  // The history is paged newest first: the latest HISTORY_PAGE runs, then a
+  // page at a time behind the cursor the controller returns, so a bench with
+  // months of runs neither sends nor draws all of them.
+  const HISTORY_PAGE = 50;
+
+  function chosenFilters() {
+    return {
+      target: $("history-target").value,
+      status: $("history-status").value,
+      ref: $("history-ref").value.trim(),
+    };
+  }
+
+  function filtering() {
+    const filters = state.historyFilters;
+    return Boolean(filters.target || filters.status || filters.ref);
+  }
+
+  // The same three comparisons the controller makes, so a live update lands
+  // in the rows exactly where the next page would have put it.
+  function matchesFilters(run) {
+    const filters = state.historyFilters;
+    if (filters.target && run.target !== filters.target) return false;
+    if (filters.status && run.status !== filters.status) return false;
+    if (filters.ref && run.ref !== filters.ref) return false;
+    return true;
+  }
+
+  function historyQuery(cursor) {
+    const query = new URLSearchParams({ limit: String(HISTORY_PAGE) });
+    const filters = state.historyFilters;
+    for (const name of ["target", "status", "ref"]) {
+      if (filters[name]) query.set(name, filters[name]);
+    }
+    if (cursor) {
+      query.set("before", cursor.created_at);
+      // The run of that instant the page ended on: two runs stamped alike
+      // are then neither repeated nor lost at a page boundary.
+      if (cursor.run_id) query.set("before_run_id", cursor.run_id);
+    }
+    return `/api/runs?${query.toString()}`;
+  }
+
+  // One page into the rows. state.runs is the page's cache of run records,
+  // which the live view reads too, so nothing is dropped from it; the rows
+  // are state.historyIds, the runs the loaded pages hold.
+  function takeRunPage(data, append) {
+    if (!append) state.historyIds = new Set();
+    for (const run of data.runs || []) {
+      state.runs.set(run.run_id, run);
+      state.historyIds.add(run.run_id);
+    }
+    state.historyCursor = data.has_more
+      ? { created_at: data.next_before, run_id: data.next_before_run_id }
+      : null;
+    state.historyMatching = Number.isInteger(data.matching)
+      ? data.matching : state.historyIds.size;
+    state.historyTotal = Number.isInteger(data.total)
+      ? data.total : state.historyMatching;
+  }
+
   function upsertRun(run) {
     if (!run || typeof run.run_id !== "string") return;
+    const counted = state.runs.has(run.run_id);
     state.runs.set(run.run_id, run);
+    if (matchesFilters(run)) {
+      if (!state.historyIds.has(run.run_id)) {
+        state.historyIds.add(run.run_id);
+        // A run this page had not seen: it has just started, so it is newer
+        // than any page and belongs at the top of the rows and in the count.
+        if (!counted) {
+          state.historyMatching += 1;
+          state.historyTotal += 1;
+        }
+      }
+    } else {
+      // A run the filters no longer match (one that was running and has
+      // finished, with "running" chosen) leaves the rows; its record stays
+      // in the cache, so watching it still works.
+      state.historyIds.delete(run.run_id);
+    }
     renderHistory();
     if (state.live && state.live.run_id === run.run_id) renderLive();
   }
 
   function renderHistory() {
-    const runs = [...state.runs.values()].sort((a, b) =>
-      String(b.created_at).localeCompare(String(a.created_at)) || b.run_id.localeCompare(a.run_id));
+    const runs = [...state.historyIds]
+      .map((runId) => state.runs.get(runId))
+      .filter(Boolean)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))
+        || b.run_id.localeCompare(a.run_id));
     $("history-empty").hidden = runs.length > 0;
+    $("history-empty").textContent = filtering()
+      ? "No run matches these filters." : "No runs yet.";
     $("history").replaceChildren(...runs.map((run) => {
       const actions = el("td", { className: "actions" },
         el("button", {
@@ -1186,17 +1282,92 @@
         el("td", {}, statusBadge(run.status)),
         actions);
     }));
+    renderHistoryCount(runs.length);
+    renderHistoryChoices();
   }
 
+  function renderHistoryCount(shown) {
+    // The figure the last page reported, and never fewer runs than are on
+    // display: a run that starts while a page is open joins the rows.
+    const matching = Math.max(state.historyMatching, shown);
+    $("history-older").hidden = !state.historyCursor;
+    if (!shown) {
+      $("history-count").textContent = "";
+      return;
+    }
+    const sentences = [
+      `Showing ${shown} of ${matching} run${matching === 1 ? "" : "s"}`
+      + (filtering() ? ` that match these filters, of ${state.historyTotal} stored.` : "."),
+    ];
+    if (state.historyCursor) {
+      sentences.push(`Load older adds up to ${HISTORY_PAGE} more, oldest last.`);
+    }
+    $("history-count").textContent = sentences.join(" ");
+  }
+
+  // The filter choices: every registered target and every target a loaded
+  // row names, and the listed refs beside the refs those rows name. Both are
+  // rebuilt only when they change, since this runs on every render.
+  function renderHistoryChoices() {
+    const targets = new Set(state.targets.keys());
+    const refs = new Set([...state.refOptions.values()].map((ref) => ref.name));
+    for (const run of state.runs.values()) {
+      if (run.target) targets.add(run.target);
+      if (run.ref) refs.add(run.ref);
+    }
+    const select = $("history-target");
+    // A chosen target stays a choice even when no row or target names it,
+    // or choosing it would clear the filter it is there to apply.
+    if (select.value) targets.add(select.value);
+    const hosts = [...targets].sort((a, b) => a.localeCompare(b));
+    if (select.dataset.hosts !== hosts.join("\n")) {
+      select.dataset.hosts = hosts.join("\n");
+      const chosen = select.value;
+      select.replaceChildren(
+        el("option", { value: "", text: "Any target" }),
+        ...hosts.map((host) => el("option", { value: host, text: host })));
+      select.value = chosen;
+    }
+    const names = [...refs].sort((a, b) => a.localeCompare(b));
+    const list = $("history-refs");
+    if (list.dataset.refs !== names.join("\n")) {
+      list.dataset.refs = names.join("\n");
+      list.replaceChildren(...names.map((name) => el("option", { value: name })));
+    }
+  }
+
+  // The newest page, for the filters now chosen: on connect, on reconnect,
+  // and whenever the filters change.
   async function loadRuns() {
+    state.historyFilters = chosenFilters();
     try {
-      const data = await api("GET", "/api/runs");
-      state.runs = new Map(data.runs.map((run) => [run.run_id, run]));
+      const data = await api("GET", historyQuery(null));
+      takeRunPage(data, false);
       renderHistory();
       if (state.live) rebuildChecklist();
     } catch (error) {
+      $("history-empty").hidden = false;
       $("history-empty").textContent = `Cannot list runs: ${error.message}`;
     }
+  }
+
+  async function loadOlderRuns() {
+    const cursor = state.historyCursor;
+    if (!cursor) return;
+    const button = $("history-older");
+    const hadFocus = document.activeElement === button;
+    button.disabled = true;
+    $("history-count").textContent = "Loading older runs…";
+    try {
+      takeRunPage(await api("GET", historyQuery(cursor)), true);
+      renderHistory();
+    } catch (error) {
+      $("history-count").textContent = `Cannot load older runs: ${error.message}`;
+    }
+    button.disabled = false;
+    // The button goes once the oldest run is on the page, so the keyboard
+    // moves to the line that says so rather than back to the document.
+    if (hadFocus) (state.historyCursor ? button : $("history-count")).focus();
   }
 
   async function showFailures(runId) {
@@ -1375,6 +1546,25 @@
     $("plan").addEventListener("change", () => renderSuites());
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelRun);
+    // The history filters: a change applies at once, and the form's own
+    // submit (Enter in the ref box, or Apply) does the same rather than
+    // navigating away.
+    $("history-filters").addEventListener("submit", (submit) => {
+      submit.preventDefault();
+      loadRuns();
+    });
+    $("history-target").addEventListener("change", loadRuns);
+    $("history-status").addEventListener("change", loadRuns);
+    // A ref picked from the suggestions, or typed and left, applies too.
+    $("history-ref").addEventListener("change", loadRuns);
+    $("history-clear").addEventListener("click", () => {
+      $("history-target").value = "";
+      $("history-status").value = "";
+      $("history-ref").value = "";
+      loadRuns();
+      $("history-target").focus();
+    });
+    $("history-older").addEventListener("click", loadOlderRuns);
     $("file-previous").addEventListener("click", () => pageOutputFile(-1));
     $("file-next").addEventListener("click", () => pageOutputFile(1));
     $("file-close").addEventListener("click", () => {
