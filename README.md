@@ -3780,7 +3780,16 @@ prints the path it loaded, which has to be inside the prefix; one since
 reports a libbtbb only when it is not the one it was built against, so what
 is required there is that warning's absence *and* that the install was built
 against a libbtbb inside the prefix, since the warning is skipped when the
-install recorded no directory to compare with. A CMake
+install recorded no directory to compare with. An absence means nothing on its
+own, so the same program is then run once more with the loader pointed at a
+copy of the install's libbtbb in a directory of its own, where that warning
+has to appear and to name both that directory and the one the install was
+built against: without it the step would pass just as readily on an install
+whose warning had stopped working, or whose loader will not say which file it
+opened. A copy and not a link, because the fork resolves both directories, so
+a link to the install's own would be one install to it and print nothing. (An
+install from before #352 names the path it loaded, which is the evidence
+itself, and the control is not run against one.) A CMake
 project of the same program is configured with
 `find_package(ubertooth <version> EXACT REQUIRED)`, the version being the one
 `libubertooth.pc` gave, so `ubertoothConfigVersion.cmake` is read and has to

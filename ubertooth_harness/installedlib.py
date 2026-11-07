@@ -11,6 +11,10 @@ a shell comparison, and they live here so a unit test can run them:
     python -m ubertooth_harness.installedlib fork-pin FINDBTBB.cmake
     python -m ubertooth_harness.installedlib consumer-identity OUT --prefix P
                                              --version-line LINE
+    python -m ubertooth_harness.installedlib another-libbtbb OUT
+                                             --loaded-from DIR
+                                             --built-libbtbb DIR
+                                             --version-line LINE
     python -m ubertooth_harness.installedlib under-prefix LOG --prefix P
                                              --marker TEXT
     python -m ubertooth_harness.installedlib same-path FIRST SECOND [--what T]
@@ -25,6 +29,15 @@ about having loaded another, which is how the fork reports that since #352,
 together with `--built-libbtbb` naming a libbtbb inside the prefix, without
 which that warning could not have been reached; and, the program being run
 with the no-devices switch, it has to say that no Ubertooth is attached.
+
+`another-libbtbb` is the live control that makes that absence mean something
+(#365). The step runs the same program once more with the loader pointed at a
+copy of the install's own libbtbb in a directory of its own, where the warning
+has to appear, has to name that directory as the one it loaded from, and has
+to name the directory the install was built against beside it. Without it the
+step above would pass just as readily on an install whose warning had stopped
+working, or whose loader will not say which file it opened: both leave
+`ubertooth_libbtbb_is_elsewhere` with nothing to report.
 
 `under-prefix` requires the path a configure log reports after a marker to be
 inside the prefix, and `same-path` requires two paths to be one directory.
@@ -110,6 +123,14 @@ _LOADED_FROM = "libbtbb loaded from: "
 # path, "the loader reached this install's libbtbb" is established by the
 # absence of the warning, with the loader pointed at the install.
 _ANOTHER_LIBBTBB = "libbtbb was loaded from"
+# The whole of that warning, with the two directories it names: the one the
+# loader opened libbtbb from and the one the build recorded
+# (BTBB_BUILD_LIBDIR). Anchored at both ends and read non-greedily, so a path
+# cannot be taken from the wrong side of a separator.
+_ANOTHER_LIBBTBB_LINE = re.compile(
+    r"\Awarning: libbtbb was loaded from (?P<loaded>.+?), not the "
+    r"(?P<built>.+?) these tools were built against; packets may decode "
+    r"differently\Z")
 _NO_BOARD = "Firmware version: no Ubertooth attached"
 # One of LIBUBERTOOTH_REQUIRED_FUNCTIONS (FindUBERTOOTH.cmake), declared in
 # ubertooth_control.h. Any of the four would do; this one is the newest of
@@ -280,6 +301,77 @@ def consumer_identity(text: str, prefix: str, version_line: str,
     return version_line.strip()
 
 
+def another_libbtbb(text: str, loaded_from: str, built_libbtbb: str,
+                    version_line: str) -> str:
+    """The warning a second libbtbb install must produce, or raise.
+
+    `consumer_identity` above reads "the loader reached this install's
+    libbtbb" off the absence of that warning, which says nothing unless the
+    warning still works: `ubertooth_libbtbb_is_elsewhere` also returns 0 where
+    the loader will not say which file it opened, and a warning that had
+    stopped being printed at all would look the same. So the step runs the
+    same program again with the loader pointed at ``loaded_from``, a copy of
+    this install's libbtbb in a directory of its own, and this requires the
+    warning to be there and to name both directories: ``loaded_from`` as the
+    one it loaded from, and ``built_libbtbb`` as the one the install was built
+    against, which is the other side of the comparison it comes from.
+
+    ``loaded_from`` has to be a second directory as the fork decides that,
+    which is on resolved paths (``same_directory`` in ``libbtbb_origin.c``):
+    a link to the install's own library directory is one install to it and
+    would print nothing, so the two directories are required to differ here
+    before the output is read at all.
+    """
+    one, other = resolved(loaded_from), resolved(built_libbtbb)
+    if one == other:
+        raise InstalledLibraryError(
+            f"the loader was pointed at {one}, which is the directory the "
+            "install was built against; the fork compares resolved paths, so "
+            "that is one install to it and it would warn about nothing. The "
+            "copy has to be a directory of its own")
+    lines = [line.rstrip() for line in text.splitlines()]
+    if version_line.strip() not in lines:
+        raise InstalledLibraryError(
+            "the program did not print the version line the build's own tools "
+            f"print ({version_line.strip()!r}); it printed "
+            + (repr(lines[0]) if lines else "nothing"))
+    if _NO_BOARD not in lines:
+        raise InstalledLibraryError(
+            f"the program did not print {_NO_BOARD!r}; it was to be run with "
+            "UBERTOOTH_TEST_NO_DEVICES=1, so that the step is about the "
+            "install and not about which boards are attached")
+    path = [line for line in lines if line.startswith(_LOADED_FROM)]
+    if path:
+        raise InstalledLibraryError(
+            f"the program printed {path[0]!r}, so this install names the "
+            "libbtbb it loaded and that is the evidence itself; the warning "
+            "this looks for is what a fork since #352 prints instead, and "
+            "there is nothing here for this control to establish")
+    warnings = [line for line in lines if _ANOTHER_LIBBTBB in line]
+    if len(warnings) != 1:
+        raise InstalledLibraryError(
+            f"the program printed {len(warnings)} warnings about another "
+            f"libbtbb, expected exactly one: the loader was pointed at {one}, "
+            "a copy of this install's libbtbb in a directory of its own, so "
+            "the warning naming it is what says the warning works at all")
+    found = _ANOTHER_LIBBTBB_LINE.match(warnings[0])
+    if found is None:
+        raise InstalledLibraryError(
+            "the program's warning about another libbtbb does not read as the "
+            f"fork's, which names both directories: {warnings[0]!r}")
+    loaded = resolved(found["loaded"].strip())
+    if loaded != one:
+        raise InstalledLibraryError(
+            f"the warning says libbtbb was loaded from {loaded}, where the "
+            f"loader was pointed at {one}")
+    built = resolved(found["built"].strip())
+    if built != other:
+        raise InstalledLibraryError(
+            f"the warning says these tools were built against {built}, where "
+            f"the install was built against {other}")
+    return warnings[0]
+
+
 def age_headers(directory: Path, function: str = DEFAULT_FUNCTION) -> list[str]:
     """Rename ``function`` wherever the installed headers declare it.
 
@@ -325,6 +417,13 @@ def main(argv: list[str] | None = None) -> int:
     consumer.add_argument("--prefix", required=True)
     consumer.add_argument("--version-line", required=True)
     consumer.add_argument("--built-libbtbb", default=None)
+    control = sub.add_parser(
+        "another-libbtbb",
+        help="the warning a second libbtbb install must produce")
+    control.add_argument("output", type=Path)
+    control.add_argument("--loaded-from", required=True)
+    control.add_argument("--built-libbtbb", required=True)
+    control.add_argument("--version-line", required=True)
     inside = sub.add_parser(
         "under-prefix", help="a path a log reports is in the prefix")
     inside.add_argument("log", type=Path)
@@ -350,6 +449,10 @@ def main(argv: list[str] | None = None) -> int:
             print(consumer_identity(args.output.read_text(errors="replace"),
                                     args.prefix, args.version_line,
                                     args.built_libbtbb))
+        elif args.command == "another-libbtbb":
+            print(another_libbtbb(args.output.read_text(errors="replace"),
+                                  args.loaded_from, args.built_libbtbb,
+                                  args.version_line))
         elif args.command == "under-prefix":
             print(under_prefix(args.log.read_text(errors="replace"),
                                args.prefix, args.marker))

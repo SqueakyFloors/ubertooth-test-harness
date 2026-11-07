@@ -16,13 +16,18 @@ from pathlib import Path
 
 from ubertooth_harness import installedlib
 from ubertooth_harness.installedlib import (
-    InstalledLibraryError, age_headers, configure_identity, consumer_identity,
-    same_path, under_prefix,
+    InstalledLibraryError, age_headers, another_libbtbb, configure_identity,
+    consumer_identity, same_path, under_prefix,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / "scripts" / "ci.sh"
 PREFIX = "/tmp/build/prefix"
+# The pin the fork's own FindBTBB.cmake sets, which is what the configure's
+# line has to name; the commit the library was found to be built from is
+# another commit of libbtbb, as it is whenever the harness's pin and the
+# fork's differ.
+FORK_PIN = "d356e9da7fb03969371aa14d603a8aad2f0ef198"
 # The two wordings FindBTBB.cmake's btbb_report_pin() prints, as CMake
 # prefixes them, with the pin written out in full in both.
 AGREED = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from commit "
@@ -31,11 +36,10 @@ AGREED = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from commit "
 # The mismatch wording names the pin without parentheses, as FindBTBB's
 # final message does; the agreeing one puts it in them.
 DIFFERED = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from commit "
-            "52b2afc; this tree is built against "
-            "7e1cdf0336857a714da1af8c7496fe32453ac6d0\n")
+            f"52b2afc; this tree is built against {FORK_PIN}\n")
 UNKNOWN = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, commit unknown "
            "(nothing in it reads as the commit it was built from); this tree "
-           "is built against 7e1cdf0336857a714da1af8c7496fe32453ac6d0\n")
+           f"is built against {FORK_PIN}\n")
 OTHER_LINES = "-- The C compiler identification is GNU 13.2.0\n-- Found USB1\n"
 
 
@@ -159,8 +163,17 @@ class ConfigureIdentityTests(unittest.TestCase):
             self.identity(OTHER_LINES + text)
 
 
-VERSION_LINE = ("Host tools version: libubertooth 1.1 (git-7cbc191a8), "
-                "libbtbb 1.3 (git-52b2afc)")
+BOARD_LINE = "Firmware version: no Ubertooth attached"
+# What a build of the current fork prints: the release the build came from,
+# with libbtbb's beside it, and no line naming the libbtbb it loaded
+# (fork #1230, harness #352).
+VERSION_LINE = "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)"
+# What a commit from before that printed: the two library interface versions,
+# each with the commit it was built from, and the libbtbb it loaded on a line
+# of its own. It is here for the checks about such an install and nowhere
+# else; everything below is about the fork as it stands.
+OLDER_VERSION_LINE = ("Host tools version: libubertooth 1.1 (git-7cbc191a8), "
+                      "libbtbb 1.3 (git-52b2afc)")
 
 
 class ConsumerIdentityTests(unittest.TestCase):
@@ -173,45 +186,50 @@ class ConsumerIdentityTests(unittest.TestCase):
         self.library = self.prefix / "lib" / "libbtbb.so.1.3"
         self.library.write_bytes(b"")
 
-    def output(self, *, version=VERSION_LINE, library=None, board=True):
+    def output(self, *, version=OLDER_VERSION_LINE, library=None, board=True):
+        """An older install's answer, which names the libbtbb it loaded."""
         lines = [version, f"libbtbb loaded from: {library or self.library}"]
         if board:
-            lines.append("Firmware version: no Ubertooth attached")
+            lines.append(BOARD_LINE)
         return "\n".join(lines) + "\n"
 
     def identity(self, text, built_libbtbb=None):
         return consumer_identity(text, str(self.prefix), VERSION_LINE,
                                  built_libbtbb)
 
-    def test_the_install_s_own_answer_passes(self):
-        self.assertEqual(VERSION_LINE, self.identity(self.output()))
+    def older_identity(self, text, built_libbtbb=None):
+        """The same, for an install from before the path line went away."""
+        return consumer_identity(text, str(self.prefix), OLDER_VERSION_LINE,
+                                 built_libbtbb)
 
-    def test_another_revision_is_another_library(self):
-        other = VERSION_LINE.replace("git-7cbc191a8", "git-0000000")
+    def test_the_install_s_own_answer_passes(self):
+        self.assertEqual(OLDER_VERSION_LINE, self.older_identity(self.output()))
+
+    def test_another_release_is_another_library(self):
+        other = VERSION_LINE.replace("2026-11-DEV2", "2026-11-DEV1+22")
         with self.assertRaises(InstalledLibraryError) as caught:
-            self.identity(self.output(version=other))
+            self.identity(f"{other}\n{BOARD_LINE}\n")
         self.assertIn("version line", str(caught.exception))
 
     def test_a_libbtbb_from_outside_the_prefix_is_refused(self):
         with self.assertRaises(InstalledLibraryError) as caught:
-            self.identity(self.output(library="/usr/lib/libbtbb.so.1"))
+            self.older_identity(self.output(library="/usr/lib/libbtbb.so.1"))
         self.assertIn("not in", str(caught.exception))
 
     def test_a_run_that_looked_for_boards_is_refused(self):
         # Without the switch the report opens every attached board, and two
         # runs on a bench host would not answer the same way.
         with self.assertRaises(InstalledLibraryError) as caught:
-            self.identity(self.output(board=False))
+            self.older_identity(self.output(board=False))
         self.assertIn("UBERTOOTH_TEST_NO_DEVICES", str(caught.exception))
 
     def test_two_libbtbb_lines_are_refused(self):
         text = self.output() + f"libbtbb loaded from: {self.library}\n"
         with self.assertRaises(InstalledLibraryError) as caught:
-            self.identity(text)
+            self.older_identity(text)
         self.assertIn("2 'libbtbb loaded from:' lines", str(caught.exception))
 
-    NO_PATH = (f"{VERSION_LINE}\n"
-               "Firmware version: no Ubertooth attached\n")
+    NO_PATH = f"{VERSION_LINE}\n{BOARD_LINE}\n"
 
     def test_an_install_that_prints_no_path_passes_without_the_warning(self):
         """Since #352 (fork #1230) there is no path line.
@@ -228,10 +246,9 @@ class ConsumerIdentityTests(unittest.TestCase):
 
     def test_a_warning_about_another_libbtbb_is_refused(self):
         text = (f"{VERSION_LINE}\n"
-                "warning: libbtbb was loaded from /usr/lib/libbtbb.so.1, not "
-                "the /opt/run/lib these tools were built against; packets may "
-                "decode differently\n"
-                "Firmware version: no Ubertooth attached\n")
+                "warning: libbtbb was loaded from /usr/lib, not the "
+                "/opt/run/lib these tools were built against; packets may "
+                f"decode differently\n{BOARD_LINE}\n")
 
         with self.assertRaises(InstalledLibraryError) as caught:
             self.identity(text, str(self.library.parent))
@@ -258,7 +275,136 @@ class ConsumerIdentityTests(unittest.TestCase):
 
     def test_an_older_install_needs_no_recorded_libbtbb(self):
         """It prints the path, which is the positive evidence itself."""
-        self.assertEqual(VERSION_LINE, self.identity(self.output()))
+        self.assertEqual(OLDER_VERSION_LINE, self.older_identity(self.output()))
+
+
+# The warning as warn_about_another_libbtbb() writes it, with the two
+# directories it names.
+WARNING = ("warning: libbtbb was loaded from {loaded}, not the {built} these "
+           "tools were built against; packets may decode differently")
+
+
+class AnotherLibbtbbTests(unittest.TestCase):
+    """The live control the absence above rests on (#365).
+
+    The step runs the install's own consumer again with the loader pointed at
+    a copy of the install's libbtbb in a directory of its own. The warning
+    has to be there and to name both directories: a warning that had stopped
+    working, and a loader that will not say which file it opened, both leave
+    the step above passing with nothing behind it.
+    """
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        self.built = self.work / "prefix" / "lib"
+        self.built.mkdir(parents=True)
+        self.decoy = self.work / "another-libbtbb"
+        self.decoy.mkdir()
+
+    def output(self, *, loaded=None, built=None, version=VERSION_LINE,
+               board=True, warning=True):
+        lines = [version]
+        if warning:
+            lines.append(WARNING.format(loaded=loaded or self.decoy,
+                                        built=built or self.built))
+        if board:
+            lines.append(BOARD_LINE)
+        return "\n".join(lines) + "\n"
+
+    def control(self, text, loaded_from=None, built_libbtbb=None):
+        return another_libbtbb(text, str(loaded_from or self.decoy),
+                               str(built_libbtbb or self.built), VERSION_LINE)
+
+    def test_a_warning_naming_both_directories_passes(self):
+        accepted = self.control(self.output())
+        self.assertIn(str(self.decoy), accepted)
+        self.assertIn(str(self.built), accepted)
+
+    def test_links_and_dots_in_either_directory_are_reduced(self):
+        # The fork resolves both paths, and on macOS a temporary directory is
+        # reached through a link, so comparing the text would fail for a
+        # reason that is not the install's.
+        text = self.output(loaded=f"{self.decoy}/../another-libbtbb",
+                           built=f"{self.built}/.")
+        self.assertIn("libbtbb was loaded from", self.control(text))
+
+    def test_no_warning_at_all_is_the_failure_this_exists_to_catch(self):
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control(self.output(warning=False))
+        self.assertIn("0 warnings about another libbtbb",
+                      str(caught.exception))
+
+    def test_a_second_warning_is_refused(self):
+        text = self.output() + WARNING.format(loaded=self.decoy,
+                                              built=self.built) + "\n"
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control(text)
+        self.assertIn("2 warnings about another libbtbb",
+                      str(caught.exception))
+
+    def test_a_warning_naming_another_loaded_directory_is_refused(self):
+        # The loader reaching a third libbtbb would say nothing about the
+        # copy this step put in front of it.
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control(self.output(loaded="/usr/lib"))
+        self.assertIn("where the loader was pointed at", str(caught.exception))
+
+    def test_a_warning_naming_another_built_directory_is_refused(self):
+        # The other side of the comparison: a warning measured against a
+        # libbtbb this install was not built with is not this install's.
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control(self.output(built="/usr/lib"))
+        self.assertIn("where the install was built against",
+                      str(caught.exception))
+
+    def test_a_copy_in_the_install_s_own_directory_is_refused(self):
+        # Refused before the output is read: there is no second install to
+        # warn about, so whatever the program printed says nothing.
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control("", loaded_from=self.built)
+        self.assertIn("a directory of its own", str(caught.exception))
+
+    def test_a_link_to_the_install_s_own_directory_is_refused(self):
+        # same_directory() in libbtbb_origin.c resolves both paths, so a link
+        # is one install to the fork and would print nothing.
+        link = self.work / "linked-libbtbb"
+        link.symlink_to(self.built)
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control(self.output(), loaded_from=link)
+        self.assertIn("a directory of its own", str(caught.exception))
+
+    def test_a_wording_this_cannot_read_is_refused(self):
+        # A warning that stopped naming both directories leaves a reader of a
+        # failed job unable to see what happened.
+        text = (f"{VERSION_LINE}\n"
+                f"warning: libbtbb was loaded from {self.decoy}\n"
+                f"{BOARD_LINE}\n")
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control(text)
+        self.assertIn("names both directories", str(caught.exception))
+
+    def test_an_install_that_names_the_path_it_loaded_is_refused(self):
+        # Such an install is the positive evidence itself, so the step is not
+        # run against one; reaching here means the two ends disagree.
+        text = (f"{OLDER_VERSION_LINE}\n"
+                f"libbtbb loaded from: {self.decoy}/libbtbb.so.1\n"
+                f"{BOARD_LINE}\n")
+        with self.assertRaises(InstalledLibraryError) as caught:
+            another_libbtbb(text, str(self.decoy), str(self.built),
+                            OLDER_VERSION_LINE)
+        self.assertIn("nothing here for this control", str(caught.exception))
+
+    def test_another_version_line_is_another_library(self):
+        other = VERSION_LINE.replace("2026-11-DEV2", "2026-11-DEV1+22")
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control(self.output(version=other))
+        self.assertIn("version line", str(caught.exception))
+
+    def test_a_run_that_looked_for_boards_is_refused(self):
+        with self.assertRaises(InstalledLibraryError) as caught:
+            self.control(self.output(board=False))
+        self.assertIn("UBERTOOTH_TEST_NO_DEVICES", str(caught.exception))
 
 
 class PathTests(unittest.TestCase):
@@ -442,6 +588,37 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("is not a directory", done.stderr)
         self.assertNotIn("FindUBERTOOTH", done.stderr)
 
+    def test_another_libbtbb_prints_the_warning_it_accepted(self):
+        # So a reader of a failed job sees which directory the program
+        # loaded libbtbb from.
+        decoy, built = self.directory / "decoy", self.directory / "lib"
+        decoy.mkdir()
+        built.mkdir()
+        output = self.directory / "another-libbtbb.txt"
+        output.write_text(f"{VERSION_LINE}\n"
+                          + WARNING.format(loaded=decoy, built=built)
+                          + f"\n{BOARD_LINE}\n")
+        done = self.run_module("another-libbtbb", str(output),
+                               "--loaded-from", str(decoy),
+                               "--built-libbtbb", str(built),
+                               "--version-line", VERSION_LINE)
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertIn(str(decoy), done.stdout)
+
+    def test_another_libbtbb_refuses_a_run_with_no_warning(self):
+        decoy, built = self.directory / "decoy", self.directory / "lib"
+        decoy.mkdir()
+        built.mkdir()
+        output = self.directory / "another-libbtbb.txt"
+        output.write_text(f"{VERSION_LINE}\n{BOARD_LINE}\n")
+        done = self.run_module("another-libbtbb", str(output),
+                               "--loaded-from", str(decoy),
+                               "--built-libbtbb", str(built),
+                               "--version-line", VERSION_LINE)
+        self.assertEqual(1, done.returncode)
+        self.assertEqual("", done.stdout)
+        self.assertIn("installed library:", done.stderr)
+
 
 class BuildStepTests(unittest.TestCase):
     """The build step still makes these checks, in the right order."""
@@ -489,6 +666,33 @@ class BuildStepTests(unittest.TestCase):
         ):
             with self.subTest(fragment):
                 self.assertIn(fragment, self.text)
+
+    def test_it_requires_the_libbtbb_warning_to_fire_for_a_second_install(self):
+        """The live control behind the absence above (#365)."""
+        for fragment in (
+            "installedlib another-libbtbb",
+            # A copy, not a link: the fork resolves both directories, so a
+            # link to the install's own would read as one install.
+            'cp -R "$il_btbb_libdir"/libbtbb.* "$il_decoy/"',
+            # The copy before the install's own directories on both loader
+            # paths, so libbtbb comes from the copy and libubertooth from
+            # the install.
+            "DYLD_LIBRARY_PATH=$il_decoy:$il_libpath",
+            "LD_LIBRARY_PATH=$il_decoy:$il_libpath",
+            '--loaded-from "$il_decoy"',
+        ):
+            with self.subTest(fragment):
+                self.assertIn(fragment, self.text)
+        # After the step whose absence it backs, and before the next one.
+        control = self.text.index("installedlib another-libbtbb")
+        self.assertLess(self.text.index("installedlib consumer-identity"),
+                        control)
+        self.assertLess(control, self.text.index(
+            'step "a CMake project finds the installed ubertooth package"'))
+        # An install from before the path line went away is the positive
+        # evidence itself, so the control is not run against one.
+        self.assertIn('if grep -q "^libbtbb loaded from: " '
+                      '"$il_work/pc-consumer.txt"; then', self.text)
 
     def test_it_configures_the_tools_against_the_install(self):
         self.assertIn('cmake -S "$il_source/host/ubertooth-tools" '
