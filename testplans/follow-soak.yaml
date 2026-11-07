@@ -1,0 +1,206 @@
+plan: Intermittent follow soak
+# One Ubertooth, pinned by serial, and the two registered nRF52840 DKs with
+# the `central` and `peripheral` roles and their BLE addresses
+# (hardware.example.yaml). The DKs transmit at normal BLE power on the one
+# channel each suite names; the Ubertooth only receives.
+#
+# Unlike every other DK test here, this one never flashes: its first case
+# checks that both boards already run the pinned role firmware and refuses if
+# they do not. That is deliberate. A test that writes firmware makes
+# run-suite hold the host lock for the whole run, and the longest suite here
+# is three days, in which nothing else on the host could write firmware or
+# switch power. This soak is meant to run beside other work, so it binds its
+# own Ubertooth and its two DKs, guards no other board, and takes no host
+# lock. Put the DKs on the pinned firmware first -- any other DK test with
+# --artifact "nRF52840 advertiser=PATH/utdk.hex" does it
+# (firmware/nrf52840dk/README.md) -- and this suite will then run for days
+# without stopping anyone else.
+#
+# None of these suites is in `fast` or in the non-soak `release` plan: the
+# shortest of them is minutes and the longest is three days. The long ones
+# run on the persistent target runner, which keeps running when whatever
+# started the run disconnects; the run directory holds the record
+# (README, "Target runner service").
+#
+#   python -m ubertooth_harness run-suite \
+#     --plan testplans/follow-soak.yaml --suite follow-soak \
+#     --hardware hardware.yaml --host Host_Linux \
+#     --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+#     --output runs
+#
+# The four suites differ only in how long they run and in the figures that
+# follow from that; what each one checks is the same.
+suites:
+  # The cycle is three phases: the peripheral advertising connectable and
+  # waiting, the central connected and writing, and both off the air. Each
+  # figure below is a relationship with another, and the catalog refuses a
+  # plan where one of them could not be judged, before any board is leased
+  # (followsoak.check_timings):
+  #
+  #   `detect within`      <= `advertising`     (the phase must outlast its
+  #                                              own detection deadline)
+  #   `connect within`     <= `acquire within`  <= `connected`
+  #   `quiet after`         < `absent`
+  #   `detect within`      <= `maximum gap`      < `advertising`
+  #   `liveness timeout`    > `connected` + `absent` + `detect within`
+  #   two cycles           <= `checkpoint every` <= half the duration
+  #
+  # The liveness one is the difference from the address soak: this fixture is
+  # deliberately off the air for part of every cycle, so the quiet stretch a
+  # healthy run really has is a whole connected phase (where a sniffer may
+  # catch none of the link), an absent phase, and the wait for the next
+  # detection. A timeout below that would restart the capture every cycle.
+  #
+  # The last of those is why a checkpoint interval is two cycles and not
+  # one: a checkpoint stops the capture at the start of an absent phase, so
+  # that phase is not judged, and an interval of one cycle would interrupt
+  # every absent phase there was and leave the fixture's going away
+  # unmeasured.
+  #
+  # The short functional run: everything the long suites do, in five minutes
+  # of capture, so a change to the driver or the catalog can be tried on the
+  # bench without booking the boards for hours. The checkpoint interval is
+  # two minutes here so the run really takes two of them -- the checkpoint is
+  # most of what this soak adds, and a suite that never took one would prove
+  # nothing about it.
+  follow-soak:
+    - Intermittent follow soak:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        duration: 5m
+        channel: 37
+        advertising: 15s
+        connected: 15s
+        absent: 20s
+        checkpoint every: 2m
+        sample every: 10s
+        advertising interval: 100
+        connection interval: 30
+        write bytes: 244
+        write period: 50
+        presence window: 1s
+        presence windows: 5
+        liveness timeout: 1m
+        detect within: 5s
+        minimum detection share: 0.9
+        connect within: 5s
+        acquire within: 10s
+        minimum follow share: 0.8
+        minimum connection packets: 3
+        quiet after: 3s
+        maximum gap: 8s
+        maximum restarts: 0
+        capture file limit: 64
+        capture budget: 1024
+
+  # Four hours: the setup validation run. Long enough to find a capture that
+  # dies, a follow that stops reacquiring, or a board that resets itself, and
+  # short enough to run between other bench work. The schedule from here on
+  # is 20 s advertising, 30 s connected, 20 s absent, which every longer
+  # suite keeps so their figures compare.
+  follow-soak-4h:
+    - Intermittent follow soak:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        duration: 4h
+        channel: 37
+        advertising: 20s
+        connected: 30s
+        absent: 20s
+        checkpoint every: 30m
+        sample every: 1m
+        advertising interval: 100
+        connection interval: 30
+        write bytes: 244
+        write period: 50
+        presence window: 2s
+        presence windows: 5
+        liveness timeout: 2m
+        detect within: 10s
+        minimum detection share: 0.95
+        connect within: 10s
+        acquire within: 15s
+        minimum follow share: 0.8
+        minimum connection packets: 3
+        quiet after: 3s
+        maximum gap: 15s
+        maximum restarts: 0
+        capture file limit: 256
+        capture budget: 4096
+
+  # A day. The same figures as the four-hour run, sampled less often because
+  # a progress record a minute over a day is 1440 of them and that is already
+  # more than a reader wants, and checkpointed hourly, which is 24 reads of
+  # the board's record rather than 48.
+  follow-soak-24h:
+    - Intermittent follow soak:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        duration: 24h
+        channel: 37
+        advertising: 20s
+        connected: 30s
+        absent: 20s
+        checkpoint every: 1h
+        sample every: 5m
+        advertising interval: 100
+        connection interval: 30
+        write bytes: 244
+        write period: 50
+        presence window: 2s
+        presence windows: 5
+        liveness timeout: 2m
+        detect within: 10s
+        minimum detection share: 0.95
+        connect within: 10s
+        acquire within: 15s
+        minimum follow share: 0.8
+        minimum connection packets: 3
+        quiet after: 3s
+        maximum gap: 15s
+        maximum restarts: 0
+        capture file limit: 512
+        capture budget: 8192
+
+  # Three days: the release-candidate soak. It holds one Ubertooth and both
+  # DKs for the whole window, so it is booked rather than scheduled, and
+  # nothing else on those three devices runs meanwhile -- but the rest of the
+  # host is free, which is why this soak writes no firmware and guards no
+  # other board.
+  follow-soak-72h:
+    - Intermittent follow soak:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        duration: 72h
+        channel: 37
+        advertising: 20s
+        connected: 30s
+        absent: 20s
+        checkpoint every: 1h
+        sample every: 15m
+        advertising interval: 100
+        connection interval: 30
+        write bytes: 244
+        write period: 50
+        presence window: 2s
+        presence windows: 5
+        liveness timeout: 2m
+        detect within: 10s
+        minimum detection share: 0.95
+        connect within: 10s
+        acquire within: 15s
+        minimum follow share: 0.8
+        minimum connection packets: 3
+        quiet after: 3s
+        maximum gap: 15s
+        maximum restarts: 0
+        capture file limit: 512
+        capture budget: 16384

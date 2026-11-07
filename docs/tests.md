@@ -2600,6 +2600,207 @@ holding the board for a moment; the case's own cleanup stops it. And the
 test needs two kinds of hardware and a flashable DK, so it cannot run
 anywhere the DK is absent.
 
+## Intermittent follow soak
+
+**What it does.** Runs one `ubertooth-btle -f` capture for as long as the plan
+asks, while two registered nRF52840 DKs cycle through the peripheral
+advertising, a connection the central makes and carries, and both going off
+the air. It reports whether the board found the advertiser each time it
+appeared, acquired the connection from its own CONNECT_IND and recorded its
+packets, stopped reporting both when the fixture went away, and found the
+device again on the next cycle — and it reads the board's watchdog record at
+planned checkpoints along the way.
+
+**Theory of operation.** This is the other half of the long-run question that
+[`BLE address parity soak`](#ble-address-parity-soak) leaves open. That one
+holds one state for its whole window: an advertiser going on and off while
+the board does nothing but listen, which is the right shape for asking
+whether the tool's text output still means what it meant. What it cannot ask
+is whether the board keeps up with the *radio state* changing under it, and
+that is what a service watching a real device meets: the device appears, it
+is connected to, the link is carried, the link drops, the device goes away,
+and later it is back. Each of those is a separate thing to get wrong, and a
+five-second capture of any one of them says nothing about the thousandth.
+
+So the cycle has three phases and the harness applies them one at a time:
+
+1. **advertising** — the peripheral advertises connectable and waits to be
+   connected, and nothing is connected, so the board is hunting and has to
+   find it;
+2. **connected** — the central connects to the peripheral and writes to it
+   for the whole phase, so the board has to acquire the connection from the
+   CONNECT_IND it saw and record the data packets on it;
+3. **absent** — the central disconnects and the peripheral stops advertising,
+   so the pair is off the air and the board has to stop reporting both.
+
+Every advertising phase is therefore a detection with a deadline, every
+connected phase a follow with a deadline, and every absent phase a silence
+with a known cause rather than an absence of evidence. And because every
+advertising phase after the first follows an absence, its first-sighting time
+*is* the reacquisition time: how long the board took to find a device that
+went away and came back. That is reported with its own distribution and not
+as a separate objective, because in this cycle it is the same population as
+detection.
+
+**The fixture is driven, not watched, and it reports on itself.** Each
+transition is a shell command to a DK, and the central's own counters are read
+at the start and the end of each connected phase. A phase whose command did
+not reach the board, whose central never reported itself connected inside
+`connect within`, or whose central wrote nothing over the phase is recorded as
+a **fixture failure** and left out of the verdict. That is what keeps the two
+possible meanings of an empty capture apart: a board that failed to follow,
+and a connection that never happened. Without it a flaky pair of DKs would
+read as a broken follow for three days.
+
+**Watchdog checkpoints.** `ubertooth-util -w` is a control read on the board
+the capture is holding, so it is never asked for beside a running capture.
+The planned way to get one is a checkpoint, taken at the start of an absent
+phase where the fixture is off the air anyway:
+
+- the capture is ended cleanly, SIGTERM then the term grace;
+- the run waits for the process to go and confirms the board answers a read,
+  which is what says it is idle and nothing else has it;
+- `ubertooth-util -U <serial> -w` is read;
+- the counters, and what rose since the last read, are recorded;
+- the next capture is started, in a file of its own.
+
+A checkpoint is classified as planned throughout: it is not a restart, not a
+recovery, and the phase it lands in is marked with a *planned* capture gap,
+exactly as a capture file rollover is. What **is** a failure is a checkpoint
+that could not do its job — a capture that had to be killed, a board that
+would not answer afterwards, or a board the next capture found still in a
+mode, which libubertooth warns about and which a clean stop leaves nothing of.
+
+**Counters belong to an interval, not to the run.** The record read before the
+run, at each checkpoint, after each unplanned restart, and at the end closes
+an **interval**: the stretch of the run since the previous read, with the
+phases and cycles it covered, the packets inside it, and every counter that
+rose — unrequested resets, capture transfer errors, the radio waits that gave
+up, and a new processor fault. The counters the board keeps are since
+power-on, so a single read at the end of a three-day run can say only that
+something happened sometime; what a reader needs is which hour it happened in,
+which is what the interval records give. Each one is in `progress.jsonl` as it
+is written, and the ones that moved a counter are in `summary.json`.
+
+**Checkpoints come at least two cycles apart**, and the catalog refuses a plan
+where they do not. A checkpoint interrupts the absent phase it lands in, so
+that phase is not judged; an interval of one cycle would interrupt every
+absent phase there was, and the run would fail saying the fixture's going away
+was never measured. With two, every other absent phase is untouched.
+
+**The absent phase is where half the cycle is checked.** A board that went on
+reporting the advertiser after `conn stop`, or went on following a connection
+the central had dropped, would meet every detection and acquisition objective
+while telling a service a device was still there. So in each judged absent
+phase, past a settle time for the packets already on the air and already in
+the tool's buffers, neither the peripheral's advertising nor a packet of the
+connection the previous phase made may still arrive. The two are counted
+apart, because they are different faults.
+
+**Timing relationships are checked before any board is leased.** The run holds
+one Ubertooth and two DKs for hours, so a plan whose figures contradict each
+other has to fail when the plan loads, not on the bench. The rules are the
+driver's (`followsoak.check_timings`), read through the same conversion the
+driver's own command line gets, so the plan is judged by what will really run:
+
+| Relationship | Why |
+|---|---|
+| `detect within` ≤ `advertising` | a phase must outlast its own detection deadline |
+| `presence window` × `presence windows` ≤ `advertising` | sustained presence has to fit |
+| `connect within` ≤ `acquire within` ≤ `connected` | a link allowed up after the follow deadline would miss it for the fixture's own slowness |
+| `quiet after` < `absent` | an absent phase needs a stretch to judge |
+| `detect within` ≤ `maximum gap` < `advertising` | a gap is measured inside one phase |
+| `liveness timeout` > `connected` + `absent` + `detect within` | the cycle's own silence must not restart the capture |
+| two cycles ≤ `checkpoint every` ≤ half the duration | above |
+| duration ≥ three cycles | the first advertising phase is not a reacquisition |
+| `minimum connection packets` ≤ the central's writes in a phase | a floor above what the fixture sends can never be met |
+
+The liveness one is the real difference from the address soak, and it makes
+this soak's liveness rule weaker on purpose. There, the only silence a healthy
+run has is one off period; here the fixture is off the air for a connected
+phase and an absent phase together, because a sniffer that is not the
+connection's peer may catch none of the link. A capture that goes deaf inside
+one cycle is therefore found by the detection objective rather than by
+liveness, which is the honest position rather than a timeout tuned to catch
+it.
+
+**Hardware and arguments.** One `Ubertooth` (receiving only, selected by
+serial, on an ordinary link), one `central` and one `peripheral` nRF52840 DK.
+`duration` and `channel`; the cycle's `advertising`, `connected`, and `absent`
+legs; `checkpoint every` and `sample every`; what the fixture puts on the air
+(`advertising interval`, `connection interval`, `write bytes`, `write
+period`); `presence window` and `presence windows`; `liveness timeout`;
+`detect within` and `minimum detection share`; `connect within`, `acquire
+within`, `minimum follow share`, and `minimum connection packets`; `quiet
+after` and `maximum gap`; `maximum restarts` and the optional `maximum memory
+growth`; and `capture file limit` and `capture budget`, which are what keep a
+run of days inside the host's disk.
+
+**Two things it deliberately does not do**, and both are about running beside
+other work. It **writes no firmware**: the first case checks that both DKs
+already run the version the harness pins and refuses with what it found,
+naming the test to run first. And it **guards no other Ubertooth**, because
+every command it runs names its board by serial, so there is nothing a guard
+would protect against. Together those mean `run-suite` takes no host lock, so
+the run holds its own three devices and nothing else — which matters when the
+longest suite holds them for three days. A test that flashed would hold the
+host lock for that whole window and stop every other hardware run on the
+host.
+
+**Expected outcome.** Two cases. `fixture-ready` identifies both DKs' probes
+and ports and leaves each one in its role at its registered address, running
+the pinned firmware. `intermittent-follow-soak` brings the Ubertooth to idle,
+records its channel, PA level, squelch, and LEDs, runs the driver, and then
+leaves both DKs idle in the advertiser role and puts the board's settings
+back. The step passes on `SOAK VERDICT: pass` and fails on any `FAIL:` line.
+
+A phase is judged only if it ran for nearly its whole scheduled length, its
+transitions reached the boards, and something was listening throughout. Each
+state is held to a **coverage floor** of its own, so a capture that kept dying
+fails rather than passing on the few phases it covered; the phases the run
+interrupted on purpose are credited against that floor, and a state in which
+nothing at all could be judged fails saying so, since a check nothing was
+measured against would otherwise read as a pass. No allowance is ever the
+whole population it applies to, so a comparison resting on one or two judged
+phases can still fail.
+
+**Known limits.** The connection figures come from the capture's records
+alone: libbtbb prints no `AdvA:` line for a data packet, so the tool's text
+output can say nothing about the connection half of this soak. It is read
+beside the records for the advertising phases and reported rather than judged,
+because whether the two agree is
+[`BLE address parity soak`](#ble-address-parity-soak)'s question, asked there
+over a capture that holds one state.
+
+`ubertooth-btle -f` follows whatever connection it meets, so on a bench with
+other BLE traffic it can be busy following a link this fixture did not make.
+Those are counted and never described — an access address is not a device
+address, but it belongs to somebody's connection — and such a phase shows up
+as a missed acquisition rather than as a failure of its own.
+
+How much of a followed connection arrives intact varies from capture to
+capture, since a sniffer that is not the connection's peer catches a fraction
+of it, so `minimum connection packets` is a floor a working follow clears
+rather than an expected count. The detection and acquisition floors are bench
+figures and not bounds from the specification: a noisier room can fail them
+with nothing wrong in the code. A self-reset is reported and not failed on, as
+everywhere else in the harness; what fails is a read that brought nothing
+back. The memory figures come from the operating system's resident set size,
+which says nothing about what inside the process grew, and no growth limit is
+applied unless a plan sets one, because what counts as growth over three days
+is not established. What the captures cost the host is the channel's traffic
+rather than this fixture's, so the disk budget removes the oldest complete
+capture and keeps the newest, recording each removal; the transcript and the
+progress file are bounded for the whole run the same way. A run the harness
+kills outright can leave the capture tool holding the board for a moment; the
+case's own cleanup stops it.
+
+Relates to
+[#368](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/368),
+[#350](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/350),
+[ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703), and
+[ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505).
+
 ## Capture known Classic device
 
 **What it does.** Two ESP32 Classic peers hold a Serial Port Profile link and

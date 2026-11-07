@@ -121,6 +121,29 @@ reports the capture process's resident memory from `ps`, which needs no
 privilege and nothing installed; a host that refuses to run `ps` costs the
 memory figures and nothing else.
 
+**Booking the DK pair for a follow soak.** `Intermittent follow soak`
+(`testplans/follow-soak.yaml`) holds one Ubertooth and *both* DKs — the
+`central` and the `peripheral` — for its whole window, which its longest
+suite makes three days, and it drives both of them on and off throughout, so
+nothing else can use any of the three meanwhile. Book the pair rather than
+scheduling it beside other DK work. What it does **not** hold is the rest of
+the host: it writes no firmware and guards no other Ubertooth, so the run
+takes no host lock and another hardware run on other devices, or host-only
+work, can go on beside it. The price of that is a precondition: both DKs must
+already run the pinned role firmware, because the soak checks and refuses
+rather than flashing. Bring them to it first with any other DK test
+(`--artifact "nRF52840 advertiser=PATH/utdk.hex"`, below) or by hand, and
+confirm with `nrfdk.py status`.
+
+Its disk cost is the same kind as the address soak's and larger per second: a
+`-f` capture records the advertising channel's traffic *and* every connection
+the board follows, so check the host's free space before booking a long run
+and keep the plan's `capture file limit` and `capture budget` set. **No
+figure has been measured for it on this bench yet** — the rate above is the
+address soak's, taken with `-n` on channel 37 — so treat the budget as the
+bound it is rather than as a prediction, and record a measured rate here once
+a long run has produced one. Both DKs' serial ports stay open for the run.
+
 Registered by its J-Link serial, quoted so leading zeros survive, plus the
 BLE address its `status` reports. That address is a static random address
 derived from the chip's FICR, so it is the same on every boot of the same

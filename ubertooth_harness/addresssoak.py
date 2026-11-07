@@ -804,16 +804,20 @@ def check_timings(options: Timings | Options) -> None:
 # The advertiser's schedule
 
 
-class Advertiser:
-    """The DK, held open for the whole run, driven on a schedule.
+class DkShell:
+    """One DK, held open for the whole run, driven a command at a time.
 
     One shell for the run rather than one command per transition: a 72-hour
-    run turns the advertiser on and off thousands of times, and the DK's
+    run turns a fixture on and off thousands of times, and the DK's
     virtual COM port does not reset the board when it is opened, so there is
     nothing to be gained by closing it. A transition that fails is tried once
     more on a freshly opened shell, because a dropped port is the failure
-    this is likely to meet, and a transition that fails twice is recorded
-    against the period it belongs to.
+    this is likely to meet, and a transition that fails twice raises, so the
+    caller records it against the period or phase it belongs to.
+
+    Apart from `Advertiser` so another soak can hold a DK the same way: the
+    retry and the counters are the part a long run depends on, and two copies
+    of them would be two places for a fix to land (followsoak.py).
     """
 
     def __init__(self, dk: nrfdk.Dk):
@@ -871,6 +875,10 @@ class Advertiser:
             except (nrfdk.NrfDkError, OSError) as second:
                 self.errors += 1
                 raise SoakError(f"status failed twice: {first}; then {second}") from second
+
+
+class Advertiser(DkShell):
+    """The advertiser DK, turned on and off by this soak's own schedule."""
 
     def configure(self, options: Options) -> dict:
         """Settings for the whole run, then the address and counter it reports."""
@@ -1035,17 +1043,76 @@ class Attempt:
         }
 
 
+class RecordClock:
+    """A capture record's time on the run's own timeline.
+
+    The time in a record is the board's clock, anchored once when the
+    capture's first packet arrived and advanced by the board's own counter
+    (libubertooth's ``now_ns_from_clk100ns``). Over hours that walks away
+    from the host clock -- the crystal's drift, and a whole clock period if a
+    quiet gap loses a wrap, which the fork itself warns about -- and the
+    windows a soak compares in are seconds wide. So the record clock is used
+    for the resolution between records, anchored to the host time the record
+    was read, and re-anchored whenever the two have drifted more than
+    ``reanchor_s`` apart. Every re-anchor is counted and the largest drift is
+    kept, so a run says what its capture clock did rather than hiding it.
+
+    What this does not do is make two readers independent in their clocks:
+    both end up on the host's timeline, which is the honest position, because
+    what a reader comparison is about is the decode -- the printed line
+    against the record's own bytes and CRC -- and never was about whose clock
+    was right.
+    """
+
+    def __init__(self, reanchor_s: float):
+        self.reanchor_s = reanchor_s
+        self.reanchors = 0
+        self.drift_max_s = 0.0
+        self._anchor = None
+
+    def restart(self) -> None:
+        """Forget the anchor: a new capture has its own clock."""
+        self._anchor = None
+
+    def at(self, epoch: float, host: float) -> float:
+        if self._anchor is None:
+            self._anchor = (epoch, host)
+            return host
+        anchor_epoch, anchor_host = self._anchor
+        at = anchor_host + (epoch - anchor_epoch)
+        drift = host - at
+        if abs(drift) > self.reanchor_s:
+            self.reanchors += 1
+            self.drift_max_s = max(self.drift_max_s, abs(drift))
+            self._anchor = (epoch, host)
+            return host
+        return at
+
+    def to_dict(self) -> dict:
+        return {"reanchors": self.reanchors,
+                "largest_drift_s": round(self.drift_max_s, 3),
+                "reanchor_at_s": self.reanchor_s}
+
+
 class Capture:
     """The capture process, its transcript reader, and its capture tail."""
 
     def __init__(self, options: Options, index: int, sink: LineSink,
-                 clock=time.monotonic, max_log_bytes: int = MAX_LOG_BYTES):
+                 clock=time.monotonic, max_log_bytes: int = MAX_LOG_BYTES,
+                 mode: str = "-n"):
         self.options = options
         self.clock = clock
         self.max_log_bytes = max_log_bytes
         self.capture_path = options.out / f"capture-{index:04d}.pcap"
         self.log_path = options.out / f"btle-{index:04d}.log"
-        self.argv = (TOOL, "-n", "-U", options.serial, f"-A{options.channel}",
+        # ``mode`` is the tool's own mode option: `-n` for advertising only,
+        # which is what this soak runs, and `-f` for a soak that has to
+        # follow a connection (followsoak.py). Everything else about an
+        # attempt -- the capture file, the transcript, the signals, the
+        # exit -- is the same whichever mode is running, so the mode is an
+        # argument rather than a second copy of this class.
+        self.mode = mode
+        self.argv = (TOOL, mode, "-U", options.serial, f"-A{options.channel}",
                      "-q", str(self.capture_path))
         self.attempt = Attempt(index, self.argv, self.capture_path.name,
                                self.log_path.name)
@@ -1187,6 +1254,91 @@ class Capture:
         self.tail.close()
 
 
+def prune_capture_files(attempts, out: Path, budget_bytes: int, record,
+                        *, max_kept: int = MAX_KEPT_ATTEMPTS,
+                        stuck_already: bool = False):
+    """Keep the newest captures inside a run's budget: (removed, bytes, stuck).
+
+    Only complete attempts are considered, so the capture being written is
+    never touched. Each removal is recorded through ``record`` with the
+    file's size, so the run says what it had and what it let go.
+
+    ``stuck`` is non-empty when the budget cannot be kept at all: over it,
+    with nothing left that can be removed. Recording that and carrying on
+    would leave the run writing captures past the budget for however long it
+    had left, which is the one thing the budget is there to prevent, so the
+    caller stops the run and fails instead. ``stuck_already`` says the caller
+    has already latched that, so it is reported once per run.
+
+    Apart from `Soak` because two soaks keep their captures the same way and
+    this is where the mistakes were: an attempt whose files would not go away
+    has to stay in the accounting, or a single undeletable file disables the
+    budget for the rest of a run of days (followsoak.py).
+    """
+    kept = [attempt for attempt in attempts if not attempt.files_removed]
+    # Attempts whose files would not go away: passed over rather than
+    # returned on, so one of them cannot disable the budget for the rest
+    # of a run of days.
+    skipped: list = []
+    over_budget = False
+    removed_attempts = 0
+    removed_bytes = 0
+    # Never the last one standing: the newest capture is the one a reader
+    # of a failed run wants, and "newest kept" is what this promises.
+    while len(kept) > 1:
+        total = sum(attempt.bytes_kept for attempt in kept + skipped)
+        over_budget = budget_bytes > 0 and total > budget_bytes
+        if not over_budget and len(kept) <= max_kept:
+            break
+        oldest = kept.pop(0)
+        removed = 0
+        left = []
+        for name in (oldest.capture, oldest.log):
+            path = out / name
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue  # already gone, or never written
+            try:
+                path.unlink()
+                removed += size
+            except OSError:
+                left.append(name)
+        if left:
+            skipped.append(oldest)
+            # A file that is still there has not been given back to the
+            # filesystem, so this attempt stays in the accounting and the
+            # run says nothing it did not do. Earlier versions put it back
+            # after unlinking, which deleted the files and then re-targeted
+            # the same attempt for ever, leaving the budget disabled for the
+            # rest of the run.
+            record({"record": "capture_not_removed",
+                    "index": oldest.index, "files": left})
+            continue
+        # Marked whether or not there were bytes to free: an attempt whose
+        # files were empty, or never written, is still one fewer attempt's
+        # worth of files in the directory.
+        oldest.files_removed = True
+        removed_attempts += 1
+        removed_bytes += removed
+        record({"record": "capture_removed", "index": oldest.index,
+                "capture": oldest.capture, "log": oldest.log,
+                "bytes": removed,
+                "reason": ("the run's capture budget" if over_budget
+                           else f"more than {max_kept} attempts")})
+    total = sum(attempt.bytes_kept for attempt in kept + skipped)
+    stuck: list = []
+    if budget_bytes > 0 and total > budget_bytes and skipped and not stuck_already:
+        stuck = sorted(name for attempt in skipped
+                       for name in (attempt.capture, attempt.log))
+        record({"record": "capture_budget_stuck", "bytes_kept": total,
+                "budget": budget_bytes, "files": stuck})
+        say(f"the capture budget cannot be kept: {total} bytes on disk against "
+            f"{budget_bytes}, and {len(stuck)} file(s) could not be removed; "
+            "stopping the run")
+    return removed_attempts, removed_bytes, stuck
+
+
 # ---------------------------------------------------------------------------
 # The run
 
@@ -1247,14 +1399,11 @@ class Soak:
         self.canceled = ""
         # When the schedule started, which is what the duration measures.
         self.window_start = 0.0
-        # The capture record clock, anchored to the host's (record_time).
-        self._record_anchor = None
-        self.record_reanchors = 0
-        self.record_drift_max_s = 0.0
+        # The capture record clock, anchored to the host's (RecordClock).
         # Half a window: a record placed further from the host's reading than
         # that could fall in the wrong window, which is what the comparison
         # counts.
-        self.reanchor_s = max(0.25, options.window_s / 2)
+        self.record_clock = RecordClock(max(0.25, options.window_s / 2))
         # Shared by every attempt, so restarts and file rotations cannot
         # multiply what the transcript costs (MAX_LOG_BYTES).
         self.transcript_budget = MAX_LOG_BYTES
@@ -1370,39 +1519,8 @@ class Soak:
     # -- the readers ------------------------------------------------------
 
     def record_time(self, epoch: float) -> float:
-        """A capture record's time on this run's own timeline.
-
-        The time in a record is the board's clock, anchored once when the
-        capture's first packet arrived and advanced by the board's own
-        counter (libubertooth's ``now_ns_from_clk100ns``). Over hours that
-        walks away from the host clock -- the crystal's drift, and a whole
-        clock period if a quiet gap loses a wrap, which the fork itself warns
-        about -- and the windows this is compared in are seconds wide. So the
-        record clock is used for the resolution between records, anchored to
-        the host time the record was read, and re-anchored whenever the two
-        have drifted more than half a window apart. Every re-anchor is
-        counted and the largest drift is reported, so a run says what its
-        capture clock did rather than hiding it.
-
-        What this does not do is make the two readers independent in their
-        clocks: both end up on the host's timeline, which is the honest
-        position, because what the parity comparison is about is the decode
-        -- the printed line against the record's own bytes and CRC -- and
-        never was about whose clock was right.
-        """
-        host = self.clock() - self.start_mono
-        if self._record_anchor is None:
-            self._record_anchor = (epoch, host)
-            return host
-        anchor_epoch, anchor_host = self._record_anchor
-        at = anchor_host + (epoch - anchor_epoch)
-        drift = host - at
-        if abs(drift) > self.reanchor_s:
-            self.record_reanchors += 1
-            self.record_drift_max_s = max(self.record_drift_max_s, abs(drift))
-            self._record_anchor = (epoch, host)
-            return host
-        return at
+        """A capture record's time on this run's own timeline (RecordClock)."""
+        return self.record_clock.at(epoch, self.clock() - self.start_mono)
 
     def period_at(self, at: float) -> Period | None:
         """The period a sighting belongs to, by its own time.
@@ -1506,7 +1624,7 @@ class Soak:
     def start_capture(self, reason: str, *, planned: bool = True) -> None:
         self.note_capture_gap(planned)
         self.capture_index += 1
-        self._record_anchor = None
+        self.record_clock.restart()
         self.attempt_text_packets = 0
         self.attempt_rss_first = None
         self.attempt_rss_last = None
@@ -1627,83 +1745,14 @@ class Soak:
             self.capture_errors.append(reason)
 
     def prune_captures(self) -> None:
-        """Keep the newest captures inside the run's budget.
-
-        Only complete attempts are considered, so the capture being written
-        is never touched. Each removal is recorded with the file's size, so
-        the run says what it had and what it let go.
-        """
-        options = self.options
-        kept = [attempt for attempt in self.attempts if not attempt.files_removed]
-        # Attempts whose files would not go away: passed over rather than
-        # returned on, so one of them cannot disable the budget for the rest
-        # of a run of days.
-        skipped: list = []
-        over_budget = False
-        # Never the last one standing: the newest capture is the one a reader
-        # of a failed run wants, and "newest kept" is what this promises.
-        while len(kept) > 1:
-            total = sum(attempt.bytes_kept for attempt in kept + skipped)
-            over_budget = (options.capture_budget_bytes > 0
-                           and total > options.capture_budget_bytes)
-            if not over_budget and len(kept) <= MAX_KEPT_ATTEMPTS:
-                break
-            oldest = kept.pop(0)
-            removed = 0
-            left = []
-            for name in (oldest.capture, oldest.log):
-                path = options.out / name
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    continue  # already gone, or never written
-                try:
-                    path.unlink()
-                    removed += size
-                except OSError:
-                    left.append(name)
-            if left:
-                skipped.append(oldest)
-                # A file that is still there has not been given back to the
-                # filesystem, so this attempt stays in the accounting and
-                # the run says nothing it did not do. Earlier versions put
-                # it back after unlinking, which deleted the files and then
-                # re-targeted the same attempt for ever, leaving the budget
-                # disabled for the rest of the run.
-                self.record({"record": "capture_not_removed",
-                              "index": oldest.index, "files": left})
-                continue
-            # Marked whether or not there were bytes to free: an attempt
-            # whose files were empty, or never written, is still one fewer
-            # attempt's worth of files in the directory.
-            oldest.files_removed = True
-            self.captures_removed += 1
-            self.capture_bytes_removed += removed
-            self.record({"record": "capture_removed", "index": oldest.index,
-                          "capture": oldest.capture, "log": oldest.log,
-                          "bytes": removed,
-                          "reason": ("the run's capture budget"
-                                     if over_budget else
-                                     f"more than {MAX_KEPT_ATTEMPTS} attempts")})
-        # Over the budget with nothing left that can be removed. Recording it
-        # and carrying on would leave the run writing captures past the
-        # budget for however long it had left, which is the one thing the
-        # budget is there to prevent, so the run stops and fails instead.
-        total = sum(attempt.bytes_kept for attempt in kept + skipped)
-        if (options.capture_budget_bytes > 0
-                and total > options.capture_budget_bytes
-                and skipped and not self.capture_budget_stuck):
-            self.capture_budget_stuck = sorted(
-                name for attempt in skipped
-                for name in (attempt.capture, attempt.log))
-            self.record({"record": "capture_budget_stuck",
-                          "bytes_kept": total,
-                          "budget": options.capture_budget_bytes,
-                          "files": self.capture_budget_stuck})
-            say(f"the capture budget cannot be kept: {total} bytes on disk against "
-                f"{options.capture_budget_bytes}, and "
-                f"{len(self.capture_budget_stuck)} file(s) could not be removed; "
-                "stopping the run")
+        """Keep the newest captures inside the run's budget."""
+        removed, removed_bytes, stuck = prune_capture_files(
+            self.attempts, self.options.out, self.options.capture_budget_bytes,
+            self.record, stuck_already=bool(self.capture_budget_stuck))
+        self.captures_removed += removed
+        self.capture_bytes_removed += removed_bytes
+        if stuck:
+            self.capture_budget_stuck = stuck
 
     def rotate_if_large(self) -> None:
         """Start a new capture file once this one is big enough.
@@ -1793,7 +1842,7 @@ class Soak:
             elif change.reset_itself:
                 self.watchdog_resets += change.new_resets
                 if len(self.watchdog_where) < MAX_WATCHDOG_WHERE:
-                    self.watchdog_where.append(record.last_reset_where())
+                    self.watchdog_where.append(record.last_reset_where)
             entry["watchdog"] = record.to_dict()
         # Counted, not kept: a run that restarts for three days reads the
         # record thousands of times, and progress.jsonl holds every one.
@@ -2544,9 +2593,7 @@ class Soak:
                             "payload_matches": self.payload_matches},
             "detection": self.detection(),
             "off_quiet": self.off_quiet(),
-            "record_clock": {"reanchors": self.record_reanchors,
-                              "largest_drift_s": round(self.record_drift_max_s, 3),
-                              "reanchor_at_s": self.reanchor_s},
+            "record_clock": self.record_clock.to_dict(),
             "parity": self.parity(),
             # Sightings that fell between two periods, which belong to
             # neither: the schedule command's own latency sits there.
@@ -2650,9 +2697,9 @@ class Soak:
         quiet = summary["off_quiet"]
         say(f"off periods: {quiet['periods']} judged, {quiet['noisy']} still heard "
             f"more than {quiet['settle_s']:g}s in (allowance {quiet['allowance']})")
-        say(f"record clock: {self.record_reanchors} re-anchor(s), largest drift "
-            f"{self.record_drift_max_s:.3f}s (re-anchored past "
-            f"{self.reanchor_s:g}s)")
+        say(f"record clock: {self.record_clock.reanchors} re-anchor(s), largest "
+            f"drift {self.record_clock.drift_max_s:.3f}s (re-anchored past "
+            f"{self.record_clock.reanchor_s:g}s)")
         say(f"gaps: longest {gaps['structural_max_s']}s structural, "
               f"{gaps['text_max_s']}s text, limit {self.options.max_gap_s:g}s, "
               f"{gaps['periods_over_limit']} period(s) over it (allowance "

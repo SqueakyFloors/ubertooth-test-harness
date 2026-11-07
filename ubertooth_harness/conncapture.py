@@ -234,6 +234,39 @@ def timed_data_packets(records, access_address: int, crc_init: int) -> list[tupl
     return found
 
 
+def connect_ind_in(record: bytes, central: str | None = None,
+                   peripheral: str | None = None) -> ConnectInd | None:
+    """The CONNECT_IND one record carries between these two, or None.
+
+    For a reader that has one record in its hand rather than a whole file:
+    a soak tails the capture as it grows and decides what each record is as
+    it arrives (followsoak.py). The checks are `timed_connect_inds`'s, so a
+    record read this way is read the same way.
+    """
+    body = _connect_ind_body(record, central, peripheral)
+    if body is None:
+        return None
+    return ConnectInd.parse(body[6:6 + CONNECT_IND_LEN])
+
+
+def data_packet_in(record: bytes, access_address: int, crc_init: int):
+    """(payload length, CRC is right) if one record is on this connection."""
+    return _data_packet(record, access_address, crc_init)
+
+
+def record_access_address(record: bytes) -> int | None:
+    """The access address the board synchronized on for this record, or None.
+
+    None when the record is too short to hold one. The advertising access
+    address is returned like any other: a caller that wants connections only
+    compares it with `ADV_ACCESS_ADDRESS` itself, which is what
+    `connection_addresses` does for a whole file.
+    """
+    if len(record) < LE_PHDR_LEN + 4:
+        return None
+    return struct.unpack("<I", record[LE_PHDR_LEN:LE_PHDR_LEN + 4])[0]
+
+
 def connection_addresses(records) -> list[int]:
     """The access address of every record that is not an advertising packet.
 

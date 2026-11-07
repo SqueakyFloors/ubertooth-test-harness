@@ -31,7 +31,8 @@ from ubertooth_harness import (
     addresssoak, advertiser_cases, advertiser_soak_cases, afh_cases,
     bluez_cases, boardstate_cases, btbr_cases,
     capture_failure_cases, classic_cases, connection_cases, dfu_cases,
-    dfu_host_cases, interrupt_cases, invalidapp_cases, python_cases,
+    dfu_host_cases, follow_soak_cases, followsoak, interrupt_cases,
+    invalidapp_cases, python_cases,
     receive_cases,
     refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
     util_refusal_cases,
@@ -208,6 +209,20 @@ def _connection_interval(value):
     return value
 
 
+def _write_bytes(value):
+    # What the central writes each time the link is up. The firmware's own
+    # ceiling is one link-layer packet's worth with Data Length Extension,
+    # which is what `Capture known BLE connection` uses as its constant
+    # (connection_cases.WRITE_BYTES); a larger value is two packets and no
+    # longer what a "long packet" check is about.
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or not 1 <= value <= connection_cases.WRITE_BYTES):
+        raise CatalogError(
+            f"must be 1-{connection_cases.WRITE_BYTES} bytes, which is what one "
+            "link-layer packet carries with Data Length Extension")
+    return value
+
+
 def _check_connection_duration(arguments) -> None:
     """The capture must span exactly one of the central's reconnections.
 
@@ -270,6 +285,27 @@ def _share(value):
     if not 0 < number <= 1:
         raise CatalogError(f"must be a fraction above 0 and at most 1 (got {value})")
     return number
+
+
+def _check_follow_soak(arguments) -> None:
+    """Refuse follow-soak figures that could not judge what they ask for.
+
+    The same kind of check as `_check_address_soak` and for the same reason:
+    the run leases an Ubertooth and two DKs and then holds them for hours, so
+    a plan whose figures contradict each other has to fail before any of
+    that. The rules themselves are the driver's
+    (followsoak.check_timings), read through the same conversion the driver's
+    own command line gets, so the plan is judged by what will really run.
+    """
+    if arguments["capture file limit"] > arguments["capture budget"]:
+        raise CatalogError(
+            f"'capture file limit' ({arguments['capture file limit']} MiB) is "
+            f"larger than 'capture budget' ({arguments['capture budget']} MiB), "
+            "which is what the whole run's captures may cost")
+    try:
+        followsoak.check_timings(follow_soak_cases.timings(arguments))
+    except followsoak.SoakError as error:
+        raise CatalogError(str(error)) from error
 
 
 def _check_address_soak(arguments) -> None:
@@ -1216,6 +1252,13 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # measurement; the duration is what a soak's time really is, and it is
     # hours, so the figure around it hardly moves the countdown.
     advertiser_soak_cases.TEST_NAME: _default(Estimate(60.0, per_duration=1)),
+    # ESTIMATE_PENDING_HW: as the address soak, plus what the checkpoints
+    # cost. The capture runs for the whole duration the plan asks for; around
+    # it are the fixture checks (two DKs identified and put in their roles),
+    # the board and watchdog reads at either end, and the cleanup. The fixed
+    # part is the sum of those bounded commands rather than a measurement,
+    # and the duration is what a soak's time really is.
+    follow_soak_cases.TEST_NAME: _default(Estimate(90.0, per_duration=1)),
 })
 
 
@@ -1235,6 +1278,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "Classic btbr console",
         "Follow a BLE connection across its end",
         advertiser_soak_cases.TEST_NAME,
+        follow_soak_cases.TEST_NAME,
         # The Classic peer tests: each one captures a piconet the ESP32 pair
         # holds, and wants an ordinary link for the same reason as the rest.
         # On a bench whose default board is the attenuated one they would
@@ -1821,6 +1865,109 @@ def builtin_catalog() -> TestCatalog:
             # Its first case flashes the DK when the board runs another
             # firmware version, so the run holds the host lock.
             writes_firmware=True,
+        ),
+        TestDefinition(
+            follow_soak_cases.TEST_NAME,
+            "A long ubertooth-btle -f capture across a changing link: two "
+            "registered nRF52840 DKs cycle through the peripheral advertising, "
+            "a connection the central makes and carries, and both going off the "
+            "air, and the run is judged on whether the board found the "
+            "advertiser, acquired the connection from its CONNECT_IND and "
+            "recorded its packets, stopped reporting both when the fixture went "
+            "away, and reacquired it each cycle -- with the board's watchdog "
+            "record read at planned checkpoints, which stop the capture cleanly "
+            "rather than reading it beside one",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "central": ArgumentRule(_selector, default="default"),
+                "peripheral": ArgumentRule(_selector, default="default"),
+                # No `coverage:`: one capture either way, and what the run
+                # costs and decides is in the figures below.
+                "duration": DURATION,
+                "channel": ArgumentRule(_advertising_channel, default=37),
+                # The cycle: the peripheral advertising and waiting to be
+                # connected, the link up and being written to, and the pair
+                # off the air altogether.
+                "advertising": ArgumentRule(_duration, default="20s"),
+                "connected": ArgumentRule(_duration, default="30s"),
+                "absent": ArgumentRule(_duration, default="20s"),
+                # How often the capture is stopped cleanly so the board's
+                # watchdog record can be read, which is never done beside a
+                # running capture.
+                "checkpoint every": ArgumentRule(_duration, default="30m"),
+                # How often the run writes a progress record, which is what
+                # a long run is watched and reviewed through.
+                "sample every": ArgumentRule(_duration, default="1m"),
+                # What the fixture puts on the air: the peripheral's
+                # advertising interval, the connection interval the central
+                # asks for, and what it writes while the link is up.
+                "advertising interval": ArgumentRule(
+                    _advertising_interval, default=100),
+                "connection interval": ArgumentRule(
+                    _connection_interval, default=30),
+                "write bytes": ArgumentRule(_write_bytes, default=244),
+                "write period": ArgumentRule(_positive_integer, default=50),
+                # Presence: how wide a window is, and how many in a row count
+                # as sustained rather than a first sighting.
+                "presence window": ArgumentRule(_duration, default="2s"),
+                "presence windows": ArgumentRule(_positive_integer, default=5),
+                # A capture with no packet at all for this long is restarted.
+                # It has to clear a connected phase, an absent phase and the
+                # next detection, because the fixture is deliberately off the
+                # air for part of every cycle (_check_follow_soak).
+                "liveness timeout": ArgumentRule(_duration, default="2m"),
+                # How soon after an advertising phase starts the peripheral
+                # must be heard, and in what share of the phases.
+                "detect within": ArgumentRule(_duration, default="10s"),
+                "minimum detection share": ArgumentRule(_share, default=0.9),
+                # How long the central has to report the link it was told to
+                # make -- a phase it misses is a fixture failure, not a
+                # follow one -- and how soon after the phase started a
+                # CONNECT_IND for the pair must be in the capture.
+                "connect within": ArgumentRule(_duration, default="10s"),
+                "acquire within": ArgumentRule(_duration, default="15s"),
+                "minimum follow share": ArgumentRule(_share, default=0.8),
+                # Packets of the connection one phase must hold. A sniffer
+                # catches a fraction of a followed connection, so this is a
+                # floor a working follow clears rather than an expected count.
+                "minimum connection packets": ArgumentRule(
+                    _positive_integer, default=3),
+                # How long into an absent phase the fixture may still be
+                # heard: the packets already on the air, and already in the
+                # tool's buffers, arrive after the stop.
+                "quiet after": ArgumentRule(_duration, default="3s"),
+                # The longest silence allowed inside an advertising phase. A
+                # gap is measured inside one phase, so the limit has to sit
+                # between `detect within` and `advertising`.
+                "maximum gap": ArgumentRule(_duration, default="15s"),
+                # Restarts the run may make and still pass. A restart is
+                # recorded whatever this says; this is what makes one a
+                # failure. A checkpoint is not a restart.
+                "maximum restarts": ArgumentRule(_nonnegative_integer, default=0),
+                # Optional, like `max_watchdog_resets`: without it the
+                # capture process's memory is reported and nothing fails on
+                # it, since what counts as growth over three days is not
+                # established.
+                "maximum memory growth": ArgumentRule(_positive_integer),
+                # How large one capture file may grow, in MiB, before the run
+                # starts another at the next absent phase, and how much of
+                # the captures the whole run keeps. Past the budget the
+                # oldest complete capture and transcript are removed, newest
+                # kept.
+                "capture file limit": ArgumentRule(_positive_integer, default=256),
+                "capture budget": ArgumentRule(_positive_integer, default=4096),
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth",
+                              "central": "nRF52840 DK",
+                              "peripheral": "nRF52840 DK"}),
+            check_arguments=_check_follow_soak,
+            command_builder=follow_soak_cases.follow_soak_cases,
+            # Two things this test deliberately does not do, both so it can
+            # run beside other work on the host for its whole window: it
+            # guards no other Ubertooth, because every command it runs names
+            # its board by serial; and it writes no firmware, so run-suite
+            # takes no host lock (leases.needs_host_lock). Its first case
+            # checks the DKs' firmware and refuses rather than flashing.
         ),
         TestDefinition(
             "Capture known Classic device",
