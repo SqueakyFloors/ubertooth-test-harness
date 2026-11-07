@@ -13,7 +13,10 @@ import unittest
 from unittest import mock
 
 from ubertooth_harness import manifest
+from ubertooth_harness import release
 from ubertooth_harness.manifest import GitRevisionResolver, ManifestError
+
+from tests.test_manifest_preflight import FIRMWARE_VERSION_MK, RELEASE_CMAKE
 
 
 GIT_ENV = {
@@ -161,3 +164,127 @@ class SourceFetchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReleaseTagFetchTest(unittest.TestCase):
+    """A checkout holding the commit but not the release tag it was named for.
+
+    What the version a build reports is worked out from is this checkout's own
+    tags, so a missing tag makes a build of an exactly tagged commit report
+    the release before it and a count: the bench reported `2026-11-DEV1+25`
+    for a build of the commit tagged `2026-11-DEV2`, and the harness predicted
+    the same wrong release from the same clone, so nothing said so (#358).
+    """
+
+    RELEASE = "2026-11-DEV2"
+
+    def setUp(self):
+        self.repos = StaleCheckout(self)
+        self.logged = []
+        self.resolver = GitRevisionResolver(log=self.logged.append)
+        # The files that decide what a build reports, so build_version reads
+        # a release name rather than the hash a tree without them stamps.
+        for name, text in (("host/cmake/set_release.cmake", RELEASE_CMAKE),
+                           ("firmware/version.mk", FIRMWARE_VERSION_MK)):
+            target = self.repos.work / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+            git(self.repos.work, "add", name)
+        git(self.repos.work, "commit", "-qm", "the version files")
+        git(self.repos.work, "tag", "2026-11-DEV1")
+        self.tagged = commit_file(self.repos.work, "b.txt", "tagged\n")
+        git(self.repos.work, "tag", self.RELEASE)
+        git(self.repos.work, "push", "-q", "origin", "main")
+        git(self.repos.work, "push", "-q", "origin", "2026-11-DEV1")
+        git(self.repos.work, "push", "-q", "origin", self.RELEASE)
+        # The commit arrives without the tag on it, which is what a checkout
+        # that fetches one branch has: `--no-tags` leaves the auto-followed
+        # tags behind. The earlier release tag is taken, as a checkout that
+        # has been around has it.
+        git(self.repos.checkout, "fetch", "-q", "--no-tags", "origin",
+            "+refs/heads/main:refs/remotes/origin/main")
+        git(self.repos.checkout, "fetch", "-q", "--no-tags", "origin",
+            "refs/tags/2026-11-DEV1:refs/tags/2026-11-DEV1")
+
+    def test_the_tag_is_fetched_so_the_release_is_the_one_it_names(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.repos.checkout, "rev-parse", "--verify", self.RELEASE)
+
+        source = self.resolver.resolve(
+            "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
+        )
+
+        self.assertEqual(self.tagged, source.commit)
+        self.assertEqual(self.RELEASE, source.build_version)
+        self.assertEqual(self.RELEASE, source.expected_revision)
+        self.assertEqual(1, len(self.logged), self.logged)
+        self.assertIn("fetching tags", self.logged[0])
+        # Without the fetch it is the release before it and the distance, and
+        # the build's own clone of this checkout would say the same.
+        self.assertEqual("2026-11-DEV1+1", self._release_without_the_tag())
+
+    def _release_without_the_tag(self) -> str:
+        """What a checkout with the commit and not the tag would report."""
+        git(self.repos.checkout, "tag", "-d", self.RELEASE)
+        return release.build_version(self.repos.checkout, self.tagged).value
+
+    def test_a_release_tag_already_here_is_not_fetched_again(self):
+        git(self.repos.checkout, "fetch", "-q", "origin",
+            f"refs/tags/{self.RELEASE}:refs/tags/{self.RELEASE}")
+        self.logged.clear()
+
+        with mock.patch.object(manifest.subprocess, "run",
+                               wraps=subprocess.run) as run:
+            source = self.resolver.resolve(
+                "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
+            )
+
+        self.assertEqual(self.RELEASE, source.build_version)
+        self.assertFalse([c for c in run.call_args_list if "fetch" in c.args[0]])
+        self.assertEqual([], self.logged)
+
+    def test_a_ref_name_that_is_not_a_release_tag_costs_no_fetch(self):
+        # Every run names the branch or tag it was started from, and most of
+        # those are not release tags: a fetch for each would be paid by runs
+        # that have no use for it. Only the name the release comes from is
+        # worth one.
+        with mock.patch.object(manifest.subprocess, "run",
+                               wraps=subprocess.run) as run:
+            source = self.resolver.resolve(
+                "Ubertooth", self.repos.checkout, self.tagged, "2026-11-DEV2-rc"
+            )
+
+        self.assertEqual(self.tagged, source.commit)
+        self.assertFalse([c for c in run.call_args_list if "fetch" in c.args[0]])
+        self.assertEqual([], self.logged)
+
+    def test_a_fetch_that_fails_leaves_the_run_resolved_and_says_so(self):
+        # Best effort: the commit is already resolved, so a remote that will
+        # not answer costs the run nothing beyond the release name it would
+        # have corrected.
+        git(self.repos.checkout, "remote", "set-url", "origin",
+            str(self.repos.origin) + "-missing")
+
+        source = self.resolver.resolve(
+            "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
+        )
+
+        self.assertEqual(self.tagged, source.commit)
+        self.assertEqual("2026-11-DEV1+1", source.build_version)
+        self.assertTrue(
+            any("fetching tags from origin failed" in line
+                for line in self.logged), self.logged
+        )
+
+    def test_a_remote_without_the_tag_is_reported_rather_than_retried(self):
+        git(self.repos.origin, "tag", "-d", self.RELEASE)
+
+        source = self.resolver.resolve(
+            "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
+        )
+
+        self.assertEqual("2026-11-DEV1+1", source.build_version)
+        self.assertTrue(
+            any(f"has no '{self.RELEASE}' either" in line
+                for line in self.logged), self.logged
+        )
