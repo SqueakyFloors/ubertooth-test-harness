@@ -30,6 +30,7 @@ from ubertooth_harness.resources import BLUETOOTH_ADAPTER, ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
     advertiser_cases, afh_cases, bluez_cases, boardstate_cases, btbr_cases,
+    btle_replay_cases,
     capture_failure_cases, classic_cases, connection_cases, dfu_cases,
     dfu_host_cases, interrupt_cases, invalidapp_cases, python_cases,
     receive_cases,
@@ -1026,6 +1027,13 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # to back, because a busy host takes two to six times longer, which is
     # why an estimate is a countdown and never a timeout.
     "Raw receive replay": _profiles(Estimate(3.1), Estimate(9.0)),
+    # Two replays of a handful of records in smoke, four in comprehensive,
+    # each with the fixture writer and the directory listing beside it.
+    # The cases' own commands, timed back to back on the macOS host against
+    # a build of fork 4b28aec9: 0.89-0.95 s in smoke and 1.58-1.66 s
+    # comprehensive, most of it starting the processes rather than replaying
+    # eight records.
+    "BLE replay": _profiles(Estimate(0.9), Estimate(1.6)),
     # Two cases and 35 commands in smoke, three and 52 comprehensive.
     # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
     # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three
@@ -1503,6 +1511,19 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=receive_cases.replay_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            btle_replay_cases.TEST_NAME,
+            "ubertooth-btle -R replays a synthetic low-energy dump with no "
+            "Ubertooth: a promiscuous capture's connection parameters and the "
+            "CONNECT_IND beside the packets on that access address, the "
+            "company identifiers libbtbb names and the one it does not, the "
+            "-d records written back, and the refusal of a replay with no "
+            "major mode",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=btle_replay_cases.btle_replay_cases,
             continue_on_case_failure=True,
         ),
         TestDefinition(

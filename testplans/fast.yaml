@@ -15,6 +15,11 @@ suites:
         hosts: each
         coverage: smoke
 
+    # No Ubertooth: ubertooth-btle -R on a synthetic low-energy dump.
+    - BLE replay:
+        hosts: each
+        coverage: smoke
+
     # No Ubertooth: refused command lines leave output files alone.
     - Refused command lines:
         hosts: each
