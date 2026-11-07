@@ -72,7 +72,7 @@ the test needs, fail planning when every host the step names is here and none
 can run it (with a host this registry has not got among them, the step is
 left out instead).
 `validate-plan --hardware <registry>` refuses the absence too, since there
-the bench is named on purpose (README, "Hardware a registry has not got").
+the bench is named on purpose (guide/plans-and-resources.md, "Hardware a registry has not got").
 
 **Hardware a step is about.** Three absences are not left out quietly,
 because the missing hardware is the subject of the test: `alternate
@@ -3714,7 +3714,7 @@ whose application region is 49152 bytes`). Every run also reads the table out
 of the fork's checkout at the
 commit under test and records the comparison, so the copy is kept in step
 without waiting for such a board to reach the bench: see the `dfu_part_table`
-record in the README's "DFU images" section.
+record in guide/builds-and-firmware.md, "DFU images".
 
 All three arrived on the fork's main after the earlier releases, so the case
 expects them: the range line in `10c3381`
@@ -3812,7 +3812,7 @@ and query workflow against a known advertiser.
 
 **Theory of operation.** The intent is to reproduce the shape of a
 production-style MAC polling workload in the harness's own process: a
-persistent `ubertooth-btle -f` capture with no `-U` on an isolated board, a
+persistent `ubertooth-btle -n -U <serial>` capture, a
 set of in-memory MAC buckets rotated on a timer, lookups on a second timer,
 listener-silence detection, and the empty-bucket restart timing. Modeling it
 in-process is deliberate: the harness will not start the original workload and
@@ -4030,7 +4030,7 @@ run killed outright (SIGKILL) leaves whatever it was in the middle of: the
 port off if it was between the switch-off and the restore, and the board in
 its DFU bootloader with the unstartable image in flash if it was anywhere
 between the write and the recovery. Both are put right by hand — switch the
-port on (README, "USB power controllers") and write an image back with
+port on (reference/power-control.md) and write an image back with
 `ubertooth-dfu -d <image> -r` — because the next run cannot do it for you:
 preflight reads the board's serial before any case runs, and a board in DFU
 reports none. What the cleanup steps do cover is the case's own command being

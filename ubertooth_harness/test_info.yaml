@@ -2184,8 +2184,8 @@ MAC polling soak:
     known advertiser. No implementation yet.
   theory: >-
     The intent is to reproduce the shape of a production-style MAC polling
-    workload in the harness's own process: a persistent ubertooth-btle -f
-    capture with no -U on an isolated board, in-memory MAC buckets rotated on
+    workload in the harness's own process: a persistent
+    ubertooth-btle -n -U <serial> capture, in-memory MAC buckets rotated on
     a timer, lookups on a second timer, listener-silence detection, and the
     empty-bucket restart timing. Modeling it in-process is deliberate: the
     harness will not start the original workload and will not add a network

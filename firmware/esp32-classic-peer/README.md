@@ -1,8 +1,8 @@
 # ESP32 Classic Bluetooth peer firmware
 
 Firmware for the two ESP32-WROOM-32E dev boards the harness uses as Classic
-Bluetooth (BR/EDR) test devices. The Ubertooth stays receive-only; these
-boards do the transmitting, the same division of work as the
+Bluetooth (BR/EDR) test devices. In these tests the Ubertooth only receives
+and these boards transmit, the same division of work as the
 [nRF52840 DK role firmware](../nrf52840dk/README.md) for Bluetooth LE.
 
 Two of these boards hold a Serial Port Profile link and push data across it,
