@@ -3847,6 +3847,41 @@ itself), weekly, and on request, and it is not a required check.
 (`DK_BASE_REF=origin/main` to compare there too), and
 `scripts/local-ci.sh firmware-dk` runs it against an exact commit.
 
+A third workflow (`.github/workflows/firmware-esp32.yml`) compiles the ESP32
+Classic peer firmware, the other thing the test and build jobs do not build:
+it needs ESP-IDF, so it builds in Espressif's own image for the version
+`firmware/esp32-classic-peer/IDF_VERSION` pins. It configures the sources for
+`esp32` and builds them out of tree, from a copy, since `idf.py set-target`
+writes the resolved configuration into the project directory and the working
+tree is mounted read-only. Then it checks that the image carries
+`UTESP_FW_VERSION`, the string a peer's shell reports and a run checks it by;
+that each setting `sdkconfig.defaults` asks for by value came back out of
+Kconfig verbatim and each one it asks to stay off did not come back on, since
+an option that was renamed or withdrawn is otherwise ignored and the image
+then runs with another radio, log, or partition configuration than its
+sources describe; and that neither configuring nor building warned about that
+directory's own files, ESP-IDF's own warnings being Espressif's to fix rather
+than this repository's. That last check is also what catches a withdrawn
+option the configuration check cannot see, since the line ESP-IDF prints
+about a symbol it does not know names the firmware's own defaults file.
+
+It builds once and compares nothing with another commit, because nothing in
+the harness flashes a peer: a run fails when a peer reports a version older
+than the test needs, so a missing version bump is loud on the bench instead
+of silent, which is what the DK's comparison is for. The image's SHA-256 is
+printed and compared with nothing either: this image is not reproducible, so
+`docs/hardware.md` records the hash of the image a bench was flashed with
+for that bench to confirm its copy. That toolchain image is several
+gigabytes, so this workflow too runs only on a change under
+`firmware/esp32-classic-peer` (or to `scripts/ci.sh` or the workflow itself),
+weekly, and on request, and it is not a required check. It is a workflow of
+its own because GitHub filters paths per workflow: a change confined to one
+firmware directory then pulls only that vendor's image, where one job for
+both would always pull both. A `scripts/ci.sh` change still starts both, and
+is meant to, since either firmware step can be the one it breaks.
+`scripts/ci.sh firmware-esp32` is the same build on any host with docker, and
+`scripts/local-ci.sh firmware-esp32` runs it against an exact commit.
+
 The target-runner tests run against an in-process stub controller, and the
 controller tests against scripted runners and the real runner, all on
 `127.0.0.1` ephemeral ports with no hardware. The GUI tests check the served
