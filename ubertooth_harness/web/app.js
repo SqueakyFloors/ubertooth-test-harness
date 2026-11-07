@@ -717,7 +717,9 @@
     purpose.className = info.available ? "info-purpose" : "info-purpose hint warn";
     purpose.textContent = info.available
       ? String(info.purpose || "")
-      : String(info.unavailable_reason || "No information for this test.")
+      // One sentence, whether or not the reason came with a full stop.
+      : String(info.unavailable_reason || "No information for this test")
+        .replace(/[.\s]*$/, ".")
         + " What the catalog itself says about it is below.";
     $("test-info-body").replaceChildren(...[
       info.available ? infoSection("Theory of operation",
