@@ -330,8 +330,9 @@ Some tests ask for an ordinary link themselves, so a plan need not:
 in tshark`, `Capture known BLE advertiser`, `Capture known BLE connection`,
 `Follow a BLE connection across its end`, `Classic capture record fields`,
 `Capture known Classic device`, `Follow Classic Bluetooth piconet`,
-`Recover AFH map`, `Bluetooth inquiry scan`, and
-`Follow Classic piconet over HCI` require `antenna: true` with no attenuation on their
+`Recover AFH map`, `Bluetooth inquiry scan`,
+`Follow Classic piconet over HCI`, and
+`BLE address parity soak` require `antenna: true` with no attenuation on their
 `Ubertooth` role (`catalog.RF_DEFAULTS`), which keeps those captures,
 surveys, and followed connections off an attenuated board. That is a list,
 not a rule: other tests take captures too and carry no default, so read

@@ -3264,6 +3264,351 @@ on an access address it does not also announce. Whether a *later* capture
 picks up records left by this one is a different measurement, which `BLE CRC
 transitions` makes with `stalecheck.py`.
 
+## BLE address parity soak
+
+**What it does.** Runs one `ubertooth-btle -n` capture for as long as the plan
+asks, while a known advertiser goes on and off to a schedule, and reads the
+one capture two ways: the documented `AdvA:` text line the tool prints, and
+the capture's own records. It reports whether the two readers agree, whether
+the advertiser was detected when it was advertising, and what the capture,
+the board, and the host process did over the whole window.
+
+**Theory of operation.** Two questions need a long run and cannot be answered
+by a short one.
+
+The first is a compatibility question. A production-style advertising
+detection service runs `ubertooth-btle` with its standard error merged into
+its standard output and picks advertiser addresses out of the `AdvA:
+xx:xx:xx:xx:xx:xx (random)` lines libbtbb prints for each packet it decodes
+(`lib/src/bluetooth_le_packet.c`, `_dump_addr`). Whether that line keeps
+meaning what it meant is not something a reader of the capture file can be
+asked about separately — so here both readers read *the same capture*. The
+text reader takes the printed line and timestamps it when the host read it;
+the structural reader tails the capture file as the tool writes it, decodes
+each `LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR` record, recomputes the link-layer
+CRC, and takes the AdvA of the packets whose CRC is right, timestamped as the
+capture recorded them. Both addresses are normalized the same way before
+anything is compared, because one source prints lower case and the other is
+raw bytes, and an unnormalized comparison would fail for a reason that has
+nothing to do with the capture.
+
+The second is what only time finds: a capture process that dies, a board that
+resets itself, a host process whose memory grows, a detection that arrives
+late, a silence inside a period the advertiser was known to be advertising
+in. None of those is visible in a five-second capture, and none of them is
+decidable without a schedule: a quiet capture could be a dead board or an
+advertiser that is not advertising. So the harness drives the advertiser
+itself, one leg at a time, and every on period becomes a detection with a
+deadline while every off period becomes a silence with a known cause. That is
+also what makes the liveness rule sound. A capture is restarted when its
+process exits, or when no packet of any address arrives for the liveness
+timeout; the timeout has to be longer than the advertiser's own off period,
+or the schedule's silence would restart the capture, and the catalog refuses
+a plan where it is not (below).
+
+**The readers are not expected to agree packet for packet, and are not asked
+to.** Two asymmetries are real and documented rather than designed away.
+libbtbb prints a decoded packet whether or not its CRC checks (the print is
+after the `dump:` label, with no CRC gate), so the text reader can report an
+address from a corrupted packet that the structural reader drops — including
+a corrupted copy of this advertiser's own packet, whose address bytes
+survived. And the `AdvA:` of a SCAN_REQ or a CONNECT_REQ is the *target's*
+address, not the sender's, so a scanner that addressed this advertiser would
+appear in the text reader alone; the advertiser is driven as
+ADV_NONCONN_IND, which is neither scannable nor connectable, so that should
+not arise, but a device on the bench can send what it likes. What the test
+compares is therefore which windows each reader found the address in, with an
+allowance that is a share of the windows either reader saw it in, so the
+allowance scales with the run instead of being a count that is strict at one
+duration and meaningless at another.
+
+A window **beside** one the other reader had is not counted at all. Both
+readers see their packets after the fact, through buffers that do not fill
+together: the tool's own output reaches the pipe a stdio block at a time, and
+its capture file reaches the disk the same way, so a packet near a window's
+edge lands either side of it depending on which buffer flushed first. The
+bench measured exactly that — two windows the record reader had alone in a
+one-minute run of 238 packets, with nothing wrong. What the comparison is for
+is a reader that misses the advertiser while the other sees it, and that is a
+run of windows rather than an edge.
+
+**The schedule is checked in both directions.** The on periods are where
+detection is measured; the off periods are where the schedule itself is
+checked. An advertiser that accepts `adv stop` and keeps advertising would
+otherwise meet every detection, gap and rate objective, and the run would
+report a controlled schedule it never had. So in each judged off period the
+advertiser must fall quiet: a sighting by either reader more than two seconds
+into it (or half the period, whichever is less, so a short schedule still has
+something judged) makes that period noisy, and more noisy periods than the
+allowance fails the run. The allowance is there for the same reason the
+parity one is: the text reader's time is when the host read a line, so one
+delayed flush should not fail three days of work. The two seconds are for the packets already
+on the air and already in the tool's buffers when the stop lands.
+
+Two things keep that check from being quietly empty, which would be worse
+than a check that fails. **A rollover does not cost its off period.** The
+capture file is rolled over at the start of an off period on purpose, so on a
+busy channel with a small `capture file limit` every off period holds a gap;
+throwing those periods away left nothing judged, and an advertiser that took
+`adv stop` and kept advertising would have passed with the schedule half
+checked. So such a period is judged from the moment something was listening
+again instead, and only a rollover that left no stretch at all, or an
+unplanned gap — where the capture's own health is in question — takes the
+period out. **And a population of none fails.** If no off period that was
+meant to complete could be judged, whatever emptied it, the run fails saying
+the stop was never measured, rather than reporting a schedule it did not
+check; a population too small for the `minimum detection share`, counted the
+way the on periods are, fails too.
+
+**An allowance is never the whole population.** Each one is a share with a
+floor of one, so a short run has slack too — but capped one below the number
+of periods judged, so a comparison resting on one or two of them can still
+fail. Without the cap the floor made the off-period and gap checks
+structurally unfailable on the short suite, which judges one or two off
+periods and is the suite a change to the driver is tried on.
+
+What the parity comparison really bounds is worth stating in windows, because
+both neighbours are checked: a reader can lose two consecutive windows
+anywhere with nothing recorded, three give one disagreement, and the floor
+absorbs that, so four consecutive windows in one place — eight seconds at the
+long suites' two-second window — is where parity starts to bite. A reader
+losing a fraction of windows everywhere is caught by sustained presence
+rather than by parity, which is why both objectives are there.
+
+**Timing relationships are checked before any board is leased.** The
+figures below constrain each other, and a run holds an Ubertooth and a DK for
+hours, so a plan whose own figures contradict each other has to fail when the
+plan loads rather than on the bench. Every relationship below is refused
+(`addresssoak.check_timings`, raised through the catalog's
+`check_arguments`), and the driver makes the same checks from the same code
+when it is run by hand:
+
+* a schedule leg under a second, or a duration and a schedule that together
+  make more periods than a run can hold — each period is kept for the whole
+  run and writes two synced records;
+* a presence window or a sampling interval too short to run for days, for the
+  same reason;
+* an advertising interval that leaves fewer than three events in a presence
+  window, so one lost or late event would empty it, or that cannot send the
+  packets a minute the rate floor asks for;
+* a detection deadline longer than the advertiser is on for;
+* sustained presence (`presence windows` × `presence window`) that does not
+  fit in an on period;
+* a liveness timeout that does not clear an off period *and* the wait for the
+  next period's first packet, which is the quiet stretch a healthy run has;
+* a gap limit below the detection deadline, which every period's wait for its
+  first packet would fail, or as long as an on period, which no gap inside one
+  could ever reach;
+* a duration shorter than two schedule cycles, or a sampling interval that
+  would leave fewer than three samples.
+
+**Hardware and arguments.** One `Ubertooth`, selected by serial and receiving
+only, and one `advertiser` (nRF52840 DK) with a registered J-Link serial and
+a static random BLE address. The Ubertooth defaults to needing an ordinary
+link (antenna attached, no attenuation). The test writes DK firmware: the
+first case flashes the DK when it runs anything but the version the harness
+pins, so the run holds the host lock. There is no `coverage:` argument — one
+capture either way — and a `duration:` is needed. The rest are the figures
+the verdict is made of: `channel:`, `interval:` and `payload:` for the
+advertiser; `advertiser on:` and `advertiser off:` for the schedule;
+`sample every:` for how often a progress record is written; `presence
+window:` and `presence windows:` for what sustained presence means; `liveness
+timeout:` for when a quiet capture is restarted; `detect within:` and
+`minimum detection share:` for the detection objective; `maximum gap:` and
+`minimum packets per minute:` for the silences and the rate; `maximum window
+disagreement share:` for how far the readers may differ; `maximum restarts:`
+for how many unplanned restarts still pass; `maximum memory growth:`, which
+only applies a limit when a plan sets one; `restart probe:`, which kills the
+capture once at the middle of the run; and `capture file limit:`, in MiB,
+which rolls the capture over to a new file at the start of an off period; and
+`capture budget:`, also in MiB, which is what the whole run's captures may
+cost (past it the oldest complete capture and its transcript are removed,
+newest kept, each removal recorded).
+
+**Commands.** `nrfdk.py` writes and identifies the DK's firmware and holds it
+idle, `addresssoak.py` is the driver that runs the capture and both readers,
+and `ubertooth-util` reads the board's settings before the capture and writes
+them back after it. The driver runs the `ubertooth-btle -n` capture itself,
+with the channel and the capture file the plan gave it:
+
+```text
+nrfdk.py identify --jlink <serial> --alias <alias> --port <port>
+nrfdk.py flash --jlink <serial> --alias <alias> --port <port> --hex <image>
+nrfdk.py advertise --jlink <serial> --alias <alias> --port <port> --address <addr>
+nrfdk.py idle --jlink <serial> --alias <alias> --port <port>
+addresssoak.py --serial <serial> --channel <37|38|39> --out <capture dir> \
+    --jlink <serial> --dk-alias <alias> --dk-port <port> \
+    --address <addr> --interval <ms> --payload <bytes> \
+    --duration <s> --advertiser-on <s> --advertiser-off <s> \
+    --sample-every <s> --presence-window <s> --presence-windows <n> \
+    --liveness-timeout <s> --detect-within <s> --min-detection-share <share> \
+    --max-gap <s> --min-packets-per-minute <n> \
+    --max-disagreement-share <share> --max-restarts <n> \
+    --max-capture-bytes <n> --max-total-capture-bytes <n> \
+    [--restart-probe]
+ubertooth-util -U <serial> -S                 # idle before the reads
+ubertooth-util -U <serial> -C                 # channel, PA level, squelch,
+ubertooth-util -U <serial> -a                 # and LEDs: read, then written
+ubertooth-util -U <serial> -z                 # back after the capture
+ubertooth-util -U <serial> -d
+ubertooth-util -U <serial> -c <channel>       # the restores
+ubertooth-util -U <serial> -l <leds>
+ubertooth-util -U <serial> -s                 # the identity read that ends it
+```
+
+**Plans.** `testplans/address-soak.yaml`, four suites, none of them in `fast`
+or in the non-soak `release` plan: `address-parity` (about a minute of
+capture, with the restart probe, for development and for a short bench
+validation), `address-soak-4h` (setup validation), `address-soak-24h`, and
+`address-soak-72h` (the release-candidate soak
+[ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703) asks
+for). The long ones run on the persistent target runner, which keeps running
+when whatever started the run has disconnected; the run directory holds the
+record, and the driver flushes a progress record to it as the run goes, so a
+soak is reviewable while it runs and afterwards.
+
+**Which on periods are judged.** An on period says something about detection
+only if the advertiser was known to be advertising for the whole of it and
+something was listening throughout. Four kinds are therefore left out, each
+counted and recorded: the last one, which the run's own duration ended; one
+cut short for another reason; one whose schedule command did not reach the
+DK; and one with a *capture gap* — a stretch where the capture was stopped or
+started, whether by a restart, by the probe, or by a file rotation. Counting
+those as missed detections would report the harness's own doing as the
+board's. A period also begins when the advertiser was *told* to start, not
+when the run decided to tell it, so the shell command's own latency is not
+charged to the detection deadline; and each sighting is attributed to the
+period its own timestamp falls in rather than to whichever period the loop
+happens to be in when it reads it, since both readers hand their sightings
+over later than the sightings themselves.
+
+Leaving periods out would leave a hole, though: a capture that kept dying
+would pass on the few periods it did cover. So a run must also be able to
+*judge* at least `minimum detection share` of the on periods that were meant
+to complete, and only the interruptions the run chose — the probe, a capture
+file rolled over, and the final period the duration ended — are allowed
+against that floor. A flapping capture fails there rather than passing
+quietly.
+
+**Expected outcome.** Two cases. The first confirms the DK runs the pinned
+firmware at its registered address, flashing the run's `nRF52840 advertiser`
+artifact if it runs anything else. The second is the soak. It passes when
+every configured objective is met: enough of the on periods could be judged
+at all (above); both readers detected the advertiser within `detect within`
+of an on period starting, and saw sustained presence, in at least
+`minimum detection share` of the judged periods; the
+readers disagreed about no more windows than the allowance; no more judged periods than
+the allowance held a silence longer than `maximum gap`; the rate over the minutes the advertiser
+was on cleared `minimum packets per minute`; at least one captured packet
+carried the harness payload tag, so the address is this advertiser's and not
+a collision; every capture file could be read to its end; the advertiser fell
+quiet in every judged off period; the capture process died of its own accord
+no more often than the restart budget allows; there were no more unplanned
+restarts than the budget; the final
+stop was a clean one (SIGTERM, within its grace, no kill needed); every
+schedule command inside the window reached the DK; the run's capture budget
+was kept; and the board answered every read afterwards. The closing
+stop-and-read is counted apart and is not one of these: it runs after the
+last period, which the duration ended and nothing judged, so a DK that
+hiccups in the final second of a three-day run affected no measurement. Each failed objective is its own `FAIL:` line and the step
+requires `SOAK VERDICT: pass`.
+
+What is reported either way, and is the point of running it: packets per
+reader, the windows each found the address in, periods detected and
+sustained with the first and median detection time, the longest and median
+gap, packets a minute with its spread, resident memory first, last, and
+largest, every capture attempt with its exit status, its last `error:` line
+and whether it had to be killed, planned file rotations, board resets, and
+every watchdog read with the mode and wait the firmware recorded. The count
+of lines matching the older "capture died" wording (`libUSB Error`, `could
+not open Ubertooth device`) is reported too, which is the compatibility note
+[ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703) asks
+for: the stable signal now is the exit status plus one documented `error:`
+line, and a run says whether the old one would have fired at all.
+
+**The restart probe.** With `restart probe: true` the driver kills the capture
+once, at the middle of the run, with SIGKILL and no stop sent to the board —
+the way a lost terminal or a dropped session ends a capture, which is the
+`#239` stream-stop class — and then restarts it. The advertiser must be heard
+again in the first judged on period after it, and where the run was too
+short to hold one, the report says the recovery is not established rather
+than claiming one. Without the probe a run that
+never needed to recover carries no evidence that it could; with it, every run
+carries that evidence deterministically, and the restart is counted apart
+from the unplanned ones so it cannot be mistaken for a fault. The attempt's
+transcript is also checked for libubertooth's "is still in mode" warning,
+which is reported rather than required, since whether it appears depends on
+the fork's own version.
+
+**A busy board is a configuration failure.** Before the capture starts the
+driver reads the board once. A board that does not answer — in use by another
+program, or gone — ends the run with exit status 3 and a reason, and is never
+reset to make it work: resetting it would spoil whatever is using it as well
+as this run. The board's own leases are the harness's business
+(README, "Sharing boards: leases"); this is the last check before hours of
+capture.
+
+**Measured on the bench, 2026-11-05.** The `address-parity` suite at fork
+`828e7322`, one Ubertooth and one DK: the test took 66.8 s, both readers
+detected the advertiser in both judged on periods (first detection 0.064 s
+text, 0.062 s structural) and saw sustained presence in both; the text reader
+counted 226 of the advertiser's packets and the structural reader 225, over
+31 windows both of them agreed on, with no window either saw alone; the
+longest silence inside a judged period was 0.32 s; the capture process grew
+from 3804 to 4340 KiB over five samples; the final stop was a SIGTERM exit 0;
+the firmware reported no unrequested reset over three reads; and the restart
+probe recovered. The bench is crowded — 40116 packets from 6652 other
+addresses arrived in the same window, none of them recorded — which is what
+the capture file limit and the transcript budget are sized for.
+
+**The host lock, for three days.** The test flashes the DK when it runs
+another firmware version, so it is declared as a test that writes firmware,
+and a run therefore holds the harness's host lock for its whole window
+(README, "The host lock"). On the 72-hour suite that means no other command
+on that host may write firmware or switch USB power for three days, on any
+board. That is the other reason these runs are booked rather than scheduled.
+
+**Every comparison carries an allowance, and the run says so.** Detection,
+sustained presence, parity, the gap limit and the off-period quiet all judge a
+*share* rather than demanding none: each one is measured over thousands of
+periods in the long suites, and each rests on a time the host read something,
+so a single delayed stdio flush must not end three days of work. The
+allowances for the gap limit and the off periods are the complement of
+`minimum detection share`; parity's is `maximum window disagreement share`.
+A run reports the count and the allowance beside each other.
+
+**A run that cannot finish still reports.** A bench failure, a full disk under
+the progress file, or a fault nobody expected is caught, added to the problems
+as the reason, and written to `summary.json` with a verdict of `fail` or
+`configuration`, because the verdict of a run of days is read from there and
+not from a traceback. The capture is stopped on the way out however the run
+ends, and a cancellation writes the report before it quiets the advertiser:
+the harness allows about two seconds after its SIGTERM, and the report is the
+part that must not be lost.
+
+**Known limits.** The two readers keep different clocks by nature. The text
+reader's time is when the host read a line, which the tool's own stdio
+buffering delays by a block on a busy channel, and the structural reader's is
+what the capture wrote. A window near a boundary can fall either side for one
+reader and not the other, which is why the comparison carries an allowance
+and why a run reports its disagreements rather than requiring none; a host
+whose wall clock steps under a long run shifts the structural times against
+the text times for the same reason. Nothing here says the two readers would
+agree about a device the harness does not drive: the comparison is about one
+address whose schedule is known. The detection floors and the rate floor are
+bench figures rather than bounds from the specification, so a noisier room
+can fail them with nothing wrong in the code. Memory is the operating
+system's resident set size, which says nothing about what inside the process
+grew, and no limit is applied unless a plan sets one, because what counts as
+growth over three days is not established. The schedule is applied by the
+host over the DK's serial shell, so a transition that failed twice is
+recorded against its period and that period is left out of the verdict
+instead of counting as a missed detection. A run the harness kills outright
+(its hard timeout, after the cancellation grace) can leave the capture tool
+holding the board for a moment; the case's own cleanup stops it. And the
+test needs two kinds of hardware and a flashable DK, so it cannot run
+anywhere the DK is absent.
+
 ## Capture known Classic device
 
 **What it does.** Two ESP32 Classic peers hold a Serial Port Profile link and
