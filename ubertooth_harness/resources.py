@@ -242,7 +242,7 @@ def _bench_lock_names(resource) -> tuple[tuple[str, str], ...]:
     lease key (``leases.board_for_resource``), so a second device with the
     same serial would be held through the first one's file.
     An Ubertooth's is its serial (its lease key too), a DK's its J-Link
-    serial as nrfutil and sysfs each print it, a peer's its bridge serial,
+    serial in either spelling of the digits, a peer's its bridge serial,
     and a programmer's the serial its USB descriptor reports.
     """
     identity = resource.identity
