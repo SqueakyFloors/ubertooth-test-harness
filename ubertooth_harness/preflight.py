@@ -554,6 +554,45 @@ def libbtbb_identity(ubertooth, libbtbb=None, *, built=False) -> LibbtbbIdentity
     )
 
 
+def device_checks(serial: str, expected_revision: str):
+    """The reads preflight makes of every Ubertooth it binds, in order.
+
+    ``(name, argv, expected patterns)`` per read, from the lowercased serial
+    the board is selected by. It is a function of its own so that the one
+    statement of these commands is the one the run sends: the document's
+    preflight block is compared with it (tests/test_tests_document.py), so a
+    read added or removed here fails until the document says so.
+    """
+    common = ("ubertooth-util", "-U", serial)
+    return (
+        (
+            "Firmware version",
+            common + ("-v",),
+            (firmware_version_pattern(expected_revision),),
+        ),
+        (
+            "Firmware compile info",
+            common + ("-V",),
+            firmware_identity_patterns(expected_revision),
+        ),
+        (
+            "Device serial",
+            common + ("-s",),
+            (rf"Serial No:\s+{re.escape(serial)}(?:\s|$)",),
+        ),
+    )
+
+
+def guard_api_check(serial: str):
+    """The extra read of a guard-only board: which firmware API it carries.
+
+    The run refuses a guard whose API is not the host tools' own, either way
+    about, because `ubertooth-btle` may stop such a board rather than read it.
+    """
+    return ("Guard firmware API", ("ubertooth-util", "-U", serial, "-v"),
+            (r"Firmware version:",))
+
+
 _NRFDK = str(Path(nrfdk.__file__).resolve())
 
 
@@ -665,10 +704,6 @@ class PreflightPolicy:
                     found.append(alias)
         return tuple(found)
 
-    @staticmethod
-    def _pattern(text: str) -> str:
-        return re.escape(text)
-
     def compile(
         self,
         invocations: Sequence[TestInvocation],
@@ -770,28 +805,11 @@ class PreflightPolicy:
                     )
                 selected_serial = serial.lower()
                 expected = ubertooth_source.expected_revision
-                common = ("ubertooth-util", "-U", selected_serial)
-                device_checks = (
-                    (
-                        "Firmware version",
-                        common + ("-v",),
-                        (firmware_version_pattern(expected),),
-                    ),
-                    (
-                        "Firmware compile info",
-                        common + ("-V",),
-                        firmware_identity_patterns(expected),
-                    ),
-                    (
-                        "Device serial",
-                        common + ("-s",),
-                        (rf"Serial No:\s+{self._pattern(serial.lower())}(?:\s|$)",),
-                    ),
-                )
+                reads = device_checks(selected_serial, expected)
                 required_api = None
                 if alias in established or alias not in tested:
-                    device_checks = tuple(
-                        check for check in device_checks if check[0] == "Device serial"
+                    reads = tuple(
+                        check for check in reads if check[0] == "Device serial"
                     )
                 if alias not in tested:
                     # Guard-only: refuse the run before any test if its API
@@ -802,9 +820,7 @@ class PreflightPolicy:
                         except StateCaseError as error:
                             raise PreflightError(str(error)) from error
                     required_api = host_api
-                    device_checks += (
-                        ("Guard firmware API", common + ("-v",), (r"Firmware version:",)),
-                    )
+                    reads += (guard_api_check(selected_serial),)
                 if (
                     bootloader is not None
                     and alias in tested
@@ -815,14 +831,14 @@ class PreflightPolicy:
                     # firmware may be older than the read, nor for a board a
                     # firmware-writing test establishes itself: both can be
                     # carrying firmware that refuses the request.
-                    device_checks += (
+                    reads += (
                         (
                             BOOTLOADER_CHECK_NAME,
                             bootloader_identity.identity_argv(selected_serial),
                             bootloader.patterns(),
                         ),
                     )
-                for name, argv, patterns in device_checks:
+                for name, argv, patterns in reads:
                     sequence += 1
                     checks.append(
                         PreflightCheck(

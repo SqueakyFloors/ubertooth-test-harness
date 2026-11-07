@@ -176,6 +176,13 @@ def identity_argv(serial: str) -> tuple[str, ...]:
     return ("ubertooth-util", "-U", serial, "-B")
 
 
+def application_argv(serial: str) -> tuple[str, ...]:
+    """The application read after a bootloader write: it is above the region
+    the write touches, so saying it still runs is cheap and is what an
+    operator wants to read before the tests start."""
+    return ("ubertooth-util", "-U", serial, "-v")
+
+
 @dataclass(frozen=True)
 class BootloaderIdentity:
     """Which bootloader a board has, as its own `-B` line says.
@@ -1520,13 +1527,10 @@ class BootloaderUpdater:
                 f"write, not the {expected.describe()} that was written",
                 written=True, previous=installed,
             )
-        # The application the run requires is above the bootloader region and
-        # the write does not touch it, so saying it still runs is cheap and is
-        # what an operator wants to read before the tests start.
         application = self._run(
             publisher, f"bootloader-application-{board.alias}",
             "application_version_after_bootloader",
-            ("ubertooth-util", "-U", board.serial, "-v"),
+            application_argv(board.serial),
             IDENTITY_TIMEOUT_S, token, owner={"resource": board.alias},
         )
         reported = FIRMWARE_VERSION_RE.search(application.stdout)

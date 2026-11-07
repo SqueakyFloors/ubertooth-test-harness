@@ -26,6 +26,16 @@ class FlashCancelled(HarnessError):
     """
 
 
+def revision_argv(serial: str) -> list[str]:
+    """The firmware revision read of one board, before and after a write."""
+    return ["ubertooth-util", "-U", serial, "-v"]
+
+
+def flash_argv(serial: str, image) -> list[str]:
+    """One firmware write, which resets the board when it is done."""
+    return ["ubertooth-dfu", "-U", serial, "-d", str(image), "-r"]
+
+
 def _revision_discrimination(request) -> dict:
     """Whether the revision read after a write tells the images apart.
 
@@ -280,7 +290,7 @@ class FlashReliabilityRunner:
             publisher,
             command_id,
             operation,
-            ["ubertooth-util", "-U", serial, "-v"],
+            revision_argv(serial),
             timeout_s,
             cancellation,
             owner=owner,
@@ -552,14 +562,7 @@ class FlashReliabilityRunner:
                 publisher,
                 f"flash-{iteration:04d}",
                 "firmware_flash",
-                [
-                    "ubertooth-dfu",
-                    "-U",
-                    target,
-                    "-d",
-                    str(artifact.path),
-                    "-r",
-                ],
+                flash_argv(target, artifact.path),
                 min(request.per_flash_timeout_s, remaining),
                 owner=self._owner,
             )
@@ -863,7 +866,7 @@ class BuildFlasher:
                 return stop(f"deadline of {total:g}s reached before {name}")
             result = commands._execute_command(
                 publisher, f"build-flash-{index}-before", "version_before_build_flash",
-                ["ubertooth-util", "-U", board.serial, "-v"],
+                revision_argv(board.serial),
                 remaining(BUILD_FLASH_QUERY_TIMEOUT_S), token, owner=owner,
             )
             before = FlashReliabilityRunner._revision(result) if result.returncode == 0 else None
@@ -890,7 +893,7 @@ class BuildFlasher:
                 )
             write = commands._execute_command(
                 publisher, f"build-flash-{index}-write", "build_firmware_flash",
-                ["ubertooth-dfu", "-U", board.serial, "-d", str(image), "-r"],
+                flash_argv(board.serial, image),
                 budget, owner=owner,
             )
             record["written"] = True
@@ -911,7 +914,7 @@ class BuildFlasher:
                 verify = commands._execute_command(
                     publisher, f"build-flash-{index}-verify-{attempt}",
                     "version_after_build_flash",
-                    ["ubertooth-util", "-U", board.serial, "-v"],
+                    revision_argv(board.serial),
                     budget, token, owner=owner,
                 )
                 if verify.returncode == 0:
