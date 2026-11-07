@@ -74,32 +74,43 @@ Help smoke:
   limitations: >-
     It proves almost nothing beyond "the binary runs". Host CLI surface is the
     same idea applied to every tool, with the tool's own name required in the
-    output.
+    output, so this adds no coverage to a suite that holds that one; it is
+    kept as the cheapest step a plan can hold.
   related: []
 
 Host CLI surface:
   purpose: >-
-    Keeps -h working, and exiting 0, on every always-built tool. Several tools
-    in this fork used to exit 1 for -h, which breaks a user's first command
-    and any script that asks a tool what it takes.
+    Keeps -h and -V working on every C host tool the fork builds. Several
+    tools in this fork used to exit 1 for -h, which breaks a user's first
+    command and any script that asks a tool what it takes; -V is how a user
+    reports which host tools they are running, and it is the line preflight
+    holds the run to.
   theory: >-
     Each tool's usage text names the tool, so requiring that name in the
     output tells a working parser from a binary that printed something else.
-    Pinning exit 0 per tool keeps the fixed tools fixed.
+    Pinning exit 0 per tool keeps the fixed tools fixed. Every tool answers
+    -V through the one libubertooth function, so the same host version line
+    is the right answer from all of them, and a tool that stopped answering
+    it is a regression in that tool alone.
   hardware: >-
-    No board. Nothing transmits. The two BlueZ-only tools declare that need,
-    so on a host without BlueZ (every macOS host) those cases are left out
-    before the run as not applicable rather than failing.
+    No board. Nothing transmits. -V reads whatever boards are attached, which
+    may include boards the run does not use, so exit 1 passes too: the line
+    is what is checked. The two BlueZ-only tools declare that need for both
+    of their cases, so on a host without BlueZ (every macOS host) they are
+    left out before the run as not applicable rather than failing.
   expected: >-
-    17 cases on Linux, 15 on macOS: -h on util, debug, specan, rx, tx, dump,
-    btle, dfu, ego, afh, and ducky, each exit 0 with its own name in the
-    output; -h on scan and follow where BlueZ is present; and the host version
-    line from util -V, rx -V, tx -V, and afh -V. A case failure does not stop
-    the others.
+    Two cases per tool, 26 on Linux and 22 on macOS: -h exits 0 with the
+    tool's own name in the output, and -V prints the host tools version line.
+    The tool list is the build's own, so a tool the fork adds gets both cases
+    with the build. A case failure does not stop the others.
   limitations: >-
     It checks that help works and that the version line is present, not what
-    any option does.
-  related: []
+    any option does, and not that the versions are the ones you wanted:
+    preflight compares them with the resolved sources. The firmware lines -V
+    prints under that line are checked by Ubertooth identity, not here.
+  related:
+    - ubertooth-test-harness#347
+    - ubertooth#813
 
 Ubertooth count:
   purpose: >-
@@ -122,56 +133,6 @@ Ubertooth count:
     It depends on the registry being right. An unregistered board attached to
     the host fails this test, correctly, but the message says only that the
     count differed.
-  related: []
-
-Firmware version:
-  purpose: >-
-    A catalog entry for reading the firmware revision from one board. No
-    implementation yet, and covered in practice: Ubertooth identity reads and
-    checks the revision, and preflight reads it for every selected board on
-    every run.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. What the entry would add over Ubertooth identity and
-    preflight is not written down.
-  related: []
-
-Firmware compile info:
-  purpose: >-
-    A catalog entry for reading the firmware's compile identity from one
-    board. No implementation yet. Ubertooth identity already checks the whole
-    ubertooth-util -V answer, including the compile-info line, and the guard
-    readback uses the same line, whose build timestamp also catches a reflash
-    of the same revision.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
-  related: []
-
-Device serial:
-  purpose: >-
-    A catalog entry for reading the microcontroller serial from one board. No
-    implementation yet. Ubertooth identity checks ubertooth-util -s against
-    the registered serial, and every transition case's cleanup ends with the
-    same read, which is how a case proves it talked to the board it selected.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
   related: []
 
 Bootloader identity:
@@ -209,41 +170,15 @@ Bootloader identity:
     - ubertooth-test-harness#298
     - ubertooth#242
 
-Part ID:
-  purpose: >-
-    A catalog entry for reading the microcontroller part ID from one board. No
-    implementation yet. Ubertooth identity checks ubertooth-util -p against
-    the part ID pattern.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
-  related: []
-
-Board ID:
-  purpose: >-
-    A catalog entry for reading the Ubertooth board ID from one board. No
-    implementation yet. Ubertooth identity checks ubertooth-util -b against
-    the board ID pattern.
-  theory: >-
-    Not established.
-  hardware: >-
-    One Ubertooth. Nothing transmits and nothing is written.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
-  related: []
-
 Ubertooth identity:
   purpose: >-
     Proves a command reached the board the plan selected rather than whichever
     board USB offered first, and catches a parser that drops a report when
-    several are asked for in one command.
+    several are asked for in one command. It is the whole of the harness's
+    identity readback: the five standalone catalog names for these reads
+    (firmware version, compile info, device serial, part ID, board ID) were
+    the same commands with the same checks and were removed, so this is
+    where they live.
   theory: >-
     The registry already knows the board's serial, so the -s read has a known
     right answer. The other reads are held to the shape the tools print. The
@@ -985,11 +920,7 @@ Raw receive replay:
     -l, replay into PCAPNG and into PCAP (link type 255, the fixture's packet
     count), a -d file that cannot be opened (exit 1, one error line, no usage
     text, nothing created or changed anywhere in the directory), and -s
-    decoding the same as without it. The -l case also requires the start of
-    the CLK1-27 search that follows a discovered UAP, and forbids a CLK6
-    note, which libbtbb reports only for a UAP the caller stated;
-    comprehensive's correct -u requires that note, at offset 0, with the
-    candidates after it. Six smoke cases are about where a
+    decoding the same as without it. Six smoke cases are about where a
     capture goes: -q - writes a readable PCAP to the redirected stream with
     the packet report printed on neither stream, /dev/stdout and /dev/fd/1
     mean that stream too and so does /proc/self/fd/1 on Linux, /dev/fd/3 is
@@ -1030,9 +961,62 @@ Raw receive replay:
     - ubertooth#782
     - ubertooth#1203
     - ubertooth-test-harness#333
-    - libbtbb#137
-    - ubertooth#1135
-    - ubertooth-test-harness#341
+
+BLE replay:
+  purpose: >-
+    The one low-energy decode test with a known answer and no radio at all.
+    It pins what a saved ubertooth-btle capture is worth: that a replay puts
+    back both halves of what a promiscuous capture found, and that the
+    company identifier table is read and reported as libbtbb words it.
+  theory: >-
+    The harness writes the dump, from the Bluetooth Core specification's own
+    encoding, so every figure in the decode is known in advance. A
+    low-energy record carries the packet's bytes rather than symbols -- the
+    access address, the PDU header, the payload and the CRC -- so the dump is
+    written field by field and the expected report computed from the same
+    constants. One dump is a promiscuous capture of one connection: the five
+    parameter records that mode sends, which carry no packet and so reach no
+    capture file, the CONNECT_IND that opened the connection, and two data
+    packets on the connection's own access address. The other is one
+    advertisement whose advertising data names three company identifiers: one
+    the Bluetooth SIG registered recently, one it has had from the start, and
+    one it has never assigned.
+  hardware: >-
+    No board, no USB, no peer. Nothing transmits.
+  expected: >-
+    Smoke runs two cases. The promiscuous replay first requires `-h` to list
+    `-R` and `-d`, so a build too old to have them says which option is
+    missing rather than failing on a refusal the checks cannot parse. It
+    must then print the five parameter lines in the order the records hold
+    them, then the CONNECT_IND
+    decoded field by field -- the connection's access address, CRC seed,
+    transmit window, interval, latency, timeout, channel map, hop increment
+    and clock accuracy -- and then the two data packets, with each packet
+    line carrying the host time of its own record and the access address the
+    CONNECT_IND handed out. The advertising replay must name both registered
+    identifiers and say "not assigned" for the third, in order. A missing or
+    reworded line fails the case and is named. Comprehensive adds two: a
+    replay dumping with -d, whose file must be the dump it read byte for
+    byte, parameter records included; and a replay with no major mode, which
+    must be refused with exit 1 and decode nothing, because a record does not
+    say which clock stamped it.
+  limitations: >-
+    The dumps are synthetic, so this covers the decode and the dump format,
+    not the receive path, the radio, or the firmware that fills a record in.
+    Nothing here verifies a CRC: the firmware is what checks one and sets the
+    record's flag, so the fixture's CRC bytes are zero. The company names are
+    the pinned libbtbb table's, so a regenerated table that renames a company
+    fails the case; the other reader of that table, ubertooth-scan -x, is not
+    covered. Neither is the rest of the fork's own -R and -d surface -- the
+    destination that is the dump being replayed, the capture files a replay
+    writes, a cut or unreadable dump -- which the fork's test_btle_replay.py
+    covers at build time.
+  related:
+    - ubertooth#1129
+    - libbtbb#75
+    - libbtbb#128
+    - ubertooth-test-harness#333
+    - ubertooth-test-harness#357
 
 Refused command lines:
   purpose: >-
@@ -1514,6 +1498,119 @@ Follow a BLE connection across its end:
     - ubertooth#505
     - ubertooth-test-harness#168
 
+BLE address parity soak:
+  purpose: >-
+    Catches two things a short capture cannot. First, a change in how a known
+    advertiser's address reaches a reader: a service that watches the tool's
+    output and picks the documented "AdvA:" line must keep seeing the
+    advertiser exactly when a reader of the capture records does, and the two
+    are compared over the same windows of the same capture. Second, what only
+    time finds: a capture that dies, a board that resets itself, a host
+    process that grows, a detection that arrives late, and a silence inside a
+    period the advertiser was known to be advertising in.
+  theory: >-
+    The advertiser is driven on a schedule, so every on period is a detection
+    with a deadline and every off period a silence with a known cause rather
+    than an absence of evidence. The one capture is then read twice: the text
+    line libbtbb prints for each decoded packet, timestamped when the host
+    read it, and the capture's own records, decoded with the link-layer CRC
+    recomputed and timestamped as the capture recorded them. Both addresses
+    are normalized before anything is compared, since one source prints lower
+    case and the other is raw bytes. The readers are not expected to agree
+    packet for packet and are not asked to: libbtbb prints a decoded packet
+    whether or not its CRC checks, so the text reader can report an address
+    from a corrupted packet the record reader drops, and the "AdvA:" of a
+    SCAN_REQ or a CONNECT_REQ is the target's address, so a scanner that
+    addressed this advertiser would appear in the text reader alone. What is
+    compared is which windows each reader found the address in, with an
+    allowance that scales with the run. Beside that, the schedule makes the
+    liveness rule sound: a capture is restarted when its process exits or when
+    no packet of any address arrives for the liveness timeout, which has to
+    be longer than the advertiser's own silence or the schedule would restart
+    the capture itself.
+  hardware: >-
+    One Ubertooth, selected by serial and receiving only, and one nRF52840 DK
+    advertising its registered address on one channel at normal BLE power.
+    The DK is flashed when it reports a firmware version other than the one
+    the harness pins, so the run holds the host lock for its whole window --
+    on the longest suite that is three days in which no other command on that
+    host may write firmware or switch power, which is why these runs are
+    booked rather than scheduled; nothing else is written, and no power is
+    switched. The Ubertooth's channel, squelch, and
+    LEDs are recorded before the run and restored afterwards, and the DK is
+    left idle in the advertiser role. The board's watchdog record is read
+    before the run, after each restart, and at the end, while no capture is
+    running. The recovery ladder may reset the board once between restarts; a
+    board that does not answer before the capture starts is reported as a
+    configuration failure and never reset, because something else is using
+    it.
+  expected: >-
+    Two cases: the advertiser is confirmed to run the pinned firmware at its
+    registered address, then the soak itself. The soak passes when both
+    readers met the detection objective for first sighting and for sustained
+    presence, the readers disagreed about no more windows than the allowance,
+    no more judged periods than the allowance held a silence longer than the
+    gap limit, the advertiser fell quiet in all but the allowance of the off
+    periods, the rate over the time the advertiser was really on cleared its
+    floor, at least one captured
+    packet carried the harness payload tag, no restart beyond the budget
+    happened, the final stop was a clean one, the advertiser's schedule was
+    applied throughout the window, the run's capture budget was kept, and the
+    board answered every read afterwards. An on period
+    is judged only if the advertiser was known to be on for the whole of it
+    and something was listening throughout, and the run must be able to judge
+    that same share of the periods it ran, so a capture that kept dying fails
+    rather than passing on the few periods it covered. An off period is judged
+    from the moment something was listening again, so the capture file
+    rollover that happens at the start of one does not cost it; a run that
+    could judge no off period at all fails saying the stop was never
+    measured, since a check nothing was measured against would otherwise read
+    as a pass. No allowance is ever the whole population it applies to, so a
+    comparison resting on one or two judged periods can still fail. Every
+    figure is reported with its distribution -- packets per reader, periods
+    detected and sustained, longest gap, packets a minute, resident memory,
+    restarts and their causes, and watchdog reads -- so a run says what
+    happened rather than only whether it passed. The restart probe, where a
+    plan asks for it, kills the capture once with no stop sent to the board
+    and requires the advertiser to be heard again in the first judged period
+    after it; where no judged period followed, the run says the recovery is
+    not established rather than claiming one.
+  limitations: >-
+    Every comparison judges a share rather than demanding none, because each
+    is measured over thousands of periods in a long run and each rests on a
+    time the host read something. A run that cannot finish at all still
+    writes its summary, with the reason among its problems. The two readers
+    keep different clocks by nature: the text reader's time
+    is when the host read a line, which the tool's own output buffering
+    delays, and the record reader's is what the capture wrote. A window near
+    a boundary can therefore fall either side for one reader and not the
+    other, which is why the comparison carries an allowance and why a run
+    reports the disagreements rather than requiring none. Nothing here proves
+    the text and record readers would agree about a device the harness does
+    not control: the comparison is about one address whose schedule is known.
+    The detection floors are bench figures, not a bound from the
+    specification, and a noisier room can fail them with nothing wrong in the
+    code. The memory figures come from the operating system's resident set
+    size, which says nothing about what inside the process grew, and no
+    growth limit is applied unless a plan sets one, because what counts as
+    growth over three days is not established. The schedule is applied by the
+    host over the DK's serial shell, so a transition that failed twice is
+    recorded against its period and that period is left out of the verdict
+    rather than counted as a missed detection; so is a period in which the
+    capture was stopped or started, which is why the coverage floor exists
+    and why the periods the run itself interrupted are allowed against it. A
+    run the harness has to kill outright can leave the capture tool holding
+    the board, which the case's own cleanup then stops. What the captures
+    cost the host is the channel's traffic rather than the advertiser's, so a
+    long run has a disk budget as well as a per-file limit: past it the oldest
+    complete capture is removed, newest kept, and the removal is recorded.
+    The tool's own transcript is bounded for the whole run the same way, so
+    the figures hold but the per-packet text past the budget is not kept.
+  related:
+    - ubertooth-test-harness#350
+    - ubertooth#703
+    - ubertooth#239
+
 Capture known Classic device:
   purpose: >-
     Gives Classic Bluetooth a piconet with a known address, which the harness
@@ -1694,12 +1791,10 @@ Classic capture record fields:
     records are rare here. A record naming no transport passes, and that is a
     real gap rather than only backward compatibility: at the libbtbb the fork
     pins, a payload-bearing record always names one, so a library that stopped
-    filling the field in would pass here. What it covers is a run that names
-    a libbtbb from before that change, which names no transport at all; a run
-    that takes the fork's pin has named transports since it, and the harness's
-    own pin and the example refs named an older one until harness #341 moved
-    them. Harness #339 drops the escape, and keeps it because that changes the
-    rule a live capture is judged by. The survey
+    filling the field in would pass here. It is accepted because the harness's
+    own pin predates that change and names no transport at all, so a strict
+    default would fail every payload-bearing record of a run built at the
+    harness's own pin; harness #339 tightens it once the pin moves. The survey
     case
     cannot assert whose records it reads. The flag rules assume the libbtbb
     this harness pins. The error flags do fire, on a clear board as well as an
@@ -1999,21 +2094,6 @@ Follow Classic piconet over HCI:
     - ubertooth-test-harness#274
     - ubertooth#518
     - ubertooth#316
-
-CLI usage smoke:
-  purpose: >-
-    A catalog entry for exercising host tool usage paths. No implementation
-    yet, and superseded in practice: Host CLI surface covers -h and -V on
-    every always-built tool, and Help smoke covers the single-tool case.
-  theory: >-
-    Not established.
-  hardware: >-
-    No board. Nothing transmits.
-  expected: >-
-    No implementation; only a plan declaring runnable: false may name it.
-  limitations: >-
-    Nothing is measured. Superseded in practice by Host CLI surface.
-  related: []
 
 BLE soak:
   purpose: >-

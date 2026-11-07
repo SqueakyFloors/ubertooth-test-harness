@@ -30,8 +30,8 @@ bluetooth_rxtx):
   are ``-b``, ``-v``, ``-p`` and ``-s``; ``-V`` is not one of them, because it
   is the version command and ends the command before the listing is reached
   (fork f898fe5, SqueakyFloors/ubertooth#813), and it then reports every
-  attached board itself, under labels of its own
-  (``Firmware build (0): ...``). A board that could not be
+  attached board itself, under a label of its own
+  (``Firmware version (0): ...``). A board that could not be
   opened gets ``unavailable, <reason>`` as the value of every query asked of
   it. A query that failed on a board that did open gets ``read failed``,
   unless that report has a diagnosis of its own (an unknown board ID, say),
@@ -60,11 +60,9 @@ from ubertooth_harness import ledblink
 from ubertooth_harness.outputfiles import find_lines, search_lines, text_lines
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    COMPILE_INFO_PATTERN,
     FIRMWARE_PATTERN,
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
-    LIBBTBB_PATH_LINE,
     PART_ID_PATTERN,
     serial_pattern,
 )
@@ -850,14 +848,13 @@ _BLOCK_PATTERNS = (
     ("-s", "serial", _SERIAL_LABEL, rf"^{_SERIAL_LABEL}: {_SERIAL_RE}$"),
 )
 # The -V answer's own lines, in the order it prints them per board, after the
-# host tools' two lines (the version and the libbtbb path), neither of which
-# is about a board at all.
+# host tools' own version, which is not about a board at all. One line per
+# board since fork #1233 took the build string out of the answer (#358).
 _VERSION_REPORTS = (
     ("Firmware version", FIRMWARE_PATTERN),
-    ("Firmware build", COMPILE_INFO_PATTERN),
 )
 _VERSION_LINE = re.compile(
-    r"^(?P<label>Firmware version|Firmware build) \((?P<index>\d+)\): (?P<text>.*)$"
+    r"^(?P<label>Firmware version) \((?P<index>\d+)\): (?P<text>.*)$"
 )
 # The label each identity query is listed under, in report order.
 LISTING_LABELS = tuple((query, label)
@@ -926,28 +923,26 @@ def serial_listing_check(registered):
 
 def version_listing_check(count):
     """`-V` with several boards: the host tools' version, then the firmware
-    version and build of every board, each labelled with the board's index.
+    version of every board, each labelled with the board's index.
 
     `-V` is the version command, so it is not part of the identity listing:
     since fork f898fe5 it ends the command and reports every attached board
-    itself. A board it could not open, and one whose version read failed, get
-    one line instead of two, so the lines are read board by board rather than
-    counted: that way such a board is named rather than reported as a wrong
-    line count. The answer carries no serial, so which board is which cannot
-    be checked here; the identity listing does that.
+    itself. A board it could not open, and one whose version read failed, say
+    so on that board's own line, so the lines are read board by board and
+    such a board is named rather than reported as a wrong line count. The
+    answer carries no serial, so which board is which cannot be checked here;
+    the identity listing does that.
     """
     def check(stdout):
         lines = list(text_lines(stdout))
-        # The answer opens with the host tools' two lines, in that order and
-        # once each (libubertooth's ubertooth_print_host_version()); the
-        # boards follow. Fixed rather than filtered, so an answer that
-        # repeats them or leaves one out is a failure.
-        head, rest = lines[:2], lines[2:]
-        if (len(head) < 2
-                or not re.search(HOST_VERSION_LINE, head[0])
-                or not re.search(LIBBTBB_PATH_LINE, head[1])):
-            return ("the answer does not open with the host tools' version "
-                    f"and the libbtbb path: {head!r}")
+        # The answer opens with the host tools' own version
+        # (libubertooth's ubertooth_print_host_version()); the boards follow.
+        # Fixed rather than filtered, so an answer that repeats it or leaves
+        # it out is a failure.
+        if not lines or not re.search(HOST_VERSION_LINE, lines[0]):
+            return ("the answer does not open with the host tools' version: "
+                    f"{lines[:1]!r}")
+        rest = lines[1:]
         for index in range(count):
             for label, pattern in _VERSION_REPORTS:
                 if not rest:

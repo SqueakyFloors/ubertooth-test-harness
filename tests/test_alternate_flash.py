@@ -130,7 +130,7 @@ class AlternatePlanningTests(unittest.TestCase):
             self.compile(plan(100), serials=(A, B, C))
 
     def test_later_test_on_an_alternated_board_is_refused(self):
-        later = """    - Firmware version:
+        later = """    - Ubertooth identity:
         hosts: each
         Ubertooth: UT_1
 """

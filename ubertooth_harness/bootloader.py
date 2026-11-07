@@ -7,8 +7,14 @@ somebody puts another one there over a serial in-system programming adapter or
 JTAG. The Ubertooth fork reports which one a board has on
 `ubertooth-util -B`::
 
+    Bootloader: 2.00 2026-11-DEV1+22, CRC32:0x9d2fe1b4
     Bootloader: 2.00 git-1a2b3c4, CRC32:0x9d2fe1b4
     Bootloader: no version block (factory or earlier, treated as 1.x), CRC32:0x5f0a73c1
+
+The build string in the block is the version the tree reported when the
+bootloader was built: the release it came from since #352 (fork #1230), and a
+commit hash before that, which is the second form above and is what a board
+flashed from an older commit carries.
 
 The first form comes from a 48-byte version block the fork's bootloader
 carries at a fixed offset; the second is every board as shipped, and any
@@ -55,6 +61,7 @@ import time
 from typing import Callable, Mapping, Sequence
 import zlib
 
+from ubertooth_harness import release
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
@@ -169,6 +176,13 @@ def identity_argv(serial: str) -> tuple[str, ...]:
     return ("ubertooth-util", "-U", serial, "-B")
 
 
+def application_argv(serial: str) -> tuple[str, ...]:
+    """The application read after a bootloader write: it is above the region
+    the write touches, so saying it still runs is cheap and is what an
+    operator wants to read before the tests start."""
+    return ("ubertooth-util", "-U", serial, "-v")
+
+
 @dataclass(frozen=True)
 class BootloaderIdentity:
     """Which bootloader a board has, as its own `-B` line says.
@@ -241,8 +255,9 @@ class BootloaderIdentity:
 def names_commit(build: str, commit: str) -> bool:
     """Does a bootloader's build string name ``commit``?
 
-    `git-<hash>`, where the hash is an abbreviation of the commit. Git
-    abbreviates to as many digits as that clone needs, and the artifact's
+    `git-<hash>`, where the hash is an abbreviation of the commit, which is
+    what a bootloader built from a commit before #352 (fork #1230) carries.
+    Git abbreviates to as many digits as that clone needs, and the artifact's
     build string and the pin come from two checkouts, so the hash is compared
     as a prefix rather than for equality. A `*` (a modified tree) fails,
     because nobody could build those bytes again.
@@ -255,6 +270,22 @@ def names_commit(build: str, commit: str) -> bool:
         and all(character in "0123456789abcdef" for character in digits)
         and commit.lower().startswith(digits)
     )
+
+
+def names_build(build: str, commit: str, expected_version: str) -> bool:
+    """Is ``build`` the string a build of ``commit`` reports?
+
+    Since #352 (fork #1230) the block carries the release the build came
+    from, which ``release.build_version`` works out the same way the makefile
+    does, so the two are compared for equality: a release name is one string
+    the whole way through and there is no shorter form of it to accept. A
+    build from an older commit stamps a commit hash, and ``expected_version``
+    says so by being one; then the hash is compared against the commit as
+    above. A `*` fails either way.
+    """
+    if expected_version.startswith("git-"):
+        return names_commit(build, commit)
+    return bool(expected_version) and build == expected_version
 
 
 def identity_from_match(match: re.Match | None) -> BootloaderIdentity | None:
@@ -988,17 +1019,28 @@ class BootloaderArtifactBuilder:
                 f"the built bootloader reports version {version}, but "
                 f"{INTERFACE_HEADER} at the pin defines {expected_version}"
             )
-        if not names_commit(build, pin.commit):
+        # What a build at the pin reports, worked out the way the makefile
+        # works it out: the release the pin came from, or the commit hash an
+        # older commit's build stamps (release.py).
+        try:
+            expected_build = release.build_version(
+                tree, pin.commit, kind="Ubertooth", short_commit=pin.short_commit
+            ).value
+        except release.ReleaseVersionError as error:
+            raise BootloaderError(
+                f"the version a bootloader built at {pin.short_commit} reports "
+                f"cannot be worked out: {error}"
+            ) from error
+        if not names_build(build, pin.commit, expected_build):
             # A build string that is not the pinned commit's means the image
             # would be rebuilt, and rewritten to a board, on the next run. The
             # `*` a modified tree adds is refused for the same reason: nobody
-            # could build those bytes again. The hash is compared as a prefix
-            # of the commit, because the two abbreviations come from git in
-            # two checkouts, which need not abbreviate to the same length.
+            # could build those bytes again.
             raise BootloaderError(
                 f"the built bootloader carries build string {build!r}, which is "
-                f"not the pinned commit {pin.short_commit}; its identity would "
-                "not be reproducible"
+                f"not the {expected_build!r} a build at the pinned commit "
+                f"{pin.short_commit} reports; its identity would not be "
+                "reproducible"
             )
         region_path = work_dir / REGION_NAME
         region_path.write_bytes(region)
@@ -1485,13 +1527,10 @@ class BootloaderUpdater:
                 f"write, not the {expected.describe()} that was written",
                 written=True, previous=installed,
             )
-        # The application the run requires is above the bootloader region and
-        # the write does not touch it, so saying it still runs is cheap and is
-        # what an operator wants to read before the tests start.
         application = self._run(
             publisher, f"bootloader-application-{board.alias}",
             "application_version_after_bootloader",
-            ("ubertooth-util", "-U", board.serial, "-v"),
+            application_argv(board.serial),
             IDENTITY_TIMEOUT_S, token, owner={"resource": board.alias},
         )
         reported = FIRMWARE_VERSION_RE.search(application.stdout)

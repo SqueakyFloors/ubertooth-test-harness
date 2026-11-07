@@ -2,7 +2,6 @@ import hashlib
 import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,10 +13,15 @@ from ubertooth_harness.cli import main
 from ubertooth_harness.executor import CommandResult
 
 from tests import watchdog_samples
+from tests.test_manifest_preflight import (
+    LIBBTBB_RELEASE,
+    RELEASE,
+    make_git_repo,
+)
 
 
 class HostVersionExecutor:
-    def __init__(self, revision, libbtbb="git-btbb"):
+    def __init__(self, revision, libbtbb=LIBBTBB_RELEASE):
         self.revision = revision
         self.libbtbb = libbtbb
         self.commands = []
@@ -25,10 +29,7 @@ class HostVersionExecutor:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         self.commands.append(command)
-        output = (
-            f"Host tools version: libubertooth 1.1 ({self.revision}), "
-            f"libbtbb 1.0 ({self.libbtbb})\n"
-        )
+        output = f"Host tools version: {self.revision} (libbtbb {self.libbtbb})\n"
         if on_output:
             on_output("stdout", output)
         return CommandResult(command, 0, output, "", 0.01, False)
@@ -47,7 +48,8 @@ class FlashDeviceExecutor:
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            output = f"Host tools version: libubertooth 1.1 ({self.host_revision}), libbtbb 1.0 (git-btbb)\n"
+            output = (f"Host tools version: {self.host_revision} "
+                      f"(libbtbb {LIBBTBB_RELEASE})\n")
         elif command[0] == "ubertooth-dfu":
             serial = command[command.index("-U") + 1]
             self.revisions[serial] = self.images[command[command.index("-d") + 1]]
@@ -66,20 +68,15 @@ class FlashDeviceExecutor:
 
 
 def make_source(root):
+    """An Ubertooth checkout whose build names a release, and that release.
+
+    The same fixture preflight's own tests use: current-release validation
+    requires the release-name `-V` answer (#358), so a scratch checkout has
+    to name a release the way the fork does.
+    """
     source = root / "source"
-    subprocess.run(["git", "init", "-q", str(source)], check=True)
-    (source / "tracked.txt").write_text("source\n")
-    subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
-    subprocess.run(
-        ["git", "-C", str(source), "-c", "user.name=Test",
-         "-c", "user.email=test@example.invalid", "commit", "-qm", "source"],
-        check=True,
-    )
-    short = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "--short", "HEAD"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    return source, short
+    make_git_repo(source, libbtbb=True)
+    return source, RELEASE
 
 
 class CliTests(unittest.TestCase):
@@ -127,7 +124,7 @@ class CliTests(unittest.TestCase):
     def test_flash_reliability_runs_as_a_plan_test_into_one_run_record(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source, short = make_source(root)
+            source, revision = make_source(root)
             test_image = root / "test.dfu"
             kgv_image = root / "kgv.dfu"
             test_image.write_bytes(b"test")
@@ -164,8 +161,8 @@ suites:
     identity: {{serial: bbbb1111bbbb1111bbbb1111bbbb1111}}
 """)
             executor = FlashDeviceExecutor(
-                f"git-{short}",
-                {str(test_image.resolve()): f"git-{short}", str(kgv_image.resolve()): "2020-12-R1"},
+                revision,
+                {str(test_image.resolve()): revision, str(kgv_image.resolve()): "2020-12-R1"},
                 "aaaa0000aaaa0000aaaa0000aaaa0000", "bbbb1111bbbb1111bbbb1111bbbb1111",
             )
             output = root / "runs"
@@ -220,7 +217,7 @@ suites:
     def test_alternate_ubertooths_rotates_flashes_across_registered_boards(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source, short = make_source(root)
+            source, revision = make_source(root)
             test_image = root / "test.dfu"
             kgv_image = root / "kgv.dfu"
             test_image.write_bytes(b"test")
@@ -258,8 +255,8 @@ suites:
     identity: {{serial: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}}
 """)
             executor = FlashDeviceExecutor(
-                f"git-{short}",
-                {str(test_image.resolve()): f"git-{short}", str(kgv_image.resolve()): "2020-12-R1"},
+                revision,
+                {str(test_image.resolve()): revision, str(kgv_image.resolve()): "2020-12-R1"},
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             )
             output = root / "runs"
@@ -293,25 +290,7 @@ suites:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
-            subprocess.run(["git", "init", "-q", str(source)], check=True)
-            (source / "tracked.txt").write_text("source\n")
-            subprocess.run(
-                ["git", "-C", str(source), "add", "tracked.txt"], check=True
-            )
-            subprocess.run(
-                [
-                    "git", "-C", str(source), "-c", "user.name=Test",
-                    "-c", "user.email=test@example.invalid", "commit",
-                    "-qm", "source",
-                ],
-                check=True,
-            )
-            short_commit = subprocess.run(
-                ["git", "-C", str(source), "rev-parse", "--short", "HEAD"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
+            make_git_repo(source)
             plan = root / "plan.yaml"
             plan.write_text(
                 """plan: cli named
@@ -336,7 +315,7 @@ suites:
             output = root / "runs"
             terminal = io.StringIO()
             summary_output = io.StringIO()
-            executor = HostVersionExecutor(f"git-{short_commit}")
+            executor = HostVersionExecutor(RELEASE)
 
             with (
                 patch(
@@ -406,16 +385,9 @@ suites:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
-            git = ["git", "-C", str(source), "-c", "user.name=Test",
-                   "-c", "user.email=test@example.invalid"]
-            subprocess.run(["git", "init", "-q", str(source)], check=True)
-            (source / "install.sh").write_text(f'LIBBTBB_REF="{"0" * 40}"\n')
-            subprocess.run(git + ["add", "install.sh"], check=True)
-            subprocess.run(git + ["commit", "-qm", "source"], check=True)
-            short_commit = subprocess.run(
-                git + ["rev-parse", "--short", "HEAD"],
-                check=True, capture_output=True, text=True,
-            ).stdout.strip()
+            make_git_repo(
+                source, install_sh=f'LIBBTBB_REF="{"0" * 40}"\n', libbtbb=True
+            )
             plan = root / "plan.yaml"
             plan.write_text(
                 "plan: cli named\nsuites:\n  fast:\n    - Host version:\n"
@@ -429,7 +401,7 @@ suites:
             )
             output = root / "runs"
             terminal = io.StringIO()
-            executor = HostVersionExecutor(f"git-{short_commit}", f"git-{short_commit}")
+            executor = HostVersionExecutor(RELEASE, RELEASE)
             with (
                 patch("ubertooth_harness.cli.SubprocessCommandExecutor",
                       return_value=executor),

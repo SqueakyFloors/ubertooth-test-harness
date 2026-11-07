@@ -62,8 +62,10 @@ AD_MANUFACTURER = 0xFF
 
 # Byte order and timestamp ticks per second of each PCAP magic: the original
 # magic counts microseconds in a record's second field, the 2013 one
-# nanoseconds. libbtbb writes the nanosecond magic.
-_PCAP_MAGIC = {
+# nanoseconds. libbtbb writes the nanosecond magic. Public, because
+# addresssoak.py reads a growing capture record by record and needs the same
+# table to make sense of its header.
+PCAP_MAGIC = {
     b"\xd4\xc3\xb2\xa1": ("<", 1_000_000), b"\xa1\xb2\xc3\xd4": (">", 1_000_000),
     b"\x4d\x3c\xb2\xa1": ("<", 1_000_000_000), b"\xa1\xb2\x3c\x4d": (">", 1_000_000_000),
 }
@@ -139,7 +141,7 @@ def read_records(data: bytes) -> tuple[str, int, list[bytes]]:
 
 def read_timed_records(data: bytes) -> tuple[str, int, list[TimedRecord]]:
     """(format, link type, records with their times) of a PCAP or PCAPNG file."""
-    if len(data) >= 24 and data[:4] in _PCAP_MAGIC:
+    if len(data) >= 24 and data[:4] in PCAP_MAGIC:
         return _read_pcap(data)
     if len(data) >= 12 and struct.unpack("<I", data[:4])[0] == _PCAPNG_SHB:
         return _read_pcapng(data)
@@ -153,7 +155,7 @@ def _micros(ticks: int, ticks_per_second: int) -> int:
 
 
 def _read_pcap(data: bytes):
-    endian, ticks_per_second = _PCAP_MAGIC[data[:4]]
+    endian, ticks_per_second = PCAP_MAGIC[data[:4]]
     link_type = struct.unpack(endian + "I", data[20:24])[0]
     records, offset = [], 24
     while offset < len(data):

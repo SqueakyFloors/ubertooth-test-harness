@@ -34,6 +34,7 @@ from __future__ import annotations
 import re
 from itertools import combinations
 
+from ubertooth_harness.patterns import HOST_VERSION_LINE
 from ubertooth_harness.refusal_cases import NO_BOARD_NOTE, probe_step, tool_step
 from ubertooth_harness.stateful import StateCase, Step
 
@@ -91,8 +92,13 @@ def _host_version() -> Step:
     # -V prints the host tools' version before looking for a board, and under
     # the no-device switch it reports none attached and exits 0 without the
     # switch's own note, which belongs to a command that wanted a board.
+    #
+    # The label alone, in either layout: what the version itself must be is
+    # decided where the resolved commit is known (preflight.py), and since
+    # #352 (fork #1230) the version on that line is a bare release name
+    # rather than `libubertooth <abi> (<commit>)`.
     return tool_step("host-version", TOOL, ("-V",), returncodes=(0,),
-                     patterns=(r"Host tools version: libubertooth ",
+                     patterns=(HOST_VERSION_LINE,
                                r"Firmware version: no Ubertooth attached"),
                      forbidden=(NO_BOARD_NOTE,))
 

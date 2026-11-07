@@ -132,3 +132,49 @@ suites:
         duration: 5s
         interval: 100
         payload: c0ffee
+
+  # The two connection checks #168 asked for. Blocked until 2026-11-04 on
+  # hardware: a connection needs two distinct DKs, and the bench registered
+  # one declaring the central and peripheral roles, so neither check could be
+  # measured at any attenuation. It now has two, and the host carries the
+  # role-named defaults that let the pair resolve distinctly.
+  #
+  # Measured through `run-suite` on 2026-11-04, run
+  # 20261104T021432Z-1cf7cc2365c2: both entries passed, 11 of 11 preflight
+  # checks, 0 failed cases, 0 watchdog resets, 111.7 s for the suite. Host
+  # tools and firmware from fork `51bac4fb` with libbtbb at its exact pin
+  # `7e1cdf03`, loaded from a private prefix rather than the host's older
+  # shared copy, and both receivers verified at `git-51bac4fb` in the hold.
+  #
+  #   captured at 40 dB (UT_Linux3)   145 packets, 139 with a correct CRC,
+  #                                   33 of 28 bytes or more, longest 251
+  #   followed at 20 dB (UT_Linux2)   422 and 625 packets across the
+  #                                   central's reconnections, 410 and 614
+  #                                   with a correct CRC, CONNECT_IND decoded
+  #
+  # So a correct-CRC share in the mid-nineties at both, with Data Length
+  # Extension packets recovered (251 bytes) and the connection reacquired
+  # across its end. Each entry is the committed test pointed at a weak-link
+  # receiver: its ordinary arguments with `weak link:` added, which a test
+  # asserts.
+  connection-weak-link:
+    - Capture known BLE connection:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 8s
+        interval: 30
+        update: 60
+
+    - Follow a BLE connection across its end:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        weak link: {Ubertooth: 20}
+        duration: 18s
+        interval: 30
+        update: 60

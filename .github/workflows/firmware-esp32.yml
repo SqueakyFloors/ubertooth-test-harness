@@ -1,0 +1,62 @@
+name: ESP32 peer firmware
+
+# The ESP32 Classic peer firmware, which neither the Test workflow nor the
+# Firmware workflow compiles: it needs ESP-IDF, so it is built in Espressif's
+# own image for the version firmware/esp32-classic-peer/IDF_VERSION pins
+# (#326). That image is several gigabytes, so this does not run on every push:
+# it runs when the firmware (or the script that builds it) changes, once a
+# week in case the pinned image or SDK stops working, and by hand. It is
+# deliberately not a required check.
+#
+# It is a workflow of its own rather than a job in firmware.yml, because
+# GitHub filters paths per workflow: a change confined to one firmware
+# directory then pulls only that vendor's image, where one workflow for both
+# would always pull both. A scripts/ci.sh change does start both, and is
+# meant to: either firmware step can be the one it breaks.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/esp32-classic-peer/**'
+      - 'scripts/ci.sh'
+      - '.github/workflows/firmware-esp32.yml'
+  pull_request:
+    paths:
+      - 'firmware/esp32-classic-peer/**'
+      - 'scripts/ci.sh'
+      - '.github/workflows/firmware-esp32.yml'
+  schedule:
+    # Mondays, 05:47 UTC, after the DK's build rather than beside it.
+    - cron: '47 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # The build itself is scripts/ci.sh firmware-esp32, so it also runs off
+  # GitHub (scripts/local-ci.sh firmware-esp32 on any host with docker); keep
+  # this file to runner setup only.
+  esp32-classic-peer:
+    runs-on: ubuntu-24.04
+    # One build of one image, and nothing compared against another commit
+    # (see the comment above run_firmware_esp32). Measured on 2026-11-06: 3
+    # minutes 19 seconds for the job, of which 71 seconds was pulling the
+    # toolchain image (several gigabytes), 9 seconds configuring, and 107
+    # seconds building.
+    timeout-minutes: 60
+    steps:
+    # The working tree only: nothing here is compared with another commit, so
+    # the history is not needed.
+    - uses: actions/checkout@v5
+
+    - name: Build the ESP32 Classic peer firmware
+      run: sh scripts/ci.sh firmware-esp32
+
+    - name: The working tree is unchanged
+      run: test -z "$(git status --porcelain)" || { git status; exit 1; }

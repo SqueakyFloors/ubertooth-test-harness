@@ -36,6 +36,8 @@ from ubertooth_harness.libbtbbpin import (
 from ubertooth_harness.manifest import SourceRevision
 from ubertooth_harness.report import write_report
 
+from tests.test_manifest_preflight import FIRMWARE_VERSION_MK, RELEASE_CMAKE
+
 
 OLD = "84ab41fc99d172e812438bc9188f30a67216f748"
 NEW = "0123456789abcdef0123456789abcdef01234567"
@@ -310,6 +312,16 @@ class ForkPinRefTests(unittest.TestCase):
         self.fork = root / "ubertooth"
         self.fork.mkdir()
         _git(self.fork, "init", "-q", "-b", "main")
+        # The files that decide what a build reports: resolving a source
+        # refuses a commit whose build names no release, because none of the
+        # output current-release validation checks comes from one (#358).
+        for name, text in (("host/cmake/set_release.cmake", RELEASE_CMAKE),
+                           ("firmware/version.mk", FIRMWARE_VERSION_MK)):
+            target = self.fork / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+            _git(self.fork, "add", name)
+        _git(self.fork, "commit", "-q", "-m", "the version files")
         self.unpinned = self._commit(self.fork, "README", "no pin yet\n")
         self.pins_first = self._commit(self.fork, "install.sh", _install_sh(self.first))
         self.pins_second = self._commit(self.fork, "install.sh", _install_sh(self.second))

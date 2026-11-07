@@ -22,7 +22,7 @@ from ubertooth_harness.preflight import HOST_VERSION_LABEL, host_version_pattern
 from ubertooth_harness.pytools import PYTHON_ENV, PYTHON_TOOLS_ENV
 from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.events import EventPublisher
-from ubertooth_harness.hostneeds import BLUEZ_TOOLS
+from ubertooth_harness.hostneeds import ALWAYS_BUILT_TOOLS, BLUEZ_TOOLS
 
 
 class BuildError(RuntimeError):
@@ -156,12 +156,11 @@ class BuildResult:
 
 # Host tools every build must install into the run prefix (the catalog cases
 # with no host need). A Linux build must also install BLUEZ_TOOLS, and a
-# --with-python build PYTHON_TOOLS; required_tools() is the full rule.
-BUILT_TOOLS = (
-    "ubertooth-util", "ubertooth-debug", "ubertooth-specan", "ubertooth-rx",
-    "ubertooth-tx", "ubertooth-dump", "ubertooth-btle", "ubertooth-dfu",
-    "ubertooth-ego", "ubertooth-afh", "ubertooth-ducky",
-)
+# --with-python build PYTHON_TOOLS; required_tools() is the full rule. The
+# list itself is hostneeds.ALWAYS_BUILT_TOOLS, which the catalog's CLI
+# surface cases read too, so the build and the test cannot disagree about
+# which tools the fork always builds.
+BUILT_TOOLS = ALWAYS_BUILT_TOOLS
 # Installed by ENABLE_PYTHON=ON; their first line names the interpreter.
 PYTHON_TOOLS = ("ubertooth-specan-ui", "ubertooth-btbr")
 BUILD_DEADLINE_S = 3600.0
@@ -280,9 +279,10 @@ def plan_build(
                  source.commit),
                 timeout_s=120.0,
             ),
-            # The fork's version stamp uses `git diff-index`, which does not
-            # refresh file stat data; a fresh checkout can then look modified
-            # and stamp the build "git-<sha>*".
+            # The fork's version stamp asks git whether the tree is modified
+            # without refreshing file stat data first; a fresh checkout can
+            # then look modified and stamp the build with the `*` a modified
+            # tree gets, which no expectation predicts.
             BuildCommand(
                 f"{name}-refresh-index",
                 f"Refresh {source.name} file index",
@@ -391,11 +391,11 @@ def _host_version_line(text: str) -> str:
     """The one line the version patterns matched.
 
     What the manifest and the report call the built tools' version, so the
-    firmware lines `-V` prints under it, which belong to whatever board
-    happened to be attached, stay out of that field.
+    firmware line `-V` prints under it, which belongs to whatever board
+    happened to be attached, stays out of that field.
     """
     for line in text.splitlines():
-        if line.startswith(HOST_VERSION_LABEL) or line.startswith("libubertooth"):
+        if line.startswith(HOST_VERSION_LABEL):
             return line
     return text
 
