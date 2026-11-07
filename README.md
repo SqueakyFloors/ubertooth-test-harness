@@ -3,7 +3,10 @@
 Standalone test-harness application for
 [`SqueakyFloors/ubertooth`](https://github.com/SqueakyFloors/ubertooth) and its
 companion [libbtbb](https://github.com/SqueakyFloors/libbtbb) builds. The application is described in
-[DESIGN.md](DESIGN.md). The first implemented slice is a local, sequential
+[DESIGN.md](DESIGN.md). The mandatory under-six-hour release procedure and
+hardware schedule are in [docs/release-testing.md](docs/release-testing.md),
+and [docs/hardware.md](docs/hardware.md) details every test fixture and how the
+harness uses it. The first implemented slice is a local, sequential
 firmware-flash reliability runner. The persistent [target runner](#target-runner-service)
 dials the [controller](#controller), which listens on `127.0.0.1` only; remote
 access is an SSH tunnel.
@@ -726,7 +729,7 @@ python -m ubertooth_harness run-suite \
   --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 7e1cdf0336857a714da1af8c7496fe32453ac6d0 \
+  --libbtbb-ref d356e9da7fb03969371aa14d603a8aad2f0ef198 \
   --build --output runs
 ```
 
@@ -811,7 +814,7 @@ python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
   --hardware host-only.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 7e1cdf0336857a714da1af8c7496fe32453ac6d0 \
+  --libbtbb-ref d356e9da7fb03969371aa14d603a8aad2f0ef198 \
   --build --output runs
 ```
 
@@ -1345,7 +1348,7 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 7e1cdf0336857a714da1af8c7496fe32453ac6d0 \
+  --libbtbb-ref d356e9da7fb03969371aa14d603a8aad2f0ef198 \
   --build [--no-flash-build] [--with-firmware] [--with-btbr] \
   [--with-python[=PYTHON]] [--bootloader record|check|update] \
   --output runs
@@ -1528,7 +1531,7 @@ So mandatory preflight holds the host tools to one libbtbb. Every tool prints
 it on its own version line, beside the tools' own version:
 `Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)`, and on a fork
 commit from before the release names, `Host tools version: libubertooth 1.07
-(git-6a917ec), libbtbb 1.3 (git-7e1cdf0)`. What libbtbb's half carries is
+(git-6a917ec), libbtbb 1.3 (git-52b2afc)`. What libbtbb's half carries is
 `btbb_get_release()`: the release its own build names since `libbtbb#139`,
 and the commit the installed library was built from before that. Either way
 the string comes from a function in libbtbb, so it describes the library the
@@ -2944,7 +2947,7 @@ python -m ubertooth_harness runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
   [--libbtbb-source /path/to/libbtbb \
-   --libbtbb-ref 7e1cdf0336857a714da1af8c7496fe32453ac6d0] \
+   --libbtbb-ref d356e9da7fb03969371aa14d603a8aad2f0ef198] \
   [--plans-dir testplans] [--allow-power-changes] \
   --output runs
 ```

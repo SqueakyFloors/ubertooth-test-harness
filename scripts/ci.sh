@@ -29,14 +29,20 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # libbtbb the fork is built and tested against, not upstream's `master` branch.
 # This pin is the harness's own copy, deliberately: the harness never calls
 # the fork's installer. It must match the fork's (LIBBTBB_REF in the fork's
-# install.sh, also in its .github/workflows/build.yml); the build step warns
-# when it does not (check_libbtbb_pin, ubertooth_harness/libbtbbpin.py). Bump
+# install.sh, LIBBTBB_PINNED_REF in its host/cmake/modules/FindBTBB.cmake, and
+# its .github/workflows/build.yml); the build step warns when it does not
+# (check_libbtbb_pin, ubertooth_harness/libbtbbpin.py), and the install check
+# reads the fork's own FindBTBB pin back out of the configure
+# (check_installed_library). A divergence is a warning rather than a failure,
+# but it means every figure a build here produces was measured against a
+# different libbtbb from the one the fork ships, and the fork's required-symbol
+# probe refuses a pin old enough to be missing a function the tools call. Bump
 # it here and in README.md together, which tests/test_libbtbb_pin.py checks.
 # A LIBBTBB_SOURCE clone has to hold the pin: a clone of the fork does, but
 # one of another libbtbb, or one made before the pin landed, needs
 # LIBBTBB_REF as well or the build stops at "unable to resolve libbtbb ref".
 LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
-LIBBTBB_PIN=7e1cdf0336857a714da1af8c7496fe32453ac6d0
+LIBBTBB_PIN=d356e9da7fb03969371aa14d603a8aad2f0ef198
 
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 
