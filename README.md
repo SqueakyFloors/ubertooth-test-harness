@@ -396,21 +396,21 @@ since an ordinary board is what every other role gets anyway.
 
 [`testplans/weak-link.yaml`](testplans/weak-link.yaml) collects the checks
 that need the bench's weak-link board: error flags and recovery under bit
-errors, the `ubertooth-rx -e` threshold, follow on a marginal link, a
-board-to-DK capture with the receiver attenuated, transmit power steps, and
-receiver sensitivity.
+errors, the `ubertooth-rx -e` threshold, AFH map recovery on a marginal
+link, transmit power steps, and receiver sensitivity.
 
 The entries a run has characterized live in the plan they belong to, each
 carrying the figures it was judged against: `ble-weak-link` in
 [`ble.yaml`](testplans/ble.yaml) (a known DK advertiser at 20 and 40 dB),
-`classic-weak-link` in [`classic.yaml`](testplans/classic.yaml) (a known
-piconet followed at 20 dB), and `range-weak-link` in
-[`range.yaml`](testplans/range.yaml). None of them changed a threshold: each
-is the committed test pointed at a weak-link receiver.
-[`testplans/weak-link.yaml`](testplans/weak-link.yaml) holds the rest, split
-into what needs a second nRF52840 DK and what needs a measurement or an
-implementation, and `ubertooth_harness/weaklink.py` names what each is
-waiting on.
+`connection-weak-link` in the same plan (a known DK-pair connection captured
+at 40 dB and followed across its end at 20 dB), `classic-weak-link` in
+[`classic.yaml`](testplans/classic.yaml) (a known piconet followed at
+20 dB), and `range-weak-link` in [`range.yaml`](testplans/range.yaml). None
+of them changed a threshold: each is the committed test pointed at a
+weak-link receiver.
+[`testplans/weak-link.yaml`](testplans/weak-link.yaml) holds the rest, which
+now waits on a measurement or an implementation rather than on hardware, and
+`ubertooth_harness/weaklink.py` names what each is waiting on.
 
 A **runnable** plan may only ask for a link a figure has been taken over, and
 that is judged **per test** rather than per bench: the requirement must pin
