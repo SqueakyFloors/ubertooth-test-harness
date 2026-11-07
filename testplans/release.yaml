@@ -136,6 +136,11 @@ suites:
         hosts: each
         coverage: comprehensive
 
+    # No Ubertooth: ubertooth-btle -R on a synthetic low-energy dump.
+    - BLE replay:
+        hosts: each
+        coverage: comprehensive
+
     # The one entry that names a bench host, and the one that needs a peer:
     # the two ESP32 Classic peers hold a piconet to a chosen channel map, and
     # a release has to carry the measurement that `ubertooth-afh` still
