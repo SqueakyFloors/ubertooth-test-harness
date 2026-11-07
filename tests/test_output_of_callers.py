@@ -63,8 +63,7 @@ class HostVersionOutputPatternTests(unittest.TestCase):
 
     def test_matching_output_is_not_a_failure(self):
         result = Result(
-            stdout="Host tools version: libubertooth 1.58 (git-abc1234), "
-                   "libbtbb 1.3 (git-7e1cdf0)\n"
+            stdout="Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n"
         )
         self.assertEqual("", self.definition.result_failure(result))
 

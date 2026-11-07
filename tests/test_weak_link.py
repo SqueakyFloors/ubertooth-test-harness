@@ -366,14 +366,11 @@ class RangeSuiteTests(unittest.TestCase):
 class WeakLinkPlanTests(unittest.TestCase):
     """What is left in the not-runnable plan, and why each entry is there."""
 
-    def test_it_is_not_runnable_and_its_two_suites_say_why(self):
+    def test_it_is_not_runnable_and_its_remaining_suite_says_why(self):
         catalog = builtin_catalog()
         plan = load_plan(WEAK_LINK_PLAN, catalog)
         self.assertFalse(plan.runnable)
-        self.assertEqual(
-            ["weak-link-needs-a-dk-pair", "weak-link-unmeasured"],
-            sorted(plan.suites),
-        )
+        self.assertEqual(["weak-link-unmeasured"], sorted(plan.suites))
         # The unmeasured suite is refused for both reasons a plan can be:
         # two entries have no implementation, and one asks for a link no
         # capture figure exists for.
@@ -383,52 +380,17 @@ class WeakLinkPlanTests(unittest.TestCase):
         )
         check_runnable(plan, catalog)
 
-    def test_the_dk_pair_suite_is_blocked_by_hardware_first(self):
-        """These two are unmeasured *because* they are unrunnable: a
-        connection needs two distinct DKs and the bench registers one, so no
-        figure can be taken at any attenuation. Both facts hold, and the
-        hardware one is the cause: give a bench a second DK and the entries
-        bind, which is what the fixture here has."""
+    def test_the_dk_pair_entries_are_no_longer_waiting(self):
+        """Measured 2026-11-04 once the bench had two DKs; they moved to
+        ble.yaml's connection-weak-link suite."""
         catalog = builtin_catalog()
         plan = load_plan(WEAK_LINK_PLAN, catalog)
-        # Unmeasured, like every other entry in the waiting plan.
-        self.assertEqual(
-            ["Capture known BLE connection",
-             "Follow a BLE connection across its end"],
-            sorted(unjudgeable_attenuations(
-                plan, catalog, "weak-link-needs-a-dk-pair")),
-        )
-        # But implemented, and bindable the moment a second DK exists.
-        self.assertEqual(
-            (), unimplemented_tests(plan, catalog, "weak-link-needs-a-dk-pair"))
-        with tempfile.TemporaryDirectory() as directory:
-            compiled = PlanCompiler(catalog, registry(directory)).compile_suite(
-                plan, "weak-link-needs-a-dk-pair", strict_hardware=True)
-            self.assertEqual(
-                ["Capture known BLE connection",
-                 "Follow a BLE connection across its end"],
-                sorted(i.test_name for i in compiled.invocations),
-            )
-
-    def test_a_single_dk_bench_cannot_bind_a_connection_pair(self):
-        """The bench's actual limitation, as planning reports it: one DK
-        declaring central and peripheral cannot fill both roles."""
-        one_dk = HARDWARE.replace("""  DK_Peripheral:
-    type: nRF52840 DK
-    attached to: Host_Linux
-    roles: [advertiser, central, peripheral]
-    identity: {jlink serial: "000123456790", BLE address: "C0:00:00:00:00:02"}
-""", "").replace("      peripheral: DK_Peripheral\n", "")
-        catalog = builtin_catalog()
-        plan = load_plan(WEAK_LINK_PLAN, catalog)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "hardware.yaml"
-            path.write_text(one_dk)
-            compiler = PlanCompiler(catalog, FileResourceRegistry.load(path))
-            with self.assertRaises(PlanningError) as raised:
-                compiler.compile_suite(plan, "weak-link-needs-a-dk-pair")
-        self.assertIn("no valid distinct resource assignment",
-                      str(raised.exception))
+        self.assertNotIn("weak-link-needs-a-dk-pair", plan.suites)
+        for test in ("Capture known BLE connection",
+                     "Follow a BLE connection across its end"):
+            with self.subTest(test):
+                self.assertNotIn(test, [s.test_name for suite in plan.suites
+                                        for s in plan.steps(suite)])
 
     def test_a_loose_lower_bound_is_refused_in_a_runnable_plan(self):
         """`rf:` can write a bare `min_attenuation_db`, and which board that
@@ -504,6 +466,10 @@ class MeasuredSuiteTests(unittest.TestCase):
         ("classic.yaml", "classic-weak-link"): [
             ("Follow Classic Bluetooth piconet", 20.0),
         ],
+        ("ble.yaml", "connection-weak-link"): [
+            ("Capture known BLE connection", 40.0),
+            ("Follow a BLE connection across its end", 20.0),
+        ],
         ("range.yaml", "range-weak-link"): [
             ("Two-device range test", 20.0),
         ],
@@ -574,6 +540,10 @@ class MeasuredSuiteTests(unittest.TestCase):
              "Capture known BLE advertiser", set()),
             ("classic.yaml", "classic-weak-link", "classic.yaml", "classic",
              "Follow Classic Bluetooth piconet", set()),
+            ("ble.yaml", "connection-weak-link", "ble.yaml", "connection",
+             "Capture known BLE connection", set()),
+            ("ble.yaml", "connection-weak-link", "ble.yaml", "connection",
+             "Follow a BLE connection across its end", set()),
         ]
         for name, suite, oname, osuite, test, allowed in pairs:
             definition = catalog.get(test)
@@ -654,7 +624,7 @@ class CheckTableTests(unittest.TestCase):
         pending = [check for check in weaklink.CHECKS if check.pending]
         # Eight are still pending; each names what it waits on and is carried
         # by the not-runnable plan rather than merely described.
-        self.assertEqual(8, len(pending))
+        self.assertEqual(6, len(pending))
         for check in pending:
             with self.subTest(check.item):
                 self.assertTrue(check.needs)

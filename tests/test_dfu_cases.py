@@ -153,7 +153,7 @@ class FakeDfuBoard:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         if command == ("ubertooth-util", "-V"):
-            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
+            return self._result(command, 0, "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n")
         self.commands.append(command)
         if command[:2] == (sys.executable, dfu_cases._CHECKER):
             out = io.StringIO()
@@ -361,7 +361,7 @@ def run_dfu(board, image_bytes, *, coverage="smoke", artifact=True, change_image
         )
         check = PreflightCheck("preflight-001-host-version", "Host version", "Host_Linux",
                                None, {}, ("ubertooth-util", "-V"),
-                               (r"libubertooth\s+\S+\s+\(git\-test\)",), REVISION)
+                               (r"Host tools version: 2026\-11\-DEV2 \(libbtbb \S+\)",), REVISION)
         if change_image:
             original_run = board.run
 
@@ -488,7 +488,7 @@ class DfuCaseShapeTests(unittest.TestCase):
 
         policy = PreflightPolicy(Registry())
         dfu = TestInvocation("001", "DFU images", "H", {}, {"Ubertooth": "U"}, {})
-        after = TestInvocation("002", "Firmware version", "H", {}, {"Ubertooth": "U"}, {})
+        after = TestInvocation("002", "Ubertooth identity", "H", {}, {"Ubertooth": "U"}, {})
         flash = TestInvocation("002", "Flash reliability", "H", {}, {"Ubertooth": "U"}, {})
         with self.assertRaises(PreflightError):
             policy.check_order((dfu, after))
@@ -691,7 +691,7 @@ class DfuHelperRecordTests(unittest.TestCase):
                 self.assertRegex(output, r"\d{4}-\d\d-\d\dT[\d:.]+ \[C\] "
                                  + re.escape(shlex.join(result.argv)) + "\n")
                 tool = Path(result.argv[0]).name
-                self.assertIn(f"[R] {tool} exit {result.returncode} in 0.010s", output)
+                self.assertIn(f"[X] {tool} exit {result.returncode} in 0.010s", output)
                 for line in (result.stdout + result.stderr).splitlines():
                     self.assertIn(line, output)
         self.assertEqual(len(calls), output.count(" [C] "))
@@ -741,9 +741,9 @@ class DfuHelperRecordTests(unittest.TestCase):
         self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[E\] Reading back "
                                        r"114688 bytes, 0x4000-0x1ffff: part 0x25011722 "
                                        r"\(LPC1754\) has 128 KiB of flash\n")
-        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[R\] ubertooth-dfu "
+        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[X\] ubertooth-dfu "
                                        r"exit 0 in 0\.010s\n")
-        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[R\] ubertooth-util "
+        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[X\] ubertooth-util "
                                        r"exit 0 in 0\.010s; \[O\] Firmware version: git-test")
 
     def test_a_timed_out_command_is_recorded(self):
@@ -755,7 +755,7 @@ class DfuHelperRecordTests(unittest.TestCase):
         self.assertIsNone(board.revision())
         record = "\n".join(lines)
         self.assertIn("[C] ubertooth-util -U abc123 -v", record)
-        self.assertIn("[R] ubertooth-util exit -1 in 5.000s, TIMED OUT; [O] partial", record)
+        self.assertIn("[X] ubertooth-util exit -1 in 5.000s, TIMED OUT; [O] partial", record)
 
     def test_ioreg_dfu_count_is_recorded_with_device_lines_only(self):
         ioreg = (
@@ -776,7 +776,7 @@ class DfuHelperRecordTests(unittest.TestCase):
         self.assertIn("[O]   +-o Ubertooth One@01100000", record)
         self.assertNotIn("idVendor", record)
         self.assertIn("4 property lines left out", record)
-        self.assertIn("[R] ioreg exit 0 in 0.200s", record)
+        self.assertIn("[X] ioreg exit 0 in 0.200s", record)
 
 
 class DfuTimeoutTests(unittest.TestCase):

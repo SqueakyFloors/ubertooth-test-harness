@@ -10,6 +10,11 @@ suites:
         hosts: each
         coverage: smoke
 
+    # No Ubertooth: ubertooth-btle -R on a synthetic low-energy dump.
+    - BLE replay:
+        hosts: each
+        coverage: smoke
+
     # Every tool runs with UBERTOOTH_TEST_NO_DEVICES=1; skipped when the built
     # libubertooth predates it (fork b6d8ede). ubertooth-follow and
     # ubertooth-scan cases are not applicable where they are not built (no BlueZ).

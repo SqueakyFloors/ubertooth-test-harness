@@ -152,6 +152,7 @@ class RunnablePlanTests(unittest.TestCase):
         self.assertEqual(
             sorted(
                 [(PLANS / "ble.yaml", "ble-weak-link"),
+                 (PLANS / "ble.yaml", "connection-weak-link"),
                  (PLANS / "classic.yaml", "classic-weak-link"),
                  (PLANS / "range.yaml", "range-weak-link")]
                 + [(PLANS / "weak-link.yaml", suite)

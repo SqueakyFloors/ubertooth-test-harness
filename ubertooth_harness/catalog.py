@@ -8,7 +8,7 @@ from typing import Callable, Mapping
 
 from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
 from ubertooth_harness.hostneeds import (
-    BLUEZ_TOOLS, NO_NEEDS, PLATFORMS, Needs, tool_needs,
+    ALWAYS_BUILT_TOOLS, BLUEZ_TOOLS, NO_NEEDS, PLATFORMS, Needs, tool_needs,
 )
 from ubertooth_harness.rf import (
     NORMAL_LINK, PlacementError, PlacementRequirement,
@@ -19,9 +19,10 @@ from ubertooth_harness import weaklink
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     FIRMWARE_PATTERN,
+    HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
-    VERSION_ANSWER,
+    VERSION_ANSWER_PATTERNS,
     serial_pattern,
 )
 from ubertooth_harness.outputfiles import output_of
@@ -29,6 +30,7 @@ from ubertooth_harness.resources import BLUETOOTH_ADAPTER, ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
     advertiser_cases, afh_cases, bluez_cases, boardstate_cases, btbr_cases,
+    btle_replay_cases,
     capture_failure_cases, classic_cases, connection_cases, dfu_cases,
     dfu_host_cases, interrupt_cases, invalidapp_cases, python_cases,
     receive_cases,
@@ -713,69 +715,80 @@ def _device_test(name, description, argv=None, extra=None):
 
 
 # ubertooth_print_host_version() in libubertooth, the first line of every
-# tool's -V answer. Anchored to its label, so a board's firmware lines under
-# it cannot stand in for it.
-_HOST_VERSION_PATTERN = (
-    r"(?m)^Host tools version: libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)$"
-)
+# tool's -V answer: patterns.HOST_VERSION_LINE, which is the one statement of
+# the line's layout. Anchored to its label, so the board's firmware line
+# under it cannot stand in for it. Which versions a given commit must print
+# is decided where the resolved commit is known (preflight.py); a case has
+# only the tool in front of it.
+_HOST_VERSION_PATTERN = HOST_VERSION_LINE
 # That line needs no board, but the command goes on to read every attached
 # one and exits 1 if any cannot be read -- in use by another program, or not
 # answering -- which may be a board this run does not use. The line is what
 # these cases check, as it is in preflight (preflight.py).
 HOST_VERSION_RETURNCODES = (0, 1)
 
+# Every host tool `Host CLI surface` runs, with what each one needs from the
+# host: the tools the fork always builds, then the two it builds only with
+# BlueZ. The list is the build's own (hostneeds.ALWAYS_BUILT_TOOLS), so a
+# tool the fork adds arrives here with the build rather than being added to
+# a second list by hand.
+HOST_CLI_TOOLS = tuple(
+    (tool, tool_needs(tool))
+    for tool in ALWAYS_BUILT_TOOLS + BLUEZ_TOOLS
+)
+
 
 def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
-    expected = (
-        ("ubertooth-util", 0),
-        ("ubertooth-debug", 0),
-        ("ubertooth-specan", 0),
-        ("ubertooth-rx", 0),
-        ("ubertooth-tx", 0),
-        ("ubertooth-dump", 0),
-        # -h exits 0 on every tool: btle since fork e4f1dc5 (fork #377), dfu,
-        # scan and follow since 12211ce (fork #406); each was 1.
-        ("ubertooth-btle", 0),
-        ("ubertooth-dfu", 0),
-        ("ubertooth-ego", 0),
-        ("ubertooth-afh", 0),
-        ("ubertooth-ducky", 0),
-    )
-    cases = [
-        CommandCase(
-            f"{tool}-help",
-            f"{tool} help",
-            (tool, "-h"),
-            (re.escape(tool),),
-            expected_returncodes=(returncode,),
+    """`<tool> -h` and `<tool> -V` for every host tool the fork builds.
+
+    Both run over one list of tools (``HOST_CLI_TOOLS``), so a tool cannot
+    be asked its usage and not its version: `-V` used to be asked of four of
+    the thirteen. What was read at Ubertooth 2026-11-DEV1, and no further
+    back: every one of the thirteen sources carries `V` in its `getopt`
+    option string and a `case 'V'` that calls
+    ``ubertooth_print_versions()`` after the option loop and returns its
+    status, so `-V` ends the command in all of them; and the eleven a macOS
+    build produces were built from that tag and run, each printing the same
+    host version line and exiting 0 with no board attached
+    ([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
+    These cases have no `-H` fallback, so against a fork from before the one
+    `-V` answer (ubertooth#813) all thirteen fail: the host version came from
+    `-H` there and `-V` was the board's compile info, and the pattern asks
+    for the `Host tools version:` line. Preflight's own host version check
+    does have the fallback (preflight.HOST_VERSION_FALLBACK_ARGV).
+
+    The two BlueZ-only tools carry their host need on both cases, so a host
+    without BlueZ leaves out each one's help and version together.
+    """
+    cases = []
+    for tool, needs in HOST_CLI_TOOLS:
+        label = " (BlueZ builds)" if needs else ""
+        cases.append(
+            CommandCase(
+                f"{tool}-help",
+                f"{tool} -h{label}",
+                (tool, "-h"),
+                (re.escape(tool),),
+                # -h exits 0 on every tool: btle since fork e4f1dc5 (fork
+                # #377), dfu, scan and follow since 12211ce (fork #406);
+                # each was 1.
+                expected_returncodes=(0,),
+                needs=needs,
+            )
         )
-        for tool, returncode in expected
-    ]
-    # Built only with BlueZ (libbluetooth); not applicable where they are not
-    # built (every macOS host).
-    cases.extend(
-        CommandCase(
-            f"{tool}-help",
-            f"{tool} help (BlueZ builds)",
-            (tool, "-h"),
-            (re.escape(tool),),
-            expected_returncodes=(0,),
-            needs=tool_needs(tool),
+    for tool, needs in HOST_CLI_TOOLS:
+        label = " (BlueZ builds)" if needs else ""
+        cases.append(
+            CommandCase(
+                f"{tool}-version",
+                f"{tool} -V{label}",
+                (tool, "-V"),
+                (_HOST_VERSION_PATTERN,),
+                timeout_s=HOST_VERSION_TIMEOUT_S,
+                expected_returncodes=HOST_VERSION_RETURNCODES,
+                needs=needs,
+            )
         )
-        for tool in BLUEZ_TOOLS
-    )
-    cases.extend(
-        CommandCase(
-            f"{tool}-version",
-            f"{tool} -V",
-            (tool, "-V"),
-            (_HOST_VERSION_PATTERN,),
-            timeout_s=HOST_VERSION_TIMEOUT_S,
-            expected_returncodes=HOST_VERSION_RETURNCODES,
-        )
-        for tool in ("ubertooth-util", "ubertooth-rx", "ubertooth-tx",
-                     "ubertooth-afh")
-    )
     return tuple(cases)
 
 
@@ -835,14 +848,14 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         ),
         # -V is the version command, not an identity query: since fork
         # f898fe5 (SqueakyFloors/ubertooth#813) it answers with the host
-        # tools' version and the board's firmware version and build, then
+        # tools' version and the board's firmware version, then
         # ends the command. So it is read on its own, and the composition
         # below asks for the four queries that do compose.
         CommandCase(
             "firmware-compile-info",
             "Firmware compile info",
             common + ("-V",),
-            (VERSION_ANSWER,),
+            VERSION_ANSWER_PATTERNS,
             timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(
@@ -977,7 +990,15 @@ def _default(estimate: Estimate) -> Mapping[str, Estimate]:
 ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Host version": _default(Estimate(0.5)),
     "Help smoke": _default(Estimate(0.5)),
-    "Host CLI surface": _default(Estimate(3.6)),
+    # 15 cases took 3.6 s on the calibration host, so 0.24 s a case; asking
+    # `-V` of every tool rather than four (#347) makes it 26 cases on a
+    # Linux host and 22 on macOS, scaled here to 6.2 s. It is a rate from
+    # one mix of cases applied to another: the nine new ones are all `-V`,
+    # which reads every attached board, so expect it to run low on a bench
+    # with several boards and high on a macOS host, which has four fewer
+    # cases. A target's own runs replace it as soon as three of them have
+    # measured it (learned.py), which is what the countdown then uses.
+    "Host CLI surface": _default(Estimate(6.2)),
     "Ubertooth count": _default(Estimate(0.5)),
     "Ubertooth identity": _default(Estimate(0.4)),
     "Debug register read": _default(Estimate(0.5)),
@@ -1024,6 +1045,13 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # to back, because a busy host takes two to six times longer, which is
     # why an estimate is a countdown and never a timeout.
     "Raw receive replay": _profiles(Estimate(3.1), Estimate(9.0)),
+    # Two replays of a handful of records in smoke, four in comprehensive,
+    # each with the fixture writer and the directory listing beside it.
+    # The cases' own commands, timed back to back on the macOS host against
+    # a build of fork 4b28aec9: 0.89-0.95 s in smoke and 1.58-1.66 s
+    # comprehensive, most of it starting the processes rather than replaying
+    # eight records.
+    "BLE replay": _profiles(Estimate(0.9), Estimate(1.6)),
     # Two cases and 35 commands in smoke, three and 52 comprehensive.
     # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
     # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three
@@ -1212,7 +1240,7 @@ def builtin_catalog() -> TestCatalog:
     definitions = [
         TestDefinition(
             "Host version",
-            "Host tools version and git identity",
+            "Host tools version line",
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
             ("ubertooth-util", "-V"),
@@ -1220,6 +1248,13 @@ def builtin_catalog() -> TestCatalog:
             output_pattern=_HOST_VERSION_PATTERN,
             expected_returncodes=HOST_VERSION_RETURNCODES,
         ),
+        # `Host CLI surface` asks this of every tool, so this entry adds no
+        # coverage. It is kept, where the five unimplemented identity
+        # entries were removed (#347), because it is the cheapest step a
+        # plan can hold: one command, no board, no pattern, and it answers
+        # "did this build produce a runnable tool" in half a second. The
+        # five were removed for having no implementation and no plan to be
+        # the cheap version of anything.
         TestDefinition(
             "Help smoke",
             "ubertooth-util help executes",
@@ -1229,7 +1264,7 @@ def builtin_catalog() -> TestCatalog:
         ),
         TestDefinition(
             "Host CLI surface",
-            "Help and parser availability for every always-built host tool",
+            "Help and host version for every C host tool the fork builds",
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
             command_builder=_host_cli_surface_cases,
@@ -1243,20 +1278,25 @@ def builtin_catalog() -> TestCatalog:
             command_builder=_ubertooth_count_cases,
             guards_other_ubertooths=True,
         ),
-        _device_test("Firmware version", "Firmware revision"),
-        _device_test("Firmware compile info", "Firmware compile identity"),
-        _device_test("Device serial", "Microcontroller serial"),
         # Which bootloader is under the application firmware. Preflight reads
         # it on every run whose commit has the read at all, which is what no
         # catalog case can do: a case cannot tell whether the commit under
         # test has `ubertooth-util -B`, and against one that has not it would
         # fail on a board that is perfectly set up (bootloader.py).
+        #
+        # It is the one identity read left as a catalog name with no cases.
+        # `Firmware version`, `Firmware compile info`, `Device serial`,
+        # `Part ID` and `Board ID` were names here too, and every one of
+        # them is a case of `Ubertooth identity` with the same command and
+        # the same check, so a plan could never have wanted the standalone
+        # entry; they were removed rather than reimplemented
+        # (#347). Preflight still reports its per-board checks under the
+        # first three of those names, and "Mandatory preflight" in
+        # docs/tests.md is where those reads are written down.
         _device_test(
             "Bootloader identity",
             "Which bootloader is installed under the application firmware",
         ),
-        _device_test("Part ID", "Microcontroller part ID"),
-        _device_test("Board ID", "Ubertooth board ID"),
         TestDefinition(
             "Ubertooth identity",
             "Isolated and composed firmware and hardware identity readback",
@@ -1501,6 +1541,19 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=receive_cases.replay_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            btle_replay_cases.TEST_NAME,
+            "ubertooth-btle -R replays a synthetic low-energy dump with no "
+            "Ubertooth: a promiscuous capture's connection parameters and the "
+            "CONNECT_IND beside the packets on that access address, the "
+            "company identifiers libbtbb names and the one it does not, the "
+            "-d records written back, and the refusal of a replay with no "
+            "major mode",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=btle_replay_cases.btle_replay_cases,
             continue_on_case_failure=True,
         ),
         TestDefinition(
@@ -1849,12 +1902,6 @@ def builtin_catalog() -> TestCatalog:
             command_builder=bluez_cases.follow_over_hci_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
-        ),
-        TestDefinition(
-            "CLI usage smoke",
-            "Exercise host tool usage paths",
-            MappingProxyType({"hosts": HOSTS}),
-            MappingProxyType({}),
         ),
         _device_test(
             "BLE soak",

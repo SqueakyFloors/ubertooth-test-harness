@@ -60,7 +60,13 @@ def bits_to_int(bits):
 
 
 def decode_record(record, laps, max_errors=2):
-    """(LAP, errors, channel, packet) for one record as cb_rx sees it, or None."""
+    """(LAP, errors, channel, clock offset, packet) as cb_rx sees one record.
+
+    None where cb_rx skips the record or finds no access code in it. The
+    offset is libubertooth's own arithmetic, written out here a second time:
+    the 100 ns from the rising edge of CLKN to the first bit of the access
+    code, within one slot.
+    """
     pkt_type, status, channel = record[4], record[5], record[6]
     if pkt_type != 0 or status & 0x20 or channel > 78:
         return None
@@ -72,7 +78,9 @@ def decode_record(record, laps, max_errors=2):
             if errors <= max_errors:
                 clk100ns = struct.unpack("<I", record[8:12])[0]
                 clock = (clk100ns + offset * 10 - 4000) // 3125
-                return lap, errors, channel, _packet(symbols[offset:], clock)
+                clk_offset = (clk100ns + offset * 10 + 6250 - 4000) % 6250
+                return (lap, errors, channel, clk_offset,
+                        _packet(symbols[offset:], clock))
     return None
 
 
@@ -123,7 +131,7 @@ class ReplayRx:
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
+            return self._result(command, 0, "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n")
         if (command[0] == sys.executable and command[1].endswith("stdoutdest.py")
                 and command[2] == "run"):
             return self._stdout_destination(command)
@@ -441,10 +449,11 @@ class ReplayRx:
             result = decode_record(record, laps, max_errors)
             if result is None:
                 continue
-            got_lap, errors, channel, packet = result
+            got_lap, errors, channel, clk_offset, packet = result
             systime = struct.unpack(">I", record[:4])[0] if self.fixed else int(time.time()) + 7
-            lines.append(f"systime={systime} ch={channel:2d} LAP={got_lap:06x} err={errors} "
-                         "clkn=1 clk_offset=1000 s=-55 n=-120 snr=65")
+            lines.append(f"systime={systime} ch={channel:2d} LAP={got_lap:06x} "
+                         f"err={errors} clkn=1 clk_offset={clk_offset} "
+                         "s=-55 n=-120 snr=65")
             found.append(record)
             dumped.append(record)
             if packet and packet["crc"] and got_lap not in uap_seen:
@@ -700,8 +709,8 @@ class FixtureTests(unittest.TestCase):
             result = decode_record(record, laps)
             if result is None:
                 continue
-            lap, errors, channel, packet = result
-            decoded.append((lap, errors, channel))
+            lap, errors, channel, clk_offset, packet = result
+            decoded.append((lap, errors, channel, clk_offset))
             if lap == rxreplay.LAP_A:
                 self.assertEqual(rxreplay.UAP_A, packet["uap"])
                 self.assertIn(packet["type"], (rxreplay.POLL, rxreplay.DH1))
@@ -731,8 +740,15 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(10, len(rxreplay.expected_packets("truncated")))
         self.assertEqual([], rxreplay.expected_packets("empty"))
         self.assertEqual(8, len(rxreplay.expected_packets(lap=rxreplay.LAP_A)))
-        self.assertEqual([(rxreplay.LAP_B, 0, 9)] * 2 + [(rxreplay.LAP_B, 1, 9)],
+        offsets = [rxreplay.clk_offset(record) for record in rxreplay.RECORDS
+                   if record.lap == rxreplay.LAP_B]
+        self.assertEqual([(rxreplay.LAP_B, 0, 9, offsets[0]),
+                          (rxreplay.LAP_B, 0, 9, offsets[1]),
+                          (rxreplay.LAP_B, 1, 9, offsets[2])],
                          rxreplay.expected_packets(lap=rxreplay.LAP_B))
+        # No two packet lines report the same offset, so a decoder that
+        # printed one figure for every record could not pass.
+        self.assertEqual(len(full), len({packet[3] for packet in full}))
         self.assertEqual(10, len(rxreplay.expected_packets(max_errors=0)))
 
     def test_dump_check(self):
@@ -784,18 +800,20 @@ class FixtureTests(unittest.TestCase):
 
 class CheckTests(unittest.TestCase):
 
-    LINE = "systime={t} ch={ch:2d} LAP={lap:06x} err={err} clkn=1 clk_offset=2 s=-1 n=-2 snr=1"
+    LINE = ("systime={t} ch={ch:2d} LAP={lap:06x} err={err} clkn=1 "
+            "clk_offset={off} s=-1 n=-2 snr=1")
 
     def lines(self, packets, t=5):
-        return "".join(self.LINE.format(t=t, lap=lap, err=err, ch=ch) + "\n"
-                       for lap, err, ch in packets)
+        return "".join(self.LINE.format(t=t, lap=lap, err=err, ch=ch, off=off)
+                       + "\n"
+                       for lap, err, ch, off in packets)
 
     def test_packets_check(self):
         want = rxreplay.expected_packets()
         check = rxreplay.packets_check(want)
         self.assertEqual("", check(self.lines(want) + "noise\n"))
         self.assertIn("10 packet lines, expected 11", check(self.lines(want[:-1])))
-        decoy = want + [(rxreplay.LAP_DECOY, 0, 12)]
+        decoy = want + [(rxreplay.LAP_DECOY, 0, 12, 195)]
         self.assertIn("decoy", check(self.lines(decoy)))
         swapped = [want[1], want[0]] + want[2:]
         self.assertIn("packet line 1", check(self.lines(swapped)))
@@ -803,13 +821,13 @@ class CheckTests(unittest.TestCase):
     # The fixture's records claim no background estimate, so a current
     # ubertooth-rx prints the word instead of a figure (fork 532adc19).
     NONE_LINE = ("systime={t} ch={ch:2d} LAP={lap:06x} err={err} clkn=1 "
-                 "clk_offset=2 s=-1 n=none snr=none")
+                 "clk_offset={off} s=-1 n=none snr=none")
 
     def test_packets_check_takes_an_absent_noise_figure(self):
         want = rxreplay.expected_packets()
         output = "".join(
-            self.NONE_LINE.format(t=5, lap=lap, err=err, ch=ch) + "\n"
-            for lap, err, ch in want
+            self.NONE_LINE.format(t=5, lap=lap, err=err, ch=ch, off=off) + "\n"
+            for lap, err, ch, off in want
         )
         self.assertEqual("", rxreplay.packets_check(want)(output))
 
@@ -820,8 +838,8 @@ class CheckTests(unittest.TestCase):
             line = self.NONE_LINE.replace("n=none", f"n={noise}").replace(
                 "snr=none", f"snr={snr}")
             output = "".join(
-                line.format(t=5, lap=lap, err=err, ch=ch) + "\n"
-                for lap, err, ch in want
+                line.format(t=5, lap=lap, err=err, ch=ch, off=off) + "\n"
+                for lap, err, ch, off in want
             )
             self.assertIn("0 packet lines", rxreplay.packets_check(want)(output))
 

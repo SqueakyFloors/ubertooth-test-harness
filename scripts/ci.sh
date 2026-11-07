@@ -29,14 +29,20 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # libbtbb the fork is built and tested against, not upstream's `master` branch.
 # This pin is the harness's own copy, deliberately: the harness never calls
 # the fork's installer. It must match the fork's (LIBBTBB_REF in the fork's
-# install.sh, also in its .github/workflows/build.yml); the build step warns
-# when it does not (check_libbtbb_pin, ubertooth_harness/libbtbbpin.py). Bump
+# install.sh, LIBBTBB_PINNED_REF in its host/cmake/modules/FindBTBB.cmake, and
+# its .github/workflows/build.yml); the build step warns when it does not
+# (check_libbtbb_pin, ubertooth_harness/libbtbbpin.py), and the install check
+# reads the fork's own FindBTBB pin back out of the configure
+# (check_installed_library). A divergence is a warning rather than a failure,
+# but it means every figure a build here produces was measured against a
+# different libbtbb from the one the fork ships, and the fork's required-symbol
+# probe refuses a pin old enough to be missing a function the tools call. Bump
 # it here and in README.md together, which tests/test_libbtbb_pin.py checks.
 # A LIBBTBB_SOURCE clone has to hold the pin: a clone of the fork does, but
 # one of another libbtbb, or one made before the pin landed, needs
 # LIBBTBB_REF as well or the build stops at "unable to resolve libbtbb ref".
 LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
-LIBBTBB_PIN=7e1cdf0336857a714da1af8c7496fe32453ac6d0
+LIBBTBB_PIN=d356e9da7fb03969371aa14d603a8aad2f0ef198
 
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 
@@ -266,9 +272,59 @@ EOF
         "$il_work/pc-consumer" > "$il_work/pc-consumer.txt" 2>&1 \
         || { cat "$il_work/pc-consumer.txt"; return 1; }
     cat "$il_work/pc-consumer.txt"
+    # The libbtbb the install was built against, which is what it compares
+    # the libbtbb it loaded with. An install since fork #1230 prints no path
+    # line and reports a libbtbb only when the two differ, so that comparison
+    # having had both sides is part of what the check needs.
+    il_btbb_libdir=$(pkg-config --variable=libdir libbtbb)
+    [ -n "$il_btbb_libdir" ] || {
+        echo "error: libbtbb.pc answered no libdir, so there is nothing to" \
+             "say which libbtbb the install was built against" >&2
+        return 1; }
+    echo "libbtbb.pc: libdir $il_btbb_libdir"
     .venv/bin/python -m ubertooth_harness.installedlib consumer-identity \
         "$il_work/pc-consumer.txt" --prefix "$il_prefix" \
-        --version-line "$il_version"
+        --version-line "$il_version" --built-libbtbb "$il_btbb_libdir"
+
+    step "the warning that reports another libbtbb fires for a second install"
+    # The step above reads "the loader reached this install's libbtbb" off the
+    # absence of that warning, and an absence says nothing on its own: the
+    # fork reports no libbtbb either when the loader will not say which file
+    # it opened, and a warning that had stopped being printed at all would
+    # look exactly the same (#365). So the same program is run once more with
+    # the loader pointed at a copy of this install's libbtbb in a directory of
+    # its own, where the warning has to appear and name that directory.
+    #
+    # A copy, not a link: ubertooth_libbtbb_is_elsewhere() resolves both paths
+    # (same_directory() in libbtbb_origin.c), so a link to the install's own
+    # library directory is one install to it and would print nothing.
+    il_decoy=$il_work/another-libbtbb
+    rm -rf "$il_decoy"
+    mkdir -p "$il_decoy"
+    # Every file of the library, the links among them included: libbtbb's
+    # install writes those relative, so inside the copy they resolve to
+    # the copy, and the loader opens it under the name the install
+    # recorded. Both naming styles, because the files are
+    # libbtbb.so.<soname> on Linux and libbtbb.<soname>.dylib on macOS.
+    cp -R "$il_btbb_libdir"/libbtbb.* "$il_decoy/" || {
+        echo "error: no libbtbb to copy out of $il_btbb_libdir, so the" \
+             "loader cannot be pointed at a second install" >&2
+        return 1; }
+    ls -l "$il_decoy"
+    # The copy first and the install after it, so libbtbb comes from the
+    # copy and libubertooth from the install: that one difference is the
+    # whole of the control. DYLD_LIBRARY_PATH reaches a program the job
+    # compiled itself, macOS stripping it only for system binaries.
+    DYLD_LIBRARY_PATH=$il_decoy:$il_libpath \
+        LD_LIBRARY_PATH=$il_decoy:$il_libpath \
+        "$il_work/pc-consumer" > "$il_work/another-libbtbb.txt" 2>&1 \
+        || { cat "$il_work/another-libbtbb.txt"; return 1; }
+    cat "$il_work/another-libbtbb.txt"
+    # Prints the warning it accepted, so a reader of a failed job sees
+    # which directory the program loaded libbtbb from.
+    .venv/bin/python -m ubertooth_harness.installedlib another-libbtbb \
+        "$il_work/another-libbtbb.txt" --loaded-from "$il_decoy" \
+        --built-libbtbb "$il_btbb_libdir" --version-line "$il_version"
 
     step "a CMake project finds the installed ubertooth package"
     mkdir -p "$il_work/cmake-consumer"
@@ -467,10 +523,17 @@ assert (len(bluez) >= 12) if platform == "macos" else not bluez, bluez
 EOF
 
     step "BlueZ tools: required in a Linux build's prefix, and their cases run"
+    # Both cases of each: the help, and the host version line of -V. A Linux
+    # build is the only place either BlueZ-only tool exists, so this is where
+    # their -V is read from a real binary rather than from the source (#347).
     .venv/bin/python - "$platform" "$WORK/build.json" "$WORK/runs/ci-host/run.jsonl" <<'EOF'
 import json, sys
 platform, build, record = sys.argv[1:]
+# The case IDs end in these; the names a run prints are `<tool> -h
+# (BlueZ builds)` and `<tool> -V (BlueZ builds)`
+# (catalog._host_cli_surface_cases).
 tools = ("ubertooth-scan", "ubertooth-follow")
+cases = ("help", "version")
 names = {item["name"] for item in json.load(open(build))["artifacts"]}
 built = [tool for tool in tools if f"built {tool}" in names]
 results = {}
@@ -479,12 +542,14 @@ for line in open(record):
     case_id = event["details"].get("case_id", "")
     if event["event_type"] == "check_finished":
         for tool in tools:
-            if case_id.endswith(f"-{tool}-help"):
-                results[tool] = event["status"]
-print(f"{platform}: built {built}, help cases {results}")
+            for case in cases:
+                if case_id.endswith(f"-{tool}-{case}"):
+                    results[f"{tool} {case}"] = event["status"]
+print(f"{platform}: built {built}, cases {results}")
 if platform == "linux":
     assert built == list(tools), built
-    assert results == {tool: "passed" for tool in tools}, results
+    expected = {f"{tool} {case}": "passed" for tool in tools for case in cases}
+    assert results == expected, results
 else:
     assert not built and not results, (built, results)
 EOF

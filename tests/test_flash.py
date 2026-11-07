@@ -376,6 +376,89 @@ class FlashRunnerTests(unittest.TestCase):
                 run_flash(executor, clock, request, directory)
             self.assertEqual([], executor.commands)
 
+    def test_an_image_sequence_of_one_file_under_two_labels_is_refused(self):
+        """Alternating between two copies of one image writes nothing new.
+
+        What used to be required was a distinct expected revision per image.
+        Since #352 (fork #1230) a version names the release a build came from
+        rather than the build, so two images can be one release and two
+        files; the files are what have to differ, and the sha256 says so.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            request, artifacts = self.prepare_request(directory, flashes=2)
+            same = Path(directory) / "same.dfu"
+            same.write_bytes(artifacts["test_build"].path.read_bytes())
+            request = replace(request, artifacts={
+                **request.artifacts,
+                "kgv": replace(
+                    artifacts["kgv"], path=same,
+                    expected_sha256=None,
+                    # The pinned-KGV hash is checked separately, so this
+                    # case is about the sequence and not about that.
+                ),
+            })
+            request = replace(request, step=replace(
+                request.step, kgv_sha256=hashlib.sha256(
+                    same.read_bytes()).hexdigest(),
+            ))
+            clock = FakeClock()
+            executor = FakeExecutor(clock, {})
+
+            with self.assertRaisesRegex(HarnessError, "the same file"):
+                run_flash(executor, clock, request, directory)
+            self.assertEqual([], executor.commands)
+
+    def test_two_images_of_one_release_are_allowed_and_recorded(self):
+        """They are different files, which is what the run alternates."""
+        with tempfile.TemporaryDirectory() as directory:
+            request, artifacts = self.prepare_request(directory, flashes=2)
+            request = replace(request, artifacts={
+                label: replace(artifact, expected_revision="2026-11-DEV1+22")
+                for label, artifact in request.artifacts.items()
+            })
+            clock = FakeClock()
+            executor = FakeExecutor(
+                clock,
+                {str(a.path): "2026-11-DEV1+22"
+                 for a in request.artifacts.values()},
+            )
+
+            # The request is accepted and the run goes through: every write
+            # writes different bytes, `ubertooth-dfu -d ... -r` reads them
+            # back against the file it wrote, and the revision read after
+            # each write says the right release is on the board. What it no
+            # longer says is which of two builds of that release, which is
+            # what the sha256 of each image is for.
+            sink = CollectEventSink()
+            summary = run_flash(executor, clock, request, directory, sink=sink)
+            self.assertTrue(summary.passed, summary.failure_reason)
+            self.assertEqual(2, summary.verified_flashes)
+            self.assertEqual("2026-11-DEV1+22", summary.final_revision)
+            # The run says so, so a reader of it does not have to work it out
+            # from the plan's own revisions.
+            (start,) = [e for e in sink.events
+                        if e.event_type == "flash_run_started"]
+            self.assertIs(False,
+                          start.details["revisions_tell_images_apart"])
+            self.assertEqual(["2026-11-DEV1+22"],
+                             start.details["repeated_revisions"])
+
+    def test_images_of_two_releases_say_nothing_about_discrimination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request, artifacts = self.prepare_request(directory, flashes=2)
+            clock = FakeClock()
+            executor = FakeExecutor(
+                clock,
+                {str(a.path): a.expected_revision for a in artifacts.values()},
+            )
+            sink = CollectEventSink()
+
+            run_flash(executor, clock, request, directory, sink=sink)
+
+            (start,) = [e for e in sink.events
+                        if e.event_type == "flash_run_started"]
+            self.assertNotIn("revisions_tell_images_apart", start.details)
+
     def test_stops_if_artifact_changes_during_run(self):
         with tempfile.TemporaryDirectory() as directory:
             request, artifacts = self.prepare_request(directory, flashes=4)
@@ -714,13 +797,16 @@ class AlternatingFlashTests(unittest.TestCase):
 
     def test_single_board_matching_every_image_fails_with_a_summary(self):
         request = self.build(2, boards=())
-        # Both images claim the board's current revision: no observable write.
+        # Both images claim the board's current revision: no observable
+        # write. Two images of one release is a sequence the request check
+        # allows since #352 (fork #1230) -- a version names the release a
+        # build came from, not the build, and the files are what tell them
+        # apart -- so this is where it is caught.
         request = replace(request, artifacts={
             label: replace(artifact, expected_revision="git-kgv")
             for label, artifact in request.artifacts.items()
         })
         runner = FlashReliabilityRunner(self.executor, clock=self.clock)
-        runner._validate_request = lambda _request: {}  # skip distinct-revision check
         from ubertooth_harness.events import EventPublisher
 
         sink = CollectEventSink()
