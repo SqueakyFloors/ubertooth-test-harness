@@ -26,6 +26,43 @@ class FlashCancelled(HarnessError):
     """
 
 
+def revision_argv(serial: str) -> list[str]:
+    """The firmware revision read of one board, before and after a write."""
+    return ["ubertooth-util", "-U", serial, "-v"]
+
+
+def flash_argv(serial: str, image) -> list[str]:
+    """One firmware write, which resets the board when it is done."""
+    return ["ubertooth-dfu", "-U", serial, "-d", str(image), "-r"]
+
+
+def _revision_discrimination(request) -> dict:
+    """Whether the revision read after a write tells the images apart.
+
+    The images of a sequence must be different files, and need not report
+    different versions: a version names the release a build came from rather
+    than the build (#352, fork #1230). Where two of them report one release,
+    the read-back after a write confirms that release and nothing more -- the
+    file's sha256, checked before every write, is what says which image was
+    written. Recorded rather than refused, and recorded rather than left for a
+    reader to work out from the plan.
+    """
+    revisions = [
+        request.artifacts[label].expected_revision
+        for label in request.step.image_sequence
+        if label in request.artifacts
+    ]
+    repeated = sorted({
+        revision for revision in revisions if revisions.count(revision) > 1
+    })
+    if not repeated:
+        return {}
+    return {
+        "revisions_tell_images_apart": False,
+        "repeated_revisions": repeated,
+    }
+
+
 @dataclass(frozen=True)
 class FirmwareArtifact:
     label: str
@@ -135,7 +172,6 @@ class FlashReliabilityRunner:
             )
 
         hashes = {}
-        revisions = []
         for label in request.step.image_sequence:
             artifact = request.artifacts.get(label)
             if artifact is None:
@@ -157,9 +193,28 @@ class FlashReliabilityRunner:
                 )
             if not artifact.expected_revision:
                 raise HarnessError(f"expected revision is required for {label}")
-            revisions.append(artifact.expected_revision)
-        if len(set(revisions)) != len(revisions):
-            raise HarnessError("image sequence must use distinct expected revisions")
+        # The images must be different files. What used to be required here
+        # was a distinct expected revision per image, on the reasoning that
+        # alternating between two images has to change what the board
+        # reports. Since #352 (fork #1230) a version names the release a
+        # build came from rather than the build, so two images can be the
+        # same release and different files -- and it is the file, by its
+        # sha256, that tells them apart. The revision read back after each
+        # write is then what it says it is: the right release is on the
+        # board, not which of two builds of it.
+        repeated = sorted(
+            {digest for digest in hashes.values()
+             if list(hashes.values()).count(digest) > 1}
+        )
+        if repeated:
+            same = sorted(
+                label for label, digest in hashes.items() if digest in repeated
+            )
+            raise HarnessError(
+                "image sequence must use images that differ: "
+                + ", ".join(same) + " are the same file, so alternating "
+                "between them writes the same bytes every time"
+            )
         return hashes
 
     def _execute_command(
@@ -235,7 +290,7 @@ class FlashReliabilityRunner:
             publisher,
             command_id,
             operation,
-            ["ubertooth-util", "-U", serial, "-v"],
+            revision_argv(serial),
             timeout_s,
             cancellation,
             owner=owner,
@@ -337,6 +392,13 @@ class FlashReliabilityRunner:
                 "serials": list(request.targets),
                 "requested_flashes": request.step.flashes,
                 "guard_serials": list(request.guard_serials),
+                # What the read-back after each write can tell apart. Two
+                # images of one release are a sequence this allows since #352
+                # (fork #1230), and then the revision read says the right
+                # release is on the board and not which image put it there,
+                # so a reader of the run has to be able to see that rather
+                # than infer it from the plan's own revisions.
+                **_revision_discrimination(request),
             },
         )
         if token.is_cancelled():
@@ -500,14 +562,7 @@ class FlashReliabilityRunner:
                 publisher,
                 f"flash-{iteration:04d}",
                 "firmware_flash",
-                [
-                    "ubertooth-dfu",
-                    "-U",
-                    target,
-                    "-d",
-                    str(artifact.path),
-                    "-r",
-                ],
+                flash_argv(target, artifact.path),
                 min(request.per_flash_timeout_s, remaining),
                 owner=self._owner,
             )
@@ -811,7 +866,7 @@ class BuildFlasher:
                 return stop(f"deadline of {total:g}s reached before {name}")
             result = commands._execute_command(
                 publisher, f"build-flash-{index}-before", "version_before_build_flash",
-                ["ubertooth-util", "-U", board.serial, "-v"],
+                revision_argv(board.serial),
                 remaining(BUILD_FLASH_QUERY_TIMEOUT_S), token, owner=owner,
             )
             before = FlashReliabilityRunner._revision(result) if result.returncode == 0 else None
@@ -838,7 +893,7 @@ class BuildFlasher:
                 )
             write = commands._execute_command(
                 publisher, f"build-flash-{index}-write", "build_firmware_flash",
-                ["ubertooth-dfu", "-U", board.serial, "-d", str(image), "-r"],
+                flash_argv(board.serial, image),
                 budget, owner=owner,
             )
             record["written"] = True
@@ -859,7 +914,7 @@ class BuildFlasher:
                 verify = commands._execute_command(
                     publisher, f"build-flash-{index}-verify-{attempt}",
                     "version_after_build_flash",
-                    ["ubertooth-util", "-U", board.serial, "-v"],
+                    revision_argv(board.serial),
                     budget, token, owner=owner,
                 )
                 if verify.returncode == 0:

@@ -1,8 +1,8 @@
 # ESP32 Classic Bluetooth peer firmware
 
 Firmware for the two ESP32-WROOM-32E dev boards the harness uses as Classic
-Bluetooth (BR/EDR) test devices. The Ubertooth stays receive-only; these
-boards do the transmitting, the same division of work as the
+Bluetooth (BR/EDR) test devices. In these tests the Ubertooth only receives
+and these boards transmit, the same division of work as the
 [nRF52840 DK role firmware](../nrf52840dk/README.md) for Bluetooth LE.
 
 Two of these boards hold a Serial Port Profile link and push data across it,
@@ -81,6 +81,64 @@ needs the large single-app partition table `sdkconfig.defaults` selects.
 `set-target` does write here is `sdkconfig`, the resolved configuration; it
 is generated from `sdkconfig.defaults` and git-ignored, so edit the defaults
 file, not it.
+
+### Without installing the SDK
+
+`scripts/ci.sh firmware-esp32` builds the same image in Espressif's own
+image for the version `IDF_VERSION` pins, so nothing but docker is needed:
+
+```sh
+scripts/ci.sh firmware-esp32              # or scripts/local-ci.sh firmware-esp32
+IDF_WORKSPACE=~/idf-ci scripts/ci.sh firmware-esp32   # keep the build directory
+IDF_IMAGE=idf-local:test scripts/ci.sh firmware-esp32 # another toolchain image
+```
+
+It copies these sources into the workspace, configures them for `esp32`, and
+builds them. The copy is what `set-target` writes `sdkconfig` into; the
+repository itself is mounted read-only.
+
+Then it checks three things. **The resolved configuration**, because an
+option that was renamed or withdrawn is otherwise ignored and the image then
+runs with another radio, log, or partition configuration than this directory
+describes, which no compiler can catch. The two polarities are checked
+differently, since Kconfig writes them differently: a default that asks for a
+value (`=y`, or a number) must come back verbatim, and a default written `=n`
+must not come back as `=y`. Demanding a line for a disabled option would fail
+on a correct resolution, because Kconfig writes one as a comment and may
+leave a disabled member of a choice out altogether. What that leaves is an
+`=n` option that was withdrawn, which disables nothing; the warning check
+catches it, because the line ESP-IDF prints about a symbol it does not know
+names this directory's own `sdkconfig.defaults`.
+
+**A warning about this directory's own files**, from configuring or from
+building. ESP-IDF's own warnings are left alone, being Espressif's to fix and
+not this repository's; a message counts when it names a path inside the copy
+of these sources, which every spelling of such a path holds and no ESP-IDF
+path does. A warning that names only something in the build directory, a
+linked object among them, is outside that.
+
+**The firmware version**: the image must carry `UTESP_FW_VERSION`, the string
+a peer's shell reports and a run checks it by.
+
+The sources are built once and compared with nothing. The DK's step builds
+the commit a pull request is against as well, because `nrfdk.py ensure`
+reflashes a DK only when it reports another version, so a changed image with
+the version left alone would never reach a board. Nothing in the harness
+flashes a peer: a run fails when a peer reports a version older than the
+test needs, so there a missing bump is loud on the bench instead of silent.
+The image's SHA-256 is printed and compared with nothing either, since this
+image is not reproducible: ESP-IDF's `CONFIG_APP_REPRODUCIBLE_BUILD` is off
+by default and this firmware does not ask for it, so the image carries a
+compile date and time, and these sources also hold the line numbers their
+error checks report.
+[`docs/hardware.md`](../../docs/hardware.md) records the hash of the image a
+bench was flashed with, for that bench to confirm its copy.
+
+The `ESP32 peer firmware` workflow runs it on a change under this directory,
+once a week, and on request
+([#326](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/326));
+it is not a required check, because the toolchain image is several gigabytes.
+The image it builds is not published: a board is flashed from a local build.
 
 ## Flash
 
@@ -832,3 +890,9 @@ built image also links ESP-IDF, which is Apache License 2.0, and Espressif's
 Bluetooth controller libraries, which are distributed under the ESP-IDF
 license for use with Espressif hardware; images are built locally and not
 committed.
+
+The toolchain container the build above uses is Espressif's own published
+image of that ESP-IDF version (`espressif/idf:$IDF_VERSION` on Docker Hub),
+carrying the same ESP-IDF and the same controller libraries under those
+licenses. It is pulled when a build needs it and is neither committed here
+nor republished.

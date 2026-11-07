@@ -58,7 +58,6 @@ from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.patterns import (
     APPLICATION_IMAGE,
     BTBR_IMAGE,
-    COMPILE_INFO_PATTERN,
     FIRMWARE_UNSUPPORTED_PATTERN,
     image_name_pattern,
 )
@@ -107,8 +106,11 @@ _WRITTEN_REVISION = r"Verified firmware revision: (?P<value>\S+)"
 # The revision on a `ubertooth-util -v` line, whether or not it names an
 # image; which image it is comes from the pattern beside this observation.
 _REVISION = r"Firmware version:\s+(?:\S+\s+)?(?P<value>\S+)\s+\(API:"
-# The build string on a `-V` line, which is image-agnostic.
-_BUILD_REVISION = r"\bubertooth\s+(?P<value>\S+)\s+\("
+# The revision is read off the `Firmware version:` line of the `-V` answer,
+# which since fork #1233 is the whole of what that answer says about a board:
+# the build string beside it has gone, because an image records only its
+# version now and this line already names it. So `-V` still asks the same
+# question the `-v` step above asked, through another command.
 VERSION_TIMEOUT_S = 20.0
 # The bootloader line, read once under each of the two images. The first read
 # is the baseline the second is held to.
@@ -382,10 +384,11 @@ def _case(serial, peer, number: int, sessions: int, *,
                          f"Record the bootloader the {BTBR_IMAGE} image "
                          "reports", _BTBR_BOOTLOADER_KEY),
         Step("verify-btbr-build",
-             f"The {BTBR_IMAGE} build string is the run's revision",
+             f"The {BTBR_IMAGE} image answers -V with its own name and the "
+             "run's revision",
              _util(serial, "-V"), timeout_s=VERSION_TIMEOUT_S,
-             output_patterns=(COMPILE_INFO_PATTERN,),
-             observe=Observation("btbr build revision", _BUILD_REVISION,
+             output_patterns=(image_name_pattern(BTBR_IMAGE),),
+             observe=Observation("btbr build revision", _REVISION,
                                  _revision)),
         _reset_peer("reset-peer-before", peer),
         _console_step(serial, peer, comprehensive=comprehensive),

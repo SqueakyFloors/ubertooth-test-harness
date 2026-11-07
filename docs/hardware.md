@@ -10,7 +10,9 @@ appears (it is git-ignored; [`hardware.example.yaml`](../hardware.example.yaml)
 is the template).
 
 Companions: [`docs/tests.md`](tests.md) says what each test does with this
-hardware, [`README.md`](../README.md) how to register and run it,
+hardware, [`README.md`](../README.md) how to set the harness up and run it,
+[`hardware-utilization.md`](hardware-utilization.md) which test uses which
+fixture,
 [`scripts/lab/`](../scripts/lab/README.md) holds the by-hand helpers (holding
 a device, switching a hub port, the udev rule), and
 [`DESIGN.md`](../DESIGN.md) describes the harness itself.
@@ -74,8 +76,8 @@ box. Every other Ubertooth test receives only.
 
 ### nRF52840 DK
 
-Nordic nRF52840 DK boards (PCA10056) are the Bluetooth LE peers: the Ubertooth
-stays receive-only and the DKs do the transmitting, so a capture can be checked
+Nordic nRF52840 DK boards (PCA10056) are the Bluetooth LE peers: in these
+tests the Ubertooth only receives and the DKs transmit, so a capture can be checked
 against an address, an interval, and a payload that were chosen rather than
 observed.
 
@@ -92,6 +94,34 @@ The connection tests need two DKs, one registered `central` and one
 `peripheral`; the advertiser tests need one. A host says which DK takes which
 role with a default named after the role (`central:`, `peripheral:`, and the
 plain `nRF52840 DK:` for the advertiser).
+
+**Booking the advertiser for a soak.** `BLE address parity soak`
+(`testplans/address-soak.yaml`) holds one Ubertooth, the `advertiser` DK, and
+— because it guards the host's other boards, as every stateful test does —
+every other registered Ubertooth on the host, plus the host lock, for its
+whole window, which its longest suite makes three days, and it drives
+the DK on and off throughout, so nothing else can use either device
+meanwhile. Book it rather than scheduling it beside other bench work, and run
+it from the deployed target runner, which keeps the run going after whatever
+started it disconnects. Two things it costs the host: the DK's serial port
+stays open for the run, and the capture file grows for as long as the run
+lasts — on a crowded advertising channel the capture holds every advertiser in
+range, not only this one, so the plan's `capture file limit` is what keeps any
+one file manageable. **Check the host's free space before booking a long
+run**, because the total is the channel's traffic, not the advertiser's.
+Measured on this bench on 2026-11-05, channel 37, over a 30-second capture:
+1.3 MB of capture and 14 MB of the tool's own transcript, with 40116 packets
+from 6652 other addresses beside the advertiser's 225. At that rate three
+days of capture is on the order of ten gigabytes, which is why a long run has
+a disk budget as well as a per-file limit: past it the oldest complete
+capture is removed and the newest kept, each removal recorded. The transcript
+has a
+run-wide budget of 64 MiB that restarts and file rotations cannot multiply
+(`addresssoak.MAX_LOG_BYTES`); every line is still read either way, so the
+figures do not change, and the run reports how much it kept. The run also
+reports the capture process's resident memory from `ps`, which needs no
+privilege and nothing installed; a host that refuses to run `ps` costs the
+memory figures and nothing else.
 
 Registered by its J-Link serial, quoted so leading zeros survive, plus the
 BLE address its `status` reports. That address is a static random address
@@ -140,7 +170,7 @@ Hands-Free Profile, so the air carries reserved-slot voice packets. An audio
 session is that link and the profile's own service level connection, an ACL
 link; it starts no data stream, and a board can hold both at once if a test
 asks for them. `sco type ev3` asks for a plain EV3
-link, whose payload is on the air at the basic rate a receive-only Ubertooth
+link, whose payload is on the air at the basic rate a receiving Ubertooth
 can decode; the 2-EV3 link the stack chooses by default carries the same
 payload as enhanced rate, which a basic-rate decoder cannot read. The
 hands-free unit has to be listening before the gateway pages it, so a session
@@ -721,6 +751,24 @@ of the commit it is against, and fails when either pair differs with
 `UTDK_FW_VERSION` unchanged
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)).
 
+CI compiles both peer firmwares, each in its vendor's own toolchain image for
+the version its sources pin, on a change under that firmware's directory,
+once a week, and on request: `scripts/ci.sh firmware-dk` for the DK
+([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147))
+and `scripts/ci.sh firmware-esp32` for the ESP32 peer
+([#326](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/326)).
+Neither is a required check, because each image is gigabytes. The peer step
+builds once and compares nothing: nothing in the harness flashes an ESP32
+peer, so a missing version bump fails a run on the bench rather than leaving
+the old image in place with nothing to say so. It does check that the image
+carries `UTESP_FW_VERSION`; that each setting `sdkconfig.defaults` asks for
+by value came back out of Kconfig verbatim and each one it asks to stay off
+did not come back on; and that neither configuring nor building warned about
+the firmware's own files, which is also what catches a withdrawn option that
+now disables nothing. The
+[firmware README](../firmware/esp32-classic-peer/README.md#without-installing-the-sdk)
+has the whole rule, and what it does not reach.
+
 ### Which Ubertooth firmware, and why
 
 The harness never tests host tools against firmware from another commit:
@@ -738,8 +786,7 @@ needs `arm-none-eabi-gcc`, and is refused up front without it.
 
 Guard boards are not flashed: preflight only requires their firmware API to be
 the host tools' own — any other, newer as well as older, is refused there,
-because `ubertooth-btle` may stop such a board rather than read it (README,
-"Guard Ubertooths") — not the resolved revision. Boards that a firmware-writing test
+because `ubertooth-btle` may stop such a board rather than read it (guide/transitions-guards-watchdog.md, "Guard Ubertooths") — not the resolved revision. Boards that a firmware-writing test
 (`Flash reliability`, `DFU images`, `Classic btbr console`) writes itself are
 not flashed either.
 
@@ -814,10 +861,15 @@ flashes an ESP32 peer, so a run fails instead when one reports a version
 older than the test needs. The hashes above let a bench confirm it holds the
 same image this repository's sources produce. Each was built as its firmware
 README says; a reproducible build is not claimed, so compare the version
-first and the hash second. The same sources do build the same peer image
-twice, but the ESP32 image holds the line numbers its error checks report,
-so even a comment added above one of them gives a different hash for the
-same version.
+first and the hash second. For the ESP32 image, that is not a caution but a
+measurement: CI built identical peer sources on two runs and got two hashes
+(`6741480e…` and `f47da7bc…`, 2026-11-06). ESP-IDF's
+`CONFIG_APP_REPRODUCIBLE_BUILD` is off by default and this firmware does not
+ask for it, so the image carries a compile date and time; the sources also
+hold the line numbers their error checks report, so even a comment added
+above one of them moves the hash for the same version. A bench whose copy
+hashes differently from the table has to be judged on the version it
+reports.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
@@ -1028,7 +1080,7 @@ its boot state does, or by being the first to open a port nobody held.
 Measured for #317: an overlapping open of an already-open port leaves the
 board running, while a reset pulse from a second process restarts it and the
 board then reports `boot reason power on`. See
-[Sharing boards: leases](../README.md#sharing-boards-leases).
+[Sharing boards: leases](guide/leases.md#sharing-boards-leases).
 
 **One lock file is one device.** No two devices may be registered with one
 serial, whatever their types and whichever way each is written: the bench's
@@ -1106,10 +1158,12 @@ tools); `tshark` from the distribution (no GUI) for
 Add `--with-acroname` to `bootstrap.py` on a host with an Acroname hub.
 Install the peer SDKs only on the host that builds the peer
 images: nRF Connect SDK v3.4.1 with `nrfutil sdk-manager` (about 6 GB), and
-ESP-IDF v5.5.6 (about 3 GB). A host with docker can build the DK image
-without that install, with `scripts/ci.sh firmware-dk` (see the
-[firmware README](../firmware/nrf52840dk/README.md)); flashing still needs
-`nrfutil`.
+ESP-IDF v5.5.6 (about 3 GB). A host with docker can build either peer image
+without that install, with `scripts/ci.sh firmware-dk` and
+`scripts/ci.sh firmware-esp32` (see the
+[DK](../firmware/nrf52840dk/README.md) and
+[ESP32 peer](../firmware/esp32-classic-peer/README.md) firmware READMEs);
+flashing still needs `nrfutil` for a DK and `esptool` for a peer.
 
 ### macOS
 
@@ -1117,7 +1171,7 @@ A Mac needs no udev rules and has no BlueZ, so `ubertooth-scan` and
 `ubertooth-follow` are not applicable there. A Mac is a test host with its own
 Ubertooths and runs a runner, never the controller; the peers and the power
 controllers stay on the Linux host. See
-[A Mac test host](../README.md#a-mac-test-host).
+[A Mac test host](guide/deploy.md#a-mac-test-host).
 
 ## Known limits
 

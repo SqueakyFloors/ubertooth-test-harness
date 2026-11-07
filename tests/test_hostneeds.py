@@ -198,8 +198,10 @@ class NeedsTests(unittest.TestCase):
     def test_split_cases_keeps_order(self):
         cases = builtin_catalog().get("Host CLI surface").command_cases({}, {}, {})
         runnable, left_out = split_cases(cases, MAC)
-        self.assertEqual(len(cases) - 2, len(runnable))
-        self.assertEqual(["ubertooth-scan-help", "ubertooth-follow-help"],
+        # Both cases of each BlueZ-only tool, its help and its -V (#347).
+        self.assertEqual(len(cases) - 4, len(runnable))
+        self.assertEqual(["ubertooth-scan-help", "ubertooth-follow-help",
+                          "ubertooth-scan-version", "ubertooth-follow-version"],
                          [case.case_id for case, _reason in left_out])
         self.assertEqual((tuple(cases), []), split_cases(cases, LINUX))
 
@@ -301,7 +303,7 @@ class FollowHelp:
         self.commands.append(command)
         if command[0] == "ubertooth-follow":
             raise AssertionError("a not-applicable case ran")
-        text = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+        text = "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n"
         if command == ("ubertooth-util", "-h"):
             text = "usage\n"
         return CommandResult(command, 0, text, "", 0.01, False)
@@ -434,19 +436,19 @@ class DryRunTests(unittest.TestCase):
         self.assertIn("nothing is built or run", text)
         self.assertIn("host: Host_Local (", text)
         for tool in BLUEZ_TOOLS:
-            self.assertIn(f"    not applicable on Host_Local: {tool} help (BlueZ builds): {tool}",
+            self.assertIn(f"    not applicable on Host_Local: {tool} -h (BlueZ builds): {tool}",
                           text)
         self.assertIn("not applicable on Host_Local: -s of the test build's binary gives the "
                       "build's .dfu: needs a firmware build", text)
-        self.assertIn("    run: ubertooth-util help", text)
-        self.assertRegex(text, r"total: 2 test\(s\), \d+ case\(s\) to run, 3 case\(s\) and 0 "
+        self.assertIn("    run: ubertooth-util -h", text)
+        self.assertRegex(text, r"total: 2 test\(s\), \d+ case\(s\) to run, 5 case\(s\) and 0 "
                                r"test\(s\) not applicable")
 
     def test_a_test_build_artifact_makes_the_sign_case_applicable(self):
         code, text = self.dry_run("--artifact", "test build=IMAGE")
         self.assertEqual(0, code)
         self.assertIn("    run: -s of the test build's binary gives the build's .dfu", text)
-        self.assertIn("2 case(s) and 0 test(s) not applicable", text)
+        self.assertIn("4 case(s) and 0 test(s) not applicable", text)
 
 
 if __name__ == "__main__":

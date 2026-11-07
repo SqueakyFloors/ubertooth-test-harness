@@ -172,6 +172,34 @@ class BuildStringTests(unittest.TestCase):
             with self.subTest(build):
                 self.assertFalse(bootloader.names_commit(build, self.COMMIT))
 
+    def test_a_release_build_string_is_compared_with_the_release(self):
+        """Since #352 (fork #1230) the block carries the release name.
+
+        One string the whole way through, so it is compared for equality:
+        there is no shorter form of a release name to accept, and a build one
+        commit further on is a different version.
+        """
+        release = "2026-11-DEV1+22"
+        self.assertTrue(
+            bootloader.names_build(release, self.COMMIT, release)
+        )
+        for build in ("2026-11-DEV1+23", "2026-11-DEV1", "2026-11-DEV1+22*",
+                      "2020-12-R1+unknown", f"git-{self.COMMIT[:9]}", ""):
+            with self.subTest(build):
+                self.assertFalse(
+                    bootloader.names_build(build, self.COMMIT, release)
+                )
+
+    def test_an_older_pin_is_still_compared_as_a_commit(self):
+        expected = f"git-{self.COMMIT[:7]}"
+        # Another abbreviation of the same commit, which two checkouts give.
+        self.assertTrue(bootloader.names_build(
+            f"git-{self.COMMIT[:12]}", self.COMMIT, expected
+        ))
+        self.assertFalse(bootloader.names_build(
+            "2026-11-DEV1+22", self.COMMIT, expected
+        ))
+
 
 class RegionTests(unittest.TestCase):
 

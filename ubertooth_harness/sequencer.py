@@ -40,7 +40,13 @@ from ubertooth_harness.outputfiles import (
     output_of,
     stream_for,
 )
-from ubertooth_harness.rawlog import record_output
+from ubertooth_harness.rawlog import (
+    STAGE_BASELINE,
+    STAGE_CLEANUP,
+    STAGE_STATE,
+    STAGE_TRANSITION,
+    record_output,
+)
 from ubertooth_harness.resources import RegistryError
 from ubertooth_harness import targets
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
@@ -67,6 +73,7 @@ from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     EXPECTED_REVISION_KEY,
     MissingContext,
+    NothingToCompare,
     POWER_CYCLE_PORT_KEY,
     REGISTRY_PATH_KEY,
     StateCase,
@@ -696,7 +703,19 @@ class NamedTestSequencer:
         try:
             argv = step.resolve_argv(context)
             if step.observe is not None:
-                step.observe.expected_value(context)
+                try:
+                    step.observe.expected_value(context)
+                except NothingToCompare as error:
+                    # The step can run; only its comparison has nothing to
+                    # compare with, which evaluate() leaves out and records.
+                    # That is tolerated for a case's own steps alone, because
+                    # StateCase is what refuses a comparison with a reading
+                    # no earlier step of it records. A step from anywhere
+                    # else (the guard reads, which transitions.py builds and
+                    # no case owns) has had no such check, so the absence
+                    # fails closed here instead.
+                    if stage not in ("transition", "cleanup"):
+                        raise MissingContext(error.args[0]) from error
         except Unrestorable as error:
             reason = f"{step.name}: skipped, {error.args[0]}"
             details.update({"reason": reason, "argv": None})
@@ -739,7 +758,7 @@ class NamedTestSequencer:
         ):
             context[step.observe.key] = outcome.observed
         elif (
-            stage == "guard"
+            stage in (STAGE_BASELINE, STAGE_STATE)
             and step.observe is not None
             and outcome.observed is not None
             and outcome.failure
@@ -758,6 +777,11 @@ class NamedTestSequencer:
             "expected": outcome.expected,
             "observed": outcome.observed,
         })
+        if outcome.uncompared:
+            # The comparison this step carries was left out: the case never
+            # recorded the reading to compare with. The step's own checks
+            # decided its status, and the cleanup is still verified.
+            details["uncompared"] = outcome.uncompared
         publisher.emit("step_finished", status, details)
         return outcome.failure, True, result.cancelled, outcome.skipped
 
@@ -777,6 +801,29 @@ class NamedTestSequencer:
         command still has a hard timeout. A cleanup failure fails the case even
         when every transition step passed, and a passing cleanup never clears
         an earlier step failure.
+
+        A cleanup step that wants something an earlier step did not record is
+        judged by what the absence means, which is what decides whether the
+        board is reported as restored:
+
+        * the step cannot run, because its command line or its expected value
+          needs that value (``MissingContext``): a cleanup failure once a
+          mutating step has run, since something may have changed and nothing
+          wrote it back. Before that it is skipped as "not needed", and like
+          any cleanup step that did not run it leaves the cleanup unverified;
+        * the value cannot be written back by any host tool
+          (``Unrestorable``): the step is skipped, so the cleanup is
+          unverified too;
+        * only a comparison has nothing to compare with
+          (``NothingToCompare``): the step runs in full, its own checks decide
+          it, and the cleanup stays verified. The step records the reading it
+          could not compare with.
+
+        An unverified cleanup is what stops the test when the case also
+        failed or was canceled: the parent test goes on to the next case only
+        from a device a cleanup checked (``_run``). A case that passed with a
+        restore it did not need carries the same unverified mark and stops
+        nothing.
         """
         owner = {
             "phase": "test",
@@ -849,7 +896,7 @@ class NamedTestSequencer:
                         "canceled",
                         {
                             **owner,
-                            "stage": "transition",
+                            "stage": STAGE_TRANSITION,
                             "step_id": step.step_id,
                             "step_name": step.name,
                             "argv": None,
@@ -858,7 +905,7 @@ class NamedTestSequencer:
                     )
                     break
                 failure, ran, canceled, skipped = self._run_state_step(
-                    publisher, token, output_dir, step, "transition",
+                    publisher, token, output_dir, step, STAGE_TRANSITION,
                     context, owner, case_id, attempt=attempt,
                 )
                 mutated = mutated or (ran and step.mutates)
@@ -905,7 +952,7 @@ class NamedTestSequencer:
         for index, step in enumerate(case.cleanup):
             try:
                 failure, ran, _canceled, skipped = self._run_state_step(
-                    publisher, cleanup_token, output_dir, step, "cleanup",
+                    publisher, cleanup_token, output_dir, step, STAGE_CLEANUP,
                     context, owner, case_id,
                     unchanged=not mutated,
                 )
@@ -1016,11 +1063,15 @@ class NamedTestSequencer:
         failures = []
         changed = []
         canceled = False
+        # The stage says which of the two reads this is, so a reader can tell
+        # the baseline snapshot from the later unchanged-state check without
+        # inferring it from the check's name (#342).
+        stage = STAGE_BASELINE if after is None else STAGE_STATE
         for board in boards:
             board_failed = False
             for step in transitions.guard_steps((board,), after):
                 failure, _ran, step_canceled, _skipped = self._run_state_step(
-                    publisher, token, output_dir, step, "guard", context, owner, case_id
+                    publisher, token, output_dir, step, stage, context, owner, case_id
                 )
                 if failure:
                     failures.append(failure)

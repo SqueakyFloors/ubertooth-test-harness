@@ -2,7 +2,7 @@
 # Run scripts/ci.sh against an exact committed revision, in a fresh export,
 # locally or on another host. Uncommitted changes are never tested.
 #
-#   scripts/local-ci.sh [-r REV] [-s SSH_PREFIX] [test|build|all|firmware-dk]
+#   scripts/local-ci.sh [-r REV] [-s SSH_PREFIX] [test|build|all|firmware-dk|firmware-esp32]
 #
 # -r REV         revision to test (default HEAD)
 # -s SSH_PREFIX  run on another host. The prefix is a command that runs its
@@ -22,13 +22,13 @@ while getopts r:s: opt; do
         r) rev=$OPTARG ;;
         s) remote=$OPTARG ;;
         *) echo "usage: scripts/local-ci.sh [-r REV] [-s SSH_PREFIX]" \
-                "[test|build|all|firmware-dk]" >&2; exit 2 ;;
+                "[test|build|all|firmware-dk|firmware-esp32]" >&2; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
 what=${1:-all}
 case $what in
-    test|build|all|firmware-dk) ;;
+    test|build|all|firmware-dk|firmware-esp32) ;;
     *) echo "unknown check set: $what" >&2; exit 2 ;;
 esac
 

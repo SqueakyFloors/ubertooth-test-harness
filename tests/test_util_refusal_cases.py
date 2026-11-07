@@ -1,3 +1,4 @@
+import re
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from ubertooth_harness.plan import load_plan
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.sequencer import NamedTestSequencer
 from ubertooth_harness.stateful import StateCase
+from tests.test_manifest_preflight import LIBBTBB_RELEASE, RELEASE
 from tests.test_sequencer import CollectSink, run_contract
 from tests.test_tool_cases import failed_names
 
@@ -37,16 +39,29 @@ class FakeUtil:
     Ubertooth device", as before 753269b). ``switch`` False is a library from
     before b6d8ede."""
 
+    # The host tools' version, as every build prints it since fork
+    # `ce13614c6`: the release the build came from with libbtbb's beside it,
+    # and no libbtbb path line. That is the only layout current-release
+    # validation accepts (#358).
+    RELEASE_VERSION = (
+        f"Host tools version: {RELEASE} (libbtbb {LIBBTBB_RELEASE})"
+    )
+    # What a build printed before it, which no check accepts any more: kept
+    # so a test can show that such an answer is turned down.
+    OLD_VERSION = ("Host tools version: libubertooth 1.1 (git-test), "
+                   "libbtbb 1.3 (git-btbb)")
+
     def __init__(self, *, bugs=(), switch=True):
         self.bugs = set(bugs)
         self.switch = switch
+        self.version_line = self.RELEASE_VERSION
         self.commands = []
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n")
+            return self._result(command, 0, f"{self.version_line}\n")
         if command[0] == sys.executable:
             assert Path(command[1]).name == "refusal.py" and command[2] == "probe", command
             answer = ("yes (/p/lib/libubertooth.so.1)" if self.switch else
@@ -90,8 +105,7 @@ class FakeUtil:
             # host lines, then nothing attached, exit 0 and no switch note.
             return self._result(
                 command, 0,
-                "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n"
-                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                f"{self.version_line}\n"
                 "Firmware version: no Ubertooth attached\n")
         if "h" in given:
             return self._result(command, 0, USAGE)
@@ -217,6 +231,34 @@ class CaseTests(unittest.TestCase):
         self.assertTrue(summary.passed, summary.failure_reason)
         summary, _events = run(FakeUtil())
         self.assertTrue(summary.passed, summary.failure_reason)
+
+    def test_the_cleanup_reads_the_host_version_line_the_fork_prints(self):
+        """Every case's cleanup runs `-V` to show the tool still runs.
+
+        The line it reads names the release the build came from, with
+        libbtbb's beside it. What the version must be is preflight's
+        business, where the resolved commit is known; here only the layout
+        decides, and the layout a build printed before fork `ce13614c6` is no
+        longer one of them (#358).
+        """
+        _arguments, built = cases("smoke")
+        cleanups = [
+            step for case in built for step in case.cleanup
+            if step.step_id == "host-version"
+        ]
+        self.assertTrue(cleanups)
+        cleanup = cleanups[0]
+        current = (f"{FakeUtil.RELEASE_VERSION}\n"
+                   "Firmware version: no Ubertooth attached\n")
+        for pattern in cleanup.output_patterns:
+            self.assertRegex(current, pattern)
+        older = (f"{FakeUtil.OLD_VERSION}\n"
+                 "Firmware version: no Ubertooth attached\n")
+        self.assertFalse(
+            all(re.search(pattern, older)
+                for pattern in cleanup.output_patterns),
+            older,
+        )
 
     def test_an_accepted_pair_fails_every_pair_case(self):
         summary, events = run(FakeUtil(bugs=("pairs-accepted",)), coverage="smoke")
