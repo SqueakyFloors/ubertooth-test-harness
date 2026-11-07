@@ -89,7 +89,10 @@ export UBERTOOTH_HARNESS_OWNER="alice"
 
 Holds devices for the length of one command, naming them the way a bench note
 does: an alias, a full serial, an unambiguous prefix of one, or
-a J-Link serial with or without its leading zeros.
+a J-Link serial with or without its leading zeros. A DK is named either way
+and held one way: its external lock file is the padded spelling the registry
+carries, whichever name resolved it
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
 
 ```sh
 .venv/bin/python scripts/lab/hold UT_Linux0 -- ubertooth-util -U <serial> -v
@@ -133,7 +136,10 @@ lease file of an Ubertooth with that serial and a peer's bridge serial is 32
 hex digits
 ([#290](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/290)).
 Its **external lock file** is the one the bench already had, named after the
-plain serial: `board-<plain serial>.lock` under the template above.
+plain serial: `board-<plain serial>.lock` under the template above. For a DK
+that is the padded J-Link serial, the one spelling the registry takes, so the
+two spellings of one serial cannot become two files
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
 
 So a bench script that locks `board-<plain serial>.lock` and nothing else is
 met by a `hold`, by an `ubertooth-harness lease`, and by a `run-suite` run, on
