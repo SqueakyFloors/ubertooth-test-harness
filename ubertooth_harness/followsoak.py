@@ -151,6 +151,7 @@ from ubertooth_harness.addresssoak import (  # noqa: E402
     MIN_WINDOW_S,
     POLL_S,
     RESET_TIMEOUT_S,
+    WATCHDOG_BOARD_SILENT,
     Attempt,
     Capture,
     DkShell,
@@ -194,8 +195,14 @@ MAX_LINKS_TRACKED = 64
 # counted before the count becomes a floor. They are never printed; this only
 # bounds what a busy bench costs in memory.
 MAX_OTHER_LINKS = 10000
-# How many of the places a board reset itself the summary names.
+# How many intervals and checkpoints the summary carries in full.
+# progress.jsonl holds every one of them.
 MAX_INTERVALS_SUMMARIZED = 200
+# How many intervals a run holds in memory. A board that died in the first
+# hour of a three-day run reads its record after every restart, so past this
+# the middle ones are forgotten, oldest and newest kept; each one was
+# recorded as it closed.
+MAX_HELD_INTERVALS = 2000
 # How long after the capture has gone the board is given to answer a read at
 # a checkpoint, which is what says it is idle.
 IDLE_TRIES = 3
@@ -489,10 +496,15 @@ class Checkpoint:
     watchdog_reason: str = ""
     capture_restarted: bool = False
     seconds: float = 0.0
+    # The run was stopped while this checkpoint was running, so what it did
+    # not get to is the cancellation's doing and not the checkpoint's.
+    canceled: bool = False
 
     @property
     def problem(self) -> str:
         """Why this checkpoint did not do its job, if it did not."""
+        if self.canceled:
+            return ""
         if not self.stopped_cleanly:
             return "the capture did not stop on SIGTERM and had to be killed"
         if not self.board_idle:
@@ -514,6 +526,7 @@ class Checkpoint:
             "watchdog_read": self.watchdog_read,
             "watchdog_reason": self.watchdog_reason,
             "capture_restarted": self.capture_restarted,
+            "canceled": self.canceled,
             "seconds": round(self.seconds, 3),
             "problem": self.problem,
         }
@@ -774,6 +787,7 @@ class Soak:
         self.phases: list[Phase] = []
         self.attempts: list[Attempt] = []
         self.intervals: list[Interval] = []
+        self.intervals_forgotten = 0
         self.checkpoints: list[Checkpoint] = []
         # Connections the fixture announced, newest last, bounded: a phase
         # keeps its own link, so what falls out here is only the lookup.
@@ -802,6 +816,7 @@ class Soak:
         self.watchdog_transfer_errors = 0
         self.watchdog_where: list = []
         self.watchdog_unreadable = 0
+        self.watchdog_not_reported = 0
         self.watchdog_last_reason = ""
         self.samples = 0
         self.rss_first = None
@@ -1461,6 +1476,13 @@ class Soak:
                 f"{interval.new_transfer_errors} transfer error(s)"
                 + (f", radio waits {watchdog.wait_counts(interval.new_radio_waits)}"
                    if interval.new_radio_waits else ""))
+        if len(self.intervals) > MAX_HELD_INTERVALS:
+            # A board that died in the first hour of a three-day run reads
+            # its record after every restart. Each one was recorded as it
+            # closed, so what is held here is only what the summary reads:
+            # the middle ones go, oldest and newest kept.
+            self.intervals_forgotten += 1
+            del self.intervals[MAX_HELD_INTERVALS // 2]
         self.open_interval()
 
     def read_watchdog_now(self, when: str, tries: int = 1,
@@ -1484,7 +1506,14 @@ class Soak:
                 self.watchdog_baseline = record
             entry["watchdog"] = record.to_dict()
         else:
-            self.watchdog_unreadable += 1
+            # Two different things, and only one of them is a failure: a
+            # board that will not answer is one the run cannot use again,
+            # while firmware without the record is reported and judged by a
+            # person (watchdog.py).
+            if why == WATCHDOG_BOARD_SILENT:
+                self.watchdog_unreadable += 1
+            else:
+                self.watchdog_not_reported += 1
             self.watchdog_last_reason = why
         self.watchdog_reads += 1
         self.record(entry)
@@ -1513,6 +1542,7 @@ class Soak:
         attempt = self.stop_capture(f"checkpoint {mark.index}")
         mark.stopped_cleanly = attempt is None or not attempt.forced
         if self.canceled:
+            mark.canceled = True
             mark.seconds = self.elapsed - mark.at
             self.record(mark.to_dict())
             return mark
@@ -1545,6 +1575,8 @@ class Soak:
         if not self.canceled:
             mark.capture_restarted = self.start_capture(
                 f"after checkpoint {mark.index}", checkpoint=True)
+        else:
+            mark.canceled = True
         mark.seconds = self.elapsed - mark.at
         self.record(mark.to_dict())
         if mark.problem:
@@ -1875,7 +1907,6 @@ class Soak:
             "acquired_share": in_time / len(phases) if phases else 0.0,
             "with_enough_packets": enough,
             "packets_share": enough / len(phases) if phases else 0.0,
-            "allowance": self.allowance(len(phases), options.min_follow_share),
             "fastest_acquisition_s": round(min(acquired), 3) if acquired else None,
             "median_acquisition_s": (round(statistics.median(acquired), 3)
                                      if acquired else None),
@@ -2052,15 +2083,17 @@ class Soak:
                 f"{self.capture_error_count} capture file(s) could not be read to "
                 "the end: " + "; ".join(self.capture_errors[:3]))
         problems += self.checkpoint_problems()
-        if not self.checkpoints:
+        if not self.checkpoints and not self.canceled:
             # The plan asked for them, and the figures a checkpoint produces
             # are half of what this soak reports; a run that took none has
-            # not done what it was asked.
+            # not done what it was asked. A canceled run is its own reason:
+            # the cancellation is already among the problems, and a stop in
+            # the first interval has taken none through no fault of the board.
             problems.append("the run took no watchdog checkpoint")
         if self.watchdog_unreadable:
             problems.append(
-                f"{self.watchdog_unreadable} watchdog read(s) brought nothing "
-                f"back: {self.watchdog_last_reason}")
+                f"{self.watchdog_unreadable} watchdog read(s) found a board that "
+                f"would not answer: {self.watchdog_last_reason}")
         if self.restarts > options.max_restarts:
             problems.append(
                 f"{self.restarts} unplanned restart(s), more than "
@@ -2289,18 +2322,22 @@ class Soak:
             },
             "intervals": {
                 "count": len(self.intervals),
+                "forgotten": self.intervals_forgotten,
                 "with_counter_increases": sum(
                     1 for item in self.intervals if item.counters_moved),
-                # Every interval is in progress.jsonl; the summary carries
-                # the ones that moved a counter, and the rest up to a bound.
-                "records": [item.to_dict() for item in self.intervals
-                            if item.counters_moved][:MAX_INTERVALS_SUMMARIZED]
-                or [item.to_dict() for item in
-                    self.intervals[:MAX_INTERVALS_SUMMARIZED]],
+                # Every interval is in progress.jsonl. Here: the ones that
+                # moved a counter, which is what a reader of a long run
+                # looks for, and then the first few whatever they did.
+                "counter_increases": [item.to_dict() for item in self.intervals
+                                      if item.counters_moved
+                                      ][:MAX_INTERVALS_SUMMARIZED],
+                "records": [item.to_dict() for item in
+                            self.intervals[:MAX_INTERVALS_SUMMARIZED]],
             },
             "watchdog": {
                 "reads": self.watchdog_reads,
-                "unreadable": self.watchdog_unreadable,
+                "board_would_not_answer": self.watchdog_unreadable,
+                "not_reported_by_this_firmware": self.watchdog_not_reported,
                 "unrequested_resets": self.watchdog_resets,
                 "transfer_errors": self.watchdog_transfer_errors,
                 "where": self.watchdog_where,
@@ -2432,7 +2469,9 @@ class Soak:
         board = summary["watchdog"]
         say(f"watchdog: {board['unrequested_resets']} unrequested reset(s) and "
             f"{board['transfer_errors']} transfer error(s) over {board['reads']} "
-            f"read(s), {board['unreadable']} read(s) that brought nothing back"
+            f"read(s), {board['board_would_not_answer']} read(s) the board would "
+            f"not answer, {board['not_reported_by_this_firmware']} this firmware "
+            "does not report"
             + ("; " + "; ".join(board["where"]) if board["where"] else ""))
         memory = summary["memory"]
         say(f"memory: first {memory['first_kb']} KiB, last {memory['last_kb']} KiB, "

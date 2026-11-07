@@ -32,7 +32,7 @@ import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from ubertooth_harness import followsoak, nrfdk, watchdog
+from ubertooth_harness import addresssoak, followsoak, nrfdk, watchdog
 from tests.executables import write_executable
 from tests.fake_dk import FakeFirmware, FakePort
 from tests.test_addresssoak import FAKE_UTIL, SERIAL
@@ -329,7 +329,8 @@ class ScenarioTests(SoakTestCase):
         # One read before the run, one per checkpoint, one at the end.
         self.assertEqual(summary["watchdog"]["reads"],
                          summary["checkpoints"]["taken"] + 2)
-        self.assertEqual(0, summary["watchdog"]["unreadable"])
+        self.assertEqual(0, summary["watchdog"]["board_would_not_answer"])
+        self.assertEqual(0, summary["watchdog"]["not_reported_by_this_firmware"])
         intervals = [entry for entry in self.progress()
                      if entry.get("record") == "interval"]
         self.assertEqual(summary["watchdog"]["reads"], len(intervals))
@@ -787,13 +788,38 @@ class VerdictTests(unittest.TestCase):
         self.assertTrue(any("found the board still in a mode" in problem
                             for problem in problems), problems)
 
-    def test_a_watchdog_read_that_brought_nothing_back_fails(self):
+    def test_a_watchdog_read_the_board_would_not_answer_fails(self):
         soak = self.healthy()
         soak.watchdog_unreadable = 2
-        soak.watchdog_last_reason = "the board did not answer the watchdog read"
+        soak.watchdog_last_reason = addresssoak.WATCHDOG_BOARD_SILENT
         problems = soak.judge()
-        self.assertTrue(any("2 watchdog read(s) brought nothing back" in problem
-                            for problem in problems), problems)
+        self.assertTrue(any("2 watchdog read(s) found a board that would not "
+                            "answer" in problem for problem in problems),
+                        problems)
+
+    def test_firmware_that_does_not_report_the_record_is_not_a_failure(self):
+        # watchdog.py's own doctrine: a board that will not answer is one the
+        # run cannot use again, and firmware without the record is reported
+        # and judged by a person.
+        soak = self.healthy()
+        soak.watchdog_not_reported = 3
+        soak.watchdog_last_reason = addresssoak.WATCHDOG_NOT_REPORTED
+        self.assertEqual([], soak.judge())
+
+    def test_a_checkpoint_the_cancellation_cut_short_is_not_its_own_failure(self):
+        soak = self.healthy()
+        soak.canceled = "SIGINT"
+        soak.checkpoints = [followsoak.Checkpoint(
+            0, 1800.0, 3, stopped_cleanly=True, board_idle=True,
+            watchdog_read=True, canceled=True)]
+        problems = soak.judge()
+        self.assertEqual(["the run was stopped by SIGINT"], problems)
+
+    def test_a_canceled_run_is_not_blamed_for_taking_no_checkpoint(self):
+        soak = self.healthy()
+        soak.canceled = "SIGTERM"
+        soak.checkpoints = []
+        self.assertEqual(["the run was stopped by SIGTERM"], soak.judge())
 
     def test_a_capture_with_no_connection_packet_that_decoded_fails(self):
         soak = self.healthy()

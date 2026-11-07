@@ -936,6 +936,15 @@ def board_answers(serial: str) -> tuple[bool, str]:
     return False, reason or f"{UTIL} -v exited {result.returncode}"
 
 
+# Why a `-w` read brought no record back. Named, because the two mean
+# different things to a verdict: a board that will not answer is one the run
+# cannot use again, and firmware without the record is no failure at all
+# (watchdog.py's own doctrine). A caller that told them apart by matching the
+# text would break the first time the wording was improved.
+WATCHDOG_BOARD_SILENT = "the board did not answer the watchdog read"
+WATCHDOG_NOT_REPORTED = "this firmware does not report a watchdog record"
+
+
 def read_watchdog(serial: str, tries: int = 1,
                   pause_s: float = WATCHDOG_RETRY_PAUSE_S
                   ) -> tuple[watchdog.WatchdogRecord | None, str]:
@@ -958,8 +967,8 @@ def read_watchdog(serial: str, tries: int = 1,
         if record is not None:
             return record, ""
     if watchdog.board_unreachable(text):
-        return None, "the board did not answer the watchdog read"
-    return None, "this firmware does not report a watchdog record"
+        return None, WATCHDOG_BOARD_SILENT
+    return None, WATCHDOG_NOT_REPORTED
 
 
 def resident_kb(pid: int, run=subprocess.run) -> int | None:
