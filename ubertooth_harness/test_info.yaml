@@ -908,27 +908,44 @@ Raw receive replay:
     harness writes the input. It covers decode behavior no live run can pin
     down, and it runs in CI with no board and no USB.
   theory: >-
-    The fixture carries two LAPs, chosen errors, chosen channels, chosen host
-    times, and decoy records, so the expected output is computed rather than
-    pattern-matched: which packet lines appear, in what order, with which
-    systime, which ones a filter drops, and how many packets reach a capture
-    file.
+    The fixture carries four piconets, chosen errors, chosen channels, chosen
+    host times, and decoy records, so the expected output is computed rather
+    than pattern-matched: which packet lines appear, in what order, with
+    which systime, which ones a filter drops, and how many packets reach a
+    capture file. Each piconet carries something the others cannot: POLLs and
+    a DH1, whose payload CRC settles an address part; ID packets only, which
+    have no header to settle one from; an address part of 0x00, which is an
+    address like any other and has to start the clock search like any other;
+    and the payload types the bench does not reliably produce -- an AUX1,
+    whose payload header is followed by no CRC, a DV, whose record holds its
+    data field and not the voice field ahead of it, an EV3, whose length is
+    in no field and is found by its CRC, and a DH3 claiming a payload no
+    400-symbol capture bank can hold.
   hardware: >-
     No board, no USB. Nothing transmits.
   expected: >-
-    Smoke runs 12 cases, 11 where there is no /proc: decode every LAP in the fixture, derive the UAP with
+    Smoke runs 14 cases, 13 where there is no /proc: decode every LAP in the fixture, derive the UAP with
     -l, replay into PCAPNG and into PCAP (link type 255, the fixture's packet
     count), a -d file that cannot be opened (exit 1, one error line, no usage
     text, nothing created or changed anywhere in the directory), and -s
-    decoding the same as without it. Six smoke cases are about where a
+    decoding the same as without it. Two more read the fourth piconet's
+    capture record by record -- one record of each of the four payload types,
+    the ACL, SCO and eSCO transports between them, three carrying a payload,
+    two passing a CRC, the AUX1 reporting no CRC checked, the DH3 carrying no
+    payload at all, and no record carrying more payload than one capture bank
+    holds -- and state -u 00 for the piconet whose address part is zero,
+    which must give the CLK6 note at offset 0 and the start of the CLK1-27
+    search, as for any other address part. Six smoke cases are about where a
     capture goes: -q - writes a readable PCAP to the redirected stream with
     the packet report printed on neither stream, /dev/stdout and /dev/fd/1
     mean that stream too and so does /proc/self/fd/1 on Linux, /dev/fd/3 is
     the caller's own file so the report keeps standard output, -q and -r naming one file are refused naming both
     options, and a -d that names the dump -i is replaying is refused. Each
     states the whole directory afterwards with the input's SHA-256.
-    Comprehensive runs 30, 29 where there is no /proc, adding the survey
-    listing of both piconets, a LAP filter, a correct and a wrong -u, -e 0
+    Comprehensive runs 32, 31 where there is no /proc, adding the survey
+    listing of every piconet in the fixture, with the address part shown for
+    the three it settled one for -- 00 among them, as an address and not an
+    absence -- and ?? for the ID-packet one; a LAP filter, a correct and a wrong -u, -e 0
     dropping the packet with an error, a -d dump compared byte for byte with
     the fixture, a filtered PCAP, an empty file, a file whose last record is
     cut short, a missing file, the recorded systime on every packet line, a
@@ -946,8 +963,11 @@ Raw receive replay:
     bare decode warns that the capture is lost.
   limitations: >-
     The fixture is synthetic, never an over-the-air capture, so this covers
-    the decode path and not the receive path. There is no LE equivalent: no
-    tool calls libbtbb's LE file replay. The capture-destination cases are
+    the decode path and not the receive path. Its records carry one fixed
+    signal reading and no background estimate at all, so nothing here says
+    how much a level varies across a capture; that is Classic capture record
+    fields'. There is no LE equivalent: no tool calls libbtbb's LE file
+    replay. The capture-destination cases are
     ubertooth-rx's; the same checks in ubertooth-btle and ubertooth-follow are
     not covered, and nor is a capture written to a terminal, which no run has.
     Five things the fork's own code calls out are uncovered too: /dev/stdin
@@ -958,9 +978,14 @@ Raw receive replay:
     backstop inside take_stdout, which no case reaches because the
     command-line check refuses such a pair first.
   related:
+    - ubertooth#754
     - ubertooth#782
+    - ubertooth#1125
     - ubertooth#1203
+    - libbtbb#28
+    - libbtbb#135
     - ubertooth-test-harness#333
+    - ubertooth-test-harness#363
 
 BLE replay:
   purpose: >-
@@ -977,10 +1002,13 @@ BLE replay:
     constants. One dump is a promiscuous capture of one connection: the five
     parameter records that mode sends, which carry no packet and so reach no
     capture file, the CONNECT_IND that opened the connection, and two data
-    packets on the connection's own access address. The other is one
+    packets on the connection's own access address. Another is one
     advertisement whose advertising data names three company identifiers: one
     the Bluetooth SIG registered recently, one it has had from the start, and
-    one it has never assigned.
+    one it has never assigned. The third is that advertisement at three of
+    the board's readings: two the board can measure, and one at the top of
+    the radio's scale, where every reading gives the same dBm figure and so
+    none of them is a measurement of the packet.
   hardware: >-
     No board, no USB, no peer. Nothing transmits.
   expected: >-
@@ -995,7 +1023,14 @@ BLE replay:
     line carrying the host time of its own record and the access address the
     CONNECT_IND handed out. The advertising replay must name both registered
     identifiers and say "not assigned" for the third, in order. A missing or
-    reworded line fails the case and is named. Comprehensive adds two: a
+    reworded line fails the case and is named. The third smoke case replays
+    the three readings into a PCAP: the two measurable readings must print as
+    two different figures, the one at the top of the scale must print
+    rssi=none as the word, and the capture's records must carry the dBm
+    figure the host's model gives each reading -- 0 dBm included where the
+    line said none, because a record has no field for "not measured" -- with
+    the noise flag set on the one record written with a background estimate
+    and clear on the two without. Comprehensive adds two more: a
     replay dumping with -d, whose file must be the dump it read byte for
     byte, parameter records included; and a replay with no major mode, which
     must be refused with exit 1 and decode nothing, because a record does not
@@ -1007,7 +1042,9 @@ BLE replay:
     record's flag, so the fixture's CRC bytes are zero. The company names are
     the pinned libbtbb table's, so a regenerated table that renames a company
     fails the case; the other reader of that table, ubertooth-scan -x, is not
-    covered. Neither is the rest of the fork's own -R and -d surface -- the
+    covered. The levels are the ones the fixture writes, so they say what a
+    reading turns into and not what a radio reads; how much a live capture's
+    levels vary is not established for the low-energy tests. Neither is the rest of the fork's own -R and -d surface -- the
     destination that is the dump being replayed, the capture files a replay
     writes, a cut or unreadable dump -- which the fork's test_btle_replay.py
     covers at build time.
@@ -1348,7 +1385,14 @@ Capture known BLE advertiser:
     tag. A capture case passes when the file holds at least a fifth of the
     DK's advertising events (and at least three packets) and no more than the
     interval allows; an absence case passes when the file holds none of the
-    DK's packets.
+    DK's packets. Every record's power fields are
+    held to the rules libbtbb's writers follow whatever was on the air: every
+    record dewhitened, carrying a signal figure and a count of its
+    access-address errors; the noise flag set exactly when the noise figure
+    is below the signal; each figure the flags call a measurement inside the
+    -120 to 0 dBm the host's model of the radio produces; and the reference
+    access address flag set exactly when that field holds an address, which
+    for a connection's own packets it does not.
   limitations: >-
     The minimum share is a floor a working bench clears comfortably, not an
     expected capture rate, and it is bench-specific: a weaker link or a
@@ -1358,10 +1402,17 @@ Capture known BLE advertiser:
     the margin is what carries the weak-link entry rather than a like-for-like
     figure. The test needs two kinds of hardware and a flashable DK, so it
     cannot run where the DK is absent, and the DK image comes from a local
-    build that CI compiles but does not publish.
+    build that CI compiles but does not publish. No floor is put on how much
+    a capture's levels vary: that is measured for Classic and not established
+    here. A record has no field for a level the board could not measure, so
+    the word none and a packet's own level are pinned by BLE replay, which
+    writes the readings itself.
   related:
+    - ubertooth#867
+    - ubertooth#1198
     - ubertooth-test-harness#86
     - ubertooth-test-harness#168
+    - ubertooth-test-harness#363
 
 Capture known BLE connection:
   purpose: >-
@@ -1397,7 +1448,12 @@ Capture known BLE connection:
     decoding with a correct CRC, at least one packet is longer than 27 bytes,
     and the central reports that it connected, wrote and had its update
     accepted. A capture that misses any of that is taken again, up to three
-    captures, each written to its own file and checked on its own.
+    captures, each written to its own file and checked on its own. Every
+    record's power fields are held to the same rules as in Capture known BLE
+    advertiser, which are the writers' own and so cover a followed connection
+    too: a connection's packets carry no reference access address, because
+    that field is the address configured into the tool, so its flag is clear
+    there and set on the advertising-channel packets that carry 8e89bed6.
   limitations: >-
     The packet counts are floors a working follow clears, not expected counts:
     of 18 packets in one followed connection measured on the bench, two
@@ -1409,11 +1465,16 @@ Capture known BLE connection:
     clears these floors with room and no flag fires. It needs the DK pair
     bound distinctly, which is a hardware question rather than an RF one;
     weaklink.CHECKS and the plan files are the live record of which
-    attenuation this test has figures for.
+    attenuation this test has figures for. No floor is put on how much a
+    capture's levels vary: that is measured for Classic and not established
+    here.
   related:
     - ubertooth#505
+    - ubertooth#867
+    - ubertooth#1198
     - libbtbb#21
     - ubertooth-test-harness#168
+    - ubertooth-test-harness#363
 
 Follow a BLE connection across its end:
   purpose: >-
@@ -1700,6 +1761,16 @@ Classic capture record fields:
     The role-swapped case keeps the address checks honest: a decoder reading a
     constant passes one case and fails the other.
 
+    The level figures have to vary. Every other rule here is satisfied by a
+    receiver that took one reading and reported it for every packet: the
+    figure is inside the radio's range and agrees with its own flag, and says
+    nothing about any packet but the one it came from. So each capture must
+    carry at least four different signal figures and four different noise
+    figures among the records that carry a measured one. No record may carry
+    more payload than one capture bank holds either -- 34 bytes, the 400
+    symbols of a bank less the 122 the access code and header take -- which
+    is arithmetic rather than a measurement.
+
     The record times are held to the run that wrote them. Following a piconet
     puts the board's clock on the piconet's, which moves it by up to its
     327.68 s period in either direction, and a reconstruction that read that
@@ -1737,7 +1808,9 @@ Classic capture record fields:
     to agree with its own payload and the record times to span no longer than
     the capture ran and to step backwards no further than 2000 us, and
     refuses a clock reported with no score or with a score only equal to the
-    next best candidate's.
+    next best candidate's, requires at least four distinct signal figures and
+    four distinct noise figures, and refuses a payload longer than one
+    capture bank.
   limitations: >-
     The packet floors are floors, for the same reason as the other Classic
     tests. The payload length and CRC checks do not fire on the bench's own
@@ -1773,10 +1846,19 @@ Classic capture record fields:
     not the way to earn a case for them, and 50 dB recovers no clock at all.
     What is open is whether a failed CRC here comes from the air rather than
     from a clock that never settled, and no case requires a flag to have
-    fired. weaklink.CHECKS and docs/tests.md carry the measurements.
+    fired. The two level floors were measured over twenty 25-second captures
+    of this piconet at 2026-11-DEV2: 122 to 373 records, 21 to 36 distinct
+    signal figures, and 28 to 53 distinct noise figures among the 90 to 326
+    records carrying a measured one. They are a fifth and a seventh of those
+    lowest counts, so they are a floor on variation and not a measurement of
+    this bench's spread; a bench whose figures genuinely did not vary would
+    fail them. weaklink.CHECKS and docs/tests.md carry the measurements.
   related:
+    - ubertooth#711
+    - ubertooth#754
     - ubertooth-test-harness#264
     - ubertooth-test-harness#168
+    - ubertooth-test-harness#363
 
 Classic btbr console:
   purpose: >-
@@ -1982,8 +2064,10 @@ Bluetooth inquiry scan:
     devices in range when it reads their names.
   expected: >-
     Two cases in both coverage profiles, each pinning exit 0. The -s case
-    passes when the inquiry reports both peers at their registered addresses
-    and at least one comes back under the name its firmware derives; the
+    passes when the inquiry reports both peers at their registered addresses,
+    at least one comes back under the name its firmware derives, and neither
+    comes back under any name but its own or [unknown], which is what a
+    failed read prints; the
     survey case passes when the results list the central's LAP with an AFH
     map line after it. Both cases have passed on a bench adapter, and both
     coverage profiles run the same two.
@@ -1995,8 +2079,12 @@ Bluetooth inquiry scan:
     The inquiry asks that one of the two peers came back under its own name
     rather than both, because a run showed a name reported against the wrong
     address inside the library, below anything the harness can see; both wrong
-    still fails, but a regression that misattributes exactly one name would
-    pass. A pending page is not held against a run, only an established link,
+    still fails, and so does a peer reported under a name that is neither its
+    own nor [unknown], which is how that run's misattribution shows and what
+    the one-name floor on its own let through. Requiring both peers under
+    their own names would have failed 3 of 19 bench runs, two of them a page
+    that went unanswered rather than a misattribution, and is left to harness
+    #384. A pending page is not held against a run, only an established link,
     since the tool's own name reads leave pages behind. The window allowed for
     the name reads is the one guessed number here, measured at 78 s and 55 s
     against 111 s, and two more silent neighbors would use it up.
@@ -2053,6 +2141,10 @@ Follow Classic piconet over HCI:
     passes a fifth to a third, with 35 carrying a transport a receive-only
     capture records as zero; both are header-derived and both belong to fork
     #518, so the HEC floor here is zero and the transport nibble is let be.
+    The two level floors Classic capture record fields carries are left out
+    for the same reason: they were measured on captures ubertooth-rx took,
+    and how much a level varies across a capture this tool takes is not
+    established. The payload bound, which is arithmetic, is checked.
     -a's map-reading branch is untested for want of a peer that runs a paged
     link with AFH on. -l and -u without -t are deliberately not exercised:
     the page then goes to a guessed address and whether it arrives is not

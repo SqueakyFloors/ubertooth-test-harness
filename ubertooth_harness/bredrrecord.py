@@ -154,6 +154,22 @@ AUX1 = 9
 NUM_BREDR_CHANNELS = 79
 # The longest payload a record can hold (BREDR_MAX_PAYLOAD).
 MAX_PAYLOAD = 400
+# How much payload one capture bank can hold, which is a tighter bound than
+# the record format's and the one a caller asks for with
+# ``--max-payload-bytes``.
+#
+# An Ubertooth sends a Basic Rate packet as one bank of 400 symbols (50 data
+# bytes in usb_pkt_rx), and libbtbb decodes a packet from the bank it arrived
+# in and no further: the payload starts 122 symbols past the sync word (its
+# own 64, the 4-symbol trailer, and 54 header symbols), so at most 278
+# symbols are left for it, which is 34 whole bytes where the payload carries
+# no error correction and fewer where it does. A record claiming more than
+# that is a payload decoded out of whatever followed the packet in the bank
+# rather than one that arrived, which is what a decoder told it had ten
+# banks produced (fork SqueakyFloors/ubertooth#754).
+BANK_SYMBOLS = 400
+PACKET_PREFIX_SYMBOLS = 122
+MAX_BANK_PAYLOAD = (BANK_SYMBOLS - PACKET_PREFIX_SYMBOLS) // 8
 # A LAP field of every bit set is libbtbb's LAP_ANY, and a UAP field of 0xff
 # its UAP_ANY: the capture had no address to record.
 LAP_ANY = 0xFFFFFF
@@ -496,7 +512,8 @@ def _transport_problems(record: Record) -> list[str]:
 
 
 def _consistency(record: Record, *, payload_checks: bool,
-                 transport_checks: bool = True) -> list[str]:
+                 transport_checks: bool = True,
+                 max_payload_bytes: int | None = None) -> list[str]:
     """What is wrong inside one record, with nothing else to compare it to.
 
     ``transport_checks`` off leaves the transport nibble alone. The nibble
@@ -533,6 +550,11 @@ def _consistency(record: Record, *, payload_checks: bool,
     if len(record.payload) > MAX_PAYLOAD:
         problems.append(f"{len(record.payload)} payload bytes, more than the "
                         f"{MAX_PAYLOAD} a record holds")
+    if max_payload_bytes is not None and len(record.payload) > max_payload_bytes:
+        problems.append(
+            f"{len(record.payload)} payload bytes, more than the "
+            f"{max_payload_bytes} one capture bank can hold: a payload this "
+            "long did not arrive with this packet")
     if record.has(REFLAP_VALID) != (record.ref_lap != LAP_ANY):
         problems.append(
             f"the reference LAP flag is {'set' if record.has(REFLAP_VALID) else 'clear'} "
@@ -550,6 +572,13 @@ def _consistency(record: Record, *, payload_checks: bool,
     if record.has(CRC_CHECKED) and len(record.payload) < 3:
         problems.append(f"a CRC was checked over {len(record.payload)} payload "
                         "bytes, which cannot hold a CRC and a byte for it to cover")
+    # An AUX1 is the one type that carries a payload header and no CRC after
+    # the body (Vol 2, Part B, Section 6.5.4.7), so there is nothing in one
+    # for a decoder to have checked. A record that says otherwise read two
+    # body bytes as a CRC.
+    if record.packet_type == AUX1 and record.has(CRC_CHECKED):
+        problems.append("an AUX1 payload reports a checked CRC, and an AUX1 "
+                        "carries none")
     if transport_checks:
         problems += _transport_problems(record)
     if record.rate != MOD_GFSK:
@@ -595,10 +624,13 @@ def problems(found: list[Record], *, lap: int | None = None,
              min_packets: int = 0, min_reference_uap: int = 0,
              min_with_payload: int = 0, min_hec_valid: int = 0,
              min_crc_valid: int = 0, min_channels: int = 0,
+             min_distinct_signal: int = 0, min_distinct_noise: int = 0,
              max_access_code_errors: int | None = None,
              types: tuple[str, ...] = (), require_types: tuple[str, ...] = (),
+             require_transports: tuple[str, ...] = (),
              payload_checks: bool = True,
              transport_checks: bool = True,
+             max_payload_bytes: int | None = None,
              max_span_s: float | None = None,
              max_backward_step_us: float | None = None) -> list[str]:
     """Everything wrong with these records, worst first; empty when they pass."""
@@ -668,6 +700,28 @@ def problems(found: list[Record], *, lap: int | None = None,
     if len(channels) < min_channels:
         failures.append(f"records on {len(channels)} channels, expected at least "
                         f"{min_channels}")
+    # How many different level figures the records carry. A receiver that
+    # latched one reading and reported it for every packet passes every
+    # other rule here -- the figure is inside the radio's range and agrees
+    # with its own flag -- and says nothing about any packet but the first
+    # (fork SqueakyFloors/ubertooth#711). A floor on distinct figures is
+    # what tells the two apart, and only a live capture has one to meet:
+    # a synthetic fixture carries whatever figures it was written with.
+    if min_distinct_signal:
+        distinct = len(set(signal_levels(found)))
+        if distinct < min_distinct_signal:
+            failures.append(
+                f"{distinct} distinct signal figures in {len(found)} records, "
+                f"expected at least {min_distinct_signal}: a receiver "
+                "reporting one latched reading for every packet looks like this")
+    if min_distinct_noise:
+        measured = noise_levels(found)
+        distinct = len(set(measured))
+        if distinct < min_distinct_noise:
+            failures.append(
+                f"{distinct} distinct noise figures in the {len(measured)} "
+                f"records that carry a measured one, expected at least "
+                f"{min_distinct_noise}")
     if types:
         allowed = {TYPE_NUMBERS[name] for name in types}
         wrong = [record for record in found if record.packet_type not in allowed]
@@ -678,14 +732,34 @@ def problems(found: list[Record], *, lap: int | None = None,
     for name in require_types:
         if not any(record.packet_type == TYPE_NUMBERS[name] for record in found):
             failures.append(f"no {name} record")
+    for name in require_transports:
+        if not any(transport_name(record.transport) == name for record in found):
+            failures.append(f"no record names the {name} transport")
     # The per-record failures come last, because there can be one per record
     # and the caller shows only the first few: the counts and addresses above
     # are what a reader needs first.
     for record in found:
         for problem in _consistency(record, payload_checks=payload_checks,
-                                    transport_checks=transport_checks):
+                                    transport_checks=transport_checks,
+                                    max_payload_bytes=max_payload_bytes):
             failures.append(f"record {record.index}: {problem}")
     return failures
+
+
+def signal_levels(found: list[Record]) -> list[int]:
+    """Every record's own signal figure, in file order."""
+    return [record.signal_power for record in found]
+
+
+def noise_levels(found: list[Record]) -> list[int]:
+    """The background figures that are measurements, in file order.
+
+    Only the records whose noise flag is set: the byte of a record without
+    it means nothing (the writers leave a sentinel there), so counting it
+    would make one absence look like one more reading.
+    """
+    return [record.noise_power for record in found
+            if record.has(NOISEPOWER_VALID)]
 
 
 def summary(found: list[Record], label: str) -> list[str]:
@@ -699,8 +773,8 @@ def summary(found: list[Record], label: str) -> list[str]:
     types = Counter(record.type_name for record in found)
     channels = sorted({record.rf_channel for record in found})
     payloads = [len(record.payload) for record in found if record.payload]
-    signals = [record.signal_power for record in found]
-    noises = [record.noise_power for record in found if record.has(NOISEPOWER_VALID)]
+    signals = signal_levels(found)
+    noises = noise_levels(found)
     flags = Counter(name for record in found for name in record.flag_names)
     lines.append("BR/EDR LAPs: " + _counted(laps))
     lines.append("BR/EDR reference LAP/UAP: " + _counted(references))
@@ -715,9 +789,11 @@ def summary(found: list[Record], label: str) -> list[str]:
            else ""))
     lines.append("BR/EDR transports: " + _counted(Counter(
         transport_name(record.transport) for record in found)))
-    lines.append(f"BR/EDR signal: {min(signals)} to {max(signals)} dBm")
+    lines.append(f"BR/EDR signal: {min(signals)} to {max(signals)} dBm, "
+                 f"{len(set(signals))} distinct")
     lines.append("BR/EDR noise: "
-                 + (f"{min(noises)} to {max(noises)} dBm in {len(noises)} records"
+                 + (f"{min(noises)} to {max(noises)} dBm in {len(noises)} records, "
+                    f"{len(set(noises))} distinct"
                     if noises else "no record reports a measured figure"))
     lines.append("BR/EDR flags: " + _counted(flags))
     lines.append("BR/EDR times: " + _times(found))
@@ -853,6 +929,12 @@ def _type_name(value: str) -> str:
     return value
 
 
+def _transport_name_arg(value: str) -> str:
+    if value not in TRANSPORT_NAMES.values():
+        raise ValueError(value)
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bredrrecord.py")
     parser.add_argument("path", type=Path)
@@ -886,10 +968,29 @@ def main(argv: list[str] | None = None) -> int:
              "fixes the ceiling for a run, and allows two by default")
     parser.add_argument("--min-crc-valid", type=int, default=0)
     parser.add_argument("--min-channels", type=int, default=0)
+    parser.add_argument(
+        "--min-distinct-signal", type=int, default=0,
+        help="different signal figures the records must carry between them; "
+             "a receiver that latched one reading and reported it for every "
+             "packet carries exactly one")
+    parser.add_argument(
+        "--min-distinct-noise", type=int, default=0,
+        help="different background figures the records that carry a measured "
+             "one must have between them")
     parser.add_argument("--types", default="",
                         help="comma list of the only packet type names allowed")
     parser.add_argument("--require-types", default="",
                         help="comma list of packet type names that must appear")
+    parser.add_argument(
+        "--require-transports", default="",
+        help="comma list of transport names (ACL, SCO, eSCO, CSB) that must "
+             "appear, so a capture that was meant to carry a voice payload "
+             "cannot pass with none in it")
+    parser.add_argument(
+        "--max-payload-bytes", type=int,
+        help="payload bytes no record may exceed; an Ubertooth capture bank "
+             f"holds at most {MAX_BANK_PAYLOAD}, so a longer payload was "
+             "decoded out of what followed the packet rather than received")
     parser.add_argument(
         "--no-payload-checks", action="store_true",
         help="skip the payload length and CRC checks, which need a link "
@@ -918,6 +1019,11 @@ def main(argv: list[str] | None = None) -> int:
                               for name in args.require_types.split(",") if name)
     except ValueError as error:
         parser.error(f"unknown packet type {error}")
+    try:
+        transports = tuple(_transport_name_arg(name)
+                           for name in args.require_transports.split(",") if name)
+    except ValueError as error:
+        parser.error(f"unknown transport {error}")
     if not args.path.exists():
         print(f"BR/EDR record problem: {args.path} does not exist")
         return 1
@@ -941,9 +1047,13 @@ def main(argv: list[str] | None = None) -> int:
         min_hec_valid=args.min_hec_valid,
         max_access_code_errors=args.max_access_code_errors,
         min_crc_valid=args.min_crc_valid, min_channels=args.min_channels,
+        min_distinct_signal=args.min_distinct_signal,
+        min_distinct_noise=args.min_distinct_noise,
         types=types, require_types=require_types,
+        require_transports=transports,
         payload_checks=not args.no_payload_checks,
         transport_checks=not args.any_transport,
+        max_payload_bytes=args.max_payload_bytes,
         max_span_s=args.max_span_s,
         max_backward_step_us=args.max_backward_step_us)
     wanted = (("LAP", "lap", args.following_lap),

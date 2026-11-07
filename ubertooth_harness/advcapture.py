@@ -54,6 +54,33 @@ PDU_NAMES = {0x0: "ADV_IND", 0x1: "ADV_DIRECT_IND", 0x2: "ADV_NONCONN_IND",
              0x3: "SCAN_REQ", SCAN_RSP: "SCAN_RSP", 0x5: "CONNECT_IND",
              0x6: "ADV_SCAN_IND"}
 LE_PHDR_LEN = 10
+
+# The low-energy pseudo-header, in the order libbtbb packs it: the RF
+# channel, the signal and noise powers in dBm, the access-address errors,
+# the reference access address, and the flag word
+# (``pcap_bluetooth_le_ll_header``, its ``lib/src/pcap-common.h``).
+_LE_PHDR = struct.Struct("<BbbBIH")
+
+# Flag word bits (the same header).
+LE_DEWHITENED = 0x0001
+LE_SIGPOWER_VALID = 0x0002
+LE_NOISEPOWER_VALID = 0x0004
+LE_PACKET_DECRYPTED = 0x0008
+LE_REF_AA_VALID = 0x0010
+LE_AA_OFFENSES_VALID = 0x0020
+LE_CHANNEL_ALIASED = 0x0040
+LE_CRC_CHECKED = 0x0400
+LE_CRC_VALID = 0x0800
+LE_MIC_CHECKED = 0x1000
+LE_MIC_VALID = 0x2000
+
+# A dBm figure outside this range is not a reading of this receiver: the
+# host's piece-wise model of the CC2400's curve bottoms out at -120 and tops
+# out at 0 (``cc2400_rssi_to_dbm()`` in the fork's callback). The record has
+# no way to say a level was not measured, so a packet whose reading was at
+# the top of the scale carries 0 dBm here while the tool's own line reads
+# ``rssi=none`` (fork SqueakyFloors/ubertooth#1192, #1198).
+MIN_DBM, MAX_DBM = -120, 0
 COMPANY_ID = 0xFFFF
 MAGIC = b"UTAD"
 PAYLOAD_FORMAT = 1
@@ -282,6 +309,110 @@ def harness_payload(adv_data: bytes) -> tuple[int, int, bytes] | None:
     return None
 
 
+@dataclass(frozen=True)
+class Levels:
+    """The power fields of one low-energy record, and its flag word."""
+
+    index: int
+    rf_channel: int
+    signal_power: int
+    noise_power: int
+    access_address_offenses: int
+    ref_access_address: int
+    flags: int
+
+    def has(self, flag: int) -> bool:
+        return bool(self.flags & flag)
+
+    @property
+    def is_data_channel_packet(self) -> bool:
+        """Whether the capture recorded no reference access address.
+
+        A tool listening to the advertising channels records 0x8e89bed6; one
+        following a connection records 0 for the connection's own packets,
+        because the field is defined as the address configured into the tool
+        (libbtbb's ``LE_REF_AA_FLAG``). So a record with no reference address
+        is a packet of a followed connection.
+        """
+        return self.ref_access_address == 0
+
+
+def levels(records) -> list[Levels]:
+    """The power fields of each record, in file order."""
+    found = []
+    for index, record in enumerate(records):
+        if len(record) < LE_PHDR_LEN:
+            continue
+        found.append(Levels(index, *_LE_PHDR.unpack(record[:LE_PHDR_LEN])))
+    return found
+
+
+def level_problems(found: list[Levels]) -> list[str]:
+    """What is wrong with the power fields of these records.
+
+    Rules the writers hold to whatever was on the air, so a live capture is
+    judged by them as a replay is. Each is one line of libbtbb's
+    ``lell_pcap_append_packet()`` and ``lell_pcapng_append_packet()``, or of
+    the figures the fork hands them (``determine_signal_and_noise()``):
+
+    - every record is dewhitened, carries a signal figure, and carries a
+      count of its access-address errors, because the writers set those
+      three flags on every record they write;
+    - the noise flag is set exactly when the noise figure is below the
+      signal, which is how the writers decide it: a board with no background
+      estimate for the channel is given a figure no signal can reach, so the
+      flag comes out clear and a reader does not take the byte for a
+      measurement;
+    - each figure the flags call a measurement is inside the range the host's
+      model of the radio can produce;
+    - the reference access address flag is set exactly when that field holds
+      an address, which is what the flag is defined to say.
+    """
+    problems = []
+    for record in found:
+        where = f"record {record.index}"
+        for flag, name in ((LE_DEWHITENED, "dewhitened"),
+                           (LE_SIGPOWER_VALID, "signal power"),
+                           (LE_AA_OFFENSES_VALID, "access-address error")):
+            if not record.has(flag):
+                problems.append(f"{where}: the {name} flag is clear, and the "
+                                "writers set it on every record")
+        if not MIN_DBM <= record.signal_power <= MAX_DBM:
+            problems.append(f"{where}: signal power {record.signal_power} dBm")
+        noisy = record.noise_power < record.signal_power
+        if record.has(LE_NOISEPOWER_VALID) != noisy:
+            problems.append(
+                f"{where}: the noise power flag is "
+                f"{'set' if record.has(LE_NOISEPOWER_VALID) else 'clear'} with "
+                f"noise {record.noise_power} dBm and signal "
+                f"{record.signal_power} dBm")
+        if record.has(LE_NOISEPOWER_VALID) and not MIN_DBM <= record.noise_power <= MAX_DBM:
+            problems.append(f"{where}: noise power {record.noise_power} dBm")
+        if record.has(LE_REF_AA_VALID) != (record.ref_access_address != 0):
+            problems.append(
+                f"{where}: the reference access address flag is "
+                f"{'set' if record.has(LE_REF_AA_VALID) else 'clear'} with "
+                f"reference access address {record.ref_access_address:08x}")
+    return problems
+
+
+def level_summary(found: list[Levels]) -> list[str]:
+    """The lines describing these records' power fields."""
+    if not found:
+        return ["levels: no record carries a pseudo-header"]
+    signals = [record.signal_power for record in found]
+    measured = [record.noise_power for record in found
+                if record.has(LE_NOISEPOWER_VALID)]
+    lines = [f"levels: signal {min(signals)} to {max(signals)} dBm, "
+             f"{len(set(signals))} distinct in {len(found)} records"]
+    lines.append(
+        "levels: noise "
+        + (f"{min(measured)} to {max(measured)} dBm in {len(measured)} records, "
+           f"{len(set(measured))} distinct" if measured
+           else "no record reports a measured figure"))
+    return lines
+
+
 @dataclass
 class Result:
     records: int = 0
@@ -289,6 +420,7 @@ class Result:
     scan_responses: int = 0
     counters: list = field(default_factory=list)
     channels: dict = field(default_factory=dict)
+    levels: list = field(default_factory=list)
     problems: list = field(default_factory=list)
 
 
@@ -308,6 +440,12 @@ def check(data: bytes, *, address: str, channel: int, absent: bool = False,
         return header, result
     address = address.upper()
     result.records = len(records)
+    result.levels = levels(records)
+    # The power fields of every record, judged by the rules the writers hold
+    # to whatever was on the air. They are not about the advertiser, so they
+    # are checked over the whole file rather than over the packets this case
+    # was looking for.
+    result.problems.extend(level_problems(result.levels))
     wrong = {}
     expected_rf = ADV_RF_CHANNEL[channel]
     for record in records:
@@ -406,6 +544,8 @@ def main(argv=None) -> int:
         print(f"advertiser scan responses, not checked: {result.scan_responses}")
     if result.counters:
         print(f"counters: {min(result.counters)}-{max(result.counters)}")
+    for line in level_summary(result.levels):
+        print(line)
     for problem in result.problems:
         print(f"FAIL: {problem}")
     if result.problems:

@@ -133,6 +133,27 @@ def crc16(bits: list[int], uap: int) -> int:
     return register
 
 
+# How far into the whitening sequence a packet's payload starts: the sequence
+# runs once over the header and the payload with no reload between them
+# (Bluetooth Core, Vol 2, Part B, Section 7.2), and the header is 18 bits
+# before the repetition code triples them (libbtbb's HEADER_WHITENING_BITS).
+HEADER_WHITENING_BITS = 18
+# The DV packet's voice field, which comes before its data field and is
+# whitened with it, so the data field starts this much further in again
+# (Vol 2, Part B, Section 6.5.4.4; libbtbb's DV_VOICE_BITS).
+DV_VOICE_BITS = 80
+# The rate 2/3 FEC code of Vol 2, Part B, Section 7.4: a (15,10) shortened
+# Hamming code, as the generator rows libbtbb encodes with (fec23_gen_matrix).
+FEC23_GENERATOR = (0x2C01, 0x5802, 0x1C04, 0x3808, 0x7010,
+                   0x4C20, 0x3440, 0x6880, 0x7D00, 0x5600)
+
+
+def _whitened(bits: list[int], clock: int, skip: int) -> list[int]:
+    """``bits`` whitened from ``skip`` bits into the packet's sequence."""
+    white = whitening(clock, skip + len(bits))[skip:]
+    return [bit ^ w for bit, w in zip(bits, white)]
+
+
 def dh1_payload_bits(body: bytes, uap: int, clock: int) -> list[int]:
     """A DH1 payload: 1-byte payload header (LLID 2, flow 1, length), body,
     CRC; no FEC; whitened on from where the packet header stopped."""
@@ -140,8 +161,93 @@ def dh1_payload_bits(body: bytes, uap: int, clock: int) -> list[int]:
     bits = [(byte >> i) & 1 for byte in bytes([header]) + body for i in range(8)]
     crc = crc16(bits, uap)
     bits += [(crc >> k) & 1 for k in range(16)]
-    white = whitening(clock, 18 + len(bits))[18:]
-    return [bit ^ w for bit, w in zip(bits, white)]
+    return _whitened(bits, clock, HEADER_WHITENING_BITS)
+
+
+def fec23(bits: list[int]) -> list[int]:
+    """``bits`` as the rate 2/3 FEC code carries them: 15 symbols per 10 bits.
+
+    The code sends each block of ten bits as it stands followed by five check
+    symbols, and the last block is padded out with zeros, which is the length
+    libbtbb's decoder reads back (unfec23 rounds a length up to a whole
+    block).
+    """
+    padded = list(bits) + [0] * (-len(bits) % 10)
+    out: list[int] = []
+    for start in range(0, len(padded), 10):
+        block = padded[start:start + 10]
+        data = sum(bit << index for index, bit in enumerate(block))
+        codeword = 0
+        for index in range(10):
+            if data >> index & 1:
+                codeword ^= FEC23_GENERATOR[index]
+        check = codeword >> 10
+        out += block + [(check >> k) & 1 for k in range(5)]
+    return out
+
+
+def aux1_payload_bits(body: bytes, clock: int) -> list[int]:
+    """An AUX1 payload: 1-byte payload header and body, and no CRC at all.
+
+    AUX1 is the one type with a payload header and nothing after the body
+    (Vol 2, Part B, Section 6.5.4.7), so a reader that expects every payload
+    header to be followed by a CRC counts two bytes too many here. No FEC,
+    like the DH types it is decoded with.
+    """
+    header = 2 | (1 << 2) | (len(body) << 3)
+    bits = [(byte >> i) & 1 for byte in bytes([header]) + body for i in range(8)]
+    return _whitened(bits, clock, HEADER_WHITENING_BITS)
+
+
+def ev3_payload_bits(body: bytes, uap: int, clock: int) -> list[int]:
+    """An EV3 payload: the body and its CRC, with no payload header.
+
+    An eSCO payload's length is agreed when the link is set up and is not in
+    the packet (Vol 2, Part B, Section 6.5.3), so the decoder unwhitens a
+    byte at a time and takes the length whose CRC agrees. No FEC: an EV3
+    carries its payload as it stands.
+    """
+    bits = [(byte >> i) & 1 for byte in body for i in range(8)]
+    crc = crc16(bits, uap)
+    bits += [(crc >> k) & 1 for k in range(16)]
+    return _whitened(bits, clock, HEADER_WHITENING_BITS)
+
+
+def dv_payload_bits(voice: bytes, body: bytes, uap: int,
+                    clock: int) -> list[int]:
+    """A DV payload: the voice field, then the data field under rate 2/3 FEC.
+
+    The voice field is whitened and sent as it stands; the data field that
+    follows it is a DM1-style payload (1-byte payload header, body, CRC)
+    whitened from after the voice field and then carried by the FEC code. A
+    record of this packet holds the data field only, which is what the
+    voice/data boundary comes down to.
+    """
+    voice_bits = [(byte >> i) & 1 for byte in voice for i in range(8)]
+    if len(voice_bits) != DV_VOICE_BITS:
+        raise ValueError(f"{len(voice_bits)} voice bits, expected {DV_VOICE_BITS}")
+    header = 2 | (1 << 2) | (len(body) << 3)
+    data = [(byte >> i) & 1 for byte in bytes([header]) + body for i in range(8)]
+    crc = crc16(data, uap)
+    data += [(crc >> k) & 1 for k in range(16)]
+    return (_whitened(voice_bits, clock, HEADER_WHITENING_BITS)
+            + fec23(_whitened(data, clock,
+                              HEADER_WHITENING_BITS + DV_VOICE_BITS)))
+
+
+def long_payload_bits(declared: int, clock: int) -> list[int]:
+    """A DH3 payload header declaring more bytes than a record can hold.
+
+    Only the two-byte payload header is here: the point is a payload the
+    decoder is told about and has no symbols for. A record carries one
+    400-symbol bank, so a DH3 claiming this many bytes cannot have arrived
+    in it, and the decoder must report no payload rather than decode one out
+    of whatever follows the packet in the bank (fork
+    SqueakyFloors/ubertooth#754).
+    """
+    header = 2 | (1 << 2) | (declared << 3)
+    bits = [(header >> i) & 1 for i in range(16)]
+    return _whitened(bits, clock, HEADER_WHITENING_BITS)
 
 
 # --- usb_pkt_rx records --------------------------------------------------------
@@ -154,8 +260,21 @@ PREAMBLE_AT = 16         # where the access code starts in the 400 symbols
 SYNC_AT = PREAMBLE_AT + 4
 BR_PACKET, LE_PACKET = 0, 1
 DISCARD = 0x20
+# The packet types the fixture carries, as the header's four type bits
+# (Vol 2, Part B, Table 6.2, at the basic rate).
 POLL, DH1 = 1, 4
+EV3, DV, AUX1, DH3 = 7, 8, 9, 11
 DH1_BODY = bytes(range(4))      # a made-up 4-byte body
+# The bodies of the three rarer payloads, each a different length so that a
+# record carrying one cannot be mistaken for a record carrying another.
+AUX1_BODY = bytes(range(0x11, 0x16))        # 5 bytes, and no CRC after them
+DV_VOICE = bytes(range(0x21, 0x2B))         # 10 bytes: the voice field
+DV_BODY = bytes(range(0x31, 0x35))          # 4 bytes: the data field's body
+EV3_BODY = bytes(range(0x41, 0x49))         # 8 bytes, then the CRC
+# What the long record's DH3 payload header declares. A record carries one
+# 400-symbol bank, which holds about 32 payload bytes at this rate, so a
+# payload this long cannot have arrived in it.
+LONG_DECLARED_BYTES = 100
 
 # libubertooth's clock arithmetic (ubertooth_callback.c): a CLKN tick is
 # 312.5 us, a slot is two of them, and a record's timestamp is taken at the
@@ -169,11 +288,34 @@ BANK_100NS = SYMBOLS * 10
 # still comes out as the central clock it was built for, while the clock
 # offset the packet line reports differs from record to record: a fixture
 # with one offset throughout would pass against a decoder that printed a
-# constant (harness#357).
-CLK_SLACK_STEP = 195
+# constant (harness#357). The step times the number of records has to stay
+# under CLK100NS_PER_CLKN, which _records() checks.
+CLK_SLACK_STEP = 125
 
 LAP_A, UAP_A = 0x5A3C96, 0x6B   # piconet with headers: LAP and UAP decode
 LAP_B = 0x0F1E2D                # ID packets only: LAP decodes, no UAP
+# A third piconet, whose address part is 0x00. That is an address like any
+# other, and a piconet given it on the command line has to start the clock
+# search like any other; one that read the part as an absence did not
+# (libbtbb SqueakyFloors/libbtbb#135, which the fork took on in
+# SqueakyFloors/ubertooth#1125). Every other case states UAP_A, which took
+# the same branch before and after.
+LAP_C, UAP_C = 0x274E85, 0x00
+# A fourth piconet, carrying the payload types a bench capture does not
+# reliably produce: an AUX1, whose payload header is followed by no CRC; a
+# DV, whose record holds its data field and not its voice field; an EV3,
+# whose length is in no field and is found by its CRC; and a DH3 claiming a
+# payload no 400-symbol bank can hold.
+#
+# Their own piconet, and a short one, because a header is read only while
+# the library holds the piconet's CLK1-6: the hop-reversal search that
+# follows winnows its candidates on the channels it sees, and the fixture's
+# channels are made up rather than a real hop sequence, so a piconet of
+# enough packets runs the candidates out and the search starts again --
+# leaving the packets in between with no clock to read a header at. Five
+# packets stay well inside that, with a POLL first because the very first
+# packet of any piconet arrives before its CLK1-6 is settled.
+LAP_D, UAP_D = 0x6D4B29, 0x3C
 LAP_DECOY = 0x3E1D07            # only in records cb_rx must skip
 FIXTURE_AGE_S = 3600            # record times are this long before generation
 
@@ -183,12 +325,15 @@ class Record:
     lap: int | None             # None: no access code at all
     channel: int
     clock: int                  # central CLK (312.5 us units)
-    kind: str = "poll"          # poll, dh1 (header and CRC-checked payload), id
+    # poll; id (no header); dh1, aux1, dv, ev3 (a payload the decoder reads);
+    # long (a payload header claiming more symbols than a bank holds)
+    kind: str = "poll"
     flip: int | None = None     # sync-word bit to invert (an access-code error)
     pkt_type: int = BR_PACKET
     status: int = 0
     decoy: bool = False         # cb_rx must skip it (or it holds no packet)
     slack: int = CLK_SLACK_STEP  # 100 ns from the CLKN edge to the access code
+    uap: int = UAP_A            # the piconet's address part, for the HEC and CRC
 
 
 def _records() -> tuple[Record, ...]:
@@ -202,6 +347,17 @@ def _records() -> tuple[Record, ...]:
     A = [Record(LAP_A, ch, clk, kind) for ch, clk, kind in a]
     B = [Record(LAP_B, 9, 0x3000 + 4 * i, "id", flip=5 if i == 2 else None)
          for i in range(3)]
+    # The piconet whose address part is 0x00, with a DH1 among its POLLs so
+    # that a run given only its LAP can settle the part for itself.
+    C = [Record(LAP_C, ch, clk, kind, uap=UAP_C) for ch, clk, kind in (
+        (11, 0x1200, "poll"), (29, 0x1208, "dh1"), (57, 0x1218, "poll"),
+    )]
+    # The piconet of rarer payloads. The POLL comes first because the first
+    # packet of a piconet is read before its clock is settled.
+    D = [Record(LAP_D, ch, clk, kind, uap=UAP_D) for ch, clk, kind in (
+        (34, 0x0840, "poll"), (31, 0x0848, "aux1"), (44, 0x0854, "dv"),
+        (7, 0x0860, "ev3"), (66, 0x0874, "long"),
+    )]
     records = (
         A[0], A[1], A[2], A[3], B[0],
         Record(LAP_DECOY, 12, 0x4000, pkt_type=LE_PACKET, decoy=True),
@@ -211,10 +367,15 @@ def _records() -> tuple[Record, ...]:
         Record(LAP_DECOY, 79, 0x4008, decoy=True),
         B[2], A[6],
         Record(None, 30, 0x5000, decoy=True),
-        A[7],
+        A[7], C[0], C[1], C[2], D[0], D[1], D[2], D[3], D[4],
     )
     # One slack step further per record, so no two packet lines report the
-    # same clock offset.
+    # same clock offset -- and every one still inside a CLKN tick, so each
+    # record's CLKN is the central clock it was built for.
+    if CLK_SLACK_STEP * len(records) >= CLK100NS_PER_CLKN:
+        raise ValueError(
+            f"{len(records)} records at {CLK_SLACK_STEP} x 100 ns reach past a "
+            f"CLKN tick ({CLK100NS_PER_CLKN} x 100 ns)")
     return tuple(replace(record, slack=CLK_SLACK_STEP * (index + 1))
                  for index, record in enumerate(records))
 
@@ -255,14 +416,28 @@ def _symbols(record: Record) -> list[int]:
             bits[4 + record.flip] ^= 1
         symbols += bits
         seqn = (record.clock >> 2) & 1
+        flags = 0b001 | (seqn << 2)
+        uap, clock = record.uap, record.clock
         if record.kind == "id":
             # After an ID packet: symbols that are not a repetition-coded header.
             symbols += [0, 1] * 30
         elif record.kind == "dh1":
-            symbols += header_bits(1, DH1, 0b001 | (seqn << 2), UAP_A, record.clock)
-            symbols += dh1_payload_bits(DH1_BODY, UAP_A, record.clock)
+            symbols += header_bits(1, DH1, flags, uap, clock)
+            symbols += dh1_payload_bits(DH1_BODY, uap, clock)
+        elif record.kind == "aux1":
+            symbols += header_bits(1, AUX1, flags, uap, clock)
+            symbols += aux1_payload_bits(AUX1_BODY, clock)
+        elif record.kind == "dv":
+            symbols += header_bits(1, DV, flags, uap, clock)
+            symbols += dv_payload_bits(DV_VOICE, DV_BODY, uap, clock)
+        elif record.kind == "ev3":
+            symbols += header_bits(1, EV3, flags, uap, clock)
+            symbols += ev3_payload_bits(EV3_BODY, uap, clock)
+        elif record.kind == "long":
+            symbols += header_bits(1, DH3, flags, uap, clock)
+            symbols += long_payload_bits(LONG_DECLARED_BYTES, clock)
         else:
-            symbols += header_bits(1, POLL, 0b001 | (seqn << 2), UAP_A, record.clock)
+            symbols += header_bits(1, POLL, flags, uap, clock)
     symbols += [0] * (SYMBOLS - len(symbols))
     return symbols[:SYMBOLS]
 
@@ -376,6 +551,39 @@ def packet_record_indices(lap: int | None = None,
         index for index, record in enumerate(fixture_records(variant))
         if not record.decoy and (lap is None or record.lap == lap)
     ]
+
+
+# The header type bits each kind of record carries. An ID packet has no
+# header at all, so it is absent.
+PACKET_TYPES = {"poll": POLL, "dh1": DH1, "aux1": AUX1, "dv": DV, "ev3": EV3,
+                "long": DH3}
+
+
+def packet_type(record: Record) -> int | None:
+    """The type this record's header states, or None where it has no header."""
+    return PACKET_TYPES.get(record.kind)
+
+
+def payload_bytes(record: Record) -> bytes:
+    """The payload bytes a decoder recovers from this record.
+
+    Empty where there is none to recover: a POLL and an ID packet carry no
+    payload, and the long record's payload header claims more symbols than
+    one bank holds, so a decoder bounded to the bank it was given reports
+    none.
+    """
+    if record.kind == "aux1":
+        header = 2 | (1 << 2) | (len(AUX1_BODY) << 3)
+        return bytes([header]) + AUX1_BODY
+    if record.kind in ("dh1", "dv", "ev3"):
+        if record.kind == "ev3":
+            body = EV3_BODY               # no payload header of its own
+        else:
+            inner = DH1_BODY if record.kind == "dh1" else DV_BODY
+            body = bytes([2 | (1 << 2) | (len(inner) << 3)]) + inner
+        bits = [(byte >> i) & 1 for byte in body for i in range(8)]
+        return body + crc16(bits, record.uap).to_bytes(2, "little")
+    return b""
 
 
 # --- output checks ------------------------------------------------------------

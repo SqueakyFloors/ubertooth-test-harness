@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from ubertooth_harness import advcapture, conncapture
-from tests.test_advcapture import pcap, pcapng
+from tests.test_advcapture import LE_FLAGS, pcap, pcapng
 
 CENTRAL = "C0:7D:CD:95:52:86"
 PERIPHERAL = "C1:92:EC:E7:71:BC"
@@ -39,7 +39,7 @@ def connect_ind(initiator=CENTRAL, advertiser=PERIPHERAL, data=None, corrupt=Fal
     crc = advcapture.crc24(header + pdu).to_bytes(3, "little")
     if corrupt:
         pdu = pdu[:-1] + bytes([pdu[-1] ^ 1])
-    phdr = bytes([4, 0xC0, 0x9C, 0]) + struct.pack("<I", advcapture.ADV_ACCESS_ADDRESS) + b"\x00\x00"
+    phdr = bytes([4, 0xC0, 0x9C, 0]) + struct.pack("<I", advcapture.ADV_ACCESS_ADDRESS) + LE_FLAGS
     return (phdr + struct.pack("<I", advcapture.ADV_ACCESS_ADDRESS) + header + pdu
             + crc)
 
@@ -51,7 +51,7 @@ def data_packet(length=251, access=ACCESS, crc_init=CRC_INIT, corrupt=False):
     crc = advcapture.crc24(header + pdu, crc_init).to_bytes(3, "little")
     if corrupt:
         crc = bytes([crc[0] ^ 1]) + crc[1:]
-    phdr = bytes([9, 0xC0, 0x9C, 0]) + struct.pack("<I", access) + b"\x00\x00"
+    phdr = bytes([9, 0xC0, 0x9C, 0]) + struct.pack("<I", access) + LE_FLAGS
     return phdr + struct.pack("<I", access) + header + pdu + crc
 
 
@@ -225,7 +225,7 @@ def advertising_record():
     header = bytes([0x0 | 1 << 6, len(pdu)])
     crc = advcapture.crc24(header + pdu).to_bytes(3, "little")
     phdr = (bytes([0, 0xC0, 0x9C, 0])
-            + struct.pack("<I", advcapture.ADV_ACCESS_ADDRESS) + b"\x00\x00")
+            + struct.pack("<I", advcapture.ADV_ACCESS_ADDRESS) + LE_FLAGS)
     return (phdr + struct.pack("<I", advcapture.ADV_ACCESS_ADDRESS) + header
             + pdu + crc)
 

@@ -35,7 +35,14 @@ import sys
 import time
 from pathlib import Path
 
-from ubertooth_harness import capturefile, rxdump, rxreplay, stalecheck, stdoutdest
+from ubertooth_harness import (
+    bredrrecord,
+    capturefile,
+    rxdump,
+    rxreplay,
+    stalecheck,
+    stdoutdest,
+)
 from ubertooth_harness.hostneeds import NO_NEEDS, Needs
 from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.stateful import (
@@ -644,6 +651,15 @@ def raw_receive_cases(arguments, _resources, resource_identities):
 _REPLAY = str(Path(rxreplay.__file__).resolve())
 _FIXTURE = "replay.bin"
 _A, _B = f"{rxreplay.LAP_A:06x}", f"{rxreplay.LAP_B:06x}"
+_C, _D = f"{rxreplay.LAP_C:06x}", f"{rxreplay.LAP_D:06x}"
+_UAP_C, _UAP_D = f"{rxreplay.UAP_C:02x}", f"{rxreplay.UAP_D:02x}"
+_RECORD_CHECKER = str(Path(bredrrecord.__file__).resolve())
+# The packet types the fixture's fourth piconet carries, as libbtbb names
+# them: a type name covers every type its four header bits cannot tell apart.
+_AUX1_TYPE = "AUX1"
+_DV_TYPE = "DV/3-DH1"
+_EV3_TYPE = "HV3/EV3/3-EV3"
+_LONG_TYPE = "DH3/3-DH3"
 # libbtbb's UAP and CLK6 progress lines; with the fixture's clocks the
 # receiver clock is the central's clock, so the CLK1-6 offset is 0. Which of
 # the two notes the address-part search prints is decided by BTBB_UAP_VALID:
@@ -739,6 +755,32 @@ def _capture_packets(step_id, name, file_name, header_format, packets):
             rf"Capture format: {header_format}, link type: {LINKTYPE_BREDR}, "
             rf"packets: {packets}$",
         ),
+    )
+
+
+def _survey_address(lap: str, uap: int | None) -> str:
+    """One piconet as ``ubertooth-rx -z`` lists it on standard output.
+
+    The non-significant address part is never known, so it is always ``??``;
+    the address part is a figure where the survey settled one and ``??``
+    where it did not. An address part of 0x00 is a figure like any other
+    (libbtbb SqueakyFloors/libbtbb#135).
+    """
+    part = "??" if uap is None else f"{uap:02X}"
+    return (f"??:??:{part}:"
+            + ":".join(lap.upper()[index:index + 2] for index in (0, 2, 4)))
+
+
+def _replay_record_step(step_id, name, file_name, checks):
+    """Decode one capture a replay wrote, field by field (bredrrecord.py)."""
+    return Step(
+        step_id,
+        name,
+        lambda context: (sys.executable, _RECORD_CHECKER,
+                         _path(file_name)(context)) + tuple(checks),
+        timeout_s=30.0,
+        output_patterns=(rf"(?m)^BR/EDR records: \d+ in {re.escape(file_name)}$",),
+        forbidden_patterns=(r"BR/EDR record problem:",),
     )
 
 
@@ -1209,6 +1251,8 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
     full = rxreplay.expected_packets()
     lap_a = rxreplay.expected_packets(lap=rxreplay.LAP_A)
     lap_b = rxreplay.expected_packets(lap=rxreplay.LAP_B)
+    lap_c = rxreplay.expected_packets(lap=rxreplay.LAP_C)
+    lap_d = rxreplay.expected_packets(lap=rxreplay.LAP_D)
     count = len(full)
     cases = [
         _replay_case("replay-decode-lap", "-i decodes every LAP in the fixture", (
@@ -1289,6 +1333,68 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
                  ("ubertooth-rx", "-h"), timeout_s=10.0, output_patterns=(SWEEP_HELP,)),
         ), f"exit 0; the same {count} packet lines; no notice; -h lists -s as the "
            "default"),
+        # The payload types a bench capture does not reliably produce, so the
+        # fixture carries one of each on a piconet of its own and the records
+        # of a replay are read field by field. What each is here for:
+        #
+        # - an AUX1, the one type with a payload header and no CRC after the
+        #   body, so its length field has to be read without counting two
+        #   bytes for one (Vol 2, Part B, Section 6.5.4.7);
+        # - a DV, whose record holds its data field and not the voice field
+        #   ahead of it, so the length field and the CRC land on the right
+        #   bytes;
+        # - an EV3, whose length is in no field at all and is found by trying
+        #   the CRC at each, and whose transport is the eSCO one;
+        # - a DH3 claiming a payload longer than a 400-symbol bank, which
+        #   must come out as a record with no payload: a decoder told it had
+        #   ten banks decoded one out of whatever followed the packet, CRC
+        #   verdict and all (fork SqueakyFloors/ubertooth#754).
+        #
+        # The three that decode a payload cover libbtbb
+        # SqueakyFloors/libbtbb#28, which decodes these payloads and bounds
+        # the decoders to the symbols they were given.
+        _replay_case("replay-payload-types",
+                     f"-i -l {_D} -u {_UAP_D}: the AUX1, DV, and eSCO payloads "
+                     "decode and the over-long one does not", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -l {_D} -u {_UAP_D} -q",
+                         ("-l", _D, "-u", _UAP_D),
+                         check=rxreplay.packets_check(lap_d),
+                         files=(("-q", "payloads.pcap"),)),
+            _replay_record_step(
+                "verify-records",
+                "The records name each payload type and hold its own fields",
+                "payloads.pcap",
+                ("--lap", _D, "--reference-lap", _D, "--reference-uap", _UAP_D,
+                 "--min-packets", str(len(lap_d)),
+                 "--require-types",
+                 ",".join((_AUX1_TYPE, _DV_TYPE, _EV3_TYPE, _LONG_TYPE)),
+                 "--require-transports", "ACL,SCO,eSCO",
+                 "--min-with-payload", "3", "--min-crc-valid", "2",
+                 "--max-payload-bytes", str(bredrrecord.MAX_BANK_PAYLOAD),
+                 "--max-access-code-errors", "0")),
+        ), f"{len(lap_d)} packet lines, all with LAP {_D}; the pcap holds an "
+           f"{_AUX1_TYPE} payload with no CRC checked, a {_DV_TYPE} and an "
+           f"{_EV3_TYPE} payload whose CRCs passed, the ACL, SCO, and eSCO "
+           f"transports between them, a {_LONG_TYPE} record with no payload, "
+           f"and no payload longer than the "
+           f"{bredrrecord.MAX_BANK_PAYLOAD} bytes a capture bank holds"),
+        # A piconet whose address part is stated as 0x00. That is an address,
+        # not an absence, and the clock search has to start on it as on any
+        # other; a piconet given it never got that far (libbtbb
+        # SqueakyFloors/libbtbb#135, fork SqueakyFloors/ubertooth#1125).
+        # Every other case states UAP_A, which took the same branch before
+        # and after the fix.
+        _replay_case("replay-uap-zero", f"-i -l {_C} -u {_UAP_C} starts the "
+                     "clock search", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -l {_C} -u {_UAP_C}",
+                         ("-l", _C, "-u", _UAP_C),
+                         check=rxreplay.packets_check(lap_c),
+                         patterns=(_CLK6_ZERO, _CLK27_CANDIDATES),
+                         forbidden=(r"failed to confirm UAP",)),
+        ), f"only LAP {_C} lines; CLK6 offset 0 confirmed and the CLK1-27 "
+           "search started, as for a piconet whose address part is not zero"),
     ]
     fixture = rxreplay.fixture_bytes(base)
     digest = hashlib.sha256(fixture).hexdigest()
@@ -1296,18 +1402,24 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
     if arguments["coverage"] != "comprehensive":
         return tuple(cases)
     survey = {
-        f"??:??:{rxreplay.UAP_A:02X}:" + ":".join(f"{_A.upper()}"[i:i + 2] for i in (0, 2, 4)),
-        "??:??:??:" + ":".join(f"{_B.upper()}"[i:i + 2] for i in (0, 2, 4)),
+        # Each piconet as -z lists it: the non-significant part is never
+        # known, and the address part only where the survey settled it from
+        # a payload CRC, which the ID-packet piconet gives it no way to do.
+        _survey_address(_A, rxreplay.UAP_A),
+        _survey_address(_B, None),
+        _survey_address(_C, rxreplay.UAP_C),
+        _survey_address(_D, rxreplay.UAP_D),
     }
     truncated = rxreplay.expected_packets("truncated")
     cases += [
-        _replay_case("replay-survey", "-i -z lists both piconets", (
+        _replay_case("replay-survey", "-i -z lists every piconet in the fixture", (
             _fixture_step(base),
             _replay_step("ubertooth-rx -i <fixture> -z", ("-z",),
                          check=rxreplay.survey_check(survey),
                          patterns=(SURVEY_HEADING_PATTERN,)),
-        ), "the heading on stderr and, on stdout, LAP A with its UAP and "
-           "LAP B without one"),
+        ), "the heading on stderr and, on stdout, each piconet whose address "
+           f"part the survey settled ({_A}, {_C} with its 00, {_D}) and the "
+           f"ID-packet one ({_B}) without one"),
         _replay_case("replay-lap-filter", f"-i -l {_B}: only that LAP", (
             _fixture_step(base),
             _replay_step(f"ubertooth-rx -i <fixture> -l {_B}", ("-l", _B),
