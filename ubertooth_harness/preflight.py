@@ -130,29 +130,31 @@ class PreflightCheck:
             # exit status.
             output = output_of(result)
             line = bootloader_identity.IDENTITY_LINE_PATTERN
-            found = output.search(line)
-            output.note_pattern("observed", self.name, line, found)
-            for pattern in self.expected_patterns:
-                if pattern != line:
+            if self.bootloader.tolerates_refusal(self.resource_alias):
+                # One recorded check, for the two answers this board may give:
+                # the line, or its firmware saying it has not got the request
+                # (`patterns`). Recording the line on its own as well would
+                # leave an observed check that found nothing every time such a
+                # board legitimately refused the read, and a check that found
+                # nothing counts against the run wherever it is read back
+                # (report.md's output files, `ubertooth-harness validate`).
+                # Which of the two answers came is in the bootloader_identity
+                # record and in the transcript.
+                for pattern in self.expected_patterns:
                     output.note_pattern(
-                        "expected", self.name, pattern, output.search(pattern)
+                        "observed", self.name, pattern, output.search(pattern)
                     )
-            installed = bootloader_identity.identity_from_match(found)
-            if installed is None and (
-                result.returncode not in self.accepted_returncodes
-            ):
-                # No line and a status this check does not accept: the read
-                # failed for a reason of its own (no board, a board another
-                # command holds, a libusb error), and naming old firmware
-                # would name the wrong fix. The command's own output is in
-                # the transcript.
-                target = self.resource_alias or self.host
-                return (
-                    f"{self.name}: {target} did not report its bootloader "
-                    f"(ubertooth-util -B exited {result.returncode})"
-                )
-            failure = self.bootloader.failure(self.resource_alias, installed)
-            return f"{self.name}: {failure}" if failure else ""
+            else:
+                output.note_pattern("observed", self.name, line,
+                                    output.search(line))
+                for pattern in self.expected_patterns:
+                    if pattern != line:
+                        output.note_pattern(
+                            "expected", self.name, pattern,
+                            output.search(pattern),
+                        )
+            _installed, _status, reason = self.bootloader_reading(result)
+            return f"{self.name}: {reason}" if reason else ""
         if result.returncode not in self.accepted_returncodes:
             return f"{self.name}: command exited {result.returncode}"
         output = output_of(result)
@@ -234,6 +236,63 @@ class PreflightCheck:
                     "unregister it"
                 )
         return ""
+
+    def bootloader_reading(
+        self, result: CommandResult
+    ) -> tuple["bootloader_identity.BootloaderIdentity | None", str, str]:
+        """What `-B` reported on this board: the identity, verdict and reason.
+
+        One decision, read by the check's own pass or failure and by the
+        `bootloader_identity` record, so the two cannot drift. The verdict is
+        `current` or `stale` for a board that answered, `not read` for an
+        established board whose firmware has not got the request (#327), and
+        `unreadable` for anything else. The reason is empty when the check
+        passes.
+        """
+        expectation = self.bootloader
+        if expectation is None:
+            raise PreflightError(
+                f"{self.name} is not a bootloader check; it has no expectation"
+            )
+        if result.timed_out or result.cancelled:
+            # The command did not finish, so whatever it had printed by then
+            # is not an answer. Said here as well as in `result_failure`, so
+            # the record cannot carry a verdict the check never reached.
+            return None, "unreadable", (
+                "command timed out" if result.timed_out else "command canceled"
+            )
+        output = output_of(result)
+        installed = bootloader_identity.identity_from_match(
+            output.search(bootloader_identity.IDENTITY_LINE_PATTERN)
+        )
+        if installed is not None:
+            failure = expectation.failure(self.resource_alias, installed)
+            current = (
+                expectation.expected is None
+                or installed.matches(expectation.expected)
+            )
+            return installed, "current" if current else "stale", failure
+        if (
+            expectation.tolerates_refusal(self.resource_alias)
+            and output.search(bootloader_identity.REFUSED_PATTERN) is not None
+        ):
+            # The firmware this board happens to be carrying has not got the
+            # request. Recorded, not failed: a test of this suite writes that
+            # board's application image, so what it was carrying beforehand
+            # is not something the run requires.
+            return None, bootloader_identity.NOT_READ, ""
+        if result.returncode not in self.accepted_returncodes:
+            # No line and a status this check does not accept: the read
+            # failed for a reason of its own (no board, a board another
+            # command holds, a libusb error), and naming old firmware would
+            # name the wrong fix. The command's own output is in the
+            # transcript.
+            target = self.resource_alias or self.host
+            return None, "unreadable", (
+                f"{target} did not report its bootloader "
+                f"(ubertooth-util -B exited {result.returncode})"
+            )
+        return None, "unreadable", expectation.failure(self.resource_alias, None)
 
     def needs_fallback(self, result: CommandResult) -> bool:
         """Did the command leave the question unanswered, so ask the fallback?"""
@@ -704,6 +763,28 @@ class PreflightPolicy:
                     found.append(alias)
         return tuple(found)
 
+    def boards_establishing_firmware(self, invocations) -> tuple[str, ...]:
+        """Ubertooths whose application image the suite itself writes, in run order.
+
+        The complement of ``boards_needing_firmware`` among the Ubertooths a
+        test of the suite selects. Their firmware revision is not required
+        before the run, and no stage flashes them, but their bootloader is
+        read: it is a property of the board that no firmware write replaces,
+        and for `Reset into invalid application` it is what the test is about
+        (#327). Guard-only boards are not here either; theirs is read as part
+        of the guard baseline instead.
+        """
+        established = self._firmware_established_by_suite(invocations)
+        found: list[str] = []
+        for invocation in invocations:
+            for role, alias in invocation.resources.items():
+                if role.startswith(GUARD_ROLE_PREFIX) or alias not in established:
+                    continue
+                if alias not in found and self.registry.get(alias).type == "Ubertooth":
+                    found.append(alias)
+        return tuple(found)
+
+
     def compile(
         self,
         invocations: Sequence[TestInvocation],
@@ -821,21 +902,23 @@ class PreflightPolicy:
                             raise PreflightError(str(error)) from error
                     required_api = host_api
                     reads += (guard_api_check(selected_serial),)
-                if (
-                    bootloader is not None
-                    and alias in tested
-                    and alias not in established
-                ):
+                if bootloader is not None and alias in tested:
                     # Which bootloader is underneath the firmware this run
-                    # just required. Not for a guard-only board, whose
-                    # firmware may be older than the read, nor for a board a
-                    # firmware-writing test establishes itself: both can be
-                    # carrying firmware that refuses the request.
+                    # just required -- and, for a board whose application
+                    # image a test of the suite writes itself, underneath
+                    # whatever it is carrying now: the bootloader is not
+                    # written by either, and for `Reset into invalid
+                    # application` it is the subject of the test (#327). Such
+                    # a board may be carrying firmware older than the request,
+                    # so its read accepts the refusal as the reading
+                    # (BootloaderExpectation.established). Not for a
+                    # guard-only board, whose bootloader the guard baseline
+                    # reads instead.
                     reads += (
                         (
                             BOOTLOADER_CHECK_NAME,
                             bootloader_identity.identity_argv(selected_serial),
-                            bootloader.patterns(),
+                            bootloader.patterns(alias),
                         ),
                     )
                 for name, argv, patterns in reads:
