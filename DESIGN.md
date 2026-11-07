@@ -911,10 +911,12 @@ reading only some runs of the case take, a baseline a mutating step has to
 establish first (`Observation.compare_with`), runs either way: the comparison
 is made where the case recorded the reading and left out where it did not,
 the step's own checks decide it, and the cleanup stays verified, so a case
-that stopped at its own write is not reported as a board left unrestored. The
+that stopped at its own write goes on rather than reporting a board left
+unrestored. The
 step's record names the reading it could not compare with. A case that
 compares with a reading no earlier step of it records is refused where the
-case is built. A case whose precondition does not hold (an
+case is built, and the tolerance is given to a case's own steps alone. A case
+whose precondition does not hold (an
 unrestorable original) is reported `skipped` before any change. Plans choose a
 bounded `coverage` profile (`smoke` or `comprehensive`); case IDs are fixed,
 descriptive literals and generation is deterministic.

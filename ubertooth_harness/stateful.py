@@ -86,12 +86,19 @@ class NothingToCompare(LookupError):
     missing.
 
     It is neither of the other two absences. ``MissingContext`` means the
-    step cannot run at all, so after a change it is a cleanup failure;
-    ``Unrestorable`` means a recorded value cannot be written back, so the
-    step is skipped and the cleanup is unverified. A step that is only
-    missing something to compare with still does its own work and still
-    proves what it is there to prove, so it passes or fails on its own
-    checks and the cleanup stays verified.
+    step cannot run at all, which is a cleanup failure once something has
+    changed; ``Unrestorable`` means a recorded value cannot be written back,
+    so the step is skipped. Either way the step did not run, which leaves the
+    cleanup unverified, and the parent test stops rather than continue from a
+    device no cleanup checked. A step that is only missing something to
+    compare with does run: it does its own work, and still proves what it is
+    there to prove, so it passes or fails on its own checks and the cleanup
+    stays verified.
+
+    Only a case's own steps are given it. ``StateCase`` is what refuses a
+    comparison with a reading no earlier step of it records, so a step from
+    anywhere else fails on the absence instead (sequencer
+    ``_run_state_step``).
     """
 
 

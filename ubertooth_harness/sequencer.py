@@ -696,11 +696,19 @@ class NamedTestSequencer:
         try:
             argv = step.resolve_argv(context)
             if step.observe is not None:
-                step.observe.expected_value(context)
-        except NothingToCompare:
-            # The step can run; only its comparison has nothing to compare
-            # with, which evaluate() leaves out and records.
-            pass
+                try:
+                    step.observe.expected_value(context)
+                except NothingToCompare as error:
+                    # The step can run; only its comparison has nothing to
+                    # compare with, which evaluate() leaves out and records.
+                    # That is tolerated for a case's own steps alone, because
+                    # StateCase is what refuses a comparison with a reading
+                    # no earlier step of it records. A step from anywhere
+                    # else (the guard reads, which transitions.py builds and
+                    # no case owns) has had no such check, so the absence
+                    # fails closed here instead.
+                    if stage not in ("transition", "cleanup"):
+                        raise MissingContext(error.args[0]) from error
         except Unrestorable as error:
             reason = f"{step.name}: skipped, {error.args[0]}"
             details.update({"reason": reason, "argv": None})
@@ -792,16 +800,23 @@ class NamedTestSequencer:
         board is reported as restored:
 
         * the step cannot run, because its command line or its expected value
-          needs that value (``MissingContext``): skipped as "not needed" when
-          no mutating step ran, and a cleanup failure once one has, since
-          something may have changed and nothing wrote it back;
+          needs that value (``MissingContext``): a cleanup failure once a
+          mutating step has run, since something may have changed and nothing
+          wrote it back. Before that it is skipped as "not needed", and like
+          any cleanup step that did not run it leaves the cleanup unverified;
         * the value cannot be written back by any host tool
-          (``Unrestorable``): the step is skipped, and the cleanup counts as
-          unverified, so the test stops;
+          (``Unrestorable``): the step is skipped, so the cleanup is
+          unverified too;
         * only a comparison has nothing to compare with
           (``NothingToCompare``): the step runs in full, its own checks decide
           it, and the cleanup stays verified. The step records the reading it
           could not compare with.
+
+        An unverified cleanup is what stops the test when the case also
+        failed or was canceled: the parent test goes on to the next case only
+        from a device a cleanup checked (``_run``). A case that passed with a
+        restore it did not need carries the same unverified mark and stops
+        nothing.
         """
         owner = {
             "phase": "test",

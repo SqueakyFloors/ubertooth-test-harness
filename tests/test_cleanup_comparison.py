@@ -21,6 +21,7 @@ something the write must not have touched, and in cleanup write the first
 image back and read it again.
 """
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,7 @@ from types import MappingProxyType
 
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.catalog import TestCatalog, TestDefinition
+from ubertooth_harness.events import RunEvent, TerminalEventSink
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.sequencer import NamedTestSequencer
@@ -185,6 +187,16 @@ def steps(events, **match):
         if event.event_type == "step_finished"
         and all(event.details.get(key) == value for key, value in match.items())
     ]
+
+
+class Recorder:
+    """The publisher one step needs, for a step run on its own."""
+
+    def __init__(self, emitted):
+        self.emitted = emitted
+
+    def emit(self, event_type, status, details):
+        self.emitted.append((status, dict(details)))
 
 
 def cases(events):
@@ -410,7 +422,8 @@ class CleanupComparisonRunTests(unittest.TestCase):
         board = FakeBoard(cancel_on=lambda command: command[1] == "-d")
 
         summary, events, _report = run_case(
-            alternate_image_case(), board=board, cancellation=token)
+            alternate_image_case("first"), alternate_image_case("second"),
+            board=board, cancellation=token, continue_on_case_failure=True)
 
         self.assertFalse(summary.passed)
         case = cases(events)[0]
@@ -422,3 +435,52 @@ class CleanupComparisonRunTests(unittest.TestCase):
         self.assertEqual("passed", verify.status)
         self.assertEqual(UNDER_ALTERNATE, verify.details["uncompared"])
         self.assertEqual("application", board.image)
+        # A cancellation ends the test whatever the cleanup found, as it
+        # always has: the record says the board was put back, not that the
+        # run may carry on.
+        self.assertEqual(1, len(cases(events)))
+
+    def test_a_step_no_case_owns_fails_on_the_absence_instead(self):
+        """The tolerance is for a case's own steps, which StateCase checked.
+
+        The guard reads are built outside any case (transitions.py), so no
+        construction-time check refuses a comparison with a reading nothing
+        records. There the absence fails the step, before its command runs,
+        rather than being left out. The tolerated stages are what the run
+        tests above cover.
+        """
+        emitted = []
+        step = _read("read-guard", "Read a guard board", AFTER_RESTORE,
+                     compare_with=UNDER_ALTERNATE)
+        sequencer = NamedTestSequencer(FakeBoard())
+
+        with tempfile.TemporaryDirectory() as directory:
+            failure, ran, canceled, skipped = sequencer._run_state_step(
+                Recorder(emitted), CancellationToken(), Path(directory),
+                step, "guard", {}, {"phase": "test"}, "001-Custom-case",
+            )
+
+        self.assertEqual(
+            f"Read a guard board: missing recorded {UNDER_ALTERNATE}", failure)
+        self.assertFalse(ran)
+        self.assertFalse(canceled)
+        self.assertEqual("", skipped)
+        self.assertEqual([("failed", failure, None)],
+                         [(status, details["reason"], details["argv"])
+                          for status, details in emitted])
+
+    def test_the_live_console_line_says_a_comparison_was_left_out(self):
+        # What someone watching the run sees, which is not report.md.
+        stream = io.StringIO()
+        sink = TerminalEventSink(stream)
+        details = {"stage": "cleanup", "step_name": "Read it back",
+                   "expected": None, "observed": BOOTLOADER,
+                   "uncompared": UNDER_ALTERNATE, "reason": ""}
+
+        sink.emit(RunEvent(1, "run", 1, "2026-10-22T01:00:00.000",
+                           "step_finished", "passed", details))
+
+        self.assertEqual(
+            f"[cleanup passed] Read it back (recorded {BOOTLOADER}) "
+            f"(nothing recorded for {UNDER_ALTERNATE}, so it was not "
+            "compared)\n", stream.getvalue())
