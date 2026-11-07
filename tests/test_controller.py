@@ -144,6 +144,31 @@ async def wait_until(predicate, timeout=TIMEOUT_S, interval=0.02):
         await asyncio.sleep(interval)
 
 
+class ManualClock:
+    """The controller's clock, which moves only when a test moves it.
+
+    The controller measures two things on this clock: the grace period a
+    start request stays pending after its caller has gone, and how long a
+    target may go without a heartbeat. On the real clock, a test that looks
+    at what is kept during such a period has only that period to do it in,
+    and a loaded host can close the window first (#383). A test that installs
+    this instead decides when each of those periods passes, so the state it
+    asserts cannot change under it, and the transition it waits for happens
+    because it moved the clock and for no other reason.
+    """
+
+    def __init__(self, now: float = 10_000.0):
+        self.now = float(now)
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> float:
+        """Move the clock on, as the controller will next read it."""
+        self.now += seconds
+        return self.now
+
+
 class ControllerTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
@@ -164,6 +189,19 @@ class ControllerTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.server.stop()
         self._directory.cleanup()
+
+    def manual_clock(self, now=10_000.0):
+        """Take the controller off the wall clock for the rest of the test.
+
+        Every target already registered is counted as having been heard from
+        at this moment, so the clock starts with nothing overdue: what expires
+        afterwards is what the test advanced the clock past.
+        """
+        clock = ManualClock(now)
+        self.controller.clock = clock
+        for target in self.controller.targets.values():
+            target.last_seen = clock()
+        return clock
 
     async def http(self, method, path, body=None, headers=None):
         return await asyncio.to_thread(_http, self.port, method, path, body, headers)
@@ -1030,10 +1068,14 @@ class ReviewFixTests(ControllerTestCase):
         self.assertEqual(3, self.controller.runs["run-1"].malformed_lines)
 
     async def test_timed_out_run_requests_expire_after_the_grace_period(self):
-        self.controller.reply_timeout_s = 0.1
-        self.controller.late_reply_grace_s = 0.4
+        # The caller does not wait at all (0), and the grace period passes
+        # only when this test says so, so neither half of the window below
+        # depends on how fast this host is (#383).
+        self.controller.reply_timeout_s = 0
+        self.controller.late_reply_grace_s = 5
         async with FakeRunner(self.port) as runner:
             await self.registered(runner, interval=10)
+            clock = self.manual_clock()
             # Within the grace window a late acceptance still creates the run.
             post, message = await self.start_run(runner)
             self.assertEqual(504, (await post)[0])
@@ -1050,6 +1092,8 @@ class ReviewFixTests(ControllerTestCase):
             # After it, the entry is gone and a late acceptance is ignored.
             post, message = await self.start_run(runner)
             self.assertEqual(504, (await post)[0])
+            self.assertIn(message["request_id"], self.controller._pending_runs)
+            clock.advance(self.controller.late_reply_grace_s)
             await wait_until(lambda: self.controller._pending_runs == {})
             errors = self.controller.targets["Host_A"].protocol_errors
             await runner.send("run_accepted", request_id=message["request_id"], run_id="run-2")
