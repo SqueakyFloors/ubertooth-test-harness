@@ -2356,6 +2356,19 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow -- -x        # and -h stray, an
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -q - -c <case dir>/extra.pcap
                                         # accepted: the extra file is warned
                                         # about on stderr and never created
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<a> -d <case dir>/new.dump
+                                        # the ubertooth-rx board list
+                                        # (fork ubertooth#1063): a board named
+                                        # twice, before the -d refusal
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,,<b> -d <case dir>/new.dump
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b>,<c> -c 39,39 -q <case dir>/new.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b> -d <case dir>/new.dump
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b> -V
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b> -c 39, -q <case dir>/new.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <9 boards> -d <case dir>/new.dump
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b> -c <9 channels> -q <case dir>/new.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -i <case dir>/kept.dump -U <a>,<b>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<a> -c 1,2,3
 refusal.py probe <tool>                   # opens every case: can the switch be used
 refusal.py seed <case dir> <names>        # the files a case must find unchanged
 refusal.py files <case dir>               # the cleanup: the directory as it
@@ -2372,8 +2385,8 @@ later value, which is each tool's own (`btle -A 40`, `rx -c 79`,
 and follow lines take the four that need no file: a stray word, `-h stray`,
 a bare `-`, and `-- -x`.
 
-**Expected outcome.** On a Linux host, smoke runs 45 cases and comprehensive
-67; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
+**Expected outcome.** On a Linux host, smoke runs 50 cases and comprehensive
+77; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
 applicable. Every file option of `btle`, `follow`, `rx`, `dump`, `specan`, and
 `dfu` is refused three ways: with a stray word, with `-h` (which exits 0 and
 must still create nothing), and with a bad option value later on the line.
@@ -2385,11 +2398,50 @@ board lookup; `dump -d` with `-c` and `-l` in either order is refused with
 before the dump file is opened; and `scan` and `follow` refuse a stray word
 with no usage text after the message.
 
+**The `ubertooth-rx` board list.** A capture may read several boards at once,
+`-U a,b,c` with one channel each
+([ubertooth#1063](https://github.com/SqueakyFloors/ubertooth/pull/1063)). What
+the boards then share — a corroborated UAP, and the merged map of channels
+the piconet was heard on — depends on which board heard what, so nothing
+asserts it; that half is named under "Known limits" below. The command lines
+the list *cannot* be given are deterministic and need no traffic, and every
+one of them is refused before a board is opened or a file created, which is
+what the rest of this test already establishes. Five are in smoke: a board
+named twice (`-U <a>,<a>`), an empty list entry (`-U <a>,,<b>`), two channels
+for three boards (`-c` naming a count that is neither one nor one per board),
+`-d` beside several boards, and `-V` beside several boards. Comprehensive adds
+five: an empty channel entry, lists longer than the eight boards a capture
+reads (in each of `-U` and `-c`), `-i` beside several boards, and a board
+named twice beside a channel count that does not line up either. Each case
+requires
+exit 1 and pins the whole of what the tool said: that one `error:` line and no
+second error, note, or warning line, and an **empty standard output**. Both
+halves matter. Expecting the message alone would pass a tool that printed it
+and then went on to say something else, a refusal a reader cannot act on
+because it does not say which of two sentences to believe; and the empty
+standard output is what the `-V` case rests on, since that is where a version
+answer would go, so a refusal cannot be read as an answer. Where two refusals would apply
+to one command line, the other message is forbidden, so the order is asserted
+rather than assumed: the board list is read before the channel list (a board
+named twice beside `-c 1,2,3`, and beside `-d`), and only a list longer than
+the tool takes at all is refused as too long, the counts that merely fail to
+line up getting the count message instead. The selectors are invented rather
+than taken from the registry, since no board is opened; each begins with a
+letter, because libubertooth reads an all-digit selector as a USB index.
+
 **Known limits.** Forks from before the no-devices switch ignore it, so the
 first step of every case reads the built library's bytes and the case skips
 when the name is absent. That is a run-time skip because only the built
 library can tell. The test says nothing about what the tools do once a command
-line is accepted.
+line is accepted. In particular, the accepted half of the `ubertooth-rx` board
+list is not covered anywhere: a capture that really reads several boards, and
+the UAP corroboration and merged channel map they share, depend on which board
+hears what, so a case asserting the agreement notes would be counting the
+room rather than the code
+([#340](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/340)).
+Three further questions that pull-request left open are design decisions
+rather than gaps here: `-U all` for a capture, a dump per board, and a PCAPNG
+interface per board.
 
 ## Failed capture files
 
