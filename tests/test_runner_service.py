@@ -23,6 +23,7 @@ from websockets.asyncio.server import serve
 from ubertooth_harness import cli
 from ubertooth_harness import release as release_version
 from ubertooth_harness.cli import main
+from ubertooth_harness.enumeration import UsbDevice
 from ubertooth_harness.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -47,13 +48,24 @@ LIBBTBB_BRANCH = "master"
 
 
 class StubEnumerator:
-    def __init__(self, serials=("0000000000000000000000000000abcd",)):
+    def __init__(self, serials=("0000000000000000000000000000abcd",), devices=None):
         self._serials = frozenset(serials)
+        self._devices = devices
         self.calls = 0
+        self.device_calls = 0
 
     def serials(self):
         self.calls += 1
         return self._serials
+
+    def devices(self):
+        self.device_calls += 1
+        if self._devices is not None:
+            return tuple(self._devices)
+        return tuple(
+            UsbDevice(serial, "1d50", "6002", f"3-{index + 1}")
+            for index, serial in enumerate(sorted(self._serials))
+        )
 
 
 class StubController:

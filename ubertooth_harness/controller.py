@@ -24,7 +24,7 @@ commit listed for that ref, and the runner runs exactly that commit, so a
 stale or differently configured runner checkout cannot substitute another
 one; the commit is recorded in ``run.json``.
 
-Target runners connect to ``/ws/runner`` and speak protocol v7
+Target runners connect to ``/ws/runner`` and speak protocol v8
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,
@@ -61,6 +61,10 @@ from ubertooth_harness.bootloader import (
     MODES as BOOTLOADER_MODES,
     MODE_RECORD as BOOTLOADER_RECORD,
     MODE_UPDATE as BOOTLOADER_UPDATE,
+)
+from ubertooth_harness.boardstatus import (
+    summary as board_summary,
+    with_status as board_views,
 )
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.events import REPORT, RUN_LOG
@@ -229,6 +233,9 @@ class Target:
     registered_at: str
     last_seen_at: str
     last_seen: float  # monotonic
+    # One entry per registered Ubertooth of that host, as the runner
+    # reported it in register or the last heartbeat.
+    boards: list = dataclasses.field(default_factory=list)
     connected: bool = True
     online: bool = True
     last_heartbeat: dict | None = None
@@ -253,6 +260,11 @@ class Target:
         del data["last_seen"]
         data["status"] = "online" if self.online else "offline"
         data["platform"] = self.platform
+        # Each board with what its facts add up to, derived in one place so
+        # that every client reads the same status and the same words for it
+        # rather than working them out again.
+        data["boards"] = board_views(self.boards)
+        data["boards_summary"] = board_summary(self.boards)
         return data
 
 
@@ -487,6 +499,8 @@ class Controller:
         self._pending_cancels: dict[str, _Pending] = {}
         # run_file requests awaiting a runner's page or refusal.
         self._pending_files: dict[str, _Pending] = {}
+        # list_devices and update_registry requests awaiting their answer.
+        self._pending_boards: dict[str, _Pending] = {}
         self._subscribers: set[_Subscriber] = set()
         # Work started from a message and awaited by nobody, held so that
         # nothing collects a task while it is still running.
@@ -971,6 +985,7 @@ class Controller:
             python=message["python"],
             ubertooth_serials=message["ubertooth_serials"],
             enumeration_error=message["enumeration_error"],
+            boards=list(message["boards"]),
             heartbeat_interval_s=message["heartbeat_interval_s"],
             active_run_id=message["active_run_id"],
             registered_at=now,
@@ -1033,7 +1048,8 @@ class Controller:
 
     def _fail_pending(self, host: str, reason: str) -> None:
         for table in (
-            self._pending_runs, self._pending_cancels, self._pending_files
+            self._pending_runs, self._pending_cancels, self._pending_files,
+            self._pending_boards,
         ):
             for key, pending in list(table.items()):
                 if pending.host == host:
@@ -1100,6 +1116,33 @@ class Controller:
             return
         self._publish_group(group)
 
+    def _take_board_request(
+        self, target: Target, kind: str, message: Mapping
+    ) -> _Pending | None:
+        """The waiting board request this answer belongs to, or None.
+
+        None for an answer whose caller has gone: the request was dropped
+        when the REST call timed out, so there is nobody to hand it to. That
+        is not the runner's fault and is not counted as one, but a
+        ``registry_updated`` still takes effect, because the registry on the
+        target really did change.
+        """
+        request_id = message["request_id"]
+        pending = self._pending_boards.get(request_id)
+        if pending is None:
+            self.log(f"discarded a late {kind} from {target.host}")
+            return None
+        if pending.host != target.host:
+            raise _Violation(f"{kind} for unknown board request {request_id}")
+        del self._pending_boards[request_id]
+        return pending
+
+    def _set_boards(self, target: Target, boards, *, always: bool = False) -> None:
+        """Replace a target's board list, publishing it when it changed."""
+        if always or list(boards) != target.boards:
+            target.boards = list(boards)
+            self._publish_target(target)
+
     def _run_for(self, target: Target, run_id: str) -> Run:
         run = self.runs.get(run_id)
         if run is not None:
@@ -1125,8 +1168,14 @@ class Controller:
             target.last_heartbeat = {
                 key: message[key] for key in message if key not in ("version", "type")
             }
-            if target.active_run_id != message["active_run_id"]:
-                target.active_run_id = message["active_run_id"]
+            changed = target.active_run_id != message["active_run_id"]
+            target.active_run_id = message["active_run_id"]
+            if target.boards != message["boards"]:
+                # A board that left USB, came back, or was leased by another
+                # command: within one interval, without opening anything.
+                target.boards = list(message["boards"])
+                changed = True
+            if changed:
                 self._publish_target(target)
         elif kind == "register":
             raise _Violation("register is only valid as the first message")
@@ -1273,6 +1322,35 @@ class Controller:
             self._publish_run(run)
             self.log(f"run {run.run_id} on {target.host}: {run.status}")
             await self.learn(run)
+        elif kind == "devices":
+            pending = self._take_board_request(target, kind, message)
+            if pending is not None:
+                pending.resolve({
+                    key: message[key] for key in
+                    ("devices", "error", "power_controllers", "suggested_alias")
+                })
+                # A listing refreshes the board list too: it was read in the
+                # same pass, so the Targets card and the flyout agree.
+                self._set_boards(target, message["boards"])
+        elif kind == "registry_updated":
+            pending = self._take_board_request(target, kind, message)
+            target.ubertooth_serials = message["ubertooth_serials"]
+            self._set_boards(target, message["boards"], always=True)
+            self.log(
+                f"target {target.host} {message['action']}ed board "
+                f"{message['alias']} in its registry"
+            )
+            if pending is not None:
+                pending.resolve({
+                    "action": message["action"], "alias": message["alias"],
+                    "target": target.view(),
+                })
+        elif kind == "registry_refused":
+            pending = self._take_board_request(target, kind, message)
+            if pending is not None:
+                pending.fail(
+                    ControllerError(message["reason"], message["status"])
+                )
         elif kind in ("run_file_page", "run_file_refused"):
             request_id = message["request_id"]
             pending = self._pending_files.get(request_id)
@@ -1441,6 +1519,95 @@ class Controller:
             pending.waiters -= 1
             if pending.waiters == 0 and not pending.future.done():
                 pending.expires_at = self.clock() + self.late_reply_grace_s
+
+    # ----- board management ------------------------------------------------
+
+    def _board_target(self, host: str) -> tuple[Target, Link]:
+        """The connected target to send a board request to, or a refusal."""
+        if not valid_identifier(host):
+            raise ControllerError(f"unknown target {host!r}", 404)
+        target = self.targets.get(host)
+        link = self._links.get(host)
+        if target is None:
+            raise ControllerError(f"unknown target {host!r}", 404)
+        if link is None or not target.online:
+            raise ControllerError(
+                f"target {host} is not connected; its boards are managed by "
+                "its own runner, so they can be changed once it is back", 503,
+            )
+        return target, link
+
+    async def _ask_target(self, host: str, message_type: str, **fields):
+        """Send one board request to a target and wait for its answer.
+
+        The runner owns its registry, so the controller only ever asks. A
+        request is held until the answer arrives, the reply timeout passes
+        (504), or the connection goes (503).
+        """
+        target, link = self._board_target(host)
+        if any(
+            pending.host == host for pending in self._pending_boards.values()
+        ):
+            # One at a time per target: these are a person pressing a button,
+            # and two overlapping registry edits would each have read the
+            # file before the other wrote it. The runner refuses the second
+            # as well; refusing it here says so without the round trip.
+            raise ControllerError(
+                f"a board request to {host} is already waiting for an answer; "
+                "try again", 409,
+            )
+        request_id = uuid.uuid4().hex
+        try:
+            text = encode_controller_message(
+                message_type, request_id=request_id, **fields
+            )
+        except ProtocolError as error:
+            raise ControllerError(str(error), 422) from None
+        pending = _Pending(host, asyncio.get_running_loop().create_future())
+        self._pending_boards[request_id] = pending
+        try:
+            try:
+                await self._send(link, text)
+            except Exception as error:
+                raise ControllerError(
+                    f"cannot reach target {host}: {error}", 503
+                ) from None
+            return await self._await_reply(pending)
+        finally:
+            # Dropped as its caller leaves. A late `registry_updated` still
+            # updates the target, because the file on it really did change;
+            # only the answer to this call is gone.
+            if self._pending_boards.get(request_id) is pending:
+                del self._pending_boards[request_id]
+
+    async def list_devices(self, host: str) -> dict:
+        """Every Ubertooth attached to a target, registered or new.
+
+        The runner reads what the kernel already knows (sysfs or the IO
+        registry): no device is opened and no command is sent, so a board
+        that is capturing is not disturbed.
+        """
+        answer = await self._ask_target(host, "list_devices")
+        return {"target": host, **answer}
+
+    async def update_registry(
+        self, host: str, *, action: str, alias: str, serial: str | None = None,
+        power_controller: str | None = None, power_port: int | None = None,
+    ) -> dict:
+        """Register or unregister one Ubertooth on a target.
+
+        A mutating request like a run start: it goes through the same guard,
+        and the runner is the one that validates and writes its own registry.
+        """
+        if action not in ("add", "remove"):
+            raise ControllerError("action must be add or remove", 422)
+        serial = (serial or "").strip().lower() or None
+        answer = await self._ask_target(
+            host, "update_registry", action=action, alias=alias,
+            serial=serial, power_controller=power_controller,
+            power_port=power_port,
+        )
+        return answer
 
     async def list_refs(self) -> dict:
         if self.ref_source is None:
@@ -2309,6 +2476,18 @@ ENDPOINTS = {
     ),
     "GET /api/targets": "registered targets",
     "GET /api/targets/{host}": "one target",
+    "GET /api/targets/{host}/devices": (
+        "every Ubertooth attached to that target from a read-only USB scan "
+        "(serial, bus path, VID:PID), each marked with the alias it is "
+        "registered as or new, with the hubs a new board could go on and a "
+        "suggested alias; no device is opened and nothing is sent to one"
+    ),
+    "POST /api/targets/{host}/boards": (
+        "register or unregister one Ubertooth in that target's own registry: "
+        "{action: add|remove, alias, serial, power_controller, power_port}; "
+        "add needs the serial, remove takes the alias only, and either is "
+        "refused while that target has an active run or the board is leased"
+    ),
     "POST /api/targets/{host}/runs": (
         "start a run: {ref, commit, plan, suite, tests, build, flash_build, "
         "with_firmware, with_btbr, with_python, bootloader}; flash_build is "
@@ -2397,6 +2576,20 @@ def create_app(controller: Controller):
         model_config = ConfigDict(extra="forbid", strict=True)
         reason: str = ""
 
+    class BoardRequest(BaseModel):
+        # One registry change. What a value may be is checked in one place,
+        # the runner's own ``registryedit``, so a browser and a script are
+        # refused for the same reasons in the same words; this only keeps a
+        # request of the wrong shape from reaching the protocol at all.
+        model_config = ConfigDict(extra="forbid", strict=True)
+        action: str
+        alias: str
+        # add only: the serial the board reports, and the switchable port it
+        # sits on, which is both halves or neither.
+        serial: str | None = None
+        power_controller: str | None = None
+        power_port: int | None = None
+
     # No interactive docs: they load scripts from a CDN.
     app = FastAPI(
         title="Ubertooth harness controller", docs_url=None, redoc_url=None,
@@ -2476,6 +2669,18 @@ def create_app(controller: Controller):
         if target is None:
             raise ControllerError(f"unknown target {host!r}", 404)
         return {"target": target.view()}
+
+    @app.get("/api/targets/{host}/devices")
+    async def list_devices(host: str):
+        return await controller.list_devices(host)
+
+    @app.post("/api/targets/{host}/boards")
+    async def update_registry(host: str, request: BoardRequest):
+        return await controller.update_registry(
+            host, action=request.action, alias=request.alias,
+            serial=request.serial, power_controller=request.power_controller,
+            power_port=request.power_port,
+        )
 
     @app.post("/api/targets/{host}/runs", status_code=201)
     async def start_run(host: str, request: RunRequest):

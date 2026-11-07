@@ -52,6 +52,22 @@ except ImportError:  # run as tests.test_controller
 
 TIMEOUT_S = 30
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+# The board list a registered runner reports: one board on USB and free,
+# whose firmware a run has read, and one the registry has but USB has not.
+BOARDS = [
+    {
+        "alias": "UT_A0", "serial": "0000000000000000000000000000abcd",
+        "present": True, "held": False, "holder": "",
+        "firmware_revision": "git-abcdef0", "power_controller": "Hub_A0",
+        "power_port": 1,
+    },
+    {
+        "alias": "UT_A1", "serial": "0000000000000000000000000000ffff",
+        "present": False, "held": False, "holder": "",
+        "firmware_revision": None, "power_controller": None,
+        "power_port": None,
+    },
+]
 # What `git ls-remote` prints for the refs these tests start runs with.
 LS_REMOTE = (
     f"{COMMIT}\tHEAD\n{COMMIT}\trefs/heads/main\n{COMMIT}\trefs/tags/v1.2\n"
@@ -115,19 +131,22 @@ class FakeRunner:
     async def send(self, message_type, **fields):
         await self.ws.send(encode_runner_message(message_type, **fields))
 
-    async def register(self, host="Host_A", interval=0.2, active=None):
+    async def register(self, host="Host_A", interval=0.2, active=None,
+                       boards=None):
         await self.send(
             "register", host=host, hostname="fake-host",
             os={"system": "Linux", "release": "6.8"}, python="3.12.6",
             ubertooth_serials=["0000000000000000000000000000abcd"],
-            enumeration_error=None, heartbeat_interval_s=interval,
+            enumeration_error=None, boards=BOARDS if boards is None else boards,
+            heartbeat_interval_s=interval,
             active_run_id=active,
         )
 
-    async def heartbeat(self, active=None):
+    async def heartbeat(self, active=None, boards=None):
         await self.send(
             "heartbeat", active_run_id=active, elapsed_s=None,
             last_event_sequence=None, last_event_type=None,
+            boards=BOARDS if boards is None else boards,
         )
 
     async def recv(self):
@@ -382,6 +401,303 @@ class RegistryTests(ControllerTestCase):
         await wait_until(lambda: not self.controller.targets["Host_A"].connected)
         self.assertFalse(self.controller.targets["Host_A"].online)
         self.assertEqual(404, (await self.http("GET", "/api/targets/Host_B"))[0])
+
+
+class BoardManagementTests(ControllerTestCase):
+    """Per-board status in a target, and the two board-management routes (#134).
+
+    The registry belongs to the runner, so the controller only ever asks: a
+    scripted runner here answers as the real one would.
+    """
+
+    async def test_a_target_carries_each_board_with_its_status(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            status, payload, _ = await self.http("GET", "/api/targets/Host_A")
+            self.assertEqual(200, status)
+            boards = {entry["alias"]: entry for entry in payload["target"]["boards"]}
+            # Derived once, on the controller, so every client reads the same
+            # word and the same sentence for a board.
+            self.assertEqual("ready", boards["UT_A0"]["status"])
+            self.assertEqual("ready", boards["UT_A0"]["level"])
+            self.assertIn("git-abcdef0", boards["UT_A0"]["status_detail"])
+            self.assertEqual("offline", boards["UT_A1"]["status"])
+            self.assertEqual("offline", boards["UT_A1"]["level"])
+            self.assertEqual(
+                "2 boards: 1 ready, 1 offline", payload["target"]["boards_summary"]
+            )
+
+    async def test_a_heartbeat_that_changes_a_board_is_published(self):
+        async with connect(
+            f"ws://127.0.0.1:{self.port}/ws/live", proxy=None
+        ) as live, FakeRunner(self.port) as runner:
+            await asyncio.wait_for(live.recv(), TIMEOUT_S)  # snapshot
+            await self.registered(runner)
+            await asyncio.wait_for(live.recv(), TIMEOUT_S)  # registration
+            leased = [
+                {**BOARDS[0], "held": True, "holder": "run xyz (agent-2)"},
+                BOARDS[1],
+            ]
+            await runner.heartbeat(boards=leased)
+            update = json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))
+            self.assertEqual("target", update["type"])
+            board = update["target"]["boards"][0]
+            self.assertEqual("busy", board["status"])
+            self.assertEqual("attention", board["level"])
+            self.assertIn("agent-2", board["status_detail"])
+
+    async def ask_devices(self, runner, **answer):
+        get = asyncio.create_task(
+            self.http("GET", "/api/targets/Host_A/devices")
+        )
+        request = await runner.recv()
+        self.assertEqual("list_devices", request["type"])
+        fields = dict(
+            devices=[{"serial": "0000000000000000000000000000abcd",
+                      "vendor": "1d50", "product": "6002", "path": "3-2.1",
+                      "alias": "UT_A0"},
+                     {"serial": "0000000000000000000000000000beef",
+                      "vendor": "1d50", "product": "6002", "path": "3-2.2",
+                      "alias": None}],
+            error=None,
+            power_controllers=[{"alias": "Hub_A0", "driver": "acroname",
+                                "ports": [2, 3]}],
+            suggested_alias="UT_A2", boards=BOARDS,
+        )
+        fields.update(answer)
+        await runner.send("devices", request_id=request["request_id"], **fields)
+        return await get
+
+    async def test_the_attached_boards_come_from_the_runner(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            status, payload, _ = await self.ask_devices(runner)
+            self.assertEqual(200, status, payload)
+            self.assertEqual("Host_A", payload["target"])
+            self.assertEqual(
+                ["UT_A0", None], [item["alias"] for item in payload["devices"]]
+            )
+            self.assertEqual("UT_A2", payload["suggested_alias"])
+            self.assertEqual([2, 3], payload["power_controllers"][0]["ports"])
+
+    async def test_a_scan_that_found_nothing_says_why(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            status, payload, _ = await self.ask_devices(
+                runner, devices=[], error="cannot read USB devices from sysfs",
+            )
+            self.assertEqual(200, status)
+            self.assertEqual([], payload["devices"])
+            self.assertIn("sysfs", payload["error"])
+
+    async def post_board(self, runner, body, answer=None, **fields):
+        post = asyncio.create_task(
+            self.http("POST", "/api/targets/Host_A/boards", body)
+        )
+        request = await runner.recv()
+        self.assertEqual("update_registry", request["type"])
+        if answer == "registry_updated":
+            await runner.send(
+                "registry_updated", request_id=request["request_id"],
+                action=request["action"], alias=request["alias"],
+                boards=fields.get("boards", BOARDS),
+                ubertooth_serials=fields.get("serials", []),
+            )
+        elif answer == "registry_refused":
+            await runner.send(
+                "registry_refused", request_id=request["request_id"],
+                status=fields.get("status", 409),
+                reason=fields.get("reason", "no"),
+            )
+        return request, await post
+
+    async def test_registering_a_board_sends_the_change_and_returns_the_target(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            added = [{**BOARDS[0]}, {**BOARDS[1]}, {
+                "alias": "UT_A2", "serial": "0000000000000000000000000000beef",
+                "present": True, "held": False, "holder": "",
+                "firmware_revision": None, "power_controller": "Hub_A0",
+                "power_port": 2,
+            }]
+            request, (status, payload, _) = await self.post_board(
+                runner,
+                {"action": "add", "alias": "UT_A2",
+                 "serial": "0000000000000000000000000000BEEF",
+                 "power_controller": "Hub_A0", "power_port": 2},
+                "registry_updated", boards=added,
+            )
+            # The serial travels lower case, the way USB reports it.
+            self.assertEqual(
+                "0000000000000000000000000000beef", request["serial"]
+            )
+            self.assertEqual(200, status, payload)
+            self.assertEqual(("add", "UT_A2"), (payload["action"], payload["alias"]))
+            self.assertEqual(
+                {"UT_A0", "UT_A1", "UT_A2"},
+                {entry["alias"] for entry in payload["target"]["boards"]},
+            )
+            # The target the controller holds was updated too, so the next
+            # reader of /api/targets sees the new board without asking again.
+            self.assertEqual(3, len(self.controller.targets["Host_A"].boards))
+
+    async def test_unregistering_a_board_sends_only_its_alias(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            request, (status, payload, _) = await self.post_board(
+                runner, {"action": "remove", "alias": "UT_A1"},
+                "registry_updated", boards=[BOARDS[0]],
+            )
+            self.assertIsNone(request["serial"])
+            self.assertIsNone(request["power_controller"])
+            self.assertEqual(200, status, payload)
+            self.assertEqual(
+                ["UT_A0"],
+                [entry["alias"] for entry in payload["target"]["boards"]],
+            )
+
+    async def test_the_runners_refusal_is_the_answer_with_its_own_status(self):
+        for refused, expected in ((409, 409), (404, 404), (400, 400), (503, 503)):
+            with self.subTest(status=refused):
+                async with FakeRunner(self.port) as runner:
+                    await self.registered(runner)
+                    _, (status, payload, _) = await self.post_board(
+                        runner, {"action": "remove", "alias": "UT_A1"},
+                        "registry_refused", status=refused,
+                        reason="UT_A1 is leased by run xyz (agent-2)",
+                    )
+                self.assertEqual(expected, status)
+                self.assertIn("leased by", payload["detail"])
+
+    async def test_a_request_the_controller_can_refuse_itself_never_travels(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            cases = {
+                "an action of its own": {"action": "replace", "alias": "UT_A1"},
+                "an alias that is a path": {"action": "remove",
+                                            "alias": "../../etc"},
+                "add with no serial": {"action": "add", "alias": "UT_A2"},
+                "half a power mapping": {
+                    "action": "add", "alias": "UT_A2",
+                    "serial": "0000000000000000000000000000beef",
+                    "power_controller": "Hub_A0",
+                },
+            }
+            for name, body in cases.items():
+                with self.subTest(name):
+                    status, payload, _ = await self.http(
+                        "POST", "/api/targets/Host_A/boards", body
+                    )
+                    self.assertEqual(422, status, payload)
+            # Nothing was sent: the connection is still idle and usable.
+            self.assertEqual({}, self.controller._pending_boards)
+
+    async def test_an_unknown_or_absent_target_is_refused(self):
+        for method, path in (
+            ("GET", "/api/targets/Host_Z/devices"),
+            ("POST", "/api/targets/Host_Z/boards"),
+        ):
+            with self.subTest(path):
+                body = {"action": "remove", "alias": "UT_A1"} if method == "POST" else None
+                status, payload, _ = await self.http(method, path, body)
+                self.assertEqual(404, status, payload)
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+        status, payload, _ = await self.http("GET", "/api/targets/Host_A/devices")
+        self.assertEqual(503, status)
+        self.assertIn("not connected", payload["detail"])
+
+    async def test_a_runner_that_does_not_answer_times_out(self):
+        self.controller.reply_timeout_s = 0.1
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = asyncio.create_task(
+                self.http("GET", "/api/targets/Host_A/devices")
+            )
+            await runner.recv()  # read it and say nothing
+            status, payload, _ = await get
+            self.assertEqual(504, status, payload)
+            # And the request is dropped, so the next one is not refused as
+            # one already waiting.
+            self.assertEqual({}, self.controller._pending_boards)
+
+    async def test_one_board_request_per_target_at_a_time(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = asyncio.create_task(
+                self.http("GET", "/api/targets/Host_A/devices")
+            )
+            request = await runner.recv()
+            status, payload, _ = await self.http(
+                "POST", "/api/targets/Host_A/boards",
+                {"action": "remove", "alias": "UT_A1"},
+            )
+            self.assertEqual(409, status, payload)
+            self.assertIn("already waiting", payload["detail"])
+            await runner.send(
+                "devices", request_id=request["request_id"], devices=[],
+                error=None, power_controllers=[], suggested_alias=None,
+                boards=BOARDS,
+            )
+            self.assertEqual(200, (await get)[0])
+
+    async def test_a_runner_that_goes_away_fails_the_waiting_request(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = asyncio.create_task(
+                self.http("GET", "/api/targets/Host_A/devices")
+            )
+            await runner.recv()
+        status, payload, _ = await get
+        self.assertEqual(503, status, payload)
+
+    async def test_a_late_answer_still_updates_the_target(self):
+        # Its caller gave up (504), but the registry on the target really did
+        # change, so the board list it reports is taken.
+        self.controller.reply_timeout_s = 0.1
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            post = asyncio.create_task(self.http(
+                "POST", "/api/targets/Host_A/boards",
+                {"action": "remove", "alias": "UT_A1"},
+            ))
+            request = await runner.recv()
+            self.assertEqual(504, (await post)[0])
+            await runner.send(
+                "registry_updated", request_id=request["request_id"],
+                action="remove", alias="UT_A1", boards=[BOARDS[0]],
+                ubertooth_serials=["0000000000000000000000000000abcd"],
+            )
+            await wait_until(
+                lambda: len(self.controller.targets["Host_A"].boards) == 1
+            )
+            self.assertEqual(0, self.controller.targets["Host_A"].protocol_errors)
+
+    async def test_the_guard_covers_the_new_mutating_route(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            body = json.dumps({"action": "remove", "alias": "UT_A1"})
+            refused = {
+                "a form post": {"Content-Type": "application/x-www-form-urlencoded"},
+                "another origin": {"Origin": "http://evil.invalid"},
+                "another site": {"Sec-Fetch-Site": "cross-site"},
+                "another host": {"Host": "lab.invalid"},
+            }
+            for name, headers in refused.items():
+                with self.subTest(name):
+                    status, payload, _ = await self.http(
+                        "POST", "/api/targets/Host_A/boards", body,
+                        {"Content-Type": "application/json", **headers},
+                    )
+                    self.assertEqual(403, status, payload)
+            # And nothing was sent to the runner.
+            self.assertEqual({}, self.controller._pending_boards)
+
+    async def test_the_two_routes_are_in_the_endpoint_summary(self):
+        _, payload, _ = await self.http("GET", "/")
+        self.assertIn("GET /api/targets/{host}/devices", payload["endpoints"])
+        self.assertIn("POST /api/targets/{host}/boards", payload["endpoints"])
 
 
 class RunTests(ControllerTestCase):
@@ -1290,7 +1606,7 @@ class MalformedRunnerTests(ControllerTestCase):
     async def test_first_message_must_be_a_valid_register(self):
         heartbeat = encode_runner_message(
             "heartbeat", active_run_id=None, elapsed_s=None,
-            last_event_sequence=None, last_event_type=None,
+            last_event_sequence=None, last_event_type=None, boards=[],
         )
         for first in ("{bad json", heartbeat, b"\x00binary",
                       # The version a runner of the last deploy still speaks:
@@ -1323,7 +1639,7 @@ class MalformedRunnerTests(ControllerTestCase):
                 encode_runner_message(
                     "register", host="Host_B", hostname="h", os={}, python="3",
                     ubertooth_serials=None, enumeration_error=None,
-                    heartbeat_interval_s=1, active_run_id=None,
+                    boards=[], heartbeat_interval_s=1, active_run_id=None,
                 ),
             ]
             for text in bad:

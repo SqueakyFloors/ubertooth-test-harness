@@ -41,7 +41,14 @@ from ubertooth_harness.protocol import (
     decode_controller_message,
     encode_runner_message,
 )
-from ubertooth_harness.protocol import valid_file_page
+from ubertooth_harness.protocol import (
+    valid_boards,
+    valid_devices,
+    valid_file_page,
+)
+from ubertooth_harness import registryedit
+from ubertooth_harness.registryedit import BoardEdit, RegistryEditError
+from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.runfiles import OutputFileError, read_output_page
 
 
@@ -62,6 +69,11 @@ _NO_BUILD = (
     "--libbtbb-source and --libbtbb-ref (scripts/deploy.sh sets them up by "
     "default), or run without Build"
 )
+
+
+# Tells "no registry was handed to me, read one" from "the registry would
+# not load", which is an answer of its own and must not be read again.
+_SAME = object()
 
 
 class RunnerConfigError(ValueError):
@@ -178,6 +190,24 @@ def _log(message: str) -> None:
     print(f"runner: {message}", file=sys.stderr, flush=True)
 
 
+def _holder_line(holder: Mapping, external: Mapping) -> str:
+    """Who holds a board, in the words a listing uses; "" when free.
+
+    Both parties when both hold it: the harness lease and the bench's own
+    lock file are separate claims, and a reader who sees only one wonders
+    why the board is busy.
+    """
+    parts = []
+    if holder:
+        parts.append(leases.describe_holder(holder))
+    if external.get("held"):
+        said = str(external.get("holder") or "").strip()
+        parts.append(
+            f"a bench lock ({said})" if said else "a bench lock"
+        )
+    return "; ".join(part for part in parts if part)[:400]
+
+
 class RunnerService:
     def __init__(
         self,
@@ -225,6 +255,15 @@ class RunnerService:
         self.connections = 0
         # File page requests being answered now, each in its own task.
         self._file_tasks: set = set()
+        # One registry edit at a time, whatever the controller asks: two
+        # overlapping writes of one file would each have read it before the
+        # other wrote.
+        self._registry_lock = asyncio.Lock()
+        # The firmware revision the last run that read a board found, by
+        # serial. Learned from the records the runner already forwards, so
+        # no board is opened for it; empty until a run has flashed or read
+        # one, which is what the board's status then says.
+        self._revisions: dict[str, str] = {}
 
     # ----- lifecycle -------------------------------------------------------
 
@@ -358,21 +397,7 @@ class RunnerService:
 
     def _registration(self) -> dict:
         identity = capture()
-        serials = None
-        enumeration_error = None
-        enumerator = self.enumerator
-        if enumerator is None:
-            # Read-only: sysfs on Linux, ioreg on macOS. Neither opens a
-            # device, so neither sends a stop to a board that is capturing.
-            try:
-                enumerator = local_enumerator()
-            except EnumerationError as error:
-                enumeration_error = str(error)
-        if enumerator is not None:
-            try:
-                serials = sorted(enumerator.serials())
-            except Exception as error:
-                enumeration_error = str(error)
+        serials, enumeration_error = self._enumerated()
         return {
             "host": self.config.host,
             "hostname": platform.node(),
@@ -381,21 +406,178 @@ class RunnerService:
             "python": identity["python"]["version"],
             "ubertooth_serials": serials,
             "enumeration_error": enumeration_error,
+            "boards": self._board_states(serials),
             "heartbeat_interval_s": self.config.heartbeat_interval_s,
             "active_run_id": self._run.run_id if self._run else None,
         }
+
+    def _enumerated(self) -> tuple[list | None, str | None]:
+        """The serials USB has, or None with the reason it could not be read.
+
+        Read-only: sysfs on Linux, ioreg on macOS. Neither opens a device,
+        so neither sends a stop to a board that is capturing.
+        """
+        enumerator = self._usb()
+        if isinstance(enumerator, str):
+            return None, enumerator
+        try:
+            return sorted(enumerator.serials()), None
+        except Exception as error:  # noqa: BLE001 - the reason is the answer
+            return None, str(error)
+
+    def _usb(self):
+        """This target's enumerator, or why it has none (as a string)."""
+        if self.enumerator is not None:
+            return self.enumerator
+        try:
+            return local_enumerator()
+        except EnumerationError as error:
+            return str(error)
+
+    def _registry(self) -> FileResourceRegistry | None:
+        """This runner's own hardware registry, or None when it will not load.
+
+        Read on demand rather than held: the file is the runner's to edit,
+        and a run reads it again for itself, so there is nothing to keep in
+        step with.
+        """
+        try:
+            return FileResourceRegistry.load(self.config.hardware)
+        except RegistryError as error:
+            self.log(f"cannot read the hardware registry: {error}")
+            return None
+
+    def _registered_boards(self, registry) -> list:
+        """The Ubertooths this host has, as leases.Board, in registry order."""
+        if registry is None:
+            return []
+        boards = []
+        for alias in registry.hardware(self.config.host, "Ubertooth"):
+            try:
+                boards.append(leases.board_for_resource(registry.get(alias)))
+            except (leases.LeaseError, RegistryError) as error:
+                # A board recorded without the serial its lease key comes
+                # from. It cannot be leased, so it cannot be reported on
+                # either; the registry itself is where that is fixed.
+                self.log(f"board {alias} cannot be leased: {error}")
+        return boards
+
+    def _board_states(self, serials, registry=_SAME) -> list:
+        """One status entry per registered board of this host.
+
+        Only what can be established without opening a device: whether USB
+        still has the serial, whether a lease holds the board, and the
+        firmware revision the last run that read it found. Never raises: a
+        target whose registry or lease directory cannot be read registers
+        with no board list rather than not registering.
+        """
+        try:
+            registry = self._registry() if registry is _SAME else registry
+            boards = self._registered_boards(registry)
+            held = self._lease_states(boards)
+            present = None if serials is None else {
+                str(serial).lower() for serial in serials
+            }
+            states = []
+            for board in boards:
+                resource = registry.get(board.alias)
+                power = resource.power or {}
+                state = held.get(board.alias, {})
+                holder = state.get("holder") or {}
+                external = state.get("external") or {}
+                # The serial as the registry spells it; compared in lower
+                # case, because USB reports it that way and one serial
+                # written two ways is still one board.
+                serial = str(resource.identity.get("serial", "") or "").strip()
+                states.append({
+                    "alias": board.alias,
+                    "serial": serial,
+                    "present": (
+                        None if present is None else serial.lower() in present
+                    ),
+                    "held": bool(state.get("held")),
+                    "holder": _holder_line(holder, external),
+                    "firmware_revision": self._revisions.get(serial.lower()),
+                    "power_controller": (
+                        str(power["controller"]) if power.get("controller")
+                        else None
+                    ),
+                    "power_port": (
+                        power["port"]
+                        if isinstance(power.get("port"), int)
+                        and not isinstance(power.get("port"), bool)
+                        else None
+                    ),
+                })
+            if valid_boards(states):
+                return states
+            self.log(
+                "the registered boards cannot be reported over this protocol; "
+                "registering without the board list"
+            )
+        except Exception as error:  # noqa: BLE001 - registration comes first
+            self.log(f"cannot list the registered boards: {error}")
+        return []
+
+    def _lease_states(self, boards) -> dict:
+        """What holds each board now, by alias; {} when it cannot be read.
+
+        A listing, not a claim: ``board_states`` probes each lease without
+        taking one, so reading this never keeps a run waiting.
+        """
+        if not boards:
+            return {}
+        try:
+            states = leases.board_states(
+                boards,
+                external_template=leases.external_lock_template(
+                    self.config.external_board_lock
+                ) or None,
+            )
+        except (leases.LeaseError, OSError) as error:
+            self.log(f"cannot read the board leases: {error}")
+            return {}
+        return {state["resource"]: state for state in states}
+
+    def _learn_revision(self, record: Mapping) -> None:
+        """Note a board's firmware revision from a record the run wrote.
+
+        The flash stage reports what each board ran before it and what it
+        runs after, so the revision comes off records the runner already
+        forwards: nothing is opened, and no run is slowed to find it.
+        """
+        if record.get("event_type") != "build_flash_board_finished":
+            return
+        details = record.get("details")
+        if not isinstance(details, Mapping):
+            return
+        serial = str(details.get("serial") or "").strip().lower()
+        revision = str(
+            details.get("after") or details.get("before") or ""
+        ).strip()
+        if serial and revision:
+            self._revisions[serial] = revision[:200]
 
     async def _heartbeat(self) -> None:
         while True:
             await asyncio.sleep(self.config.heartbeat_interval_s)
             run = self._run
+            # Off the event loop: the scan runs a command on macOS and the
+            # lease listing touches files, and neither may stall an active
+            # run's events.
+            boards = await asyncio.to_thread(self._heartbeat_boards)
             await self._send(
                 "heartbeat",
                 active_run_id=run.run_id if run else None,
                 elapsed_s=round(time.monotonic() - run.started, 3) if run else None,
                 last_event_sequence=run.last_sequence if run else None,
                 last_event_type=run.last_event_type if run else None,
+                boards=boards,
             )
+
+    def _heartbeat_boards(self) -> list:
+        serials, _ = self._enumerated()
+        return self._board_states(serials)
 
     # ----- inbound ---------------------------------------------------------
 
@@ -412,6 +594,10 @@ class RunnerService:
             await self._cancel(message)
         elif message["type"] == "run_file":
             await self._take_file_request(message)
+        elif message["type"] == "list_devices":
+            await self._list_devices(message)
+        elif message["type"] == "update_registry":
+            await self._update_registry(message)
 
     async def _start_run(self, message: dict, tasks: list) -> None:
         request_id = message["request_id"]
@@ -544,7 +730,174 @@ class RunnerService:
             except ProcessLookupError:
                 pass
 
+    # ----- board management ------------------------------------------------
+
+    async def _list_devices(self, message: dict) -> None:
+        """Answer with every attached Ubertooth, registered or new.
+
+        A read-only scan of what the kernel already knows: no device is
+        opened and no command is sent, so a board in the middle of a capture
+        is not disturbed. Read off the event loop, because the scan runs a
+        command on macOS.
+        """
+        fields = await asyncio.to_thread(self._devices)
+        await self._send("devices", request_id=message["request_id"], **fields)
+
+    def _devices(self) -> dict:
+        registry = self._registry()
+        serials, enumeration_error = self._enumerated()
+        boards = self._board_states(serials, registry)
+        registered = {
+            str(board["serial"]).lower(): board["alias"] for board in boards
+        }
+        devices, error = [], enumeration_error
+        enumerator = self._usb()
+        if isinstance(enumerator, str):
+            error = enumerator
+        else:
+            try:
+                devices = [
+                    {**device.view(),
+                     "alias": registered.get(device.serial.lower())}
+                    for device in enumerator.devices()
+                ]
+            except Exception as error_found:  # noqa: BLE001 - the reason is the answer
+                devices, error = [], str(error_found)
+        if not valid_devices(devices):
+            devices, error = [], (
+                "this target found Ubertooths it cannot describe over this "
+                "protocol"
+            )
+        controllers = []
+        suggested = None
+        if registry is not None:
+            try:
+                controllers = registryedit.power_controllers(
+                    registry, self.config.host
+                )
+                suggested = registryedit.suggested_alias(
+                    self.config.host, registry.resources
+                ) or None
+            except Exception as problem:  # noqa: BLE001 - the listing stands
+                self.log(f"cannot describe the power controllers: {problem}")
+        return {
+            "devices": devices, "error": error,
+            "power_controllers": controllers, "suggested_alias": suggested,
+            "boards": boards,
+        }
+
+    async def _update_registry(self, message: dict) -> None:
+        """Register or unregister one Ubertooth, or say why not.
+
+        Refused outright while a run is active, and for a board a lease
+        holds: a run reads the registry when it starts, and a board somebody
+        else is using is not ours to unregister. Everything else is the
+        registry's own validation, which happens before the file is touched.
+        """
+        request_id = message["request_id"]
+        async with self._registry_lock:
+            if self._run is not None:
+                await self._send(
+                    "registry_refused", request_id=request_id, status=409,
+                    reason=(
+                        f"run {self._run.run_id} is active on this target; a "
+                        "run reads the registry when it starts, so boards are "
+                        "managed between runs"
+                    ),
+                )
+                return
+            try:
+                edit = BoardEdit(
+                    action=message["action"], alias=message["alias"],
+                    serial=(message["serial"] or "").strip().lower(),
+                    power_controller=message["power_controller"],
+                    power_port=message["power_port"],
+                )
+            except RegistryEditError as error:
+                await self._send(
+                    "registry_refused", request_id=request_id,
+                    status=error.status, reason=error.detail,
+                )
+                return
+            answer, fields = await asyncio.to_thread(self._apply_edit, edit)
+            await self._send(answer, request_id=request_id, **fields)
+            if answer == "registry_refused":
+                self.log(
+                    f"refused a registry change on {edit.alias}: "
+                    f"{fields['reason']}"
+                )
+            else:
+                # The change, never the file: a log line is read by people
+                # who have no business knowing where the registry lives, and
+                # a full serial identifies a board nobody asked about.
+                self.log(f"registry: {edit.describe()}")
+
+    def _apply_edit(self, edit: BoardEdit) -> tuple[str, dict]:
+        """Make the change, or say why it was not made. Never raises."""
+        try:
+            held = self._held_alias(edit)
+            if held:
+                raise RegistryEditError(held, 409)
+            registry = registryedit.apply_edit(
+                self.config.hardware, self.config.host, edit
+            )
+        except RegistryEditError as error:
+            return "registry_refused", {
+                "status": error.status, "reason": error.detail,
+            }
+        except RegistryError as error:
+            # The file did not hold a registry to begin with, or the change
+            # made one it refuses. Nothing was kept either way.
+            return "registry_refused", {
+                "status": 409,
+                "reason": f"this target's hardware registry refused the "
+                          f"change: {error}",
+            }
+        except Exception as error:  # noqa: BLE001 - silence is the worst answer
+            return "registry_refused", {
+                "status": 503,
+                "reason": f"this target could not change its hardware "
+                          f"registry: {type(error).__name__}",
+            }
+        serials, _ = self._enumerated()
+        return "registry_updated", {
+            "action": edit.action, "alias": edit.alias,
+            "boards": self._board_states(serials, registry),
+            "ubertooth_serials": serials,
+        }
+
+    def _held_alias(self, edit: BoardEdit) -> str:
+        """Why a lease keeps this board from being unregistered, or "".
+
+        Only for ``remove``: a board that is not registered yet cannot be
+        leased under an alias the registry has not got.
+        """
+        if edit.action != registryedit.REMOVE:
+            return ""
+        registry = self._registry()
+        if registry is None:
+            return ""
+        try:
+            resource = registry.get(edit.alias)
+        except RegistryError:
+            return ""  # apply_edit says it is not registered, and why
+        if resource.type != registryedit.UBERTOOTH_TYPE:
+            return ""
+        state = self._lease_states([leases.board_for_resource(resource)]).get(
+            edit.alias, {}
+        )
+        if not state.get("held"):
+            return ""
+        holder = _holder_line(
+            state.get("holder") or {}, state.get("external") or {}
+        )
+        return (
+            f"{edit.alias} is leased by {holder}"
+            if holder else f"{edit.alias} is leased by another command"
+        ) + "; it stays registered until that command gives it back"
+
     # ----- saved output files ----------------------------------------------
+
 
     async def _take_file_request(self, message: dict) -> None:
         """Answer a run_file request in its own task, or refuse it as busy.
@@ -703,6 +1056,9 @@ class RunnerService:
                     break
                 run.last_sequence = record["sequence"]
                 run.last_event_type = record["event_type"]
+                # What this run read off a board, kept for the board's own
+                # status once the run is over.
+                self._learn_revision(record)
                 if record["event_type"] == "run_finished":
                     final = record
             if malformed or finished:

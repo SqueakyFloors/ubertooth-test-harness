@@ -47,9 +47,18 @@
     offline: ["○", "offline"],
     busy: ["◆", "busy"],
   };
+  // The symbol beside a registered board's status word.
+  const BOARD_ICON = {
+    ready: ["●"],
+    busy: ["◆"],
+    unknown: ["?"],
+    offline: ["○"],
+  };
 
   const state = {
     targets: new Map(),
+    // The Manage boards panel, when it is open: see manageState().
+    manage: null,
     runs: new Map(),
     plans: [],
     // The target the plan list on display was loaded for, the one a load is
@@ -99,6 +108,17 @@
     const key = known ? status.replace(/ /g, "-") : "unknown";
     return el("span", { className: `status status-${key}` },
       el("span", { "aria-hidden": "true", text: icon + " " }), label);
+  }
+
+  // A board's status as the controller derived it (boardstatus.py): the word
+  // it sent, a symbol, and a color from its level. The word is always
+  // there, so the color only repeats what the text says.
+  function boardBadge(board) {
+    const status = String(board.status || "unknown");
+    const [icon] = BOARD_ICON[status] || ["•"];
+    const level = String(board.level || "attention");
+    return el("span", { className: `status level-${level}` },
+      el("span", { "aria-hidden": "true", text: icon + " " }), status);
   }
 
   function timeElement(iso) {
@@ -163,6 +183,7 @@
             onclick: () => selectRun(target.active_run_id),
           }))
         : "none";
+      const boards = Array.isArray(target.boards) ? target.boards : [];
       return el("li", {},
         el("article", { className: "card target-card", "aria-labelledby": `target-${target.host}` },
           el("h3", { id: `target-${target.host}`, text: target.host }),
@@ -174,9 +195,38 @@
             el("dt", { text: "Python" }), el("dd", { text: target.python }),
             el("dt", { text: "Ubertooth serials" }), el("dd", { text: serials }),
             el("dt", { text: "Last seen" }), el("dd", {}, timeElement(target.last_seen_at)),
-            el("dt", { text: "Active run" }), el("dd", {}, active))));
+            el("dt", { text: "Active run" }), el("dd", {}, active)),
+          el("div", { className: "target-boards" },
+            el("h4", { id: `boards-${target.host}`, text: "Boards" }),
+            el("p", { className: "hint", text: target.boards_summary || "" }),
+            boards.length
+              ? el("ul", {
+                  className: "boards",
+                  "aria-labelledby": `boards-${target.host}`,
+                }, ...boards.map(boardLine))
+              : null,
+            el("button", {
+              type: "button", text: "Manage boards",
+              "aria-label": `Manage the boards of ${target.host}`,
+              onclick: () => openManage(target.host),
+            }))));
     }));
     renderTargetSelect();
+    if (state.manage) renderManage();
+  }
+
+  // One registered board: its status, its alias and serial, where its power
+  // comes from, and the sentence saying why the status is what it is.
+  function boardLine(board) {
+    const power = board.power_controller
+      ? `${board.power_controller} port ${board.power_port}`
+      : "no switchable port";
+    return el("li", { className: "board reg-board" },
+      boardBadge(board),
+      el("span", { className: "board-name", text: String(board.alias || "") }),
+      el("code", { className: "board-serial", text: String(board.serial || "") }),
+      el("span", { className: "board-power", text: power }),
+      el("p", { className: "reason", text: String(board.status_detail || "") }));
   }
 
   function renderTargetSelect() {
@@ -211,6 +261,239 @@
   function targetPlatform(host) {
     const target = host ? state.targets.get(host) : null;
     return target && target.platform ? target.platform : null;
+  }
+
+  // ----- manage boards -----------------------------------------------------
+
+  // The panel's own state: which target it is open for, the last autodetect
+  // answer, the power-port choices that answer offered, and the device being
+  // registered. `returnFocus` is the button that opened it, so closing gives
+  // the keyboard back where it came from.
+  function manageState(host) {
+    return {
+      host, devices: null, error: "", controllers: [], suggested: "",
+      ports: [], adding: null, busy: false, returnFocus: null,
+    };
+  }
+
+  function openManage(host) {
+    const reopened = state.manage && state.manage.host === host;
+    state.manage = reopened ? state.manage : manageState(host);
+    state.manage.returnFocus = document.activeElement;
+    $("manage").hidden = false;
+    renderManage();
+    $("manage-heading").focus();
+    if (!reopened) detectBoards();
+  }
+
+  function closeManage() {
+    const back = state.manage && state.manage.returnFocus;
+    state.manage = null;
+    $("manage").hidden = true;
+    $("add-board").hidden = true;
+    // Back to the button that opened it, when that button is still on the
+    // page; a target that deregistered meanwhile takes its button with it,
+    // and then the focus is left where the browser has it.
+    if (back && document.contains(back) && typeof back.focus === "function") {
+      back.focus();
+    }
+  }
+
+  function manageStatus(text, warn) {
+    const node = $("manage-status");
+    node.textContent = text;
+    node.classList.toggle("warn", Boolean(warn));
+  }
+
+  function renderManage() {
+    const manage = state.manage;
+    if (!manage) return;
+    const target = state.targets.get(manage.host);
+    $("manage-about").textContent = target
+      ? `${manage.host}: boards are held in that target's own registry, and `
+        + "its runner is what reads and changes it. A change is refused while "
+        + "the target has a run going, or while the board is leased."
+      : `${manage.host} is no longer registered with the controller.`;
+    const boards = target && Array.isArray(target.boards) ? target.boards : [];
+    $("manage-registered-empty").hidden = boards.length > 0;
+    $("manage-registered").replaceChildren(...boards.map((board) =>
+      el("li", { className: "board reg-board" },
+        boardBadge(board),
+        el("span", { className: "board-name", text: String(board.alias || "") }),
+        el("code", { className: "board-serial", text: String(board.serial || "") }),
+        el("button", {
+          type: "button", text: "Unregister",
+          disabled: manage.busy,
+          "aria-label": `Unregister ${board.alias} from ${manage.host}`,
+          onclick: () => removeBoard(board.alias),
+        }),
+        el("p", { className: "reason", text: String(board.status_detail || "") })
+      )));
+    renderDetected();
+  }
+
+  function renderDetected() {
+    const manage = state.manage;
+    const devices = manage && Array.isArray(manage.devices) ? manage.devices : null;
+    $("manage-detect").disabled = Boolean(manage && manage.busy);
+    $("manage-detected-empty").hidden = devices !== null && devices.length > 0;
+    if (devices === null) {
+      $("manage-detected-empty").textContent =
+        "Press Autodetect boards to list what is attached.";
+    } else if (!devices.length) {
+      $("manage-detected-empty").textContent = manage.error
+        ? `No board could be listed: ${manage.error}`
+        : "No Ubertooth is attached to this target.";
+    }
+    $("manage-detected-wrap").hidden = !devices || !devices.length;
+    $("manage-detected").replaceChildren(...(devices || []).map((device) => {
+      const serial = String(device.serial || "");
+      const registered = device.alias
+        ? el("span", {}, "registered as ", el("code", { text: String(device.alias) }))
+        : el("span", { text: "new" });
+      return el("tr", {},
+        el("td", {}, el("code", { text: serial || "none reported" })),
+        el("td", {}, el("code", { text: String(device.path || "") })),
+        el("td", {}, el("code", {
+          text: `${String(device.vendor || "")}:${String(device.product || "")}`,
+        })),
+        el("td", {}, registered),
+        el("td", { className: "actions" }, device.alias
+          ? null
+          : el("button", {
+              type: "button", text: "Add",
+              disabled: manage.busy || !serial,
+              "aria-label": serial
+                ? `Register the board with serial ${serial}`
+                : `The board at ${device.path} reports no serial and cannot be registered`,
+              onclick: () => startAdd(device),
+            })));
+    }));
+    if (devices && devices.some((device) => !device.serial)) {
+      // A board sitting in its DFU bootloader reports no serial at all, so
+      // there is nothing to register it by; say so rather than leaving a
+      // disabled button to be puzzled over.
+      manageStatus(
+        "A listed board reports no serial: it is sitting in its DFU "
+        + "bootloader. Bring it back to its application firmware and "
+        + "autodetect again.",
+        true,
+      );
+    }
+  }
+
+  async function detectBoards() {
+    const manage = state.manage;
+    if (!manage) return;
+    manage.busy = true;
+    manageStatus("Reading the target's USB bus…");
+    renderDetected();
+    try {
+      const data = await api(
+        "GET", `/api/targets/${encodeURIComponent(manage.host)}/devices`);
+      if (!state.manage || state.manage.host !== manage.host) return;
+      manage.devices = Array.isArray(data.devices) ? data.devices : [];
+      manage.error = typeof data.error === "string" ? data.error : "";
+      manage.controllers = Array.isArray(data.power_controllers)
+        ? data.power_controllers : [];
+      manage.suggested = data.suggested_alias || "";
+      manageStatus(manage.error ? `Autodetect: ${manage.error}` : "", manage.error);
+    } catch (error) {
+      if (!state.manage || state.manage.host !== manage.host) return;
+      manage.devices = manage.devices || [];
+      manageStatus(`Autodetect failed: ${error.message}`, true);
+    } finally {
+      manage.busy = false;
+      renderManage();
+    }
+  }
+
+  function startAdd(device) {
+    const manage = state.manage;
+    if (!manage) return;
+    manage.adding = device;
+    const serial = String(device.serial || "");
+    $("add-board-device").textContent =
+      `Serial ${serial}, on ${device.path}, reporting `
+      + `${device.vendor}:${device.product}.`;
+    $("add-alias").value = manage.suggested || "";
+    // One option per free port, plus no port at all: a port another board
+    // already has is not offered, because the registry refuses two boards
+    // on one port.
+    manage.ports = [];
+    for (const controller of manage.controllers) {
+      for (const port of controller.ports || []) {
+        manage.ports.push({ controller: controller.alias, port });
+      }
+    }
+    $("add-power").replaceChildren(
+      el("option", { value: "", text: "No switchable port" }),
+      ...manage.ports.map((entry, index) => el("option", {
+        value: String(index),
+        text: `${entry.controller} port ${entry.port}`,
+      })));
+    $("add-board").hidden = false;
+    manageStatus("");
+    $("add-alias").focus();
+  }
+
+  function cancelAdd() {
+    if (state.manage) state.manage.adding = null;
+    $("add-board").hidden = true;
+    $("manage-detect").focus();
+  }
+
+  async function submitAdd(submitted) {
+    submitted.preventDefault();
+    const manage = state.manage;
+    if (!manage || !manage.adding || manage.busy) return;
+    const chosen = $("add-power").value;
+    const mapping = chosen === "" ? null : manage.ports[Number(chosen)];
+    const body = {
+      action: "add",
+      alias: $("add-alias").value.trim(),
+      serial: String(manage.adding.serial || ""),
+      power_controller: mapping ? mapping.controller : null,
+      power_port: mapping ? mapping.port : null,
+    };
+    await changeRegistry(body, `Registered ${body.alias}.`);
+  }
+
+  async function removeBoard(alias) {
+    const manage = state.manage;
+    if (!manage || manage.busy) return;
+    await changeRegistry(
+      { action: "remove", alias },
+      `Unregistered ${alias}.`,
+    );
+  }
+
+  async function changeRegistry(body, done) {
+    const manage = state.manage;
+    manage.busy = true;
+    manageStatus("Asking the target to change its registry…");
+    renderManage();
+    try {
+      await api(
+        "POST", `/api/targets/${encodeURIComponent(manage.host)}/boards`, body);
+      if (!state.manage || state.manage.host !== manage.host) return;
+      manage.adding = null;
+      $("add-board").hidden = true;
+      manage.busy = false;
+      // The target's board list came back with the change; what is attached
+      // has changed too, so the listing is read again. The outcome is said
+      // after it, so the listing's own message does not replace it.
+      await detectBoards();
+      if (state.manage === manage && !manage.error) manageStatus(done);
+    } catch (error) {
+      if (!state.manage || state.manage.host !== manage.host) return;
+      manageStatus(error.message, true);
+    } finally {
+      if (state.manage === manage) {
+        manage.busy = false;
+        renderManage();
+      }
+    }
   }
 
   // ----- run setup ---------------------------------------------------------
@@ -1375,6 +1658,14 @@
     $("plan").addEventListener("change", () => renderSuites());
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelRun);
+    $("manage-close").addEventListener("click", closeManage);
+    $("manage-detect").addEventListener("click", detectBoards);
+    $("add-board").addEventListener("submit", submitAdd);
+    $("add-cancel").addEventListener("click", cancelAdd);
+    // Escape closes the panel, as it does any other transient one.
+    $("manage").addEventListener("keydown", (pressed) => {
+      if (pressed.key === "Escape") closeManage();
+    });
     $("file-previous").addEventListener("click", () => pageOutputFile(-1));
     $("file-next").addEventListener("click", () => pageOutputFile(1));
     $("file-close").addEventListener("click", () => {
