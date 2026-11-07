@@ -71,8 +71,10 @@ resources:
       serial: REPLACE_WITH_MAC_UBERTOOTH_SERIAL
 
   # nRF52840 DKs (PCA10056) running the harness role firmware
-  # (firmware/nrf52840dk). Identify each by its on-board J-Link serial, as
-  # `nrfutil device list` prints it (quote it to keep leading zeros). The
+  # (firmware/nrf52840dk). Identify each by its on-board J-Link serial: all
+  # 12 digits as the /dev/serial/by-id name carries it, quoted so the
+  # leading zeros survive, which is the one spelling the registry takes
+  # because the DK's external lock file is named after it (harness #324). The
   # advertiser's BLE address is the static random address its `status`
   # reports (derived from the chip's FICR, stable per board). VCOM0 is found
   # by J-Link serial (/dev/serial/by-id on Linux); set `serial device` to
