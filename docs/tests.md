@@ -4046,8 +4046,9 @@ phases can still fail.
 **Known limits.** The connection figures come from the capture's records
 alone: libbtbb prints no `AdvA:` line for a data packet, so the tool's text
 output can say nothing about the connection half of this soak. It is read
-beside the records for the advertising phases and reported rather than judged,
-because whether the two agree is
+beside the records for the advertising phases and reported rather than judged
+— the check that the fixture went quiet included — because whether the two
+agree is
 [`BLE address parity soak`](#ble-address-parity-soak)'s question, asked there
 over a capture that holds one state.
 

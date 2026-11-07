@@ -1292,12 +1292,16 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # measurement; the duration is what a soak's time really is, and it is
     # hours, so the figure around it hardly moves the countdown.
     advertiser_soak_cases.TEST_NAME: _default(Estimate(60.0, per_duration=1)),
-    # ESTIMATE_PENDING_HW: as the address soak, plus what the checkpoints
-    # cost. The capture runs for the whole duration the plan asks for; around
-    # it are the fixture checks (two DKs identified and put in their roles),
-    # the board and watchdog reads at either end, and the cleanup. The fixed
-    # part is the sum of those bounded commands rather than a measurement,
-    # and the duration is what a soak's time really is.
+    # ESTIMATE_PENDING_HW: as the address soak. The capture runs for the whole
+    # duration the plan asks for; around it are the fixture checks (two DKs
+    # identified and put in their roles), the board and watchdog reads at
+    # either end, and the cleanup. The fixed part is the sum of those bounded
+    # commands rather than a measurement, and the duration is what a soak's
+    # time really is. The checkpoints are not in the fixed part, because they
+    # scale with the duration rather than sitting outside it: each one costs
+    # seconds inside a window measured in hours, so it falls well inside the
+    # step's own allowance (follow_soak_cases.`step_timeout`) and would be
+    # noise in a countdown.
     follow_soak_cases.TEST_NAME: _default(Estimate(90.0, per_duration=1)),
 })
 

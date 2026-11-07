@@ -247,6 +247,23 @@ class Peer(DkShell):
         self.role = role
         self.address = address
 
+    def enter_role(self) -> dict:
+        """Put the board in its role, then check it is the board we expect.
+
+        The role is sent rather than assumed. `fixture-ready` asserts the
+        firmware and the address and then *releases* both DKs with
+        `nrfdk.py idle`, which leaves each one in the `advertiser` role, so
+        by the time the driver runs neither board is in the role this soak
+        needs. Sending it here also means a board somebody left in the other
+        role is driven into this one instead of failing the run.
+
+        `role` leaves both roles idle with their boot settings
+        (nrfdk.`role`), so it comes before every `conn` setting `configure`
+        writes, and it gets the same longer timeout `nrfdk` gives it.
+        """
+        self.command(f"role {self.role}", timeout=nrfdk.LEAVE_TIMEOUT_S)
+        return self.check()
+
     def check(self) -> dict:
         """The board runs the pinned firmware, in its role, at its address."""
         status = nrfdk.require_connection_fields(self.status())
@@ -277,7 +294,7 @@ class Peripheral(Peer):
     """The DK that advertises connectable and waits to be connected."""
 
     def configure(self, options: "Options") -> dict:
-        self.check()
+        self.enter_role()
         self.quiet()
         for command in (f"conn chmap {options.channel}", "conn dle on"):
             self.command(command)
@@ -303,7 +320,7 @@ class Central(Peer):
     """The DK that makes the link and writes to it for the whole phase."""
 
     def configure(self, options: "Options") -> dict:
-        self.check()
+        self.enter_role()
         self.quiet()
         for command in (f"conn peer {options.peripheral_address}",
                         f"conn interval {options.conn_interval_ms}",
@@ -840,8 +857,9 @@ class Soak:
         # keeps its own link, so what falls out here is only the lookup.
         self.links: "OrderedDict[int, Link]" = OrderedDict()
         self.other_link_addresses: set = set()
-        self.other_link_packets = 0
         self.unannounced_packets = 0
+        # The phase a capture stop counted its gap for; see note_capture_gap.
+        self.gap_counted_in: int | None = None
         self.connect_inds = 0
         self.other_connect_inds = 0
         self.connection_packets = 0
@@ -980,9 +998,17 @@ class Soak:
             else:
                 # The central disconnects first: a peripheral that stopped
                 # advertising while still connected would leave the link up
-                # with nothing announcing it.
-                self.central.command("conn stop")
-                self.peripheral.command("conn stop")
+                # with nothing announcing it. Each gets its own attempt, so
+                # a central that failed twice does not leave the peripheral
+                # advertising through the absent phase and into the next one.
+                errors = []
+                for side in (self.central, self.peripheral):
+                    try:
+                        side.command("conn stop")
+                    except SoakError as error:
+                        errors.append(str(error))
+                if errors:
+                    raise SoakError("; ".join(errors))
         except SoakError as error:
             phase.schedule_error = str(error)
             self.schedule_errors += 1
@@ -1041,8 +1067,16 @@ class Soak:
         The readers are drained while it waits: the tool keeps printing and
         its capture keeps growing, and a wait that read neither would charge
         this stretch's packets to the wrong phase.
+
+        The deadline runs from the phase's start, not from the moment
+        `conn start` came back. The firmware waits up to its own
+        `CONNECT_TIMEOUT_MS` for the link (`Central.connect`), so measuring
+        from after that return would let a link be accepted that far past
+        'connect within' -- while 'acquire within' is measured from the
+        phase's start, which is what `check_timings`' `connect within <=
+        acquire within` rule is there to relate.
         """
-        deadline = self.elapsed + self.options.connect_within_s
+        deadline = phase.started + self.options.connect_within_s
         while self.elapsed < deadline and not self.canceled:
             self.read_text()
             self.read_structural()
@@ -1230,7 +1264,6 @@ class Soak:
         link = self.links.get(address)
         if link is None:
             self.unannounced_packets += 1
-            self.other_link_packets += 1
             if len(self.other_link_addresses) < MAX_OTHER_LINKS:
                 self.other_link_addresses.add(address)
             return
@@ -1263,7 +1296,14 @@ class Soak:
     # -- the capture ------------------------------------------------------
 
     def note_capture_gap(self, planned: bool) -> None:
-        """The phase running now had a stretch with nothing listening."""
+        """The phase running now had a stretch with nothing listening.
+
+        One gap per changeover, not two. A changeover is a stop and a start,
+        and the stretch with nothing listening between them is one gap in the
+        phase they land in, so `start_capture` skips the note the stop just
+        before it already made for this phase. The first capture of a run,
+        and a start whose stop fell in the previous phase, still count theirs.
+        """
         phase = self.phase()
         if phase is None or phase.ended is not None:
             return
@@ -1274,7 +1314,10 @@ class Soak:
 
     def start_capture(self, reason: str, *, planned: bool = True,
                       checkpoint: bool = False) -> bool:
-        self.note_capture_gap(planned)
+        phase = self.phase()
+        if phase is None or self.gap_counted_in != phase.index:
+            self.note_capture_gap(planned)
+        self.gap_counted_in = None
         self.capture_index += 1
         self.record_clock.restart()
         self.attempt_text_packets = 0
@@ -1333,6 +1376,10 @@ class Soak:
             # one started, reaches the teardown here.
             return None
         self.note_capture_gap(planned)
+        phase = self.phase()
+        # Which phase this gap was counted for, so the start that closes the
+        # changeover does not count it a second time.
+        self.gap_counted_in = None if phase is None else phase.index
         # A canceled run waits for nothing: the tool was asked to stop in the
         # signal handler, this process has about two seconds left, and the
         # group SIGKILL that follows reaches the tool as well.
@@ -1408,8 +1455,9 @@ class Soak:
         silence the cycle already has instead of in a phase being judged.
         """
         if (self.capture is None or self.options.capture_limit_bytes <= 0
-                or self.capture_budget_stuck):
-            # Another file is another file nothing can remove.
+                or self.capture_budget_stuck or self.canceled):
+            # Another file is another file nothing can remove, and a canceled
+            # run starts no capture the teardown would stop a moment later.
             return
         try:
             size = self.capture.capture_path.stat().st_size
@@ -2079,12 +2127,20 @@ class Soak:
         """
         phases = self.absent_phases()
         still_advertising: list = []
+        still_text: list = []
         still_connected: list = []
         for phase in phases:
             settled = self.absent_judged_from(phase)
-            if any(side.last is not None and side.last > settled
-                   for side in (phase.structural, phase.text)):
+            # The records, not the text lines: the text reader is reported
+            # and never judged here, as it is for detection, because the
+            # tool's standard output and its capture file reach this process
+            # through buffers that do not fill together. A line that arrived
+            # late would otherwise fail a run for a packet the records put
+            # inside the settle time.
+            if phase.structural.last is not None and phase.structural.last > settled:
                 still_advertising.append(phase.index)
+            if phase.text.last is not None and phase.text.last > settled:
+                still_text.append(phase.index)
             # The connection the cycle before this phase made, judged by its
             # own late packets: the link object is the connected phase's, so
             # a run that forgot the access address still has the count.
@@ -2095,6 +2151,7 @@ class Soak:
         return {
             "phases": len(phases),
             "still_advertising": len(still_advertising),
+            "still_advertising_text": len(still_text),
             "still_connected": len(still_connected),
             "settle_s": self.options.quiet_after_s,
             "allowance": self.allowance(len(phases)),

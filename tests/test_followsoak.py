@@ -141,9 +141,12 @@ class PhaseFirmware(FakeFirmware):
 
     def __init__(self, state_path: Path, role: str, **options):
         self.state_path = Path(state_path)
-        self.role_wanted = role
         super().__init__(**options)
-        self.role = role
+        # Left in the `advertiser` role, which is where `fixture-ready`'s own
+        # cleanup leaves both boards (`nrfdk.py idle` sends `role
+        # advertiser`). So the driver has to put each board in its role
+        # itself, and a stand-in built already in that role would hide it.
+        self.role = "advertiser"
         if role == "peripheral":
             self.state_path.write_text("absent", encoding="utf-8")
 
@@ -276,6 +279,26 @@ class ScenarioTests(SoakTestCase):
         self.assertEqual(0, summary["connections"]["other_connect_inds"])
         self.assertEqual(
             0, summary["connections"]["packets_of_connections_not_announced"])
+
+    def test_each_dk_is_driven_into_its_role_before_it_is_configured(self):
+        """`fixture-ready` releases both boards into the `advertiser` role.
+
+        Its cleanup is `nrfdk.py idle`, which sends `role advertiser`, so
+        neither board is in the role this soak needs by the time the driver
+        runs. The driver sends the role itself, before every connection
+        setting, because `role` restores both roles' boot settings.
+        """
+        self.assertEqual("advertiser", self.peripheral_firmware.role)
+        self.assertEqual("advertiser", self.central_firmware.role)
+        code, out, err = self.run_soak()
+        self.assertEqual(0, code, out + err)
+        for firmware, role in ((self.peripheral_firmware, "peripheral"),
+                               (self.central_firmware, "central")):
+            with self.subTest(role):
+                self.assertIn(f"role {role}", firmware.commands)
+                self.assertLess(firmware.commands.index(f"role {role}"),
+                                firmware.commands.index("conn dle on"))
+                self.assertEqual(role, firmware.role)
 
     def test_a_reacquisition_is_measured_for_every_phase_after_an_absence(self):
         code, out, err = self.run_soak()
@@ -910,6 +933,29 @@ class IntervalTests(unittest.TestCase):
         # And a new interval is open, carrying none of it.
         self.assertEqual(2, len(soak.intervals))
         self.assertFalse(soak.intervals[1].counters_moved)
+
+    def test_an_unrequested_reset_records_where_the_firmware_was(self):
+        """The `where` line of each reset, which nothing else reads.
+
+        `WatchdogRecord.last_reset_where` is a property, and it was being
+        called as a function in the address soak, so the first unrequested
+        reset in a soak ended the run in a `TypeError`. A reset is not
+        something a healthy run produces, so no scenario test reaches this.
+        """
+        soak = self.soak()
+        soak.open_interval()
+        soak.watchdog_baseline = self.record()
+        current = self.record(resets=1, last_reset_mode="LE",
+                              last_reset_wait="rx")
+        change = watchdog.compare(soak.watchdog_baseline, current)
+        self.assertTrue(change.reset_itself)
+        # What read_watchdog_now does with a record that moved.
+        soak.watchdog_resets += change.new_resets
+        soak.watchdog_where.append(current.last_reset_where)
+        self.assertEqual(1, soak.watchdog_resets)
+        self.assertEqual([current.last_reset_where], soak.watchdog_where)
+        self.assertIsInstance(soak.watchdog_where[0], str)
+        self.assertIn("rx", soak.watchdog_where[0])
 
     def test_an_interval_counts_the_phases_and_packets_inside_it(self):
         soak = self.soak()
