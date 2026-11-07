@@ -1035,7 +1035,15 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # sweep case costs the most, since specan takes longest to reach its
     # floor.
     "Interrupting a capture": _profiles(Estimate(11.2), Estimate(18.5)),
-    "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
+    # Every case is a handful of short commands, so the cost goes with the
+    # command count: the btle replay and dfu read-back cases (#333) take the
+    # commands this test runs on a macOS host from 192 to 212 in smoke and
+    # from 256 to 322 comprehensive, and the figures are the earlier ones
+    # scaled by that. Measuring the two profiles end to end on this host gave
+    # 10.7 s and 16.6 s, and the same comprehensive suite without the new
+    # cases took 89.3 s on a busy host, which is why the count and not a
+    # stopwatch is what the increase rests on.
+    "Refused command lines": _profiles(Estimate(11.0), Estimate(26.0)),
     # No hardware: 6 cases and 39 commands in smoke, 16 and 112
     # comprehensive, all of them short (preflight is not counted, as it is in
     # no estimate). The lightest run of them on the macOS host cost 0.135 s a

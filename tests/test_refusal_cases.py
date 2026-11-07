@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -26,15 +27,25 @@ USAGE = {
     "ubertooth-dfu": "ubertooth-dfu - Ubertooth firmware update tool\n",
 }
 FILE_OPTIONS = {
-    "ubertooth-btle": "rqc", "ubertooth-follow": "rqd", "ubertooth-rx": "rqd",
+    "ubertooth-btle": "rqcd", "ubertooth-follow": "rqd", "ubertooth-rx": "rqd",
     "ubertooth-dump": "d", "ubertooth-specan": "d", "ubertooth-dfu": "su",
     "ubertooth-scan": "",
 }
 VALUE_OPTIONS = {
-    "ubertooth-btle": "AxstU", "ubertooth-follow": "lueUbw", "ubertooth-rx": "iluUecst",
+    "ubertooth-btle": "AxstUR", "ubertooth-follow": "lueUbw", "ubertooth-rx": "iluUecst",
     "ubertooth-dump": "U", "ubertooth-specan": "luU", "ubertooth-dfu": "dU",
     "ubertooth-scan": "Uteb",
 }
+# ubertooth-btle's options that drive, name, or tune a board, in the order the
+# fork asks about them beside -R, and the interference letters among them.
+REPLAY_BOARD_OPTIONS = ("k", "t", "A", "U", "i", "I", "j", "J")
+# The values that name the one stream standard output is. The lone "-" is the
+# usual spelling; "./-" is a file of that name and is not here.
+STDOUT_VALUES = ("-", "/dev/stdout", "/dev/fd/1", "/proc/self/fd/1")
+
+
+def writes_to_stdout(value):
+    return value in STDOUT_VALUES
 
 
 class FakeTools:
@@ -54,6 +65,22 @@ class FakeTools:
     taken, as it was before opt_check_once()), modulation-last-wins
     (ubertooth-dump takes -c with -l and uses the last of the two, as it did
     before fork d3429234).
+    ubertooth-btle's replay is as at fork 04dbe53c (#1129): -R needs the mode
+    its dump was recorded with, every option that drives a board is refused
+    beside it, -A is refused with -p before either, a destination that is the
+    dump -R is replaying is refused by file rather than by name, and one
+    capture at a time may have standard output. ubertooth-dfu -u refuses a
+    value naming standard output as the value is read (#333).
+    Replay and read-back bug switches: replay-mode-guessed (-R is taken with
+    no major mode), replay-board-options-dropped (an option that drives a
+    board is accepted beside -R and dropped), dump-over-input-allowed (a
+    destination that is the replayed dump is opened, emptying it),
+    two-captures-on-stdout (-q or -c and -d both take the stream),
+    destinations-may-collide (two destinations naming one file are both
+    opened), replay-refusal-order (the board-option refusal is asked before
+    the -A-with-p one), missing-input-at-the-board (a -R input that is not
+    there is left to the board lookup),
+    upload-stdout-allowed (dfu -u takes a name of standard output as a file).
     ``missing`` tools are not installed; ``switch`` False is a library from
     before b6d8ede."""
 
@@ -168,6 +195,11 @@ class FakeTools:
         refused = self._after_loop(tool, flags, files)
         if refused:
             return self._result(command, 1, "".join(out), "".join(err) + refused)
+        if tool == "ubertooth-btle":
+            refused = self._replay(flags, files)
+            if refused:
+                return self._result(command, 1, "".join(out),
+                                    "".join(err) + refused)
         if tool == "ubertooth-dfu":
             return self._dfu(command, files, dict(flags), out, err)
         # Every check on the command line has passed, so the command asks
@@ -198,8 +230,111 @@ class FakeTools:
         else:
             Path(value).write_bytes(b"\x0a\x0d\x0d\x0a")
 
+    def _replay(self, flags, files):
+        """ubertooth-btle's replay checks, in the order the fork asks them.
+
+        The destination comparisons come first because they are asked of
+        every run, replay or not; then the replay's own three.
+        """
+        options = [option for option, _value in flags]
+        pcap = files.get("q")
+        dump = files.get("d")
+        if pcap is not None and dump is not None:
+            if (writes_to_stdout(pcap[1]) and writes_to_stdout(dump[1])
+                    and "two-captures-on-stdout" not in self.bugs):
+                # One stream, one capture: interleaved there, neither file
+                # would be readable and the second writer said nothing.
+                return (f"error: -{pcap[0]} and -d cannot both write to "
+                        "standard output\n")
+        named = [files[key] for key in ("r", "q", "d") if key in files]
+        if "destinations-may-collide" not in self.bugs:
+            for first, second in ((a, b) for index, a in enumerate(named)
+                                  for b in named[index + 1:]):
+                if (writes_to_stdout(first[1])
+                        or not self._same_file(first[1], second[1])):
+                    continue
+                # Both options are named; where the two values differ, so is
+                # what each was given, since one destination reached through
+                # another is not obvious from either on its own.
+                options = f"-{first[0]} and -{second[0]}"
+                if first[1] == second[1]:
+                    return (f"error: {options} cannot both write to "
+                            f"{first[1]}\n")
+                return (f"error: {options} cannot both write to one file "
+                        f"({first[1]} and {second[1]})\n")
+        source = dict(flags).get("R")
+        if source is None:
+            return ""
+        if (not any(option in options for option in "fnp")
+                and "replay-mode-guessed" not in self.bugs):
+            return ("error: -R needs -f, -n or -p: a dump does not record "
+                    "which mode wrote it, and the modes stamp their packets "
+                    "with different clocks\n")
+        def board_option():
+            if "replay-board-options-dropped" in self.bugs:
+                return ""
+            for option in REPLAY_BOARD_OPTIONS:
+                if option in options:
+                    return (f"error: -{option} cannot be combined with -R; a "
+                            "replay reads a saved dump rather than driving a "
+                            "board\n")
+            return ""
+
+        if "replay-refusal-order" in self.bugs:
+            # What the order is there for: with the board-option refusal
+            # asked first, "-p -R <dump> -A 38" is reported as a replay
+            # having no board to tune rather than as -A not going with -p.
+            refused = board_option()
+            if refused:
+                return refused
+        if "A" in options and "p" in options:
+            # Decided before the replay's own refusals, so the message is
+            # about the mode rather than about there being no board to tune.
+            return ("error: -A does not go with -p: promiscuous mode listens "
+                    "on the channel the board is holding\n")
+        refused = board_option()
+        if refused:
+            return refused
+        # The replay's input is opened for reading here, before the
+        # destination comparison below, which takes the open input to say
+        # which file it holds. So an input that is not there is reported
+        # first -- and before any board, since a replay opens none.
+        if (not Path(source).exists()
+                and "missing-input-at-the-board" not in self.bugs):
+            return f"error: {source}: No such file or directory\n"
+        if "dump-over-input-allowed" in self.bugs:
+            for option, value in files.values():
+                if self._same_file(value, source):
+                    # What the refusal prevents: the destination is opened
+                    # for writing, so the dump is empty before a record of it
+                    # has been read.
+                    Path(value).write_bytes(b"")
+            return ""
+        for option, value in files.values():
+            if self._same_file(value, source):
+                return (f"error: -{option} would write over the dump -R is "
+                        f"replaying ({value})\n")
+        return ""
+
     @staticmethod
-    def _value(tool, option, value):
+    def _same_file(first, second):
+        """Whether two names are one file, as the fork compares them.
+
+        Device and inode, which is what makes a hard link the same file and
+        not merely the same path; a destination that is not there yet is
+        compared by path instead, as the fork compares a link's target.
+        """
+        if writes_to_stdout(first) or writes_to_stdout(second):
+            return False
+        one, other = Path(first), Path(second)
+        try:
+            first_stat, other_stat = one.stat(), other.stat()
+        except OSError:
+            return one.resolve() == other.resolve()
+        return ((first_stat.st_dev, first_stat.st_ino)
+                == (other_stat.st_dev, other_stat.st_ino))
+
+    def _value(self, tool, option, value):
         bad = {
             ("ubertooth-btle", "A"): ("40", "error: advertising channel index must be 37-39 (got 40)\n"),
             ("ubertooth-rx", "c"): ("79", "error: channel must be 0-78 (got 79)\n"),
@@ -210,6 +345,12 @@ class FakeTools:
             return bad[(tool, option)][1]
         if tool == "ubertooth-dfu" and option == "s" and not value.endswith(".bin"):
             return "error: -s requires a .bin\n"
+        if (tool == "ubertooth-dfu" and option == "u" and writes_to_stdout(value)
+                and "upload-stdout-allowed" not in self.bugs):
+            # The read-back is renamed over the name given and a retry
+            # rewinds it, neither of which a pipe can do, so the value is
+            # refused as it is read: before -h and before any board.
+            return "error: -u cannot write the read-back to stdout; give a file name\n"
         if tool == "ubertooth-btle" and option == "r" and value == "-":
             return "error: PCAPNG capture to stdout is not supported; use -q - or -c -\n"
         return ""
@@ -237,7 +378,10 @@ class FakeTools:
     def _dfu(self, command, files, flags, out, err):
         image = flags.get("d")
         temp = None
-        if "u" in files:
+        # A value naming standard output never gets this far unless the
+        # upload-stdout-allowed switch is on, and there is no file beside a
+        # stream to put a temporary one next to.
+        if "u" in files and not writes_to_stdout(files["u"][1]):
             temp = Path(files["u"][1] + ".Ab12Cd")
             temp.write_bytes(b"")
         if "s" in files:
@@ -256,7 +400,8 @@ class FakeTools:
                                 f"error: {image}: Unknown DFU suffix length: "
                                 f"{length}; firmware will not be updated\n")
         self._drop(temp)
-        return self._result(command, 1, "", NOTE)
+        return self._result(command, 1, "",
+                            NOTE + "error: no Ubertooth devices found\n")
 
     def _drop(self, temp):
         if temp is not None and "temp-left" not in self.bugs:
@@ -314,6 +459,62 @@ class HelperTests(unittest.TestCase):
             path = self._prefix(Path(directory), None)
             self.assertIn("no libubertooth beside", refusal.probe("ubertooth-rx", path))
 
+    def test_link_gives_a_seeded_file_another_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with redirect_stdout(io.StringIO()):
+                refusal.main(["seed", directory, "dump.bin"])
+                refusal.main(["link", directory, "--symlink", "link.bin=dump.bin",
+                              "--hardlink", "hard.bin=dump.bin"])
+            self.assertTrue((root / "link.bin").is_symlink())
+            # Relative, so what a tool follows is the file beside it.
+            self.assertEqual("dump.bin", os.readlink(root / "link.bin"))
+            self.assertEqual((root / "dump.bin").stat().st_ino,
+                             (root / "hard.bin").stat().st_ino)
+            symlinks = [("link.bin", "dump.bin")]
+            hardlinks = [("hard.bin", "dump.bin")]
+            self.assertEqual("", refusal.check(
+                root, ["new.bin"], ["dump.bin"], symlinks, hardlinks))
+            # A name nothing was said about is a file a refused command line
+            # left behind.
+            self.assertIn("link.bin", refusal.check(root, [], ["dump.bin"]))
+            # A destination opened through the symbolic link empties the file
+            # at its end, which the target's own contents report.
+            (root / "dump.bin").write_bytes(b"")
+            self.assertIn("dump.bin changed", refusal.check(
+                root, [], ["dump.bin"], symlinks, hardlinks))
+
+    def test_check_finds_a_link_replaced_by_a_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with redirect_stdout(io.StringIO()):
+                refusal.main(["seed", directory, "dump.bin"])
+                refusal.main(["link", directory, "--symlink", "link.bin=dump.bin",
+                              "--hardlink", "hard.bin=dump.bin"])
+            for name in ("link.bin", "hard.bin"):
+                os.unlink(root / name)
+                (root / name).write_bytes(b"")
+            self.assertIn("link.bin is no longer a symbolic link", refusal.check(
+                root, [], ["dump.bin"], [("link.bin", "dump.bin")], []))
+            self.assertIn("hard.bin is no longer the same file", refusal.check(
+                root, [], ["dump.bin"], [], [("hard.bin", "dump.bin")]))
+
+    def test_check_finds_a_hard_link_replaced_by_a_symbolic_one(self):
+        """A hard link is the file itself, so a symbolic link to the same
+        target is not one: it reads as the file but is a name a writer would
+        replace instead of writing through."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with redirect_stdout(io.StringIO()):
+                refusal.main(["seed", directory, "dump.bin"])
+            (root / "hard.bin").symlink_to("dump.bin")
+            self.assertIn("hard.bin is a symbolic link", refusal.check(
+                root, [], ["dump.bin"], [], [("hard.bin", "dump.bin")]))
+            # A name that is not there at all is reported, not raised.
+            os.unlink(root / "hard.bin")
+            self.assertIn("cannot be read", refusal.check(
+                root, [], ["dump.bin"], [], [("hard.bin", "dump.bin")]))
+
     def test_check_finds_created_changed_missing_and_extra_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -340,15 +541,17 @@ class CaseTests(unittest.TestCase):
         self.assertEqual({}, dict(definition.hardware_roles or {}))
         _a, smoke = cases("smoke")
         # 3 ways for each of 13 file options (dump has its -U), plus the
-        # extra-capture-file case, three repeated-option cases, and a stray
-        # word on scan and follow.
-        self.assertEqual(13 * 3 + 1 + 3 + 2, len(smoke))
+        # extra-capture-file case, three repeated-option cases, three btle
+        # replay cases and the dfu -u stdout case, and a stray word on scan
+        # and follow.
+        self.assertEqual(13 * 3 + 1 + 3 + 4 + 2, len(smoke))
         _a, full = cases("comprehensive")
         # The comprehensive cases: 16 of them here (the checks after the
         # option loop, both orders of dump's two modulation options, the
-        # four repeated -d cases, and the dfu inputs) and 6 more stray-word
-        # cases on scan and follow.
-        self.assertEqual(len(smoke) + 16 + 6, len(full))
+        # four repeated -d cases, and the dfu inputs), 8 more for the btle
+        # replay and the dfu read-back, and 6 more stray-word cases on scan
+        # and follow.
+        self.assertEqual(len(smoke) + 16 + 8 + 6, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
@@ -385,8 +588,10 @@ class CaseTests(unittest.TestCase):
         failed = failed_names(events)
         # Every file option in every refusal, plus the four cases that name two
         # capture files: the first one is opened in the loop before the repeat
-        # or the note. The scan and follow stray cases name no file.
-        self.assertEqual(13 * 3 + 4, len(failed))
+        # or the note. Plus the replay case whose -d names the dump, which the
+        # loop then empties. The scan and follow stray cases name no file, and
+        # a destination spelled "-" is not a file to create.
+        self.assertEqual(13 * 3 + 4 + 1, len(failed))
         self.assertFalse([name for name in failed if "'stray' is refused" in name])
 
     def test_extra_capture_note_on_stdout_fails(self):
@@ -423,6 +628,83 @@ class CaseTests(unittest.TestCase):
         self.assertFalse(summary.passed)
         self.assertEqual(sorted([
             "dfu -u <kept> -d <bad image>", "dfu -u <kept> -s <missing .bin>",
+            # A run stopped at the board lookup has read nothing back, so the
+            # temporary file it left is a file it should not have created.
+            "dfu -u <dir>/-: a file whose name is -",
+        ]), failed_names(events))
+
+    def test_a_replay_that_guesses_its_mode_fails(self):
+        """-R with no -f, -n or -p: a dump does not record which mode wrote
+        it, and the modes stamp their packets from different clocks, so the
+        times a replay reconstructs would be wrong with nothing to say so."""
+        summary, events = run(FakeTools(bugs=("replay-mode-guessed",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(["btle -R <dump> with no -f, -n or -p"],
+                         failed_names(events))
+
+    def test_board_options_accepted_beside_a_replay_fail(self):
+        """A replay opens no board, so an option that drives, names, or tunes
+        one asks for something it cannot do: refused, not dropped in silence."""
+        summary, events = run(FakeTools(bugs=("replay-board-options-dropped",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(
+            ["btle -f -R <dump> with each option that drives a board"],
+            failed_names(events))
+
+    def test_a_destination_that_empties_the_replayed_dump_fails(self):
+        """A destination is opened for writing, so one that is the dump -R is
+        replaying empties it before a record of it has been read."""
+        summary, events = run(FakeTools(bugs=("dump-over-input-allowed",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(sorted([
+            "btle -f -R <dump> -d <the same dump>",
+            "btle -f -R <dump> -d <another name for it>",
+        ]), failed_names(events))
+
+    def test_two_captures_taking_standard_output_fail(self):
+        """Standard output carries one stream: a PCAP and a dump interleaved
+        there would be neither, and the second writer said nothing."""
+        summary, events = run(FakeTools(bugs=("two-captures-on-stdout",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(sorted([
+            "btle -n -q - -d -: one stream, one capture",
+            "btle -n -c - -d -: the letter -c was given",
+        ]), failed_names(events))
+
+    def test_two_destinations_naming_one_file_fail(self):
+        """Each writer opens its own destination, which truncates what another
+        put there, so a run given one name twice would keep one format and
+        lose the rest."""
+        summary, events = run(FakeTools(bugs=("destinations-may-collide",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(["btle -f -R <dump> -q <file> -d <the same file>"],
+                         failed_names(events))
+
+    def test_the_channel_refusal_asked_after_the_replay_one_fails(self):
+        """-A does not go with -p at all, so that is what the user needs to be
+        told; asking the replay's own refusals first reports a board it has no
+        business tuning instead."""
+        summary, events = run(FakeTools(bugs=("replay-refusal-order",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(["btle -p -R <dump> -A 38: -A is about -p"],
+                         failed_names(events))
+
+    def test_a_missing_replay_input_left_to_the_board_lookup_fails(self):
+        """A replay opens no board, so a dump that is not there has to be
+        reported as itself rather than as a board that could not be found."""
+        summary, events = run(FakeTools(bugs=("missing-input-at-the-board",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(["btle -f -R <a dump that is not there>"],
+                         failed_names(events))
+
+    def test_a_read_back_written_to_standard_output_fails(self):
+        """dfu -u renames a temporary file over the name it was given and
+        rewinds to retry a block, neither of which a pipe can do."""
+        summary, events = run(FakeTools(bugs=("upload-stdout-allowed",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(sorted([
+            "dfu -u: the lone - and the names of descriptor 1",
+            "dfu -u /dev/stdout with -h: no usage text",
         ]), failed_names(events))
 
     def test_missing_tool_and_old_library_skip(self):

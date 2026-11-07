@@ -190,10 +190,12 @@ class EstimateTests(unittest.TestCase):
         # that takes the gate past half an hour gets a decision instead of
         # slipping in (#250). Raw receive replay's capture-destination cases
         # add 5.1 s to the comprehensive entry, measured on the macOS host at
-        # fork 7cbc191a against the same test without them (#333).
+        # fork 7cbc191a against the same test without them (#333), and
+        # Refused command lines' btle replay and dfu read-back cases add
+        # 5.3 s to its own (#333, catalog.py).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(1179.6, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1184.9, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 

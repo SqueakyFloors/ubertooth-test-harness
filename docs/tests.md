@@ -1718,9 +1718,10 @@ and that note is forbidden in a refusal.
 `ubertooth-follow` and `ubertooth-scan` cases declare that they need BlueZ, so
 they are left out on a host without it.
 
-**Expected outcome.** On a Linux host, smoke runs 45 cases and comprehensive
-67; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
-applicable. Every file option of `btle`, `follow`, `rx`, `dump`, `specan`, and
+**Expected outcome.** On a Linux host, smoke runs 49 cases and comprehensive
+79; a macOS host runs 12 fewer in smoke and 19 fewer comprehensive, since the
+BlueZ-only cases are not applicable. Every file option of `btle`, `follow`,
+`rx`, `dump`, `specan`, and
 `dfu` is refused three ways: with a stray word, with `-h` (which exits 0 and
 must still create nothing), and with a bad option value later on the line.
 Beyond that: the extra-capture-file note goes to stderr, so it cannot land in
@@ -1731,11 +1732,60 @@ board lookup; `dump -d` with `-c` and `-l` in either order is refused with
 before the dump file is opened; and `scan` and `follow` refuse a stray word
 with no usage text after the message.
 
+**`ubertooth-btle`'s replay, and the dump it writes.** `-R` replays a dump
+`-d` saved (fork `04dbe53c`, [ubertooth#1129](https://github.com/SqueakyFloors/ubertooth/pull/1129)),
+and four of its decisions come before a board is asked for and before any
+destination is opened for writing, so they run here with no board. `-R` with none of `-f`, `-n` or `-p` is refused: a
+record does not say which mode wrote it, and the modes stamp their packets
+from different clocks, so the times a replay reconstructed would be wrong past
+the first wrap with nothing in the file to say so. Every option that drives,
+names, or tunes a board — `-k`, `-t`, `-A`, `-U`, and the interference letters
+`-i`, `-I`, `-j`, `-J` — is refused beside `-R` naming itself, rather than
+accepted and dropped in silence (comprehensive, one case with a step per
+letter). `-A` with `-p` is refused for not going with promiscuous mode at all,
+and that is decided first, so `-p -R <dump> -A 38` is about the mode and not
+about a replay having no board to tune. And a destination that is the dump
+`-R` is replaying is refused with the dump left as it was: a destination is
+opened for writing, which would empty the file before a record of it had been
+read. Smoke refuses it by name; comprehensive adds a symbolic link, a hard
+link, and the replay reading the link while the destination names the file, so
+what is compared is the file. That one comparison takes the open input to say
+which file it holds, so it is made after the input has been opened for
+reading, and a `-R` input that is not there is reported as
+`error: <file>: No such file or directory` first (comprehensive) -- both still
+before any board and before any destination is opened. One capture at a time
+may have standard output, so `-q -` (and `-c -`, comprehensive) beside `-d -`
+is refused while the command line is read, as is either pair naming one file.
+
+**`ubertooth-dfu -u` and standard output.** The read-back is written through a
+temporary file renamed over the name given, and a retry rewinds it to block
+zero; a pipe can do neither, so a value naming standard output is refused as
+the value is read. The lone `-` and the names of descriptor 1 (`/dev/stdout`,
+`/dev/fd/1`) are refused with
+`error: -u cannot write the read-back to stdout; give a file name`, before
+`-h` (comprehensive) and before any board. A path whose last component is `-`
+is an ordinary file of that name, so that command line is accepted and the run
+goes on to the board lookup, leaving neither the file nor a temporary one
+behind (comprehensive).
+
 **Known limits.** Forks from before the no-devices switch ignore it, so the
 first step of every case reads the built library's bytes and the case skips
 when the name is absent. That is a run-time skip because only the built
 library can tell. The test says nothing about what the tools do once a command
 line is accepted.
+
+The replay cases are about `ubertooth-btle`'s own call and its own option
+letters, not about the comparison behind it: the redirected-standard-output
+and descriptor forms of "this destination is the file being replayed" are
+covered on `ubertooth-rx` in [Raw receive replay](#raw-receive-replay), and
+both tools hand their names to the same `opt_parse.c` helpers. Nothing here
+replays a dump that holds records, so what a replay decodes, and whether it
+preserves a connection's parameters, is untested: that needs a synthetic BLE
+dump, which the harness has not got
+([#357](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/357)).
+`/proc/self/fd/1` is a fourth name for descriptor 1 on Linux and is not among
+the `dfu -u` spellings here, because a case left out on a host without
+`/proc` belongs where that is already handled, in Raw receive replay.
 
 ## Failed capture files
 
@@ -3120,9 +3170,9 @@ carries `required hardware: true`, so the naming costs the other benches
 nothing and hides nothing either: a registry without those peers, or without
 that host, runs every other release test and records this one as blocked, and
 the run finishes failed rather than passing with the recovery unmeasured. Its
-smoke estimate is about 520 s, which takes the release suite to about 1175 s
+smoke estimate is about 520 s, which takes the release suite to about 1185 s
 (roughly 20 minutes) on the host it names; a target without the peers plans
-about 655 s of the suite and fails on this step. The third, `-t` case stays in the
+about 665 s of the suite and fails on this step. The third, `-t` case stays in the
 `classic-comprehensive` suite, which a release runs alongside the gate.
 
 **Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and
