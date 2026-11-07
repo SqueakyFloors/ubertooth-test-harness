@@ -39,6 +39,15 @@ import shutil
 from typing import Iterable, Mapping, Sequence
 
 PLATFORMS = ("linux", "macos")
+# The C host tools the fork builds on every platform, which every build must
+# install into the run prefix (build.BUILT_TOOLS) and which `Host CLI
+# surface` runs `-h` and `-V` on. One list, so a tool added to the fork
+# cannot reach one of those and not the other.
+ALWAYS_BUILT_TOOLS = (
+    "ubertooth-util", "ubertooth-debug", "ubertooth-specan", "ubertooth-rx",
+    "ubertooth-tx", "ubertooth-dump", "ubertooth-btle", "ubertooth-dfu",
+    "ubertooth-ego", "ubertooth-afh", "ubertooth-ducky",
+)
 # Built by the fork only when libbluetooth is found (BlueZ, Linux only).
 BLUEZ_TOOLS = ("ubertooth-scan", "ubertooth-follow")
 # Programs a case runs that are not the fork's and that the harness does not

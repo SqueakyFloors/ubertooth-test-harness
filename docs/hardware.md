@@ -10,7 +10,9 @@ appears (it is git-ignored; [`hardware.example.yaml`](../hardware.example.yaml)
 is the template).
 
 Companions: [`docs/tests.md`](tests.md) says what each test does with this
-hardware, [`README.md`](../README.md) how to register and run it,
+hardware, [`README.md`](../README.md) how to set the harness up and run it,
+[`hardware-utilization.md`](hardware-utilization.md) which test uses which
+fixture,
 [`scripts/lab/`](../scripts/lab/README.md) holds the by-hand helpers (holding
 a device, switching a hub port, the udev rule), and
 [`DESIGN.md`](../DESIGN.md) describes the harness itself.
@@ -74,8 +76,8 @@ box. Every other Ubertooth test receives only.
 
 ### nRF52840 DK
 
-Nordic nRF52840 DK boards (PCA10056) are the Bluetooth LE peers: the Ubertooth
-stays receive-only and the DKs do the transmitting, so a capture can be checked
+Nordic nRF52840 DK boards (PCA10056) are the Bluetooth LE peers: in these
+tests the Ubertooth only receives and the DKs transmit, so a capture can be checked
 against an address, an interval, and a payload that were chosen rather than
 observed.
 
@@ -140,7 +142,7 @@ Hands-Free Profile, so the air carries reserved-slot voice packets. An audio
 session is that link and the profile's own service level connection, an ACL
 link; it starts no data stream, and a board can hold both at once if a test
 asks for them. `sco type ev3` asks for a plain EV3
-link, whose payload is on the air at the basic rate a receive-only Ubertooth
+link, whose payload is on the air at the basic rate a receiving Ubertooth
 can decode; the 2-EV3 link the stack chooses by default carries the same
 payload as enhanced rate, which a basic-rate decoder cannot read. The
 hands-free unit has to be listening before the gateway pages it, so a session
@@ -756,8 +758,7 @@ needs `arm-none-eabi-gcc`, and is refused up front without it.
 
 Guard boards are not flashed: preflight only requires their firmware API to be
 the host tools' own — any other, newer as well as older, is refused there,
-because `ubertooth-btle` may stop such a board rather than read it (README,
-"Guard Ubertooths") — not the resolved revision. Boards that a firmware-writing test
+because `ubertooth-btle` may stop such a board rather than read it (guide/transitions-guards-watchdog.md, "Guard Ubertooths") — not the resolved revision. Boards that a firmware-writing test
 (`Flash reliability`, `DFU images`, `Classic btbr console`) writes itself are
 not flashed either.
 
@@ -1051,7 +1052,7 @@ its boot state does, or by being the first to open a port nobody held.
 Measured for #317: an overlapping open of an already-open port leaves the
 board running, while a reset pulse from a second process restarts it and the
 board then reports `boot reason power on`. See
-[Sharing boards: leases](../README.md#sharing-boards-leases).
+[Sharing boards: leases](guide/leases.md#sharing-boards-leases).
 
 **One lock file is one device.** No two devices may be registered with one
 serial, whatever their types and whichever way each is written: the bench's
@@ -1142,7 +1143,7 @@ A Mac needs no udev rules and has no BlueZ, so `ubertooth-scan` and
 `ubertooth-follow` are not applicable there. A Mac is a test host with its own
 Ubertooths and runs a runner, never the controller; the peers and the power
 controllers stay on the Linux host. See
-[A Mac test host](../README.md#a-mac-test-host).
+[A Mac test host](guide/deploy.md#a-mac-test-host).
 
 ## Known limits
 

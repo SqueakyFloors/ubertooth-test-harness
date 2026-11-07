@@ -59,7 +59,7 @@ class RawLogFormatTests(unittest.TestCase):
         self.assertEqual(
             [
                 f"{stamp_of(0)} [C] ubertooth-util -U abc -v",
-                f"{stamp_of(2)} [R] ubertooth-util exit 0 in 0.059s; [O] Firmware version: git-x (API:1.07)",
+                f"{stamp_of(2)} [X] ubertooth-util exit 0 in 0.059s; [O] Firmware version: git-x (API:1.07)",
             ],
             lines_of(record),
         )
@@ -67,7 +67,7 @@ class RawLogFormatTests(unittest.TestCase):
     def test_no_output_is_stated_on_the_second_line(self):
         record = format_command_record(result(), capture_of())
         self.assertEqual(
-            [f"{stamp_of(0)} [C] tool -x", f"{stamp_of(1)} [R] tool exit 0 in 0.250s; no output"],
+            [f"{stamp_of(0)} [C] tool -x", f"{stamp_of(1)} [X] tool exit 0 in 0.250s; no output"],
             lines_of(record),
         )
 
@@ -82,7 +82,7 @@ class RawLogFormatTests(unittest.TestCase):
                 f"{stamp_of(1)} [O] a",
                 f"{stamp_of(2)} [E] b",
                 f"{stamp_of(3)} [O] c",
-                f"{stamp_of(4)} [R] tool exit 0 in 0.250s",
+                f"{stamp_of(4)} [X] tool exit 0 in 0.250s",
             ],
             lines_of(record),
         )
@@ -126,7 +126,7 @@ class RawLogFormatTests(unittest.TestCase):
                 f"{stamp_of(2)} [O] partial",
                 f"{stamp_of(4)} [O] next",
                 f"{stamp_of(4)} [E] e",
-                f"{stamp_of(4)} [R] tool exit 0 in 0.250s",
+                f"{stamp_of(4)} [X] tool exit 0 in 0.250s",
             ],
             lines_of(record),
         )
@@ -139,12 +139,12 @@ class RawLogFormatTests(unittest.TestCase):
         record = format_command_record(
             result(returncode=-9, timed_out=True, cancelled=True), capture_of()
         )
-        self.assertIn("[R] tool exit -9 in 0.250s, TIMED OUT, CANCELLED", record)
+        self.assertIn("[X] tool exit -9 in 0.250s, TIMED OUT, CANCELED", record)
         record = format_command_record(result(returncode=7), capture_of())
-        self.assertIn("[R] tool exit 7 in 0.250s", record)
+        self.assertIn("[X] tool exit 7 in 0.250s", record)
         self.assertNotIn("TIMED OUT", record)
         record = format_command_record(result(timed_out=True), capture_of(), stopped=True)
-        self.assertIn("[R] tool exit 0 in 0.250s, stopped at its planned deadline", record)
+        self.assertIn("[X] tool exit 0 in 0.250s, stopped at its planned deadline", record)
 
     def test_falls_back_to_collected_output_when_the_executor_did_not_stream(self):
         record = format_command_record(

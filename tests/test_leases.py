@@ -756,7 +756,7 @@ class LeaseCliTests(RawHoldMixin, unittest.TestCase):
         """#224: the one place a reader of the run can see it happened."""
         from tests.test_cli import FlashDeviceExecutor, make_source
 
-        source, short = make_source(self.root)
+        source, revision = make_source(self.root)
         kgv = self.root / "kgv.dfu"
         kgv.write_bytes(b"kgv")
         test = self.root / "test.dfu"
@@ -776,8 +776,8 @@ class LeaseCliTests(RawHoldMixin, unittest.TestCase):
                     KGV revision: 2020-12-R1
             """))
         executor = FlashDeviceExecutor(
-            f"git-{short}",
-            {str(test.resolve()): f"git-{short}", str(kgv.resolve()): "2020-12-R1"},
+            revision,
+            {str(test.resolve()): revision, str(kgv.resolve()): "2020-12-R1"},
             A.key, B.key,
         )
         output = self.root / "runs"
