@@ -1493,10 +1493,11 @@ with no Ubertooth and no USB at all.
 **Theory of operation.** This is the one receive test with a known answer for
 every packet, because the harness writes the input. The fixture
 ([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) carries two LAPs, chosen
-errors, chosen channels, chosen host times, and decoy records, so the expected
-output is computed rather than pattern-matched: which packet lines appear, in
-what order, with which systime, which ones a filter drops, and how many
-packets reach a capture file. That makes it possible to check decode behavior
+errors, chosen channels, chosen host times, chosen distances from a CLKN
+edge, and decoy records, so the expected output is computed rather than
+pattern-matched: which packet lines appear, in what order, with which systime
+and which clock offset, which ones a filter drops, and how many packets
+reach a capture file. That makes it possible to check decode behavior
 that no live run can pin down, and to run the whole thing in CI.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
@@ -1507,6 +1508,19 @@ fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
 and `-s` decoding the same as without it, with `-h` listing `-s` as the
 default.
+
+Every case that reads packet lines requires each line's `clk_offset` to be
+the figure the record's own timestamp calls for, and not merely a number.
+libubertooth computes it in `cb_rx` from the record's `clk100ns` and the bit
+offset of the sync word within the record, in 100 ns ticks within one slot,
+so the fixture reproduces that arithmetic and puts each record's access code
+one step further past a CLKN edge than the last. A decoder that reported a
+constant, or the same offset for every packet, fails
+([harness#357](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/357)).
+It is not the CLK1-6 slot offset `btbb_piconet_get_clk_offset()` reports,
+which the fork reads only on a live follow
+([libbtbb#98](https://github.com/SqueakyFloors/libbtbb/pull/98) is still
+uncovered).
 
 **Which note each command line prints.** libbtbb reports a clock out of the
 address-part search as a CLK6 note only when it already held the UAP, which is
@@ -1590,8 +1604,11 @@ part-way through would be read as a record cut short and the run would exit 1
 instead of 0.
 
 **Known limits.** The fixture is synthetic, never an over-the-air capture, so
-this covers the decode path and not the receive path. There is no LE
-equivalent: no tool calls libbtbb's LE file replay. The capture-destination
+this covers the decode path and not the receive path. The low-energy
+equivalent is [BLE replay](#ble-replay), which replays a synthetic dump
+through `ubertooth-btle -R`: that tool reads its own dump, and neither
+library has a low-energy file reader for a tool to call.
+The capture-destination
 cases are `ubertooth-rx`'s; the same checks in `ubertooth-btle` and
 `ubertooth-follow` are not covered, and nor is a capture written to a
 terminal, which no run has. Five more things the fork's own code calls out go
@@ -1605,6 +1622,79 @@ a destination whose last element is a number, which is a file and not a
 descriptor unless the descriptor filesystem answers for it; and the backstop
 inside `take_stdout`, which no case reaches because the command-line check
 refuses such a pair first.
+
+## BLE replay
+
+**What it does.** Replays a synthetic low-energy dump with
+`ubertooth-btle -R`, with no Ubertooth, no USB and no connection.
+
+**Theory of operation.** `-d <file>` saves the records the board sent and
+`-R <file>` decodes them again, taking the major mode the dump was recorded
+with: a record does not say which clock stamped it, and the modes stamp their
+packets differently, so the mode is asked for rather than guessed (fork
+[ubertooth#1129](https://github.com/SqueakyFloors/ubertooth/pull/1129)). That
+makes a replay the one path on which this tool's decode has a known answer
+with no radio at all, because the harness writes the input
+([`btlereplay.py`](../ubertooth_harness/btlereplay.py)). A low-energy record
+carries the packet's own bytes rather than symbols -- the access address, the
+PDU header, the payload and the CRC -- so the dump is written field by field
+from the Bluetooth Core specification's encoding and the expected report is
+computed from the same constants.
+
+Two dumps. The first is a promiscuous capture of one connection: the five
+parameter records promiscuous mode sends as it works out which connection it
+has found, the `CONNECT_IND` that opened that connection on an advertising
+channel, and two data packets on the connection's own access address. The
+parameter records carry no packet, so they reach no capture file and a dump
+is the only way to keep them -- which is what `-d` and `-R` are for. The
+second is one `ADV_IND` whose advertising data holds three Manufacturer
+Specific Data fields, so the decode reads the company identifier table three
+ways: an identifier the Bluetooth SIG registered recently
+([libbtbb#75](https://github.com/SqueakyFloors/libbtbb/pull/75)), one it has
+had from the start, and one it has never assigned, which libbtbb reports as
+`not assigned`
+([libbtbb#128](https://github.com/SqueakyFloors/libbtbb/pull/128)). The other
+reader of that table is `ubertooth-scan -x`, which needs BlueZ, a board and a
+third idle Classic device, so the dump is the cheap way to it.
+
+**Hardware and arguments.** No board role. `hosts:` and `coverage:`.
+
+**Expected outcome.** Smoke runs two cases. The promiscuous replay
+(`-p -R <dump>`) begins by requiring `ubertooth-btle -h` to list `-R` and
+`-d`, so a build too old to have them fails saying which option is missing
+rather than on a refusal the checks cannot parse. It must then print the
+five parameter lines in the order the records hold them -- access address, CRC seed, hop interval, hop increment, and the
+algorithm 2 event counter -- then the `CONNECT_IND` decoded field by field:
+the connection's access address, CRC seed, transmit window size and offset,
+interval, peripheral latency, supervision timeout, channel map, hop increment
+and clock accuracy. Then the two data packets, each with its LLID and, for
+the control PDU, its opcode. Every packet line must carry the host time of
+its own record and the access address it belongs to, so a replay reporting
+its own clock fails. The advertising replay (`-n -R <dump>`) must name both
+registered companies and say `not assigned` for the third, in that order. A
+missing or reworded line fails the case, and the step names the first line it
+could not find.
+
+Comprehensive adds two. A replay dumping with `-d` must write the dump it
+read back byte for byte, the parameter records included, since a `-d` that
+dropped them would lose what a promiscuous capture was for. And a replay with
+no major mode must be refused with exit 1 and decode nothing:
+`error: -R needs -f, -n or -p: a dump does not record which mode wrote it,
+and the modes stamp their packets with different clocks`.
+
+**Known limits.** The dumps are synthetic, so this covers the decode and the
+dump format, not the receive path, the radio, or the firmware that fills a
+record in. Nothing here verifies a CRC: the firmware is what checks one and
+sets the record's flag, so the fixture's CRC bytes are zero and the decode
+never looks at them. The company names are the pinned libbtbb table's, so a
+regenerated table that renames a company fails the case; that is a one-line
+update in `btlereplay.py`. The rest of the fork's own `-R` and `-d` surface
+goes uncovered here -- a destination that is the dump being replayed, the
+capture files a replay writes, a dump cut short or unreadable, and the
+spellings of standard output -- which the fork's own
+`host/ubertooth-tools/tests/test_btle_replay.py` covers at build time; the
+same checks for `ubertooth-rx` are in
+[Raw receive replay](#raw-receive-replay).
 
 ## Interrupting a capture
 
