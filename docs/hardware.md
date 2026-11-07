@@ -759,6 +759,24 @@ of the commit it is against, and fails when either pair differs with
 `UTDK_FW_VERSION` unchanged
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)).
 
+CI compiles both peer firmwares, each in its vendor's own toolchain image for
+the version its sources pin, on a change under that firmware's directory,
+once a week, and on request: `scripts/ci.sh firmware-dk` for the DK
+([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147))
+and `scripts/ci.sh firmware-esp32` for the ESP32 peer
+([#326](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/326)).
+Neither is a required check, because each image is gigabytes. The peer step
+builds once and compares nothing: nothing in the harness flashes an ESP32
+peer, so a missing version bump fails a run on the bench rather than leaving
+the old image in place with nothing to say so. It does check that the image
+carries `UTESP_FW_VERSION`; that each setting `sdkconfig.defaults` asks for
+by value came back out of Kconfig verbatim and each one it asks to stay off
+did not come back on; and that neither configuring nor building warned about
+the firmware's own files, which is also what catches a withdrawn option that
+now disables nothing. The
+[firmware README](../firmware/esp32-classic-peer/README.md#without-installing-the-sdk)
+has the whole rule, and what it does not reach.
+
 ### Which Ubertooth firmware, and why
 
 The harness never tests host tools against firmware from another commit:
@@ -851,10 +869,15 @@ flashes an ESP32 peer, so a run fails instead when one reports a version
 older than the test needs. The hashes above let a bench confirm it holds the
 same image this repository's sources produce. Each was built as its firmware
 README says; a reproducible build is not claimed, so compare the version
-first and the hash second. The same sources do build the same peer image
-twice, but the ESP32 image holds the line numbers its error checks report,
-so even a comment added above one of them gives a different hash for the
-same version.
+first and the hash second. For the ESP32 image, that is not a caution but a
+measurement: CI built identical peer sources on two runs and got two hashes
+(`6741480e…` and `f47da7bc…`, 2026-11-06). ESP-IDF's
+`CONFIG_APP_REPRODUCIBLE_BUILD` is off by default and this firmware does not
+ask for it, so the image carries a compile date and time; the sources also
+hold the line numbers their error checks report, so even a comment added
+above one of them moves the hash for the same version. A bench whose copy
+hashes differently from the table has to be judged on the version it
+reports.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
@@ -1143,10 +1166,12 @@ tools); `tshark` from the distribution (no GUI) for
 Add `--with-acroname` to `bootstrap.py` on a host with an Acroname hub.
 Install the peer SDKs only on the host that builds the peer
 images: nRF Connect SDK v3.4.1 with `nrfutil sdk-manager` (about 6 GB), and
-ESP-IDF v5.5.6 (about 3 GB). A host with docker can build the DK image
-without that install, with `scripts/ci.sh firmware-dk` (see the
-[firmware README](../firmware/nrf52840dk/README.md)); flashing still needs
-`nrfutil`.
+ESP-IDF v5.5.6 (about 3 GB). A host with docker can build either peer image
+without that install, with `scripts/ci.sh firmware-dk` and
+`scripts/ci.sh firmware-esp32` (see the
+[DK](../firmware/nrf52840dk/README.md) and
+[ESP32 peer](../firmware/esp32-classic-peer/README.md) firmware READMEs);
+flashing still needs `nrfutil` for a DK and `esptool` for a peer.
 
 ### macOS
 
