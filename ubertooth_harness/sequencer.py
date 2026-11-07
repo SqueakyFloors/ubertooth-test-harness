@@ -85,11 +85,17 @@ from ubertooth_harness import transitions
 
 
 def _record_bootloader_identity(publisher, check, result, failure: str) -> None:
-    """Record the bootloader one preflight read found on one board."""
-    found = bootloader_identity.identity_from_match(
-        output_of(result).search(bootloader_identity.IDENTITY_LINE_PATTERN)
-    )
+    """Record the bootloader one preflight read found on one board.
+
+    The verdict comes from the check itself, so the record and the check's
+    own pass or failure cannot disagree. A board whose firmware has not got
+    the request, and whose application image a test of the suite writes
+    anyway, is recorded as `not read` with the reason and passes (#327).
+    """
+    found, status, reason = check.bootloader_reading(result)
     expectation = check.bootloader
+    if status == bootloader_identity.NOT_READ and not reason:
+        reason = expectation.not_read_note(check.resource_alias)
     publisher.emit(
         "bootloader_identity",
         "failed" if failure else "passed",
@@ -106,13 +112,8 @@ def _record_bootloader_identity(publisher, check, result, failure: str) -> None:
                 expectation.expected.to_dict() if expectation.expected else None
             ),
             "written": False,
-            "status": (
-                "unreadable" if found is None
-                else "current" if expectation.expected is None
-                or found.matches(expectation.expected)
-                else "stale"
-            ),
-            "reason": failure,
+            "status": status,
+            "reason": failure or reason,
         },
     )
 

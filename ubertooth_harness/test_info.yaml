@@ -155,19 +155,31 @@ Bootloader identity:
     writes the board's bootloader, which cannot be undone over USB.
   expected: >-
     No implementation as a plan entry; only a plan declaring runnable: false
-    may name it. As a mandatory preflight check, one -B read per selected
-    board whose firmware the run requires and then verifies, recorded as a
+    may name it. As a mandatory preflight check, one -B read per Ubertooth a
+    test of the suite selects, recorded as a
     bootloader_identity record and shown in the report
     and the GUI board list. record passes on any answer, including a factory
     bootloader; check and update pass only on the identity the artifact names.
+    A board whose application image a test of the suite writes is read and
+    compared too, and may instead answer that its firmware has not got the
+    request, which records a "not read" verdict with the reason and passes.
+    The write still covers only the boards whose firmware preflight requires,
+    so a stale bootloader on one of the others is reported with the programmer
+    named rather than installed.
   limitations: >-
     A run against a fork commit from before -B existed has no check at all,
-    and records that it had none. There is no one factory hash to compare
+    and records that it had none. A "not read" verdict establishes nothing
+    about that board's bootloader, so a stale one under old firmware passes
+    unnoticed until that board is read on a run that requires its firmware or
+    by hand; and the stall it is read from cannot be told from a wedged board,
+    which stalls every request, though the firmware and serial checks before
+    it would have caught one. There is no one factory hash to compare
     against: shipped boards each report a different one. The region hash is
     predicted from the artifact, so a programmer that wrote the region any
     other way is caught by the read-back rather than foreseen.
   related:
     - ubertooth-test-harness#298
+    - ubertooth-test-harness#327
     - ubertooth#242
 
 Ubertooth identity:
@@ -1848,12 +1860,22 @@ Classic btbr console:
     board, and the only one that runs ubertooth-btbr: it refuses the option
     values the tool must refuse before it looks for a board, writes the btbr
     image, drives one console session against a registered peer, and always
-    writes the application image back.
+    writes the application image back. It is also where a board's bootloader
+    is read under each of its two application images, since ubertooth-dfu
+    writes the application region only.
   theory: >-
-    Four things make the answers knowable in advance. The image identity:
+    Five things make the answers knowable in advance. The image identity:
     ubertooth-util -v names the image the firmware was built from ahead of the
     revision, so the board must report btbr and the run's revision after the
     write and bluetooth_rxtx and the same revision after the restore. The
+    bootloader under each image: ubertooth-dfu writes the application region
+    only and both images implement the -B request, so -B is read once the
+    run's btbr image is on the board and again after the application image is
+    back. Reading after the write rather than before it is deliberate: this
+    test establishes its board's image, so the board can arrive carrying
+    firmware older than the request, and a reading taken then can only be a
+    refusal, which is recorded as the reading. The two are recorded and not
+    compared with each other; see ubertooth-test-harness#366. The
     peer: it is discoverable and connectable from boot, its BD_ADDR is in the
     registry and the firmware builds its device name from that address, so an
     inquiry has to hear it, a page has to reach it, and the name it answers
@@ -1893,14 +1915,19 @@ Classic btbr console:
     the connection, the once-per-opcode report of an LMP request with no
     handler, the page again with the peer reset before it, the two scan modes,
     the count of the board's own refusal lines, no hang-up on a peer that took
-    the connection, and the split between the capture on standard output and
+    the connection, and the split
+    between the capture on standard output and
     the progress on standard error. Comprehensive decides 21: paging an address nothing answers must
     end in a paging timeout with no connection, and it also makes five more
     transmit runs, covering three more formats, and pages the peer once
     more. The report says how many checks
     passed, failed, and never ran. The cleanup always writes the application
-    image back, reads it, and resets the peer; a cleanup failure fails the
-    case, so the board cannot be left on btbr quietly.
+    image back, reads it, records the bootloader the application image
+    reports, and resets the peer; a cleanup failure fails the case, so the
+    board cannot be left on btbr quietly. No cleanup step wants a value the
+    steps may not have recorded, because a cleanup step that cannot run stops
+    the test, so a case that failed at its own write still reports a verified
+    restore.
   limitations: >-
     A repeat page is only a page of the peer because the session resets the
     peer first: idle tells the peer nothing, so it holds the link the last
@@ -1934,6 +1961,9 @@ Classic btbr console:
     the driver, because passing it on would put third-party addresses and
     device names into the run record.
   related:
+    - ubertooth-test-harness#327
+    - ubertooth-test-harness#329
+    - ubertooth-test-harness#366
     - ubertooth#1075
     - ubertooth#1166
     - ubertooth#1183
@@ -2417,7 +2447,10 @@ Reset into invalid application:
     committed plan names the board
     the registry pairs with a debug programmer, so a board that does fault
     has a recovery path at hand without re-cabling. On a board carrying the
-    factory bootloader this test does not fail, it bricks the board.
+    factory bootloader this test does not fail, it bricks the board. Run the
+    plan with --bootloader check, which does cover this board: the read
+    reaches every Ubertooth a test of the suite selects, so the run states
+    which bootloader the verdict was taken against.
   expected: >-
     One case. The write reaches the flash and reports no verified revision,
     since the board stays in its bootloader; then, after the port comes back,
@@ -2441,9 +2474,16 @@ Reset into invalid application:
     the board in DFU, both put right by hand. The one hardware case covers
     erased vectors; the other unstartable images the harness can build are
     checked on the host only, because each extra case is another cold boot
-    with the same risk.
+    with the same risk. The bootloader read covers this board now, with two
+    gaps: the board may be carrying firmware older than the request when
+    preflight reads it, which records a "not read" verdict rather than an
+    identity, so a check run states the bootloader only when the row says
+    current; and the write never reaches this board, so one that needs a
+    bootloader gets it over its programmer by hand. Nothing reads -B after
+    the test, so read it by hand either side.
   related:
     - ubertooth-test-harness#141
+    - ubertooth-test-harness#327
     - ubertooth#863
 
 Receive-only firmware:

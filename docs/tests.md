@@ -591,9 +591,9 @@ only that the count differed.
 ## Bootloader identity
 
 **What it does.** Nothing as a plan entry: a catalog entry for the bootloader
-read, which mandatory preflight does instead — for the boards whose
-firmware a run requires and then verifies, which leaves out a guard-only
-board and a board whose test establishes its own firmware.
+read, which mandatory preflight does instead — for every Ubertooth a test of
+the suite selects, which leaves out a guard-only board, whose bootloader the
+guard baseline reads instead.
 
 **Theory of operation.** A board's bootloader is the first 16 KiB of its
 flash, and `ubertooth-dfu` runs from there, so an ordinary firmware write
@@ -621,7 +621,7 @@ and compares that: a release name for equality, since there is no shorter form
 of one to accept, and a hash as an abbreviation of the commit, since two
 checkouts need not abbreviate to the same length.
 
-Preflight reads it for every board whose firmware the run requires, after the
+Preflight reads it for every Ubertooth a test of the suite selects, after the
 firmware checks, since firmware older than the read refuses it. What the run
 then requires is `--bootloader`:
 
@@ -657,6 +657,52 @@ the same command and the same check — so they were removed rather than
 implemented twice
 ([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
 
+**A board whose application image a test of the suite writes.** `Flash
+reliability`, `DFU images`, `Classic btbr console` and `Reset into invalid
+application` each establish their own board's image, so the run does not
+require a firmware revision of that board — and the read used to be left out
+with it, which took the check off the one board where the bootloader is the
+subject of the test
+([#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+The read covers those boards now, with one tolerance: what such a board is
+carrying when preflight runs is whatever the last run left, and firmware older
+than the request refuses it, which the 2020-12-R1 image a flash test
+alternates in does. There that refusal is the reading — the verdict is `not
+read`, the reason says nothing was compared, and the run goes on. Only the one
+wording libubertooth prints for a stalled request is read that way; a read
+that failed any other way (no board, a board another command holds, a libusb
+error, a timeout) still fails the check, on that board as on any other. A
+board that does answer is compared like the rest, so `check` fails the run on
+a stale bootloader there, naming the programmer: the write covers the boards
+whose firmware preflight requires and no others, because a board the suite
+reflashes could not then be held to the application revision an update
+verifies. `update` on a suite whose every board is one of these says it had no
+board to install on and reads and compares them anyway.
+
+**A board's bootloader under each of its two application images.** `Classic
+btbr console` is where that is read, because it is the one test that puts the
+alternate `btbr` image on a board and the application image back
+([#329](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/329)).
+It reads `-B` once the run's own `btbr` image is on the board and again, in
+its cleanup, with the application image back, so the run record carries the
+board's bootloader as each image reports it.
+
+The two are recorded and not compared, which is a limit of the harness rather
+than a judgement about the reading. `ubertooth-dfu` writes the application
+region only, so the two lines ought to be identical, and a difference would
+mean a write had reached the bootloader. Asserting it needs a cleanup step
+that compares against a baseline a failed case may never have recorded, and a
+cleanup step that cannot run stops the test whether it is skipped or failed,
+so a case that failed at its own write would be reported as a board left
+unrestored. The equality is worth asserting and waits on a way to say
+"compare only if there is something to compare with"
+([#366](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/366)).
+Either read may also answer that the firmware has not got the request, which
+is recorded as the reading: a fork commit with the `btbr` image but without
+`-B` answers that way, and so does a board that arrives carrying firmware
+older than the request, which this test's board can, since it establishes its
+own image.
+
 **Hardware and arguments.** One `Ubertooth` per check, selected by full
 serial. `update` also needs a `Debug programmer` paired with the board, with a
 `serial device`, plus `lpc21isp` and `arm-none-eabi-gcc` on the host; see
@@ -673,14 +719,22 @@ ubertooth-util -U <serial> -v                     # the application came back
 
 **Expected outcome.** No implementation as a plan entry; only a
 `runnable: false` plan may name it. As a preflight check: one `-B` per
-selected board whose firmware the run requires, recorded in `run.jsonl` as a
+Ubertooth a test of the suite selects, recorded in `run.jsonl` as a
 `bootloader_identity` record and
 shown in the report's Bootloader section and in the GUI's board list.
 `record` passes on any answer, including a factory bootloader; `check` and
-`update` pass only on the identity the artifact names.
+`update` pass only on the identity the artifact names. A board whose
+application image the suite writes may answer that its firmware has not got
+the request, which records `not read` and passes.
 
 **Known limits.** A run against a fork commit from before `-B` existed has no
-check at all, and records that it had none. The region hash is worked out from
+check at all, and records that it had none. A `not read` verdict is exactly
+that: nothing about that board's bootloader was established, so a stale
+bootloader under old firmware passes unnoticed until that board is read on a
+run that requires its firmware, or by hand. The tolerance also cannot be told
+apart from a wedged board, which stalls every request it is sent; the firmware
+and serial checks that ran before it are what would have caught one. The
+region hash is worked out from
 the artifact, which is the image padded with the 0xff of erased flash and the
 vector checksum filled in; a programmer that wrote the region any other way
 would be caught by the read-back rather than predicted, which is what the
@@ -4258,10 +4312,11 @@ not this test's.
 
 **What it does.** Runs the tool's command line for the option values it must
 refuse before it looks for a board, writes the `btbr` firmware image to the
-board, checks the board reports that image, drives one `ubertooth-btbr`
-console session against a registered ESP32 Classic peer, and always writes the
-application image back. It is the only test that puts a firmware image other
-than `bluetooth_rxtx` on a board, and the only one that runs
+board, checks the board reports that image, records the bootloader under it,
+drives one `ubertooth-btbr` console session against a registered ESP32
+Classic peer, and always writes the application image back and records the
+bootloader under that one too. It is the only test that puts a firmware image
+other than `bluetooth_rxtx` on a board, and the only one that runs
 `ubertooth-btbr`.
 
 **Theory of operation.** `ubertooth-btbr` needs the separate `btbr` image and
@@ -4273,6 +4328,22 @@ from ahead of the revision, so the board must report `btbr` and the run's
 revision after the write and `bluetooth_rxtx` and the same revision after the
 restore. Reading the revision alone would pass a board on either image, and
 the application-image check every other board gets would turn this board down.
+
+The bootloader under each image: `ubertooth-dfu` writes the application
+region only, so a board keeps its bootloader across both of this case's
+writes, and both images implement the `-B` request. `ubertooth-util -B` is
+therefore read once the run's `btbr` image is on the board and again, in the
+cleanup, with the application image back
+([#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327),
+[#329](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/329)).
+Reading after the write rather than before it is deliberate: this test
+establishes its board's image, so the board can arrive carrying firmware older
+than the request, and a reading taken then can only be a refusal. Both are
+recorded and neither is compared with the other, for the reason under
+"Bootloader identity" above
+([#366](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/366));
+a read the firmware has not got is the reading too, so a commit with the
+`btbr` image but without `-B` records that rather than failing the case.
 
 The peer: the ESP32 Classic peer is discoverable and connectable from boot
 (see [`hardware.md`](hardware.md)), its BD_ADDR is in the registry, and the
@@ -4402,6 +4473,9 @@ btbrconsole.py options                                   # the command line, no 
 ubertooth-dfu  -U <serial> -d <btbr image> -r
 ubertooth-util -U <serial> -v                            # it reports btbr at the revision
 ubertooth-util -U <serial> -V
+ubertooth-util -U <serial> -B                            # the bootloader under each
+                                                         # image, read here and again
+                                                         # in the cleanup (#329)
 btbrconsole.py session --serial <serial> --peer <BD_ADDR> --peer-name <name> \
     --peer-reset esp32peer.py --peer-device <peer port> --inquiry-seconds <n> \
     --page-seconds <n> --hold-seconds <n> --no-answer-seconds <n> \
@@ -4432,9 +4506,12 @@ each scan). Comprehensive decides 21: paging an address nothing answers must
 end in `paging timeout` with no connection, and it also makes five more
 transmit runs, covering three more formats, and pages the peer once more. The report says how many checks passed,
 how many failed, and how many never ran, so a session that stopped early is not
-read as a pass. The cleanup always writes the application image back, reads it,
-and resets the peer; a cleanup failure fails the case, so the board cannot be
-left on `btbr` quietly.
+read as a pass. The cleanup always writes the application image back, reads
+it, records the bootloader the application image reports, and resets the peer;
+a cleanup failure fails the case, so the board cannot be left on `btbr`
+quietly. No cleanup step wants a value the steps may not have recorded: one
+that cannot run stops the test, so a case that failed at its own write still
+reports a verified restore.
 
 The capture itself never leaves the driver. An inquiry hears every discoverable
 device in range, so passing it on would put third-party addresses and device
@@ -5506,17 +5583,20 @@ not fail — it bricks the board, which then needs its P4 entry pin bridged,
 because that bootloader jumps into the erased vectors it was given. So the
 committed plan names the board the registry pairs with a `Debug programmer`,
 which is also what gives that board a recovery path, and holding the board
-holds the programmer with it. Read the bootloader before and after
-(`ubertooth-util -U <serial> -B`) by hand: `--bootloader check` does not
-cover this board, because preflight reads the bootloader of a board whose
-firmware the run requires and this test establishes its own, so the read is
-skipped for it
+holds the programmer with it. Run this plan with `--bootloader check`, which
+does cover this board: the read reaches every Ubertooth a test of the suite
+selects, so the run states which bootloader the verdict was taken against
 ([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
 [#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
-`--bootloader update` does not reach this board either — it installs over a
-programmer for the same boards the read covers — so a board that needs a
-bootloader gets one before this plan is run: from a run that does require its
-firmware, or by hand over the programmer. Required:
+Two things it still cannot do. The board may be carrying firmware older than
+the request when preflight reads it, since this test establishes its own
+image; that answer is recorded as `not read` and the run goes on, so a
+`check` run proves the bootloader only when the row says `current`. And
+`--bootloader update` does not reach this board — the write covers the boards
+whose firmware preflight requires — so a board that needs a bootloader gets
+one before this plan is run: from a run that does require its firmware, or by
+hand over the programmer. Nothing reads `-B` after the test either, so read it
+by hand afterwards (`ubertooth-util -U <serial> -B`). Required:
 `platforms:`, because the hub is reached through a serial-device path that
 only Linux has, and
 `USB power controller:`, the hub the board must be on. A plan pointed at the
