@@ -988,10 +988,10 @@ Raw receive replay:
     down, and it runs in CI with no board and no USB.
   theory: >-
     The fixture carries two LAPs, chosen errors, chosen channels, chosen host
-    times, and decoy records, so the expected output is computed rather than
-    pattern-matched: which packet lines appear, in what order, with which
-    systime, which ones a filter drops, and how many packets reach a capture
-    file.
+    times, chosen distances from a CLKN edge, and decoy records, so the
+    expected output is computed rather than pattern-matched: which packet
+    lines appear, in what order, with which systime and which clock offset,
+    which ones a filter drops, and how many packets reach a capture file.
   hardware: >-
     No board, no USB. Nothing transmits.
   expected: >-
@@ -999,7 +999,10 @@ Raw receive replay:
     -l, replay into PCAPNG and into PCAP (link type 255, the fixture's packet
     count), a -d file that cannot be opened (exit 1, one error line, no usage
     text, nothing created or changed anywhere in the directory), and -s
-    decoding the same as without it. The -l case also requires the start of
+    decoding the same as without it. Every case that reads packet lines
+    requires each line's clock offset to be the figure the record's own
+    timestamp calls for, which libubertooth computes in cb_rx from that
+    timestamp, so a decoder reporting a constant fails. The -l case also requires the start of
     the CLK1-27 search that follows a discovered UAP, and forbids a CLK6
     note, which libbtbb reports only for a UAP the caller stated;
     comprehensive's correct -u requires that note, at offset 0, with the
@@ -1029,8 +1032,14 @@ Raw receive replay:
     bare decode warns that the capture is lost.
   limitations: >-
     The fixture is synthetic, never an over-the-air capture, so this covers
-    the decode path and not the receive path. There is no LE equivalent: no
-    tool calls libbtbb's LE file replay. The capture-destination cases are
+    the decode path and not the receive path. The low-energy equivalent is
+    BLE replay, which replays a synthetic dump through ubertooth-btle -R:
+    that tool reads its own dump, and neither library has a low-energy file
+    reader for a tool to call. The clock offset a packet line reports is
+    libubertooth's own and not the CLK1-6 slot offset
+    btbb_piconet_get_clk_offset() reports, which the fork reads only on a
+    live follow, so libbtbb#98 is still uncovered. The capture-destination
+    cases are
     ubertooth-rx's; the same checks in ubertooth-btle and ubertooth-follow are
     not covered, and nor is a capture written to a terminal, which no run has.
     Five things the fork's own code calls out are uncovered too: /dev/stdin
@@ -1047,6 +1056,63 @@ Raw receive replay:
     - libbtbb#137
     - ubertooth#1135
     - ubertooth-test-harness#341
+    - ubertooth-test-harness#357
+
+BLE replay:
+  purpose: >-
+    The one low-energy decode test with a known answer and no radio at all.
+    It pins what a saved ubertooth-btle capture is worth: that a replay puts
+    back both halves of what a promiscuous capture found, and that the
+    company identifier table is read and reported as libbtbb words it.
+  theory: >-
+    The harness writes the dump, from the Bluetooth Core specification's own
+    encoding, so every figure in the decode is known in advance. A
+    low-energy record carries the packet's bytes rather than symbols -- the
+    access address, the PDU header, the payload and the CRC -- so the dump is
+    written field by field and the expected report computed from the same
+    constants. One dump is a promiscuous capture of one connection: the five
+    parameter records that mode sends, which carry no packet and so reach no
+    capture file, the CONNECT_IND that opened the connection, and two data
+    packets on the connection's own access address. The other is one
+    advertisement whose advertising data names three company identifiers: one
+    the Bluetooth SIG registered recently, one it has had from the start, and
+    one it has never assigned.
+  hardware: >-
+    No board, no USB, no peer. Nothing transmits.
+  expected: >-
+    Smoke runs two cases. The promiscuous replay first requires `-h` to list
+    `-R` and `-d`, so a build too old to have them says which option is
+    missing rather than failing on a refusal the checks cannot parse. It
+    must then print the five parameter lines in the order the records hold
+    them, then the CONNECT_IND
+    decoded field by field -- the connection's access address, CRC seed,
+    transmit window, interval, latency, timeout, channel map, hop increment
+    and clock accuracy -- and then the two data packets, with each packet
+    line carrying the host time of its own record and the access address the
+    CONNECT_IND handed out. The advertising replay must name both registered
+    identifiers and say "not assigned" for the third, in order. A missing or
+    reworded line fails the case and is named. Comprehensive adds two: a
+    replay dumping with -d, whose file must be the dump it read byte for
+    byte, parameter records included; and a replay with no major mode, which
+    must be refused with exit 1 and decode nothing, because a record does not
+    say which clock stamped it.
+  limitations: >-
+    The dumps are synthetic, so this covers the decode and the dump format,
+    not the receive path, the radio, or the firmware that fills a record in.
+    Nothing here verifies a CRC: the firmware is what checks one and sets the
+    record's flag, so the fixture's CRC bytes are zero. The company names are
+    the pinned libbtbb table's, so a regenerated table that renames a company
+    fails the case; the other reader of that table, ubertooth-scan -x, is not
+    covered. Neither is the rest of the fork's own -R and -d surface -- the
+    destination that is the dump being replayed, the capture files a replay
+    writes, a cut or unreadable dump -- which the fork's test_btle_replay.py
+    covers at build time.
+  related:
+    - ubertooth#1129
+    - libbtbb#75
+    - libbtbb#128
+    - ubertooth-test-harness#333
+    - ubertooth-test-harness#357
 
 Refused command lines:
   purpose: >-
@@ -2184,8 +2250,8 @@ MAC polling soak:
     known advertiser. No implementation yet.
   theory: >-
     The intent is to reproduce the shape of a production-style MAC polling
-    workload in the harness's own process: a persistent ubertooth-btle -f
-    capture with no -U on an isolated board, in-memory MAC buckets rotated on
+    workload in the harness's own process: a persistent
+    ubertooth-btle -n -U <serial> capture, in-memory MAC buckets rotated on
     a timer, lookups on a second timer, listener-silence detection, and the
     empty-bucket restart timing. Modeling it in-process is deliberate: the
     harness will not start the original workload and will not add a network
