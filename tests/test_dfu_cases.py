@@ -153,7 +153,7 @@ class FakeDfuBoard:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         if command == ("ubertooth-util", "-V"):
-            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
+            return self._result(command, 0, "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n")
         self.commands.append(command)
         if command[:2] == (sys.executable, dfu_cases._CHECKER):
             out = io.StringIO()
@@ -361,7 +361,7 @@ def run_dfu(board, image_bytes, *, coverage="smoke", artifact=True, change_image
         )
         check = PreflightCheck("preflight-001-host-version", "Host version", "Host_Linux",
                                None, {}, ("ubertooth-util", "-V"),
-                               (r"libubertooth\s+\S+\s+\(git\-test\)",), REVISION)
+                               (r"Host tools version: 2026\-11\-DEV2 \(libbtbb \S+\)",), REVISION)
         if change_image:
             original_run = board.run
 

@@ -1493,6 +1493,9 @@ def _transcript(run: _Run) -> list[str]:
                 text += f" (expected {details.get('expected')}, observed {details.get('observed')})"
             elif details.get("observed") is not None:
                 text += f" (recorded {details.get('observed')})"
+            if details.get("uncompared"):
+                text += (f" (nothing recorded for {details['uncompared']}, "
+                         "so it was not compared)")
             if details.get("reason"):
                 text += f": {details['reason']}"
             line(event, text)

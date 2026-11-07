@@ -2,7 +2,6 @@
 
 import io
 import signal
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +13,7 @@ from unittest.mock import patch
 import yaml
 
 from ubertooth_harness.cancellation import CancellationToken
+from ubertooth_harness import release as release_version
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.cli import main
 from ubertooth_harness.enumeration import (
@@ -40,6 +40,7 @@ from ubertooth_harness.resources import STARTECH_DRIVER, FileResourceRegistry
 from ubertooth_harness.sequencer import NamedTestSequencer
 
 from tests import watchdog_samples
+from tests.test_manifest_preflight import RELEASE, make_git_repo
 from tests.test_sequencer import CollectSink, run_contract
 
 SERIALS = {
@@ -170,7 +171,7 @@ class LabExecutor:
         seen = sorted(self.lab.serials())
         stdout, stderr, code = "", "", 0
         if argv == ("ubertooth-util", "-V"):
-            stdout = "Host tools version: libubertooth 1.1 (git-test)\n"
+            stdout = "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n"
         elif argv[0] == "ubertooth-util" and argv[-1] == "-w":
             # The watchdog read selects its board, so several attached boards
             # do not stop it; a board that is off answers nothing.
@@ -188,7 +189,7 @@ class LabExecutor:
         elif argv == ("ubertooth-util", "-s"):
             stdout = f"Serial No: {seen[0]}\n"
         elif argv == ("ubertooth-util", "-v"):
-            stdout = "Firmware version: git-test (API:1.07)\n"
+            stdout = f"Firmware version: {RELEASE} (API:1.07)\n"
         elif argv[:2] == ("bash", "-c") and "ubertooth-btle -f" in argv[2]:
             code = 124
         else:
@@ -1123,14 +1124,7 @@ class RunSuiteCliIsolationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         source = self.root / "source"
-        subprocess.run(["git", "init", "-q", str(source)], check=True)
-        (source / "tracked.txt").write_text("source\n")
-        subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
-        subprocess.run(
-            ["git", "-C", str(source), "-c", "user.name=Test",
-             "-c", "user.email=test@example.invalid", "commit", "-qm", "source"],
-            check=True,
-        )
+        make_git_repo(source)
         # run-suite only runs on the registered host's own platform.
         local = "macos" if sys.platform == "darwin" else "linux"
         (self.root / "hardware.yaml").write_text(
@@ -1231,10 +1225,7 @@ class RunSuiteCliIsolationTests(unittest.TestCase):
                 built.append(self)
 
         source = Path(self.argv[self.argv.index("--ubertooth-source") + 1])
-        revision = "git-" + subprocess.run(
-            ["git", "-C", str(source), "rev-parse", "--short", "HEAD"],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
+        revision = release_version.build_version(source, "HEAD").value
 
         class SourceBuiltLab(LabExecutor):
             # Host and firmware report the checked-out source revision; with
@@ -1252,14 +1243,14 @@ class RunSuiteCliIsolationTests(unittest.TestCase):
                 if selected and argv == ("ubertooth-util", "-V"):
                     self.commands.append(argv)
                     answer = (
-                        f"Host tools version: libubertooth 1.1 ({revision})\n"
-                        "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                        f"Host tools version: {revision} "
+                        f"(libbtbb {revision})\n"
                         f"Firmware version: {revision} (API:1.07)\n"
-                        f"Firmware build: ubertooth {revision} (test@host)\n"
                     )
                     return CommandResult(argv, 0, answer, "", 0.01, False, False)
                 result = super().run(argv, **kwargs)
-                return replace(result, stdout=result.stdout.replace("git-test", revision))
+                return replace(
+                    result, stdout=result.stdout.replace(RELEASE, revision))
 
         executor = SourceBuiltLab(usb)
         stderr = io.StringIO()

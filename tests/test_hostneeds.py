@@ -301,7 +301,7 @@ class FollowHelp:
         self.commands.append(command)
         if command[0] == "ubertooth-follow":
             raise AssertionError("a not-applicable case ran")
-        text = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+        text = "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n"
         if command == ("ubertooth-util", "-h"):
             text = "usage\n"
         return CommandResult(command, 0, text, "", 0.01, False)

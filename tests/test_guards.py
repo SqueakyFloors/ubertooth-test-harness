@@ -422,9 +422,6 @@ def flip(value):
 # One disturbance per guard read, keyed by the read's setting name.
 GUARD_CHANGES = {
     "firmware": lambda board: setattr(board, "firmware", board.firmware + "-reflashed"),
-    "compile-info": lambda board: setattr(
-        board, "compile_info", board.compile_info + " rebuilt"
-    ),
     # The serial the board reports, not the one commands select it by: this is
     # a board answering as somebody else, which is what the read catches.
     transitions.GUARD_IDENTITY_KEY: lambda board: setattr(
@@ -504,7 +501,6 @@ class GuardExecutionTests(ReadOnlyGuardCommands, unittest.TestCase):
         self.assertEqual({
             "guard Ubertooth 1 firmware":
                 f"{guard.firmware} (API:{transitions.format_api(guard.api)})",
-            "guard Ubertooth 1 compile-info": guard.compile_info,
             "guard Ubertooth 1 identity": guard.reported_serial,
             "guard Ubertooth 1 bootloader": f"Bootloader: {guard.bootloader}",
             "guard Ubertooth 1 channel": before["channel"],
