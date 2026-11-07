@@ -67,6 +67,7 @@ from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     EXPECTED_REVISION_KEY,
     MissingContext,
+    NothingToCompare,
     POWER_CYCLE_PORT_KEY,
     REGISTRY_PATH_KEY,
     StateCase,
@@ -696,6 +697,10 @@ class NamedTestSequencer:
             argv = step.resolve_argv(context)
             if step.observe is not None:
                 step.observe.expected_value(context)
+        except NothingToCompare:
+            # The step can run; only its comparison has nothing to compare
+            # with, which evaluate() leaves out and records.
+            pass
         except Unrestorable as error:
             reason = f"{step.name}: skipped, {error.args[0]}"
             details.update({"reason": reason, "argv": None})
@@ -757,6 +762,11 @@ class NamedTestSequencer:
             "expected": outcome.expected,
             "observed": outcome.observed,
         })
+        if outcome.uncompared:
+            # The comparison this step carries was left out: the case never
+            # recorded the reading to compare with. The step's own checks
+            # decided its status, and the cleanup is still verified.
+            details["uncompared"] = outcome.uncompared
         publisher.emit("step_finished", status, details)
         return outcome.failure, True, result.cancelled, outcome.skipped
 
@@ -776,6 +786,22 @@ class NamedTestSequencer:
         command still has a hard timeout. A cleanup failure fails the case even
         when every transition step passed, and a passing cleanup never clears
         an earlier step failure.
+
+        A cleanup step that wants something an earlier step did not record is
+        judged by what the absence means, which is what decides whether the
+        board is reported as restored:
+
+        * the step cannot run, because its command line or its expected value
+          needs that value (``MissingContext``): skipped as "not needed" when
+          no mutating step ran, and a cleanup failure once one has, since
+          something may have changed and nothing wrote it back;
+        * the value cannot be written back by any host tool
+          (``Unrestorable``): the step is skipped, and the cleanup counts as
+          unverified, so the test stops;
+        * only a comparison has nothing to compare with
+          (``NothingToCompare``): the step runs in full, its own checks decide
+          it, and the cleanup stays verified. The step records the reading it
+          could not compare with.
         """
         owner = {
             "phase": "test",

@@ -906,7 +906,15 @@ State-changing cases are ordered transition steps plus mandatory cleanup
 compare it with a value derived from earlier observations. Cleanup always runs
 with a fresh cancellation token and hard timeouts; its failure is a case
 failure, and restoration that depends on a value never recorded is skipped only
-when no mutating step has run. A case whose precondition does not hold (an
+when no mutating step has run. A step whose comparison alone depends on a
+reading only some runs of the case take, a baseline a mutating step has to
+establish first (`Observation.compare_with`), runs either way: the comparison
+is made where the case recorded the reading and left out where it did not,
+the step's own checks decide it, and the cleanup stays verified, so a case
+that stopped at its own write is not reported as a board left unrestored. The
+step's record names the reading it could not compare with. A case that
+compares with a reading no earlier step of it records is refused where the
+case is built. A case whose precondition does not hold (an
 unrestorable original) is reported `skipped` before any change. Plans choose a
 bounded `coverage` profile (`smoke` or `comprehensive`); case IDs are fixed,
 descriptive literals and generation is deterministic.

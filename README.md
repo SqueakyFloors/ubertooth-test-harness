@@ -1107,7 +1107,22 @@ events, then the error is raised), a cleanup failure fails the case, and a passi
 never clears an earlier failure. A case is reported `canceled` only when
 cancellation was its sole failure. Restore steps that depend on a value never
 recorded are reported as skipped when nothing was changed and as failed
-otherwise. Every step that runs, is skipped, or is canceled before it starts
+otherwise. A step whose *comparison* alone depends on such a value is
+different: a cleanup step may compare two answers to one question, read
+either side of something that must not have changed it, where the first
+reading can only be taken after a mutating step (an alternate firmware image
+written, so that a bootloader read under it means anything). The step asks to
+compare with that recorded reading rather than with a value of its own, so a
+case that stopped, was canceled, or was skipped before the reading was taken
+still runs the step, is judged by its own checks, and leaves the cleanup
+verified; the run goes on instead of reporting a board nobody restored. Its
+`step_finished` event then names the reading it had nothing to compare with
+(`uncompared`), and the report says so beside what it recorded. Where both
+readings are there the comparison is made and a difference fails the cleanup.
+Nothing is invented in either case, and a case that asks to compare with a
+reading no earlier step of it takes is refused where it is built, so a
+misspelled name cannot quietly stop comparing.
+Every step that runs, is skipped, or is canceled before it starts
 emits a `step_finished` event with its reason, expected and observed values,
 and argv (`null` for a step that did not run). Steps after the first failure or
 skip emit nothing. Aggregate reasons are bounded; each
