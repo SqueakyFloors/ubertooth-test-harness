@@ -392,11 +392,11 @@ def _host_version_line(text: str) -> str:
     """The one line the version patterns matched.
 
     What the manifest and the report call the built tools' version, so the
-    firmware lines `-V` prints under it, which belong to whatever board
-    happened to be attached, stay out of that field.
+    firmware line `-V` prints under it, which belongs to whatever board
+    happened to be attached, stays out of that field.
     """
     for line in text.splitlines():
-        if line.startswith(HOST_VERSION_LABEL) or line.startswith("libubertooth"):
+        if line.startswith(HOST_VERSION_LABEL):
             return line
     return text
 

@@ -35,11 +35,11 @@ Command contracts below come from the Ubertooth fork sources:
   the earlier one and the set was dropped). ``-z`` always kept both.
 - ``-V`` is the version command and ends the command: since fork f898fe5
   (SqueakyFloors/ubertooth#813) ``ubertooth-util`` prints the host tools'
-  version and the board's firmware version and build, then returns, before
+  version and the board's firmware version, then returns, before
   any identity query runs. So it does not compose with the other reads, and
-  ``-V -s`` prints no serial line. Its firmware lines carry labels of their
-  own (``Firmware build: ...``), where the old ``-V`` printed the bare build
-  string.
+  ``-V -s`` prints no serial line. The board's line carries a label of its
+  own (``Firmware version: ...``); the image's build string stood under it
+  until fork #1233 took it out.
 - ``-z`` (set or read) with a mode option is refused (fork 4ed4a1d).
 - ``-S`` requests idle mode. From idle it changes nothing, so settings persist
   between idle commands. Leaving an active mode (xmas, range test, repeater,
@@ -885,9 +885,8 @@ def _version_case(case_id, options, serial):
     Since fork f898fe5 (#813) -V is the version command: ubertooth-util
     returns as soon as it has printed the answer, before the identity queries
     run. So -V with -s prints the version answer and no serial line, whichever
-    order they were written in, and the answer carries labels of its own
-    ("Firmware build: ...") rather than the bare build string the old -V
-    printed.
+    order they were written in, and the answer is the host tools' version and
+    the board's firmware version, each under a label of its own.
     """
     return CommandCase(
         case_id,
@@ -1666,9 +1665,8 @@ def btle_conflict_cases(_arguments, _resources, resource_identities):
 # Guard boards: every other registered Ubertooth on the host must be untouched
 #
 # Guards are read with queries only (no -S, no set option): firmware revision
-# and API, the version answer (-V, whose "Firmware build:" line carries a
-# build timestamp, so a same-revision reflash is caught too), and every
-# setting these tests change. The expected
+# and API, the version answer (-V), and every setting these tests change. The
+# expected
 # value of each check is the guard's own baseline read before the test's
 # first case.
 #
@@ -1725,27 +1723,6 @@ GUARD_FIRMWARE_PATTERN = (
 )
 API_PATTERN = r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)"
 _GUARD_API_RE = re.compile(API_PATTERN)
-# The build string a board reports, in either of the two forms a build has
-# stamped into it. Since #352 (fork #1230) it is the date the image was built
-# and nothing else, under its own label; before that it was
-# "ubertooth <revision> (who@where) <date>", labelled since fork 201c3c49 and
-# bare before it, so that branch is matched wherever it sits.
-#
-# Only the value is the reading, so a labelled line has its label taken off
-# (_guard_build_string). What this read is for is unchanged either way: a
-# board reflashed with the same revision gets a new build date, which is what
-# the reading catches.
-GUARD_COMPILE_INFO_PATTERN = (
-    r"\bubertooth\s+\S+\s+\([^\n]*\S"
-    r"|(?m:^Firmware build: (?!read failed$|not reported$)\S[^\n]*)"
-)
-_BUILD_LABEL = "Firmware build: "
-
-
-def _guard_build_string(match: re.Match) -> str:
-    """The build string a GUARD_COMPILE_INFO_PATTERN match stands for."""
-    text = match.group(0).strip()
-    return text[len(_BUILD_LABEL):] if text.startswith(_BUILD_LABEL) else text
 GUARD_IDENTITY_KEY = "identity"
 GUARD_IDENTITY_PATTERN = r"Serial No:\s+(?P<value>[0-9a-fA-F]+)"
 GUARD_BOOTLOADER_KEY = "bootloader"
@@ -1817,16 +1794,22 @@ def _tolerant(pattern, convert, values=None):
 
 
 # What every guard is read for, whatever image it carries: who it is, which
-# image and revision it runs, what built it, and which bootloader is under
-# that. All four are answered by the images a guard is expected to carry --
+# image and revision it runs, and which bootloader is under that. All three
+# are answered by the images a guard is expected to carry --
 # bluetooth_rxtx, its receive-only build, and btbr. A board that answers
 # fewer, as the assembly-test image does (it has the revision and the serial,
-# not the build string or the bootloader), is still pinned by the ones it
+# not the bootloader), is still pinned by the ones it
 # answers; one that answers none is turned away by the pinning rule below
 # rather than guarded.
+#
+# A fourth read asked `-V` for the image's build string, whose build date
+# caught a reflash of the same revision. Fork #1233 took that string out of
+# the answer -- an image records only its version now -- so nothing reports
+# it and the read has gone (#358). The firmware read below still pins the
+# image, the revision and the API, so a reflash to a different revision is
+# caught; a reflash to the same one is not, which is in docs/tests.md.
 GUARD_STABLE_READBACK = (
     (GUARD_FIRMWARE_KEY, "-v", GUARD_FIRMWARE_PATTERN, None),
-    ("compile-info", "-V", GUARD_COMPILE_INFO_PATTERN, _guard_build_string),
     (GUARD_IDENTITY_KEY, "-s", GUARD_IDENTITY_PATTERN, None),
     (GUARD_BOOTLOADER_KEY, "-B", GUARD_BOOTLOADER_PATTERN, None),
 )
@@ -1850,9 +1833,7 @@ GUARD_PINNING_KEYS = tuple(key for key, *_rest in GUARD_STABLE_READBACK)
 # instead, which costs nothing: every image that answers these requests at
 # all answers the LED reads (bluetooth_rxtx and its receive-only build, btbr,
 # the assembly test), and a board whose firmware answers nothing is turned
-# away by the pinning rule below. Each of the other reads makes one request
-# (`-V` makes two, and firmware too old for the second is exactly the case
-# worth tolerating).
+# away by the pinning rule below. Each of the other reads makes one request.
 GUARD_STRICT_KEYS = (LEDS.key,)
 # The reads below are the ones an image may refuse, so they are the only ones
 # an image can be held to here; a strict read is held to by every guard,

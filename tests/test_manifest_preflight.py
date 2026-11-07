@@ -17,7 +17,6 @@ from ubertooth_harness.manifest import (
 )
 from ubertooth_harness.patterns import (
     HOST_VERSION_TIMEOUT_S,
-    compile_info_pattern,
     firmware_version_pattern,
     revision_pattern,
 )
@@ -55,6 +54,28 @@ resources:
     identity: {serial: abcdef0123456789}
 """
 
+# The release the scratch checkouts below are tagged with, and so the version
+# a build of them reports. Every version line names a release since fork
+# `ce13614c6`, and fork #1233 left the `-V` answer two lines with no build
+# string: that answer is what current-release validation requires (#358).
+RELEASE = "2026-11-DEV2"
+# The release libbtbb reports beside it, as the fork's pinned libbtbb does.
+LIBBTBB_RELEASE = "2020-12-R1+79"
+# The fork's host/cmake/set_release.cmake, as release.py reads it: the three
+# tag globs, the floor a tree with no release tag in reach reports, and the
+# second look at the name git handed back.
+RELEASE_CMAKE = """\
+set(LATEST_RELEASE "2020-12-R1")
+set(RELEASE_TAG_MATCH
+\t--match "[0-9][0-9][0-9][0-9]-[0-9][0-9]-R[0-9]*"
+\t--match "[0-9][0-9][0-9][0-9]-[0-9][0-9]-RC[0-9]*"
+\t--match "[0-9][0-9][0-9][0-9]-[0-9][0-9]-DEV[0-9]*")
+set(RELEASE_TAG_FORM "^[0-9][0-9][0-9][0-9]-[0-9][0-9]-(R|RC|DEV)[0-9]+$")
+"""
+# The firmware's own file, which has to name the same floor or release.py
+# refuses the tree: one that named two would report two versions.
+FIRMWARE_VERSION_MK = "UBERTOOTH_LATEST_RELEASE := 2020-12-R1\n"
+
 
 class CollectSink:
     def __init__(self):
@@ -65,7 +86,8 @@ class CollectSink:
 
 
 class FakeExecutor:
-    def __init__(self, revision, *, wrong_serial=False, libbtbb="git-btbb"):
+    def __init__(self, revision, *, wrong_serial=False,
+                 libbtbb=LIBBTBB_RELEASE):
         self.revision = revision
         self.wrong_serial = wrong_serial
         self.libbtbb = libbtbb
@@ -75,21 +97,16 @@ class FakeExecutor:
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            output = (
-                f"Host tools version: libubertooth 1.1 ({self.revision}), "
-                f"libbtbb 1.3 ({self.libbtbb})\n"
-            )
+            output = f"Host tools version: {self.revision} (libbtbb {self.libbtbb})\n"
         elif command[-1] == "-v":
             output = f"Firmware version: {self.revision} (API:1.07)\n"
         elif command[-1] == "-V":
-            # The whole answer, which is what -V prints for one board since
-            # fork f898fe5; the compile-info check reads its last line.
+            # The whole answer, which is what -V prints for one board: the
+            # host tools' version and the board's firmware version, and
+            # nothing else since fork #1233 took the build string out.
             output = (
-                f"Host tools version: libubertooth 1.1 ({self.revision}), "
-                f"libbtbb 1.3 ({self.libbtbb})\n"
-                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                f"Host tools version: {self.revision} (libbtbb {self.libbtbb})\n"
                 f"Firmware version: {self.revision} (API:1.07)\n"
-                f"Firmware build: ubertooth {self.revision} (builder@host) timestamp\n"
             )
         elif command[-1] == "-s":
             serial = "wrong" if self.wrong_serial else "abcdef0123456789"
@@ -103,16 +120,38 @@ class FakeExecutor:
         return CommandResult(command, 0, output, "", 0.01, False)
 
 
-def make_git_repo(path: Path, *, install_sh: str | None = None) -> str:
-    """A one-commit checkout, with an ``install.sh`` when one is wanted.
+def make_git_repo(path: Path, *, install_sh: str | None = None,
+                  libbtbb: bool = False) -> str:
+    """A one-commit checkout whose build names a release, tagged RELEASE.
 
-    Preflight reads that file at the resolved Ubertooth commit for the
-    libbtbb the run's tools must be linked against (#294), so a test about
-    that check gives the repository one.
+    Preflight reads two things out of the resolved Ubertooth commit: the
+    libbtbb its ``install.sh`` pins (#294), so a test about that check gives
+    the repository one, and the file that decides what a build of it reports
+    (``release.py``). Current-release validation requires the release-name
+    `-V` answer (#358), so the checkout names a release here as the fork has
+    since `ubertooth#1232`: the file the host tools read it from, the one the
+    firmware reads it from with the same floor, and a release tag on the
+    commit, which makes a build of it report RELEASE and nothing else.
+
+    ``libbtbb`` writes libbtbb's own version file as well, for a fixture that
+    resolves one checkout as both projects. Without it a run that resolves
+    this checkout as libbtbb gets the ``git-<commit>`` a build with no such
+    file stamps, which is what a libbtbb from before `libbtbb#139` reports.
     """
     subprocess.run(["git", "init", "-q", str(path)], check=True)
     (path / "tracked.txt").write_text("one\n")
     tracked = ["tracked.txt"]
+    files = [
+        ("host/cmake/set_release.cmake", RELEASE_CMAKE),
+        ("firmware/version.mk", FIRMWARE_VERSION_MK),
+    ]
+    if libbtbb:
+        files.append(("cmake/set_release.cmake", RELEASE_CMAKE))
+    for name, text in files:
+        target = path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        tracked.append(name)
     if install_sh is not None:
         (path / "install.sh").write_text(install_sh)
         tracked.append("install.sh")
@@ -124,6 +163,7 @@ def make_git_repo(path: Path, *, install_sh: str | None = None) -> str:
         ],
         check=True,
     )
+    subprocess.run(["git", "-C", str(path), "tag", RELEASE], check=True)
     return subprocess.run(
         ["git", "-C", str(path), "rev-parse", "HEAD"],
         check=True,
@@ -193,7 +233,7 @@ class ManifestTests(unittest.TestCase):
                 "https://example.invalid/ubertooth.git", branch.repository
             )
             self.assertNotIn("secret", branch.repository)
-            self.assertEqual(f"git-{branch.short_commit}", branch.expected_revision)
+            self.assertEqual(RELEASE, branch.expected_revision)
             with self.assertRaises(Exception):
                 branch.commit = "other"
             self.assertNotIn("ref_name", branch.to_dict())
@@ -512,37 +552,37 @@ class PreflightTests(unittest.TestCase):
 
 
 class HostVersionCheckTests(unittest.TestCase):
-    """The host tools' version, in the two shapes the fork's tools print it."""
+    """The host tools' version, as the fork's tools print it."""
 
-    # ubertooth-util -V, the one version answer (fork #813).
+    # ubertooth-util -V, the one version answer (fork #813): the host tools'
+    # own version and the board's firmware version, and nothing else since
+    # fork #1233 took the build string out.
     V_ANSWER = (
-        "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
-        "libbtbb loaded from: /usr/local/lib/libbtbb.so.1\n"
-        "Firmware version: bluetooth_rxtx git-test (API:1.35)\n"
-        "Firmware build: ubertooth git-test (builder@host) Mon Oct 27 11:22:33 2025\n"
+        f"Host tools version: {RELEASE} (libbtbb {LIBBTBB_RELEASE})\n"
+        f"Firmware version: bluetooth_rxtx {RELEASE} (API:1.58)\n"
     )
-    # ubertooth-util -H on a fork commit before it: the same two host lines,
-    # printed by the same function, and no board read.
-    H_ANSWER = (
-        "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
-        "libbtbb loaded from: /usr/local/lib/libbtbb.so.1\n"
-    )
-    # -H before the fork labelled its version lines (fork 201c3c49): the same
-    # two versions, on a line of their own.
-    UNLABELLED_H_ANSWER = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+    # ubertooth-util -H on a fork commit before `-V` answered for the host:
+    # the same host line, printed by the same function, and no board read.
+    H_ANSWER = f"Host tools version: {RELEASE} (libbtbb {LIBBTBB_RELEASE})\n"
     # What -V was on those commits: the board's build string, nothing about
     # the host, and with no board attached it fails.
     OLD_V_ANSWER = "ubertooth git-test (builder@host) Mon Oct 27 11:22:33 2025\n"
 
     @staticmethod
-    def source(name, short_commit):
+    def source(name, version):
+        """A resolved source whose build reports ``version``.
+
+        A release name, which is what every build reports since fork
+        `ce13614c6` and what current-release validation requires (#358).
+        """
         return SourceRevision(
             name=name,
             source_path=f"/src/{name}",
             repository="example",
             requested_ref="HEAD",
-            commit=short_commit.removeprefix("git-").ljust(40, "0"),
-            short_commit=short_commit.removeprefix("git-"),
+            commit="0" * 40,
+            short_commit="0000000",
+            build_version=version,
         )
 
     def check(self):
@@ -554,9 +594,10 @@ class HostVersionCheckTests(unittest.TestCase):
             resource_identity=MappingProxyType({}),
             argv=HOST_VERSION_ARGV,
             expected_patterns=host_version_patterns(
-                self.source("Ubertooth", "git-test"), self.source("libbtbb", "git-btbb")
+                self.source("Ubertooth", RELEASE),
+                self.source("libbtbb", LIBBTBB_RELEASE),
             ),
-            expected_revision="git-test",
+            expected_revision=RELEASE,
             fallback_argv=HOST_VERSION_FALLBACK_ARGV,
             fallback_when_missing=re.escape(HOST_VERSION_LABEL),
             accepted_returncodes=(0, 1),
@@ -584,15 +625,13 @@ class HostVersionCheckTests(unittest.TestCase):
             self.assertEqual((0, 1), check.accepted_returncodes)
             self.assertEqual(HOST_VERSION_TIMEOUT_S, check.timeout_s)
 
-    def test_every_shape_of_the_answer_passes(self):
+    def test_both_options_answer_with_the_same_line(self):
         check = self.check()
-        for output in (self.V_ANSWER, self.H_ANSWER, self.UNLABELLED_H_ANSWER):
+        for output in (self.V_ANSWER, self.H_ANSWER):
             with self.subTest(output=output.splitlines()[0]):
                 self.assertEqual("", check.result_failure(self.result(output)))
 
     def test_a_labelled_answer_does_not_ask_the_older_option(self):
-        # The unlabelled line is left out: it only ever arrives as the
-        # fallback's own answer, which is not asked again.
         check = self.check()
         for output in (self.V_ANSWER, self.H_ANSWER):
             with self.subTest(output=output.splitlines()[0]):
@@ -613,33 +652,47 @@ class HostVersionCheckTests(unittest.TestCase):
         self.assertIn("timed out", check.result_failure(timed_out))
 
     def test_a_wrong_revision_is_reported_rather_than_asked_again(self):
-        other = self.V_ANSWER.replace("libubertooth 1.1 (git-test)",
-                                      "libubertooth 1.1 (git-other)")
+        other = self.V_ANSWER.replace(
+            f"Host tools version: {RELEASE}", "Host tools version: 2026-11-DEV1"
+        )
         result = self.result(other)
 
         self.assertIn("identity mismatch", self.check().result_failure(result))
         self.assertFalse(self.check().needs_fallback(result))
 
     def test_a_board_that_cannot_be_read_still_passes(self):
-        # -V reads every attached board after the host lines and exits 1 if
+        # -V reads every attached board after the host line and exits 1 if
         # one cannot be read; that board may not even be in this run.
         busy = self.V_ANSWER.replace(
-            "Firmware version: bluetooth_rxtx git-test (API:1.35)",
+            f"Firmware version: bluetooth_rxtx {RELEASE} (API:1.58)",
             "Firmware version: unavailable, in use by another program",
         )
 
         self.assertEqual("", self.check().result_failure(self.result(busy, returncode=1)))
 
-    def test_the_firmware_lines_cannot_stand_in_for_the_host_line(self):
-        # "Firmware build: ubertooth git-test (...)" names the same revision,
-        # so the patterns are anchored to the host tools' own line.
-        firmware_only = self.V_ANSWER.split("libbtbb loaded from", 1)[1]
+    def test_the_firmware_line_cannot_stand_in_for_the_host_line(self):
+        # It names the same release, so the patterns are anchored to the host
+        # tools' own label.
+        firmware_only = self.V_ANSWER.splitlines(keepends=True)[1]
 
         self.assertIn("identity mismatch",
                       self.check().result_failure(self.result(firmware_only)))
 
+    def test_an_older_layout_does_not_pass(self):
+        # What a build printed before fork `ce13614c6`: the two library ABI
+        # versions with the commit each was built from, and the libbtbb path
+        # under it. No requirement accepts it any more (#358).
+        old = (
+            "Host tools version: libubertooth 1.1 (git-test), "
+            "libbtbb 1.0 (git-btbb)\n"
+            "libbtbb loaded from: /usr/local/lib/libbtbb.so.1\n"
+        )
+
+        self.assertIn("identity mismatch",
+                      self.check().result_failure(self.result(old)))
+
     def test_a_modified_source_marker_fails(self):
-        marked = self.V_ANSWER.replace("git-test)", "git-test*)")
+        marked = self.V_ANSWER.replace(f"{RELEASE} (libbtbb", f"{RELEASE}* (libbtbb")
 
         self.assertIn("identity mismatch",
                       self.check().result_failure(self.result(marked)))
@@ -650,76 +703,81 @@ class HostToolsLibbtbbTests(unittest.TestCase):
 
     A run that builds nothing used to accept whatever libbtbb the host's
     tools happened to load, and reported a pass while measuring a different
-    decoder from the one it named. The expectation now comes from the
-    ``LIBBTBB_REF`` the Ubertooth commit under test sets in its own
-    ``install.sh``.
+    decoder from the one it named. The expectation comes from the libbtbb the
+    run resolved, which every real run names: a deployed runner passes
+    ``--libbtbb-ref fork-pin`` and CI passes ``--libbtbb-source``. A run that
+    resolved none records that nothing held its tools to a library, and why
+    (``ReleaseVersionLineTests``).
     """
 
     PIN = "52b2afcb0c4b8b03412dac759aad88debdfb18e2"
     OTHER = "0176769fb4b5b1b4a7d07fd1dbe8e4b0ef4d11c2"
 
-    def host_check(self, install_sh=None, **resolved):
+    def host_check(self, install_sh=None, *, libbtbb="HEAD", **resolved):
         with tempfile.TemporaryDirectory() as directory:
             _root, _source, _manifest, checks = prepare_preflight(
-                directory, install_sh=install_sh, **resolved
+                directory, install_sh=install_sh, libbtbb=libbtbb, **resolved
             )
         self.assertEqual("Host version", checks[0].name)
         return checks[0]
 
     @staticmethod
-    def answer(check, *, ubertooth=None, libbtbb="git-52b2afc"):
+    def answer(check, *, ubertooth=None, libbtbb=""):
         """What `ubertooth-util -V` prints for those two versions.
 
-        The Ubertooth revision defaults to the one the check resolved, so
-        only the libbtbb half is under test.
+        Each half defaults to the one the check requires, so only the other
+        is under test. ``libbtbb=None`` prints no libbtbb half at all, which
+        is not a line the fork prints and has to be reported as such.
         """
-        line = f"Host tools version: libubertooth 1.1 ({ubertooth or check.expected_revision})"
+        version = ubertooth or check.expected_revision
+        line = f"Host tools version: {version}"
         if libbtbb is not None:
-            line += f", libbtbb 1.3 ({libbtbb})"
-        return CommandResult(
-            HOST_VERSION_ARGV, 0,
-            f"{line}\nlibbtbb loaded from: /usr/local/lib/libbtbb.so.1\n",
-            "", 0.01, False,
+            line += f" (libbtbb {libbtbb or check.libbtbb.expected_revision})"
+        return CommandResult(HOST_VERSION_ARGV, 0, f"{line}\n", "", 0.01, False)
+
+    def test_a_run_holds_the_tools_to_the_libbtbb_it_resolved(self):
+        check = self.host_check()
+
+        # The full commit, since a short hash would also accept a longer one
+        # that merely starts with it.
+        self.assertTrue(
+            check.libbtbb.expected_revision.startswith("git-"),
+            check.libbtbb.expected_revision,
         )
-
-    def test_a_run_that_builds_nothing_holds_the_tools_to_the_commits_pin(self):
-        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
-
-        self.assertEqual(f"git-{self.PIN}", check.libbtbb.expected_revision)
-        self.assertIn("install.sh", check.libbtbb.origin)
-        # The library stamps its own short hash, so the pin's abbreviation
-        # and its full commit name the same thing.
+        self.assertEqual(LIBBTBB_RESOLVED_ORIGIN, check.libbtbb.origin)
         self.assertEqual("", check.result_failure(self.answer(check)))
-        self.assertEqual(
-            "", check.result_failure(self.answer(check, libbtbb=f"git-{self.PIN}"))
-        )
+        # The library stamps its own short hash, so the abbreviation and the
+        # full commit name the same thing.
+        short = check.libbtbb.expected_revision[: len("git-") + 7]
+        self.assertEqual("", check.result_failure(self.answer(check, libbtbb=short)))
 
     def test_another_libbtbb_fails_naming_both_and_how_to_fix_it(self):
-        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        check = self.host_check()
 
         reason = check.result_failure(self.answer(check, libbtbb="git-0176769"))
         self.assertIn("report libbtbb git-0176769", reason)
-        self.assertIn(self.PIN, reason)
-        self.assertIn("--libbtbb-source", reason)
+        self.assertIn(check.libbtbb.expected_revision, reason)
+        self.assertIn("--libbtbb-ref", reason)
 
     def test_a_library_that_cannot_name_a_commit_fails_too(self):
         # A libbtbb built from a tarball, or from a modified checkout, reports
-        # a release or a `*` instead: neither says it is the pinned commit.
-        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        # a release or a `*` instead: neither says it is the resolved commit.
+        check = self.host_check()
 
         for release in ("2020-12-R1", "git-52b2afc*"):
             with self.subTest(release=release):
                 reason = check.result_failure(self.answer(check, libbtbb=release))
                 self.assertIn(f"report libbtbb {release}", reason)
-        # Tools that print no libbtbb version at all are reported as such,
-        # not as a mismatch with something they never said.
-        self.assertIn(
-            "no libbtbb version at all",
-            check.result_failure(self.answer(check, libbtbb=None)),
-        )
+        # Tools that print no libbtbb half at all print no line the fork
+        # prints: the host-version pattern requires the whole line, bracket
+        # and all, so the answer is turned down there rather than compared
+        # against something the tools never said.
+        reason = check.result_failure(self.answer(check, libbtbb=None))
+        self.assertIn("identity mismatch", reason)
+        self.assertIn("libbtbb", reason)
 
     def test_the_run_records_what_it_required_and_what_it_found(self):
-        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        check = self.host_check()
         result = self.answer(check)
         # The run reads a command's output through the CommandOutput it
         # carries, which is where a check's record lands (outputfiles.py).
@@ -728,16 +786,18 @@ class HostToolsLibbtbbTests(unittest.TestCase):
         self.assertEqual("", check.result_failure(result))
         (recorded,) = [item for item in result.output.checks if "libbtbb" in item.name]
         self.assertEqual(("expected", True), (recorded.kind, recorded.found))
-        self.assertIn("git-52b2afc", recorded.matched)
-        self.assertIn(f"git-{self.PIN}, the LIBBTBB_REF", check.libbtbb.describe())
+        self.assertIn(check.libbtbb.expected_revision[: len("git-") + 7],
+                      recorded.matched)
+        self.assertIn(check.libbtbb.expected_revision, check.libbtbb.describe())
 
     def test_an_ubertooth_commit_that_pins_nothing_requires_nothing(self):
-        # Fork commits from before the pin landed claim no libbtbb, so there
-        # is nothing to hold the installed library to. The run says so rather
-        # than staying silent: that is the condition #294 is about.
+        # Fork commits from before the pin landed claim no libbtbb, so a run
+        # that resolved none has nothing to hold the installed library to.
+        # The run says so rather than staying silent: that is the condition
+        # #294 is about.
         for install_sh in (None, "#!/bin/sh\necho hi\n"):
             with self.subTest(install_sh=install_sh):
-                check = self.host_check(install_sh)
+                check = self.host_check(install_sh, libbtbb=None)
                 self.assertFalse(check.libbtbb.required)
                 self.assertEqual(
                     "", check.result_failure(self.answer(check, libbtbb="git-other"))
@@ -775,13 +835,14 @@ class HostToolsLibbtbbTests(unittest.TestCase):
         # failed on the tools' own revision never compared the library. The
         # report must not report that as a libbtbb failure.
         with tempfile.TemporaryDirectory() as directory:
-            root, source, manifest, checks = prepare_preflight(
-                directory, install_sh=f'LIBBTBB_REF="{self.PIN}"\n'
+            root, _source, manifest, checks = prepare_preflight(
+                directory, libbtbb="HEAD"
             )
             invocations = make_invocations()[:1]
+            libbtbb = checks[0].libbtbb.expected_revision
 
             summary = NamedTestSequencer(
-                FakeExecutor("git-0000000", libbtbb="git-52b2afc"),
+                FakeExecutor("2026-11-DEV1", libbtbb=libbtbb),
                 event_sink=CollectSink(),
             ).run(
                 invocations,
@@ -800,24 +861,25 @@ class HostToolsLibbtbbTests(unittest.TestCase):
     def test_the_ubertooth_revision_is_reported_before_the_libbtbb_one(self):
         # Tools from another commit are the bigger problem, and the reason
         # line is often all an operator sees.
-        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        check = self.host_check()
 
         reason = check.result_failure(
-            self.answer(check, ubertooth="git-0000000", libbtbb="git-0176769")
+            self.answer(check, ubertooth="2026-11-DEV1", libbtbb="git-0176769")
         )
         self.assertIn("identity mismatch", reason)
 
     def test_a_pin_that_cannot_be_compared_refuses_the_run(self):
         # Nothing the tools report can be compared with a name that moves or
-        # with a pin built from a shell variable, so the run stops here
-        # rather than measure an unverified library.
+        # with a pin built from a shell variable, so a run that resolved no
+        # libbtbb of its own stops here rather than measure an unverified
+        # library.
         for pin, problem in (
             ("v1.0", "not a commit"),
             ("${REF}", "not a literal commit"),
         ):
             with self.subTest(pin=pin):
                 with self.assertRaises(PreflightError) as raised:
-                    self.host_check(f'LIBBTBB_REF="{pin}"\n')
+                    self.host_check(f'LIBBTBB_REF="{pin}"\n', libbtbb=None)
                 message = str(raised.exception)
                 self.assertIn("cannot be checked", message)
                 self.assertIn(problem, message)
@@ -826,11 +888,12 @@ class HostToolsLibbtbbTests(unittest.TestCase):
     def test_a_run_records_the_library_it_required_and_the_report_shows_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root, source, manifest, checks = prepare_preflight(
-                directory, install_sh=f'LIBBTBB_REF="{self.PIN}"\n'
+                directory, libbtbb="HEAD"
             )
             sink = CollectSink()
             invocations = make_invocations()[:1]
-            executor = FakeExecutor(source.expected_revision, libbtbb="git-52b2afc")
+            libbtbb = checks[0].libbtbb.expected_revision
+            executor = FakeExecutor(source.expected_revision, libbtbb=libbtbb)
 
             summary = NamedTestSequencer(executor, event_sink=sink).run(
                 invocations,
@@ -846,23 +909,22 @@ class HostToolsLibbtbbTests(unittest.TestCase):
                 if event.event_type == "check_started"
             )
             self.assertEqual(
-                f"git-{self.PIN}, the LIBBTBB_REF install.sh sets at "
-                f"Ubertooth {source.short_commit}",
+                f"{libbtbb}, {LIBBTBB_RESOLVED_ORIGIN}",
                 started.details["expected_libbtbb"],
             )
             report = (root / "run" / "report.md").read_text()
-            self.assertIn(f"| libbtbb in the tools | git-{self.PIN}, ", report)
+            self.assertIn(f"| libbtbb in the tools | {libbtbb}, ", report)
             self.assertIn("(verified) |", report)
 
     def test_a_run_whose_tools_load_another_library_runs_no_test(self):
         with tempfile.TemporaryDirectory() as directory:
             root, source, manifest, checks = prepare_preflight(
-                directory, install_sh=f'LIBBTBB_REF="{self.PIN}"\n'
+                directory, libbtbb="HEAD"
             )
             sink = CollectSink()
             invocations = make_invocations()[:1]
             # What the lab host did: tools of the right Ubertooth commit,
-            # linked against a libbtbb several commits behind the pin.
+            # linked against a libbtbb other than the one the run resolved.
             executor = FakeExecutor(source.expected_revision, libbtbb="git-0176769")
 
             summary = NamedTestSequencer(executor, event_sink=sink).run(
@@ -889,6 +951,7 @@ class HostToolsLibbtbbTests(unittest.TestCase):
         ubertooth = SourceRevision(
             name="Ubertooth", source_path="/src", repository="example",
             requested_ref="HEAD", commit="a" * 40, short_commit="aaaaaaa",
+            build_version=RELEASE,
         )
 
         # The pin is not read at all: the run built a libbtbb of its own, and
@@ -928,7 +991,7 @@ class HostToolsLibbtbbTests(unittest.TestCase):
                 # The pin is not what the tools are held to any more.
                 self.assertIn(
                     "report libbtbb git-52b2afc",
-                    check.result_failure(self.answer(check)),
+                    check.result_failure(self.answer(check, libbtbb="git-52b2afc")),
                 )
 
     def test_a_commit_longer_than_a_revision_string_is_compared_as_a_prefix(self):
@@ -943,61 +1006,51 @@ class HostToolsLibbtbbTests(unittest.TestCase):
         ubertooth = SourceRevision(
             name="Ubertooth", source_path="/src", repository="example",
             requested_ref="HEAD", commit="a" * 40, short_commit="aaaaaaa",
+            build_version=RELEASE,
         )
 
         identity = libbtbb_identity(ubertooth, libbtbb, built=True)
         self.assertEqual(f"git-{sha256[:40]}", identity.expected_revision)
         self.assertRegex(
-            "Host tools version: libubertooth 1.1 (git-aaaaaaa), "
-            f"libbtbb 1.3 (git-{sha256[:12]})\n",
+            f"Host tools version: {RELEASE} (libbtbb git-{sha256[:12]})\n",
             identity.pattern,
         )
 
-    def test_a_pin_is_compared_on_every_digit_it_carries(self):
-        # A pin the fork wrote abbreviated identifies only those digits, and
+    def test_a_resolved_commit_is_compared_on_every_digit_it_carries(self):
         # git abbreviates to a length that is unique in the repository, so a
-        # longer hash starting with them is that same commit.
-        short = self.host_check(f'LIBBTBB_REF="{self.PIN[:7]}"\n')
-        self.assertEqual("", short.result_failure(self.answer(short)))
-        self.assertEqual(
-            "", short.result_failure(self.answer(short, libbtbb=f"git-{self.PIN[:12]}"))
-        )
-        self.assertIn(
-            "report libbtbb git-52b2afd",
-            short.result_failure(self.answer(short, libbtbb="git-52b2afd")),
-        )
-        # A full pin is compared on all forty, so a longer hash that merely
+        # longer hash starting with those digits is that same commit -- and a
+        # full commit is compared on all forty, so a longer hash that merely
         # starts with its first digits is turned down.
-        full = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
-        other = f"git-{self.PIN[:7]}0000000000"
+        check = self.host_check()
+        full = check.libbtbb.expected_revision.removeprefix("git-")
+
+        self.assertEqual(
+            "", check.result_failure(self.answer(check, libbtbb=f"git-{full[:12]}"))
+        )
+        other = f"git-{full[:7]}0000000000"
         self.assertIn(
             f"report libbtbb {other}",
-            full.result_failure(self.answer(full, libbtbb=other)),
+            check.result_failure(self.answer(check, libbtbb=other)),
         )
 
-    def test_an_uppercase_pin_still_matches_the_hash_the_library_reports(self):
-        check = self.host_check(f'LIBBTBB_REF="{self.PIN.upper()}"\n')
-
-        self.assertEqual(f"git-{self.PIN}", check.libbtbb.expected_revision)
-        self.assertEqual("", check.result_failure(self.answer(check)))
-
     def test_only_the_host_version_line_can_satisfy_the_requirement(self):
-        # The other lines of the `-V` answer name libbtbb too, and one of
-        # them carries a path that can hold anything.
-        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        # Another line of the output can hold anything, the firmware line
+        # among them, so the requirement is anchored to the host line.
+        check = self.host_check()
         elsewhere = CommandResult(
             HOST_VERSION_ARGV, 0,
-            f"Host tools version: libubertooth 1.1 ({check.expected_revision})\n"
-            f"libbtbb loaded from: /build/libbtbb 1.3 (git-52b2afc)/lib.so\n",
+            f"Host tools version: {check.expected_revision}\n"
+            f"Firmware version: bluetooth_rxtx "
+            f"{check.libbtbb.expected_revision} (API:1.58)\n",
             "", 0.01, False,
         )
 
-        self.assertIn("no libbtbb version at all", check.result_failure(elsewhere))
+        self.assertIn("identity mismatch", check.result_failure(elsewhere))
 
     def test_a_libbtbb_only_mismatch_does_not_ask_the_older_option(self):
         # `-H` prints the same line from the same function, so asking it
         # again would only report the mismatch twice.
-        check = self.host_check(f'LIBBTBB_REF="{self.PIN}"\n')
+        check = self.host_check()
         result = self.answer(check, libbtbb="git-0176769")
 
         self.assertTrue(check.result_failure(result))
@@ -1031,16 +1084,6 @@ class RevisionAbbreviationTests(unittest.TestCase):
         self.assertTrue(self.matches("git-1c7f06d6", "git-1c7f06d6", image=""))
         self.assertTrue(self.matches("2020-12-R1", "2020-12-R1", image=""))
 
-    def test_compile_info_accepts_the_image_name_before_the_build_string(self):
-        self.assertRegex(
-            "bluetooth_rxtx: ubertooth git-1c7f06d6 (2026-10-27 12:00:00)",
-            compile_info_pattern("git-1c7f06d"),
-        )
-        self.assertRegex(
-            "ubertooth git-1c7f06d6 (2026-10-27 12:00:00)",
-            compile_info_pattern("git-1c7f06d"),
-        )
-
     def test_board_reports_a_longer_abbreviation_than_expected(self):
         # The run that found this: the board said git-1c7f06d6, the host
         # tools git-1c7f06d, and preflight called it an identity mismatch.
@@ -1072,6 +1115,9 @@ class RevisionAbbreviationTests(unittest.TestCase):
         self.assertFalse(self.matches("git-test", "git-tested"))
 
     def test_host_version_patterns_accept_either_abbreviation(self):
+        # The tools' own half names a release, so there is one form of it;
+        # the libbtbb half still carries a hash for a library whose own build
+        # stamps one, and git may abbreviate that to any length.
         source = SourceRevision(
             name="Ubertooth",
             source_path="/src",
@@ -1079,6 +1125,7 @@ class RevisionAbbreviationTests(unittest.TestCase):
             requested_ref="HEAD",
             commit=self.HASH,
             short_commit="1c7f06d",
+            build_version=RELEASE,
         )
         libbtbb = SourceRevision(
             name="libbtbb",
@@ -1088,7 +1135,7 @@ class RevisionAbbreviationTests(unittest.TestCase):
             commit="2fd0d391d99e9b0620146f63f439c1ec74f79861",
             short_commit="2fd0d3912",
         )
-        output = "Host tools version: libubertooth 1.1 (git-1c7f06d621), libbtbb 1.1 (git-2fd0d39)\n"
+        output = f"Host tools version: {RELEASE} (libbtbb git-2fd0d39)\n"
 
         for pattern in host_version_patterns(source, libbtbb):
             self.assertRegex(output, pattern)
@@ -1158,16 +1205,17 @@ class RevisionAbbreviationTests(unittest.TestCase):
 
 
 class ReleaseVersionLineTests(unittest.TestCase):
-    """The version lines as the fork prints them since #352 (fork #1230).
+    """The version lines as the fork prints them, and the only ones accepted.
 
         Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
         Firmware version: bluetooth_rxtx 2026-11-DEV1+22 (API:1.58)
-        Firmware build: Thu Nov  6 02:11:04 UTC 2026
 
-    The library ABI numbers and the parenthesized commits have gone, the
-    libbtbb path line has gone, and the build string is the build date. Which
-    layout a commit prints is decided by the resolved commit, so a run of an
-    older ref is still held to the old one.
+    Every version line names the release the build came from since fork
+    `ce13614c6`, in place of the library ABI numbers and the commit each was
+    built from, and the libbtbb path line went with them. Fork #1233 then
+    left the `-V` answer the two lines above: an image records only its
+    version, so the build string under them said nothing a reader needed.
+    Current-release validation requires this answer and nothing else (#358).
     """
 
     RELEASE = "2026-11-DEV1+22"
@@ -1175,7 +1223,6 @@ class ReleaseVersionLineTests(unittest.TestCase):
     ANSWER = (
         f"Host tools version: {RELEASE} (libbtbb {LIBBTBB_RELEASE})\n"
         f"Firmware version: bluetooth_rxtx {RELEASE} (API:1.58)\n"
-        "Firmware build: Thu Nov  6 02:11:04 UTC 2026\n"
     )
 
     @staticmethod
@@ -1208,8 +1255,8 @@ class ReleaseVersionLineTests(unittest.TestCase):
         # A build of this commit reports a release, so the layout a commit
         # before the change prints is not that answer.
         older = (
-            f"Host tools version: libubertooth 1.1 (git-aaaaaaa), "
-            f"libbtbb 1.3 (git-bbbbbbb)\n"
+            "Host tools version: libubertooth 1.1 (git-aaaaaaa), "
+            "libbtbb 1.3 (git-bbbbbbb)\n"
         )
         self.assertIn("identity mismatch",
                       check.result_failure(self.result(older)))
@@ -1268,7 +1315,6 @@ class ReleaseVersionLineTests(unittest.TestCase):
     def test_the_libbtbb_half_is_read_off_the_new_line(self):
         identity = LibbtbbIdentity(
             self.LIBBTBB_RELEASE, LIBBTBB_RESOLVED_ORIGIN, "fix it",
-            names_release=True,
         )
         check = self.check(
             host_version_patterns(self.source("Ubertooth", self.RELEASE)),
@@ -1288,15 +1334,14 @@ class ReleaseVersionLineTests(unittest.TestCase):
         identity = libbtbb_identity(ubertooth, libbtbb, built=True)
 
         self.assertTrue(identity.required)
-        self.assertTrue(identity.names_release)
         self.assertEqual(self.LIBBTBB_RELEASE, identity.expected_revision)
         self.assertEqual(LIBBTBB_BUILT_ORIGIN, identity.origin)
 
     def test_a_commit_style_libbtbb_under_the_new_line_is_still_a_commit(self):
         """The two repositories moved separately, so the line may carry either.
 
-        The Ubertooth commit decides the layout; what libbtbb's half must
-        carry comes from the libbtbb commit.
+        The Ubertooth commit decides the line; what libbtbb's half must carry
+        comes from the libbtbb commit, whose own build may still stamp a hash.
         """
         ubertooth = self.source("Ubertooth", self.RELEASE)
         older_libbtbb = self.source("libbtbb", "", commit="b" * 40)
@@ -1304,7 +1349,6 @@ class ReleaseVersionLineTests(unittest.TestCase):
         identity = libbtbb_identity(ubertooth, older_libbtbb)
 
         self.assertEqual("git-" + "b" * 40, identity.expected_revision)
-        self.assertTrue(identity.names_release)
         check = self.check(
             host_version_patterns(ubertooth), libbtbb=identity
         )
@@ -1345,25 +1389,65 @@ class ReleaseVersionLineTests(unittest.TestCase):
                 self.ANSWER.replace(self.LIBBTBB_RELEASE, "1999-01-R1+3")
             )))
 
-    def test_an_older_ref_still_has_its_pin_checked_by_commit(self):
-        pin = "52b2afcb0c4b8b03412dac759aad88debdfb18e2"
+    def test_an_older_ref_is_refused_rather_than_held_to_its_own_output(self):
+        """A commit whose build stamps a hash prints none of this (#358).
+
+        Current-release validation requires the release-name answer, so such
+        a commit is turned away by name before any check is built, rather
+        than failing every version check against a layout it never prints.
+        """
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "source"
-            commit = make_git_repo(path, install_sh=f'LIBBTBB_REF="{pin}"\n')
-            ubertooth = self.source(
-                "Ubertooth", "", commit=commit, source_path=str(path)
+            root = Path(directory)
+            source_path = root / "source"
+            make_git_repo(source_path)
+            # A checkout with no file that derives a release, which is what
+            # every commit before the change is.
+            subprocess.run(
+                ["git", "-C", str(source_path), "rm", "-rq",
+                 "host/cmake", "firmware"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source_path), "-c", "user.name=Test",
+                 "-c", "user.email=test@example.invalid", "commit", "-qm",
+                 "before releases were named"],
+                check=True,
+            )
+            older = GitRevisionResolver().resolve(
+                "Ubertooth", source_path, "HEAD"
+            )
+            self.assertFalse(older.names_release)
+
+            hardware_path = root / "hardware.yaml"
+            hardware_path.write_text(HARDWARE)
+            plan_path = root / "plan.yaml"
+            plan_path.write_text("plan\n")
+            invocations = make_invocations()
+            manifest = build_run_manifest(
+                run_id="preflight-run", plan_name="test plan", suite="fast",
+                host="Host_Linux", plan_path=plan_path,
+                hardware_path=hardware_path, sources=(older,),
+                invocations=invocations,
+                created_at="2026-10-22T00:00:00+00:00",
             )
 
-            identity = libbtbb_identity(ubertooth)
+            with self.assertRaises(PreflightError) as raised:
+                PreflightPolicy(
+                    FileResourceRegistry.load(hardware_path)
+                ).compile(invocations, manifest)
 
-            self.assertTrue(identity.required)
-            self.assertFalse(identity.names_release)
-            self.assertEqual(f"git-{pin}", identity.expected_revision)
+            message = str(raised.exception)
+            self.assertIn("before the fork named releases", message)
+            self.assertIn(older.short_commit, message)
 
-    def test_minus_V_reads_the_firmware_version_where_the_build_string_cannot(self):
-        """The build string names no version now, so the same answer's own
-        `Firmware version:` line is what the second command reads."""
-        patterns = firmware_identity_patterns(self.RELEASE, names_release=True)
+    def test_minus_V_reads_the_firmware_version_of_the_answer(self):
+        """The whole of what `-V` says about a board is that one line.
+
+        The build string beside it has gone (fork #1233), so the revision
+        comes off the `Firmware version:` line -- the same question the `-v`
+        check asks, asked through the other command.
+        """
+        patterns = firmware_identity_patterns(self.RELEASE)
         check = self.check(patterns, name="Firmware compile info")
 
         self.assertEqual("", check.result_failure(self.result(self.ANSWER)))
@@ -1374,18 +1458,9 @@ class ReleaseVersionLineTests(unittest.TestCase):
         reason = check.result_failure(self.result(other))
         self.assertIn("runs 2026-11-DEV1+21", reason)
         self.assertIn(self.RELEASE, reason)
-        # A board with nothing to show for its build string fails too.
-        for missing in ("read failed", "not reported"):
-            with self.subTest(missing=missing):
-                answer = self.ANSWER.replace(
-                    "Thu Nov  6 02:11:04 UTC 2026", missing
-                )
-                self.assertIn("identity mismatch",
-                              check.result_failure(self.result(answer)))
-
-    def test_an_older_ref_reads_the_revision_off_the_build_string(self):
-        patterns = firmware_identity_patterns("git-1c7f06d", names_release=False)
-        self.assertEqual((compile_info_pattern("git-1c7f06d"),), patterns)
+        # Nothing requires a build string any more, so an answer without one
+        # -- which is every answer the release under test prints -- passes.
+        self.assertNotIn("Firmware build", "".join(patterns))
 
     def test_the_manifest_records_the_release_a_build_reports(self):
         source = self.source("Ubertooth", self.RELEASE)

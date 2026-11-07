@@ -266,11 +266,8 @@ class FakeUbertooth:
     def _version_answer(self):
         """The whole -V answer for one board (libubertooth's version file)."""
         return "".join(line + "\n" for line in (
-            f"Host tools version: libubertooth 1.1 ({self.firmware}), "
-            "libbtbb 1.0 (git-btbb)",
-            "libbtbb loaded from: /p/lib/libbtbb.so.1",
+            f"Host tools version: {self.firmware} (libbtbb git-btbb)",
             self._firmware_line(),
-            f"Firmware build: {self.compile_info}",
         ))
 
     @staticmethod
@@ -657,7 +654,7 @@ class FakeUbertooth:
         if "v" in flags:
             lines.append(self._firmware_line())
         if "V" in flags:
-            lines.append(self.compile_info)
+            lines.append(self._firmware_line())
         if usr == "q" or "l" in gets:
             lines.append(f"USR LED status: {self.state['usr']}")
         if pa == "q" or "a" in gets:
@@ -737,7 +734,7 @@ class HostVersionPassthrough:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         if not self.answered and tuple(argv) == ("ubertooth-util", "-V"):
             self.answered = True
-            output = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+            output = "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n"
             return CommandResult(tuple(argv), 0, output, "", 0.01, False)
         return self.device.run(
             argv,

@@ -218,11 +218,17 @@ access. Planning stays permissive: `validate-plan --hardware` prints a
 
 Before the first case the test records a baseline for each guard with
 read-only queries only: `ubertooth-util -U <serial>` with `-v` (firmware
-image, revision and API), `-V` (the version answer, whose `Firmware build:`
-line carries a build timestamp that also catches a reflash of the same
-revision), `-s` (the serial the board itself reports), `-B` (the bootloader
-under that firmware), `-C` (channel), `-a` (PA level), `-z`
+image, revision and API), `-s` (the serial the board itself reports), `-B`
+(the bootloader under that firmware), `-C` (channel), `-a` (PA level), `-z`
 (squelch), and `-d` (LEDs), then `ubertooth-btle -U <serial> -k` (CRC).
+
+A ninth read asked `-V` for the image's build string, whose build date caught
+a reflash of the same revision. Fork #1233 took that string out of the
+answer, so nothing reports it and the read has gone
+([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358));
+the firmware read still pins the image, the revision and the API, so a
+reflash to a different revision is caught and one to the same revision is
+not.
 None of the `ubertooth-util` options these reads use checks the firmware API,
 but `ubertooth-btle` does, and
 it may refuse any API that is not the one the tools were built for — newer as

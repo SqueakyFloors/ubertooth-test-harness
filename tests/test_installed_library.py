@@ -182,53 +182,42 @@ class ConsumerIdentityTests(unittest.TestCase):
         self.library = self.prefix / "lib" / "libbtbb.so.1.3"
         self.library.write_bytes(b"")
 
-    def output(self, *, version=OLDER_VERSION_LINE, library=None, board=True):
-        """An older install's answer, which names the libbtbb it loaded."""
-        lines = [version, f"libbtbb loaded from: {library or self.library}"]
-        if board:
-            lines.append(BOARD_LINE)
-        return "\n".join(lines) + "\n"
-
     def identity(self, text, built_libbtbb=None):
         return consumer_identity(text, str(self.prefix), VERSION_LINE,
                                  built_libbtbb)
 
-    def older_identity(self, text, built_libbtbb=None):
-        """The same, for an install from before the path line went away."""
-        return consumer_identity(text, str(self.prefix), OLDER_VERSION_LINE,
-                                 built_libbtbb)
-
-    def test_the_install_s_own_answer_passes(self):
-        self.assertEqual(OLDER_VERSION_LINE, self.older_identity(self.output()))
-
     def test_another_release_is_another_library(self):
         other = VERSION_LINE.replace("2026-11-DEV2", "2026-11-DEV1+22")
         with self.assertRaises(InstalledLibraryError) as caught:
-            self.identity(f"{other}\n{BOARD_LINE}\n")
+            self.identity(f"{other}\n{BOARD_LINE}\n", str(self.library.parent))
         self.assertIn("version line", str(caught.exception))
-
-    def test_a_libbtbb_from_outside_the_prefix_is_refused(self):
-        with self.assertRaises(InstalledLibraryError) as caught:
-            self.older_identity(self.output(library="/usr/lib/libbtbb.so.1"))
-        self.assertIn("not in", str(caught.exception))
 
     def test_a_run_that_looked_for_boards_is_refused(self):
         # Without the switch the report opens every attached board, and two
         # runs on a bench host would not answer the same way.
         with self.assertRaises(InstalledLibraryError) as caught:
-            self.older_identity(self.output(board=False))
+            self.identity(f"{VERSION_LINE}\n", str(self.library.parent))
         self.assertIn("UBERTOOTH_TEST_NO_DEVICES", str(caught.exception))
 
-    def test_two_libbtbb_lines_are_refused(self):
-        text = self.output() + f"libbtbb loaded from: {self.library}\n"
+    def test_an_install_that_names_the_path_it_loaded_is_refused(self):
+        """No commit this checks prints one (#358).
+
+        An install named the libbtbb it loaded on a line of its own until
+        fork #1230 replaced it with the warning below. Accepting one here
+        would be a second way to pass, against output the release under test
+        does not produce.
+        """
+        text = (f"{OLDER_VERSION_LINE}\n"
+                f"libbtbb loaded from: {self.library}\n{BOARD_LINE}\n")
         with self.assertRaises(InstalledLibraryError) as caught:
-            self.older_identity(text)
-        self.assertIn("2 'libbtbb loaded from:' lines", str(caught.exception))
+            consumer_identity(text, str(self.prefix), OLDER_VERSION_LINE,
+                              str(self.library.parent))
+        self.assertIn("not as a path line", str(caught.exception))
 
     NO_PATH = f"{VERSION_LINE}\n{BOARD_LINE}\n"
 
-    def test_an_install_that_prints_no_path_passes_without_the_warning(self):
-        """Since #352 (fork #1230) there is no path line.
+    def test_the_install_s_own_answer_passes_without_the_warning(self):
+        """Since fork #1230 there is no path line.
 
         A libbtbb other than the one the tools were built against is a
         warning instead, so the loader having reached this install is
@@ -268,10 +257,6 @@ class ConsumerIdentityTests(unittest.TestCase):
         with self.assertRaises(InstalledLibraryError) as caught:
             self.identity(self.NO_PATH, "/usr/lib")
         self.assertIn("establish nothing", str(caught.exception))
-
-    def test_an_older_install_needs_no_recorded_libbtbb(self):
-        """It prints the path, which is the positive evidence itself."""
-        self.assertEqual(OLDER_VERSION_LINE, self.older_identity(self.output()))
 
 
 # The warning as warn_about_another_libbtbb() writes it, with the two
@@ -395,8 +380,9 @@ class AnotherLibbtbbTests(unittest.TestCase):
                 self.assertIn("names both directories", str(caught.exception))
 
     def test_an_install_that_names_the_path_it_loaded_is_refused(self):
-        # Such an install is the positive evidence itself, so the step is not
-        # run against one; reaching here means the two ends disagree.
+        # No install this checks prints one, and such an install would be
+        # the positive evidence itself; reaching here means the two ends
+        # disagree.
         text = (f"{OLDER_VERSION_LINE}\n"
                 f"libbtbb loaded from: {self.decoy}/libbtbb.so.1\n"
                 f"{BOARD_LINE}\n")
@@ -699,10 +685,9 @@ class BuildStepTests(unittest.TestCase):
                         control)
         self.assertLess(control, self.text.index(
             'step "a CMake project finds the installed ubertooth package"'))
-        # An install from before the path line went away is the positive
-        # evidence itself, so the control is not run against one.
-        self.assertIn('if grep -q "^libbtbb loaded from: " '
-                      '"$il_work/pc-consumer.txt"; then', self.text)
+        # No install this checks prints a path line, so the control runs
+        # unconditionally and the step above refuses one (#358).
+        self.assertNotIn("libbtbb loaded from", self.text)
 
     def test_it_configures_the_tools_against_the_install(self):
         self.assertIn('cmake -S "$il_source/host/ubertooth-tools" '

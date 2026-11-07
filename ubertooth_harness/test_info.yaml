@@ -43,19 +43,17 @@ Host version:
     a run could otherwise claim tools it never used.
   theory: >-
     Every tool's -V answer opens with the host tools' own version. The check
-    is anchored to that label, so a firmware line printed under it cannot
-    stand in for it. The line has two layouts: a build names the release it
-    came from with libbtbb's beside it since ubertooth#1230, and before that
-    it named the two library ABI versions each with the commit it was built
-    from. This case has only the tool in front of it, so it accepts either;
-    preflight is where the resolved commit decides which one a run must
-    print.
+    is anchored to that label, so the firmware line printed under it cannot
+    stand in for it. A build names the release it came from with libbtbb's
+    beside it (ubertooth#1230), and that is the one layout accepted:
+    current-release validation keeps no requirement that output carry a
+    commit hash or a build stamp, and a run of a commit from before the
+    release names is refused in preflight by name (harness #358).
   hardware: >-
     No board. Nothing transmits, nothing is written, and the command runs with
     a 20 s timeout.
   expected: >-
-    One case. Either "Host tools version: <release> (libbtbb <release>)" or
-    "Host tools version: libubertooth <v> (<id>), libbtbb <v> (<id>)" must
+    One case. "Host tools version: <release> (libbtbb <release>)" must
     appear. Exit 0 and exit 1 both pass, because the command
     goes on to read every attached board and exits 1 if one cannot be read,
     which may be a board this run does not use.
@@ -151,21 +149,23 @@ Firmware version:
 Firmware compile info:
   purpose: >-
     A catalog entry for reading the firmware's compile identity from one
-    board. No implementation yet. Ubertooth identity already checks the whole
-    ubertooth-util -V answer, including the build line, and the guard
-    readback uses the same line, whose build date also catches a reflash
-    of the same revision.
+    board. No implementation yet, and nothing prints such an identity: fork
+    #1233 took the image's build string out of the ubertooth-util -V answer,
+    because an image records only its version now and the Firmware version
+    line beside it already names that. Ubertooth identity checks the whole -V
+    answer as it now stands.
   theory: >-
-    Not established. The build line carries the date the image was built and
-    nothing else since ubertooth#1230; before that it was
-    "ubertooth <revision> (<who>@<where>) <date>", so a board flashed from an
-    older commit reports a revision there too.
+    Not established. A test would need a tool option that reports the
+    firmware's compile identity, and no fork tool has one.
   hardware: >-
     One Ubertooth. Nothing transmits and nothing is written.
   expected: >-
     No implementation; only a plan declaring runnable: false may name it.
   limitations: >-
-    Nothing is measured. Covered in practice by Ubertooth identity.
+    Nothing is measured. The build string's build date was what caught a
+    reflash of the same revision, on a board under test and on a guard;
+    nothing reports it now, so nothing catches that. A reflash to a different
+    revision is still caught by the firmware read.
   related: []
 
 Device serial:
@@ -270,8 +270,7 @@ Ubertooth identity:
     test is not guarded. Nothing transmits and nothing is written.
   expected: >-
     Six cases: firmware version, the whole -V answer in the fork's order (host
-    version, then the libbtbb path on a commit that prints one, then firmware
-    version and firmware build), device serial,
+    version, then firmware version), device serial,
     part ID, board ID, and the four-query composition. A case failure does not
     stop the others.
   limitations: >-

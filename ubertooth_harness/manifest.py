@@ -207,6 +207,16 @@ def _fetch_remote(path: Path, requested_ref: str) -> str | None:
     return remotes[0] if len(remotes) == 1 else None
 
 
+def _is_release_tag_name(ref: str) -> bool:
+    """Is ``ref`` named like a release the fork tags (``2026-11-DEV2``)?
+
+    Only such a name is worth a fetch of its own when the checkout has the
+    commit but not the ref: it is the name the version a build reports comes
+    from (release.py).
+    """
+    return release_version.RELEASE_TAG_FORM.match(ref) is not None
+
+
 def _last_line(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     line = lines[-1] if lines else "no output"
@@ -219,9 +229,11 @@ class GitRevisionResolver:
 
     A ref the checkout does not have (a commit pushed since it was last
     fetched, typically) is fetched once from the checkout's remote, within
-    ``fetch_timeout_s``, and resolved again. Fetching only updates
-    remote-tracking refs, tags and objects: the working tree, HEAD and local
-    branches are never touched.
+    ``fetch_timeout_s``, and resolved again. A checkout that has the commit
+    but not the release tag the run was named for has that tag fetched too,
+    because the release a build reports is worked out from this checkout's
+    tags (#358). Fetching only updates remote-tracking refs, tags and
+    objects: the working tree, HEAD and local branches are never touched.
     """
 
     def __init__(self, *, fetch_timeout_s: float = FETCH_TIMEOUT_S, log=None):
@@ -288,6 +300,51 @@ class GitRevisionResolver:
             f"{failure}; fetched from {remote}, which does not have it either"
         )
 
+    def _fetch_release_tag(self, name: str, path: Path, ref_name: str) -> None:
+        """Fetch the release tags of ``path``'s remote, so ``ref_name`` is there.
+
+        Never raises: the caller has already resolved the commit, and this
+        only puts the release a build of it reports right.
+        """
+        self.log(
+            f"{name} ref '{ref_name}' is not in {path}, though its commit is; "
+            "fetching tags so the release a build of it reports is the one "
+            "that ref names"
+        )
+        remote = _fetch_remote(path, ref_name)
+        if remote is None:
+            self.log(f"{path} has no remote to fetch '{ref_name}' from")
+            return
+        command = [
+            "git", "-C", str(path), "fetch", "--quiet",
+            "--no-recurse-submodules", remote, "refs/tags/*:refs/tags/*",
+        ]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True,
+                timeout=self.fetch_timeout_s, stdin=subprocess.DEVNULL,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.log(
+                f"fetching tags from {remote} timed out after "
+                f"{self.fetch_timeout_s:g}s; '{ref_name}' is still not here"
+            )
+            return
+        except OSError as error:
+            self.log(f"fetching tags from {remote} failed: {error}")
+            return
+        if result.returncode != 0:
+            self.log(
+                f"fetching tags from {remote} failed: "
+                f"{_last_line(result.stderr or result.stdout)}"
+            )
+        elif _rev_parse(path, ref_name) is None:
+            self.log(
+                f"fetched tags from {remote}, which has no '{ref_name}' "
+                "either; the release a build reports is the nearest tag here"
+            )
+
     def resolve(
         self, name: str, source_path: Path | str, requested_ref: str,
         ref_name: str | None = None,
@@ -314,6 +371,27 @@ class GitRevisionResolver:
         commit = _rev_parse(path, requested_ref)
         if commit is None:
             commit = self._fetch_and_retry(name.strip(), path, requested_ref)
+        elif ref_name is not None and _is_release_tag_name(ref_name) \
+                and _rev_parse(path, ref_name) is None:
+            # The commit is here, but the release tag the run was named for
+            # is not. That happens when a caller resolved the tag elsewhere
+            # and passes the commit: the checkout has the commit, because it
+            # fetches the branch the tag sits on, and not the tag. The
+            # version a build reports is the nearest release tag and the
+            # distance to it, worked out in this very checkout, so a missing
+            # tag makes a build of an exactly tagged commit report the
+            # release before it and a count -- "2026-11-DEV1+25" where the
+            # commit is 2026-11-DEV2 (#358). The build's own clone of this
+            # checkout would say the same, so the mismatch is silent: both
+            # sides agree on the wrong release.
+            #
+            # Only tags are fetched, and only for a ref named like a release:
+            # an ordinary run resolves its ref here and must not pay for a
+            # fetch it has no use for. Best effort, because the commit is
+            # already resolved: a remote that will not answer costs the run
+            # nothing beyond the release name it would have corrected, and
+            # the run says what it tried.
+            self._fetch_release_tag(name.strip(), path, ref_name)
         if not _COMMIT_RE.fullmatch(commit):
             raise ManifestError(f"resolved {name} commit is invalid: {commit}")
         short_commit = _git(path, "rev-parse", "--short", commit)

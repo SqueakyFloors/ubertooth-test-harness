@@ -299,39 +299,34 @@ line.
 
 **Theory of operation.** `ubertooth_print_host_version()` prints the host
 tools' own version as the first line of every tool's `-V` answer. The check is
-anchored to that label, so firmware lines printed under it cannot stand in for
-it. The same line is what preflight compares against the resolved host
+anchored to that label, so the firmware line printed under it cannot stand in
+for it. The same line is what preflight compares against the resolved host
 sources, which is how a run proves the tools under test are the ones the
 manifest names.
 
-The line has two layouts, because what a build reports changed
+A build names the release it came from, with libbtbb's beside it
 ([ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230),
-`ubertooth#1232`). A build now names the release it came from, with libbtbb's beside
-it:
+`ubertooth#1232`):
 
 ```text
-Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
+Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)
 ```
 
-Before that it named the two library ABI versions, each with the commit it was
-built from, and printed the libbtbb it loaded on a line of its own:
-
-```text
-Host tools version: libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-84ab41f)
-libbtbb loaded from: /usr/local/lib/libbtbb.so.1
-```
-
-This case has only the tool in front of it, so it requires one of the two.
-Which one a given commit must print is decided where the resolved commit is
-known: preflight works the version string out the way the build works it out
-(`release.py`) and requires the layout that goes with it, so a run of an older
-ref is still held to the old line and a run of a newer one cannot pass by
-printing it.
+That is the one layout accepted. Before that change a build named the two
+library interface versions, each with the commit it was built from, and
+printed the libbtbb it loaded on a line of its own; the harness held a run of
+such a commit to that older line until
+[#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358),
+where the maintainer decided that current-release validation requires the
+release-name answer and keeps no requirement that output carry a commit hash
+or a build stamp. A run of a commit from before the change is now refused in
+preflight, by name, rather than checked against output the release under test
+does not print.
 
 **Hardware and arguments.** No board role. `hosts:` only. The command runs
 with a 20 s timeout.
 
-**Expected outcome.** One case. One of the two lines above must appear.
+**Expected outcome.** One case. The line above must appear.
 Exit 0 and exit 1 both pass: the command goes on to read every attached board
 and exits 1 if any cannot be read, which may be a board this run does not use.
 
@@ -425,20 +420,23 @@ name it.
 compile identity from one board.
 
 **Theory of operation.** Not established. `Ubertooth identity` checks the
-whole `ubertooth-util -V` answer, the build line among it, and the guard
-readback uses the same `Firmware build:` line, whose build date also catches a
-reflash of the same revision.
+whole `ubertooth-util -V` answer, which since
+[ubertooth#1233](https://github.com/SqueakyFloors/ubertooth/issues/1233) is
+the host tools' version and the board's firmware version and nothing else.
+The image's build string stood under them until that change: an image records
+only its version now, and the `Firmware version:` line already names it.
 
-That line carries the date the image was built and nothing else since
-[ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
-(`ubertooth#1232`); before it, it was
-`ubertooth <revision> (<who>@<where>) <date>`, so a board flashed from an
-older commit reports a revision there too. Nothing reads a version off it any
-more: preflight's per-board `-V` check reads the revision off the
-`Firmware version:` line of the same answer, which is the same question the
-`-v` check asks through the other command, and requires the build line to
-carry a build string rather than the `read failed` or `not reported`
-libubertooth prints when it has none.
+So no tool prints a compile identity any more, and a test of one would need a
+tool option that does not exist. Preflight's per-board `-V` check reads the
+revision off the `Firmware version:` line of that answer, which is the same
+question the `-v` check asks through the other command, over a different pair
+of control requests.
+
+One thing went with the build string: its build date was what caught a reflash
+of the same revision, on a board under test and on a guard
+([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)).
+Nothing reports it, so nothing catches that now; a reflash to a different
+revision is still caught by the firmware read.
 
 **Hardware and arguments.** One `Ubertooth`.
 
@@ -589,7 +587,7 @@ are checked against the shape the tools print. The composed `-vspb` case then
 requires all four reports from one command: a parser that drops a report when
 several are asked for passes the single-option cases and fails this one. `-V`
 is not in that composition. It is the version command: since fork `f898fe5`
-it prints the host tools' version and the board's firmware version and build,
+it prints the host tools' version and the board's firmware version,
 then ends the command, so its case asks for the whole of that answer on its
 own.
 
@@ -597,9 +595,8 @@ own.
 guarded (every command is read-only and selects by serial).
 
 **Expected outcome.** Six cases: firmware version, the whole `-V` answer (its
-lines in the fork's order: the host version, then the libbtbb path on a commit
-that prints one, then firmware version and firmware build), device serial,
-part ID, board ID, and the four-query
+lines in the fork's order: the host version, then the firmware version),
+device serial, part ID, board ID, and the four-query
 readback composition. A case failure does not stop the others. The `-V` case
 keeps its `firmware-compile-info` id and its `Firmware compile info` name,
 although it now covers more than that line: the id is what a run's records
