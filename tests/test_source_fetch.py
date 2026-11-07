@@ -206,6 +206,12 @@ class ReleaseTagFetchTest(unittest.TestCase):
         git(self.repos.checkout, "fetch", "-q", "--no-tags", "origin",
             "refs/tags/2026-11-DEV1:refs/tags/2026-11-DEV1")
 
+    def assertCheckoutUntouched(self):
+        checkout = self.repos.checkout
+        self.assertEqual("main", git(checkout, "rev-parse", "--abbrev-ref", "HEAD"))
+        self.assertEqual("", git(checkout, "status", "--porcelain",
+                                 "--untracked-files=all"))
+
     def test_the_tag_is_fetched_so_the_release_is_the_one_it_names(self):
         with self.assertRaises(subprocess.CalledProcessError):
             git(self.repos.checkout, "rev-parse", "--verify", self.RELEASE)
@@ -218,7 +224,7 @@ class ReleaseTagFetchTest(unittest.TestCase):
         self.assertEqual(self.RELEASE, source.build_version)
         self.assertEqual(self.RELEASE, source.expected_revision)
         self.assertEqual(1, len(self.logged), self.logged)
-        self.assertIn("fetching tags", self.logged[0])
+        self.assertIn("fetching the tag", self.logged[0])
         # Without the fetch it is the release before it and the distance, and
         # the build's own clone of this checkout would say the same.
         self.assertEqual("2026-11-DEV1+1", self._release_without_the_tag())
@@ -258,33 +264,81 @@ class ReleaseTagFetchTest(unittest.TestCase):
         self.assertFalse([c for c in run.call_args_list if "fetch" in c.args[0]])
         self.assertEqual([], self.logged)
 
-    def test_a_fetch_that_fails_leaves_the_run_resolved_and_says_so(self):
-        # Best effort: the commit is already resolved, so a remote that will
-        # not answer costs the run nothing beyond the release name it would
-        # have corrected.
+    def test_a_fetch_that_fails_refuses_the_run_rather_than_mislabel_it(self):
+        # Carrying on would report the release before it and a count: a
+        # version that is not the one the run was named for, agreed on by the
+        # build and by every expectation derived from the same checkout, so
+        # reported by nobody as wrong.
         git(self.repos.checkout, "remote", "set-url", "origin",
             str(self.repos.origin) + "-missing")
 
-        source = self.resolver.resolve(
-            "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
-        )
+        with self.assertRaises(ManifestError) as caught:
+            self.resolver.resolve(
+                "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
+            )
 
-        self.assertEqual(self.tagged, source.commit)
-        self.assertEqual("2026-11-DEV1+1", source.build_version)
-        self.assertTrue(
-            any("fetching tags from origin failed" in line
-                for line in self.logged), self.logged
-        )
+        message = str(caught.exception)
+        self.assertIn(f"ref '{self.RELEASE}' names a release", message)
+        self.assertIn("fetching it from origin failed", message)
+        self.assertCheckoutUntouched()
 
-    def test_a_remote_without_the_tag_is_reported_rather_than_retried(self):
+    def test_a_remote_without_the_tag_is_refused_too(self):
         git(self.repos.origin, "tag", "-d", self.RELEASE)
 
+        with self.assertRaises(ManifestError) as caught:
+            self.resolver.resolve(
+                "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
+            )
+
+        message = str(caught.exception)
+        self.assertIn(f"ref '{self.RELEASE}' names a release", message)
+        # git refuses a refspec for a tag the remote has not got, so that is
+        # what the reason carries; the "has no it either" wording is the
+        # backstop for a remote that answers the fetch and still has none.
+        self.assertIn("fetching it from origin failed", message)
+
+    def test_a_checkout_with_no_remote_is_refused_by_name(self):
+        git(self.repos.checkout, "remote", "remove", "origin")
+
+        with self.assertRaisesRegex(
+            ManifestError, "no remote to fetch it from"
+        ):
+            self.resolver.resolve(
+                "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
+            )
+
+    def test_the_tag_arrives_when_the_commit_had_to_be_fetched_too(self):
+        # The deployed-runner path: the controller resolves the tag and sends
+        # the commit, and the checkout has neither. The fetch that brings a
+        # named commit asks for that commit alone and brings no tag with it,
+        # so the tag is asked for after the commit resolved either way.
+        later = commit_file(self.repos.work, "c.txt", "later\n")
+        git(self.repos.work, "tag", "2026-12-R1")
+        git(self.repos.work, "push", "-q", "origin", "main")
+        git(self.repos.work, "push", "-q", "origin", "2026-12-R1")
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.repos.checkout, "cat-file", "-e", f"{later}^{{commit}}")
+
         source = self.resolver.resolve(
-            "Ubertooth", self.repos.checkout, self.tagged, self.RELEASE
+            "Ubertooth", self.repos.checkout, later, "2026-12-R1"
         )
 
-        self.assertEqual("2026-11-DEV1+1", source.build_version)
+        self.assertEqual(later, source.commit)
+        self.assertEqual("2026-12-R1", source.build_version)
+
+    def test_a_tag_naming_another_commit_is_said_and_not_refused(self):
+        # A run may be asked for a commit past a tag, and the release a build
+        # reports then carries the distance, which is right. The two came
+        # from different places, so it may not go unsaid.
+        past = commit_file(self.repos.work, "d.txt", "past\n")
+        git(self.repos.work, "push", "-q", "origin", "main")
+
+        source = self.resolver.resolve(
+            "Ubertooth", self.repos.checkout, past, self.RELEASE
+        )
+
+        self.assertEqual(f"{self.RELEASE}+1", source.build_version)
         self.assertTrue(
-            any(f"has no '{self.RELEASE}' either" in line
+            any("names" in line and "this run resolved" in line
                 for line in self.logged), self.logged
         )

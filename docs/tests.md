@@ -223,9 +223,12 @@ access address (`-a`).
 **Guard Ubertooths.** A guarded test binds every other registered Ubertooth on
 the host as a `guard Ubertooth N` resource and reads each one before the test
 and after every case, with queries only and one command per read:
-`ubertooth-util -v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, then
-`ubertooth-btle -k` (`-V` ends the command, so it could not share one with the
-others anyway). Every read must match the baseline taken before the
+`ubertooth-util -v`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, then
+`ubertooth-btle -k`. A ninth read asked `-V` for the image's build string,
+whose build date caught a reflash of the same revision; fork #1233 took that
+string out of the answer, so nothing reports it and the read has gone
+([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)).
+Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
 is refused, which fails the check, unless that board's firmware API is the
@@ -249,7 +252,7 @@ Either is recorded as the reading (`unsupported`) and compared with the rest,
 so a board that starts answering a read it refused before, or refuses one it
 answered, fails the check. The alternate `btbr` image, for instance, has no
 channel or squelch request and no tool will read its CRC setting, and it is
-still guarded by its identity, image and revision, build, bootloader, LEDs,
+still guarded by its identity, image and revision, bootloader, LEDs,
 and, on an Ubertooth One, its transmit power level. The LED read is the
 exception to the tolerance: `-d` asks for all three LEDs in one command, and
 every image that answers these requests at all answers those three, so a
@@ -259,7 +262,7 @@ readings themselves have to satisfy:
 a guard running `bluetooth_rxtx`, or the receive-only `bluetooth_rx` build of
 it, must answer the radio settings that build implements, since a board that
 cannot is not holding them; and any guarded test is turned away when a guard
-answered none of `-v`, `-V`, `-s`, or `-B`, because nothing about that board
+answered none of `-v`, `-s`, or `-B`, because nothing about that board
 could be compared afterwards — a wedged board would read that way too, though
 the strict LED read fails it first.
 
@@ -4069,10 +4072,10 @@ be the last one on that board.
 
 Its guard Ubertooths matter more here than in a test that writes nothing, and
 they are read under the rules in "Guard Ubertooths" above: a guard that
-answered none of `-v`, `-V`, `-s`, or `-B` turns the run away by name before
+answered none of `-v`, `-s`, or `-B` turns the run away by name before
 any case, since nothing about that board could be compared after the write. A
 guard carrying the alternate `btbr` image is not in that position — it answers
-all four — and it is guarded by what it answers, not reflashed to make it
+all three — and it is guarded by what it answers, not reflashed to make it
 answer more.
 
 **Expected outcome.** One case. The write must reach the flash and must not

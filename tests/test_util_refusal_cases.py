@@ -51,15 +51,10 @@ class FakeUtil:
     OLD_VERSION = ("Host tools version: libubertooth 1.1 (git-test), "
                    "libbtbb 1.3 (git-btbb)")
 
-    def __init__(self, *, bugs=(), switch=True, names_release=True):
+    def __init__(self, *, bugs=(), switch=True):
         self.bugs = set(bugs)
         self.switch = switch
-        self.version_line = (
-            self.RELEASE_VERSION if names_release else self.OLD_VERSION
-        )
-        self.path_line = "" if names_release else (
-            "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
-        )
+        self.version_line = self.RELEASE_VERSION
         self.commands = []
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
@@ -111,7 +106,6 @@ class FakeUtil:
             return self._result(
                 command, 0,
                 f"{self.version_line}\n"
-                f"{self.path_line}"
                 "Firmware version: no Ubertooth attached\n")
         if "h" in given:
             return self._result(command, 0, USAGE)

@@ -1458,9 +1458,13 @@ class ReleaseVersionLineTests(unittest.TestCase):
         reason = check.result_failure(self.result(other))
         self.assertIn("runs 2026-11-DEV1+21", reason)
         self.assertIn(self.RELEASE, reason)
-        # Nothing requires a build string any more, so an answer without one
-        # -- which is every answer the release under test prints -- passes.
-        self.assertNotIn("Firmware build", "".join(patterns))
+        # Nothing requires a build string any more, and a build string being
+        # there is what says the answer is not the current one: the two
+        # commits between the release names and fork #1233 report a release
+        # and still print it.
+        with_build = self.ANSWER + "Firmware build: Thu Nov  6 02:11:04 UTC 2026\n"
+        self.assertIn("identity mismatch",
+                      check.result_failure(self.result(with_build)))
 
     def test_the_manifest_records_the_release_a_build_reports(self):
         source = self.source("Ubertooth", self.RELEASE)

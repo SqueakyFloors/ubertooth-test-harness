@@ -22,7 +22,7 @@ from ubertooth_harness.patterns import (
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
-    VERSION_ANSWER,
+    VERSION_ANSWER_PATTERNS,
     serial_pattern,
 )
 from ubertooth_harness.outputfiles import output_of
@@ -845,7 +845,7 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
             "firmware-compile-info",
             "Firmware compile info",
             common + ("-V",),
-            (VERSION_ANSWER,),
+            VERSION_ANSWER_PATTERNS,
             timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(

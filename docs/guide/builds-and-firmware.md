@@ -385,15 +385,21 @@ the same thing and agree with each other on purpose,
 modified tree is never predicted: a run refuses a dirty source checkout and
 builds from a clean clone of it, so a reported `*` is a mismatch to report.
 
-**An older ref still reports a commit.** A commit from before that change
-stamps `git-<hash>`, and its version *lines* are laid out differently too, so
-the harness reads the style off the checkout at the commit it resolved rather
-than assuming one: the file that decides the string either derives a release
-name or formats a hash, and it says which in its own text. A file that does
-neither, and a tree whose firmware names releases while that file has moved,
-refuse the run rather than being guessed at -- a wrong guess would compare
-every version in the run against the wrong string. A commit with no such file
-at all is read as the hash style, which is what every such build stamped.
+**An older ref is refused rather than read its own way.** A commit from
+before that change stamps `git-<hash>`, and its version lines are laid out
+differently too. Current-release validation requires the release-name answer
+and keeps no requirement that output carry a commit hash or a build stamp
+([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)),
+so a run of such a commit is refused where its sources are resolved, before
+anything is built or written to a board, and `--dry-run` answers for it the
+same way. The style is still read off the checkout at the resolved commit,
+because that is what says which it is: the file that decides the string
+either derives a release name or formats a hash, and it says which in its own
+text. A file that does neither, and a tree whose firmware names releases
+while that file has moved, refuse the run rather than being guessed at -- a
+wrong guess would compare every version in the run against the wrong string.
+A commit with no such file at all is read as the hash style, which is what
+every such build stamped, and is refused with the rest.
 
 The version the run expects is in the manifest as each source's
 `expected_revision`, and in report.md beside the ref and the commit, so a

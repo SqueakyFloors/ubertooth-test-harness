@@ -83,7 +83,7 @@ from ubertooth_harness.patterns import (
     IMAGE_NAME_PATTERN,
     PART_ID_PATTERN,
     RX_ONLY_IMAGE,
-    VERSION_ANSWER,
+    VERSION_ANSWER_PATTERNS,
     matched_image,
     serial_pattern,
 )
@@ -892,8 +892,7 @@ def _version_case(case_id, options, serial):
         case_id,
         f"{' '.join(options)} answers the version alone",
         _util(serial, *options),
-        (
-            VERSION_ANSWER,
+        VERSION_ANSWER_PATTERNS + (
             # -V ended the command, so -s never ran.
             rf"\A(?![\s\S]*{serial_pattern(serial)})",
         ),

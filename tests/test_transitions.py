@@ -159,7 +159,6 @@ class FakeUbertooth:
         serial=SERIAL,
         firmware="git-test",
         api=HOST_API,
-        compile_info="ubertooth git-test (builder@host) timestamp",
         reported_serial=None,
         bootloader="2.00 git-test, CRC32:0x11112222",
         unsupported=(),
@@ -189,7 +188,6 @@ class FakeUbertooth:
         self.aa = "8e89bed6"
         self.firmware = firmware
         self.api = api
-        self.compile_info = compile_info
         # What `-s` answers. Apart in the fake so a test can change the
         # number the board reports without moving the board the commands
         # select; a real board's two are the same number.

@@ -23,7 +23,7 @@ FIRMWARE_PATTERN = r"Firmware version:\s+\S+"
 # bracket closing at the end of the line. Required wherever the line is
 # matched, even where the check is only about the tools' own half, because a
 # line missing it is not the line libubertooth prints.
-LIBBTBB_BRACKET = r"\(libbtbb[ \t]+[^)\n]*[^)\s][ \t]*\)"
+LIBBTBB_BRACKET = r"\(libbtbb[ \t]+[^)\s\n]+[ \t]*\)"
 # The whole of that first line, to the end of it: anything else is not the
 # line libubertooth prints. Which versions it must carry is
 # preflight.host_version_patterns()'s business, where the resolved commit is
@@ -31,11 +31,20 @@ LIBBTBB_BRACKET = r"\(libbtbb[ \t]+[^)\n]*[^)\s][ \t]*\)"
 # statement of the line's layout, so a case cannot hold it to a different
 # strictness from the next case's.
 HOST_VERSION_LINE = rf"(?m)^Host tools version: \S+[ \t]+{LIBBTBB_BRACKET}$"
+# The label the build string stood under until fork #1233. No commit this
+# validation accepts prints one, so its presence is what says an answer is
+# not the current one: the two commits between the release names (fork
+# ce13614c6) and #1233 report a release and print the string, and nothing
+# else tells them from the release under test. Written as a requirement that
+# the whole output carries no such line, so a reader of a failed check sees
+# what was wanted.
+NO_BUILD_LINE = r"\A(?![\s\S]*(?m:^Firmware build:))"
 # The whole `-V` answer for one board, as the consecutive lines libubertooth
 # prints, in its order: a pattern per line would pass an answer whose lines
 # arrived in any order or with others between them. It is not anchored to the
 # end of the output, because a tool may put a warning or a note on standard
-# error beside it.
+# error beside it; what may not be there is the build line, which
+# NO_BUILD_LINE is required alongside this.
 VERSION_ANSWER = (
     # Written exactly as HOST_VERSION_LINE writes it, so the same line is not
     # held to two strictnesses; what this adds is the board's line under it.
@@ -44,6 +53,8 @@ VERSION_ANSWER = (
     # carries when the board answered nothing.
     r"Firmware version: (?!read failed$|unavailable, )\S[^\n]*$"
 )
+# That answer and nothing standing in for the line fork #1233 took out.
+VERSION_ANSWER_PATTERNS = (VERSION_ANSWER, NO_BUILD_LINE)
 
 # `ubertooth-util -v` names the image the build came from when the firmware
 # carries an info block ("Firmware version: bluetooth_rxtx git-1c7f06d6
@@ -78,9 +89,8 @@ def matched_image(match: re.Match | None) -> str | None:
     """The image name a match of FIRMWARE_VERSION_RE names, if it names one.
 
     None where the line carries no image name, which is firmware older than
-    the info block (`Firmware version: 2020-12-R1 (API:1.07)`), where there
-    was no match, and where the match came from a pattern with no image group
-    at all, as the compile-info one has none.
+    the info block (`Firmware version: 2020-12-R1 (API:1.07)`), and where
+    there was no match.
     """
     if match is None:
         return None

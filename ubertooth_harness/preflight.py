@@ -19,6 +19,7 @@ from ubertooth_harness.patterns import (
     FIRMWARE_VERSION_RE,
     HOST_VERSION_TIMEOUT_S,
     LIBBTBB_BRACKET,
+    NO_BUILD_LINE,
     commit_revision,
     firmware_version_pattern,
     matched_image,
@@ -248,11 +249,12 @@ class PreflightCheck:
 
 # `-V` is the version command in every tool the fork builds from C, and its
 # first line is the host tools' own version, printed before any board is
-# looked for (fork #813). Commits before that answered the host version on
-# `-H`/`--host-version`, where `-V` was the board's compile info, so the host
-# version check asks `-V` first and falls back to `-H`: the fallback output is
-# the same line, since both options print it from one function in
-# libubertooth.
+# looked for (fork #813). A tool that answers nothing under that label is
+# asked `-H`, where the same function printed the same line: a commit old
+# enough to need it is refused by require_release_output, but an older
+# install earlier on PATH than the run's prefix is not, and the fallback is
+# what makes such an install report its version instead of nothing. It costs
+# one extra command, and only where the label was missing.
 HOST_VERSION_ARGV = ("ubertooth-util", "-V")
 HOST_VERSION_FALLBACK_ARGV = ("ubertooth-util", "-H")
 
@@ -328,6 +330,31 @@ def libbtbb_reported_pattern() -> str:
     )
 
 
+def require_release_output(ubertooth) -> None:
+    """Refuse a commit whose build does not report a release (#358).
+
+    Every version line names the release the build came from since fork
+    `ce13614c6`, and fork #1233 left the `-V` answer two lines with no build
+    string. Current-release validation requires that answer and keeps no
+    requirement that output carry a commit hash or a build stamp (the
+    maintainer's decision on #358), so a commit whose build stamps
+    `git-<hash>` is turned away by name rather than failing every version
+    check against a layout it never prints.
+
+    Called where the resolved commit is first known, before anything is built
+    or written to a board, and again from ``PreflightPolicy.compile`` so a
+    caller that assembles preflight itself cannot skip it.
+    """
+    if ubertooth.names_release:
+        return
+    raise PreflightError(
+        f"Ubertooth {ubertooth.short_commit} is from before the fork named "
+        "releases in its version lines, so its tools and images report "
+        "git-<hash> and not the release-name `ubertooth-util -V` answer this "
+        f"checks; run a commit from {RELEASE_OUTPUT_SINCE} or later"
+    )
+
+
 def firmware_identity_patterns(expected_revision: str) -> tuple[str, ...]:
     """What `ubertooth-util -V` must say about the board's firmware.
 
@@ -338,10 +365,11 @@ def firmware_identity_patterns(expected_revision: str) -> tuple[str, ...]:
     The revision comes off the `Firmware version:` line of the answer, which
     is the whole of what `-V` says about a board: fork #1233 took the build
     string out, because an image records only its version now and the line
-    above already names it. Nothing requires a build string any more, here or
-    anywhere else (#358).
+    above already names it. Nothing requires a build string any more, and a
+    build string being there is what says the answer is not the current one,
+    so its absence is required (#358).
     """
-    return (firmware_version_pattern(expected_revision),)
+    return (firmware_version_pattern(expected_revision), NO_BUILD_LINE)
 
 
 def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
@@ -355,7 +383,8 @@ def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
     where the expectation came from; the build checks its own tools with both
     (build.py).
     """
-    patterns = (host_version_pattern(ubertooth.expected_revision),)
+    patterns = (host_version_pattern(ubertooth.expected_revision),
+                NO_BUILD_LINE)
     if libbtbb is not None:
         # The revision as that build reports it: the release name, or the
         # abbreviation an older build stamps. Not the full commit
@@ -660,21 +689,10 @@ class PreflightPolicy:
         if not manifest.matches_invocations(invocations):
             raise PreflightError("manifest invocations do not match selected tests")
         ubertooth_source = manifest.source("Ubertooth")
-        if not ubertooth_source.names_release:
-            # Every version line names the release the build came from since
-            # fork #1230, and fork #1233 took the build string out of the
-            # `-V` answer. Current-release validation requires that answer and
-            # keeps no requirement that output carry a commit hash or a build
-            # stamp (the maintainer's decision on #358), so a commit whose
-            # build stamps `git-<hash>` is turned away here by name rather
-            # than failing every version check with a layout it never prints.
-            raise PreflightError(
-                f"Ubertooth {ubertooth_source.short_commit} is from before the "
-                "fork named releases in its version lines, so its tools and "
-                "images report git-<hash> and not the release-name "
-                "`ubertooth-util -V` answer this checks; run a commit from "
-                f"{RELEASE_OUTPUT_SINCE} or later"
-            )
+        # The backstop: cli.py refuses such a commit before anything is built
+        # or written to a board (require_release_output), and a caller that
+        # assembles preflight itself still cannot skip it.
+        require_release_output(ubertooth_source)
         try:
             libbtbb_source = manifest.source("libbtbb")
         except ManifestError:

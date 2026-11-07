@@ -229,6 +229,7 @@ answer, so nothing reports it and the read has gone
 the firmware read still pins the image, the revision and the API, so a
 reflash to a different revision is caught and one to the same revision is
 not.
+
 None of the `ubertooth-util` options these reads use checks the firmware API,
 but `ubertooth-btle` does, and
 it may refuse any API that is not the one the tools were built for — newer as
@@ -255,7 +256,7 @@ refuses one it answered, fails the check. The LED read is the exception: `-d`
 asks for all three LEDs in one command, so a stall there fails the read
 rather than being recorded. A guard running `bluetooth_rxtx`, or the
 receive-only `bluetooth_rx` build of it, must answer the radio settings that
-build implements, and a guard that answered none of `-v`, `-V`, `-s`, or `-B`
+build implements, and a guard that answered none of `-v`, `-s`, or `-B`
 is refused by name before any case: nothing about it could be compared
 afterwards. [docs/tests.md, "Guard Ubertooths"](../tests.md) has the whole
 rule.

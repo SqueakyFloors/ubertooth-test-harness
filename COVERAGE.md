@@ -43,22 +43,23 @@ may name them; `validate-plan` fails on any other plan that does.
 Harness-wide checks that use the CLIs:
 
 - **Preflight** (every run): the `Host tools version:` line of
-  `ubertooth-util -V` must match the resolved host sources; forks before the
-  one `-V` answer (ubertooth#813) are asked `-H` instead, there and in the
-  build's verify step only: every other check wants this tree's tools. The
-  version it must carry, and the layout of the line, both come from the
-  resolved commit: a build names the release it came from since
-  [ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230),
-  and a commit hash before that, and the harness works out which the way the
-  build does (`release.py`). For each selected board,
+  `ubertooth-util -V` must match the resolved host sources; a tool that
+  answers nothing under that label is asked `-H`, there and in the build's
+  verify step only, so an older install shadowing the run's prefix shows what
+  it is rather than nothing. The line names the release the build came from
+  ([ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)),
+  and the harness works out which release the way the build does
+  (`release.py`); a commit from before those names is refused by name
+  ([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)).
+  For each selected board,
   `ubertooth-util -U <serial>` runs `-v`
   (firmware revision and API), `-V` (the same revision on the
-  `Firmware version:` line of that answer, with a build string beside it;
-  on an older commit, the revision the build string itself carried), and
+  `Firmware version:` line of that answer, and no build string under it,
+  which fork #1233 took out), and
   `-s`, one command each.
 - **Guards** (stateful tests): every other registered board on the host is read
   before and after the test, with queries only, one command per read:
-  `ubertooth-util -v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, and then
+  `ubertooth-util -v`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, and then
   `ubertooth-btle -k`. The `ubertooth-btle -k` read is refused, failing the
   check, unless the board's firmware API is the host tools' own — that tool
   may refuse any other, newer as well as older, and stop the board, depending
@@ -75,7 +76,7 @@ Harness-wide checks that use the CLIs:
   query. A guard
   on `bluetooth_rxtx`, or on the receive-only `bluetooth_rx` build, must answer
   the radio settings that build implements, and any guarded test is refused
-  when a guard answered none of `-v`, `-V`, `-s`, or `-B`.
+  when a guard answered none of `-v`, `-s`, or `-B`.
 - **Board state between runs** (`slow` plan): the only test that kills a
   capture instead of stopping it. `killedcapture.py` SIGKILLs `ubertooth-dump`
   or `ubertooth-specan` while it is streaming, so no STOP reaches the board,
@@ -135,7 +136,7 @@ Harness-wide checks that use the CLIs:
 | `-U all` | identity queries for every board | Covered | Multi-board selection (smoke): `-U all -s` lists every registered board, and only those, with indices in order; comprehensive: `-U all -bvps` gives four lines per board. Each line carries the label the single-board report prints with the board's index in it, `Serial No (0): <serial>`, since fork [#610](https://github.com/SqueakyFloors/ubertooth/issues/610). `-V` is not one of the queries the listing can show: it is the version command, so `-U all -V` is not refused and answers for every board itself, under a label of its own (`Firmware version (0): ...`), also covered there (comprehensive). Rejected with a setter or mode: Argument validation (comprehensive). `-U all` with no query, and `-U all -N` with nothing else beside it, are both refused with `error: -U all needs one of the read-only queries -b, -v, -p or -s to list`, before `-N` prints anything (the count is not a per-device query, and a listing is what `-U all` asks for): Not covered |
 | `-N` | count devices | Covered | Ubertooth count (fast, release): equals the registered boards on the host. With `-i` it prints the count and the command carries on (fork `db5649b`; it dropped the mode before, [ubertooth#332](https://github.com/SqueakyFloors/ubertooth/issues/332)): `-N -i` and `-i -N` print `0`, then `-i` finds no board, exit 1: Util mode refusals (comprehensive) |
 | `-v` | firmware revision | Covered | Ubertooth identity (fast, release), preflight, util compositions (smoke) |
-| `-V` | version report | Covered | Host version and Host CLI surface (fast, release): the `Host tools version:` line, which needs no board, and which preflight and the build's verify step check against the resolved sources (falling back to `-H` on forks before the one `-V` answer, [ubertooth#813](https://github.com/SqueakyFloors/ubertooth/issues/813)); one layout of that line is accepted, the release name a build reports since [ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230), and a run of a commit from before it is refused in preflight by name ([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)). Ubertooth identity requires the whole answer on one board as the consecutive lines the fork prints, in its order: the host version and `Firmware version:`, which is the whole of it since [ubertooth#1233](https://github.com/SqueakyFloors/ubertooth/issues/1233) took the image's build string out from under them. Preflight reads the revision off the `Firmware version:` line of that answer, against the resolved sources; nothing requires a build string any more, and with the build date gone nothing catches a reflash of the same revision. Since fork `f898fe5` it is the version command and ends the command, so it composes with nothing: util compositions (smoke) requires `-V -s` and `-s -V` to print that answer and no serial line, and Multi-board selection (comprehensive) requires `-U all -V` and `-V` with no selector to report every board, indexed. The warning the report prints in place of that path line, where the loader opened a libbtbb other than the one the tools were built against, is checked live in the build job's install checks: the same program is run again with the loader pointed at a copy of the install's libbtbb in a directory of its own, and the warning has to appear and to name both directories, so the absence the step above reads means something ([#365](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/365)) |
+| `-V` | version report | Covered | Host version and Host CLI surface (fast, release): the `Host tools version:` line, which needs no board, and which preflight and the build's verify step check against the resolved sources (falling back to `-H` where nothing answers under that label, which is what an older install shadowing the run's prefix gives, [ubertooth#813](https://github.com/SqueakyFloors/ubertooth/issues/813)); one layout of that line is accepted, the release name a build reports since [ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230), and a run of a commit from before it is refused in preflight by name ([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)). Ubertooth identity requires the whole answer on one board as the consecutive lines the fork prints, in its order: the host version and `Firmware version:`, which is the whole of it since [ubertooth#1233](https://github.com/SqueakyFloors/ubertooth/issues/1233) took the image's build string out from under them. Preflight reads the revision off the `Firmware version:` line of that answer, against the resolved sources; nothing requires a build string any more, and with the build date gone nothing catches a reflash of the same revision. Since fork `f898fe5` it is the version command and ends the command, so it composes with nothing: util compositions (smoke) requires `-V -s` and `-s -V` to print that answer and no serial line, and Multi-board selection (comprehensive) requires `-U all -V` and `-V` with no selector to report every board, indexed. The warning the report prints in place of that path line, where the loader opened a libbtbb other than the one the tools were built against, is checked live in the build job's install checks: the same program is run again with the loader pointed at a copy of the install's libbtbb in a directory of its own, and the warning has to appear and to name both directories, so the absence the step above reads means something ([#365](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/365)) |
 | `-s` | MCU serial | Covered | Ubertooth identity, preflight, cleanup identity check |
 | `-p` | part ID | Covered | Ubertooth identity, util compositions (smoke) |
 | `-b` | board ID | Covered | Ubertooth identity, util compositions (smoke) |
@@ -433,7 +434,7 @@ Prompt commands (`Classic btbr console`, one session, smoke unless noted):
 
 | Behavior | Status | Harness test / notes |
 |---|---|---|
-| the `btbr` image is on the board | Covered | `ubertooth-util -v` must name `btbr` at the run's revision after the write, and `bluetooth_rxtx` at the same revision after the cleanup; `-V` must report the same revision and a build string beside it |
+| the `btbr` image is on the board | Covered | `ubertooth-util -v` must name `btbr` at the run's revision after the write, and `bluetooth_rxtx` at the same revision after the cleanup; `-V` must name the `btbr` image on its `Firmware version:` line at the same revision |
 | output streams | Covered | The capture records are on standard output and the prompt and progress on standard error, with nothing of either on the other |
 | an LMP request with no handler | Covered | Refused and named in one `warning:` line per opcode, not one per packet |
 | a refused transmit, an exhausted scan scheduler, a page response that never went out | Partial | None of these happens on a healthy board: showing one needs a firmware image patched to drop a transmit. The fork's deterministic firmware tests are the gate (`test_btbr_tx_queue.c`, `test_btbr_tx_hop_phase.c`, `test_btbr_connection_end.c`, `test_btbr_page_response.c`, `test_btbr_inquiry_response.c`, and the scheduling tests beside them: `test_btbr_scan_schedule.c`, `test_btbr_rx_schedule.c`, `test_btbr_tx_schedule.c`, `test_btbr_tx_untuned.c`). The session checks the observable end result: the repeated pages completed, no connection was reported and then given up, the link carried packets after the transmit runs, and each of the eleven refusal lines the board can print is counted — up to three of one line are reported and allowed, since the firmware is built to survive the condition, and more than three of the same line fails. The two lines the board prints about a `tx` this session sent are not exceptional and either fails. The wording of all thirteen is the board's own console text, which the tool's man page does not promise, so a fork that rewords one leaves the count reading zero |
