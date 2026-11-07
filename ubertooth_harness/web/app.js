@@ -372,13 +372,17 @@
     if (devices && devices.some((device) => !device.serial)) {
       // A board sitting in its DFU bootloader reports no serial at all, so
       // there is nothing to register it by; say so rather than leaving a
-      // disabled button to be puzzled over.
-      manageStatus(
-        "A listed board reports no serial: it is sitting in its DFU "
-        + "bootloader. Bring it back to its application firmware and "
-        + "autodetect again.",
-        true,
-      );
+      // disabled button to be puzzled over. Only when nothing else is being
+      // said, because this runs on every render and a refusal must not be
+      // written over by a note.
+      if (!$("manage-status").textContent) {
+        manageStatus(
+          "A listed board reports no serial: it is sitting in its DFU "
+          + "bootloader. Bring it back to its application firmware and "
+          + "autodetect again.",
+          true,
+        );
+      }
     }
   }
 

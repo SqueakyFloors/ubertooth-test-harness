@@ -43,6 +43,10 @@ def board_status(board) -> tuple[str, str]:
     ``board`` is one entry of the protocol's ``boards`` list: ``present``
     (true, false, or null when enumeration is unavailable), ``held``, the
     ``holder`` line a lease carries, and ``firmware_revision``.
+
+    An established fact comes before an unestablished one, so a board a
+    lease holds reads as busy even on a target that cannot say whether USB
+    still has it.
     """
     present = board.get("present")
     held = bool(board.get("held"))
@@ -50,18 +54,18 @@ def board_status(board) -> tuple[str, str]:
     revision = str(board.get("firmware_revision") or "").strip()
     if present is False:
         return OFFLINE, (
-            "registered, but USB on this target has not got it: unplugged, "
-            "powered off, or no longer answering"
+            "registered, but USB on this target has not got its serial: "
+            "unplugged, powered off, no longer answering, or sitting in its "
+            "DFU bootloader, which reports no serial at all"
         )
+    if held:
+        return BUSY, (
+            f"leased by {holder}" if holder else "leased by another command"
+        ) + (" (on USB)" if present else "")
     if present is None:
         return UNKNOWN, (
             "this target cannot list USB devices, so whether the board is "
             "attached is not established"
-        )
-    if held:
-        return BUSY, (
-            f"on USB, and leased by {holder}" if holder
-            else "on USB, and leased by another command"
         )
     if revision:
         return READY, f"on USB and free; last read running {revision}"

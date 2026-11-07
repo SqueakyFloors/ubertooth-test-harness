@@ -165,8 +165,14 @@ def suggested_alias(host: str, taken) -> str:
 
 
 def _load_text(path: Path) -> str:
+    """The file's text exactly as it is, line endings included.
+
+    Opened with newline translation off, because an edit keeps the file's
+    own endings and cannot keep what the read turned into "\\n".
+    """
     try:
-        return path.read_text(encoding="utf-8")
+        with path.open("r", encoding="utf-8", newline="") as stream:
+            return stream.read()
     except OSError as error:
         # The reason, never the path: a refusal travels to a browser.
         raise RegistryEditError(
@@ -240,7 +246,14 @@ def _blocks(text: str) -> tuple[tuple[_Block, ...], int, int]:
                 last = pairs[index + 1][0].start_mark.line - 1
             else:
                 last = min(value.end_mark.line, len(lines) - 1)
-            while last > first and _is_filler(lines[last]):
+            # The last resource's end mark is where the parser stopped, which
+            # for a `resources:` that is not the file's last top-level key is
+            # the next key's own line. A resource's lines are the ones
+            # indented past the `resources:` key, so anything shallower than
+            # that (and any blank line or comment) is not this board's.
+            while last > first and (
+                _is_filler(lines[last]) or _indent(lines[last]) <= key.start_mark.column
+            ):
                 last -= 1
             trailing = 0
             while (
@@ -253,6 +266,10 @@ def _blocks(text: str) -> tuple[tuple[_Block, ...], int, int]:
     raise RegistryEditError(
         "this target's hardware registry has no resources mapping to edit", 503
     )
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
 
 
 def _is_filler(line: str) -> bool:
@@ -404,9 +421,11 @@ def edited_text(text: str, host: str, edit: BoardEdit) -> str:
 
     A resource and the blank lines after it move together, so adding a board
     and removing it again leaves the file exactly as it was, whitespace
-    included.
+    included. The file's own line ending is kept: a registry written on
+    Windows is not rewritten end to end for the sake of one board.
     """
     blocks, resources_line, indent = _blocks(text)
+    ending = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines()
     if edit.action == REMOVE:
         block = next((item for item in blocks if item.alias == edit.alias), None)
@@ -420,10 +439,20 @@ def edited_text(text: str, host: str, edit: BoardEdit) -> str:
         kept = (
             lines[:after] + _rendered(edit, host, indent) + [""] + lines[after:]
         )
-    return "".join(f"{line}\n" for line in kept)
+    return "".join(f"{line}{ending}" for line in kept)
 
 
 # ----- writing it ----------------------------------------------------------
+
+
+def _temporary(path: Path, suffix: str) -> Path:
+    """A scratch name beside ``path`` that only this process writes.
+
+    The process ID is in it because the lock that serialises edits is one
+    runner's own: another process editing the same registry must not find
+    its half-written file under this one's name, or delete it.
+    """
+    return path.with_name(f".{path.name}.{os.getpid()}{suffix}")
 
 
 def _write_atomically(path: Path, text: str) -> None:
@@ -432,9 +461,9 @@ def _write_atomically(path: Path, text: str) -> None:
     The data is on the disk before the rename, so a registry is never half
     written, whatever happens to the machine between the two.
     """
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = _temporary(path, ".tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as stream:
+        with temporary.open("w", encoding="utf-8", newline="") as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
@@ -454,9 +483,9 @@ def _validated(text: str, path: Path) -> None:
     `/dev/serial/by-id` entry means the same thing it will mean once the text
     is in place, and the registry itself is never the candidate.
     """
-    candidate = path.with_name(f".{path.name}.candidate")
+    candidate = _temporary(path, ".candidate")
     try:
-        candidate.write_text(text, encoding="utf-8")
+        candidate.write_text(text, encoding="utf-8", newline="")
         FileResourceRegistry.load(candidate)
     except OSError as error:
         raise RegistryEditError(
@@ -526,6 +555,8 @@ def power_controllers(registry, host: str) -> list[dict]:
     What the GUI offers when a board is registered: a port already mapped to
     another board is left out, because the registry refuses two boards on one
     port and an operator should not have to find that out by being refused.
+    A controller whose driver this harness does not switch is left out with
+    no ports rather than costing every other controller its entry.
     """
     used = {
         (
@@ -538,12 +569,15 @@ def power_controllers(registry, host: str) -> list[dict]:
     for resource in registry.resources.values():
         if resource.type != POWER_CONTROLLER_TYPE or resource.attached_to != host:
             continue
+        try:
+            ports = controller_ports(resource)
+        except Exception:  # noqa: BLE001 - an unknown driver is still a hub
+            ports = ()
         controllers.append({
             "alias": resource.alias,
             "driver": resource.driver,
             "ports": [
-                port for port in controller_ports(resource)
-                if (resource.alias, port) not in used
+                port for port in ports if (resource.alias, port) not in used
             ],
         })
     controllers.sort(key=lambda entry: entry["alias"])

@@ -93,10 +93,12 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 7` and a `type` (version 2 added
+Messages are JSON objects with `"version": 8` and a `type` (version 2 added
 the run's `commit`, version 3 its `flash_build`, version 4 the `run_file`
 request and its answers, version 5 the run's `with_firmware` and
-`with_python`, version 6 its `bootloader`, version 7 its `with_btbr`; a
+`with_python`, version 6 its `bootloader`, version 7 its `with_btbr`, and
+version 8 per-board status in `register` and `heartbeat` with the
+`list_devices` and `update_registry` requests; a
 runner or controller of
 another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or

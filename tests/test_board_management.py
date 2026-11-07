@@ -18,6 +18,7 @@ import re
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -276,16 +277,32 @@ class BoardStatusTests(unittest.TestCase):
 
     def test_a_leased_board_is_busy_and_names_its_holder(self):
         status, why = boardstatus.board_status(
-            board(held=True, holder="run abc (agent-1)",
+            board(held=True, holder="agent-1, run abc",
                   firmware_revision="git-abcdef0")
         )
         self.assertEqual(boardstatus.BUSY, status)
-        self.assertIn("run abc (agent-1)", why)
+        self.assertIn("agent-1, run abc", why)
+
+    def test_a_leased_board_is_busy_even_when_usb_cannot_be_read(self):
+        # An established fact beats an unestablished one: a lease holds it,
+        # whatever this target can say about USB.
+        status, why = boardstatus.board_status(
+            board(present=None, held=True, holder="agent-1")
+        )
+        self.assertEqual(boardstatus.BUSY, status)
+        self.assertIn("agent-1", why)
 
     def test_a_board_no_run_has_read_is_unknown_not_ready(self):
         status, why = boardstatus.board_status(board())
         self.assertEqual(boardstatus.UNKNOWN, status)
         self.assertIn("not established", why)
+
+    def test_an_offline_board_mentions_the_dfu_bootloader(self):
+        # A board sitting in its DFU bootloader reports no serial, so it is
+        # absent from the enumerated set; the reason says so rather than
+        # leaving "unplugged" as the only explanation.
+        _, why = boardstatus.board_status(board(present=False))
+        self.assertIn("DFU bootloader", why)
 
     def test_a_target_that_cannot_enumerate_leaves_its_boards_unknown(self):
         status, why = boardstatus.board_status(
@@ -293,7 +310,6 @@ class BoardStatusTests(unittest.TestCase):
         )
         self.assertEqual(boardstatus.UNKNOWN, status)
         self.assertIn("not established", why)
-
     def test_every_status_has_a_level_the_page_can_draw(self):
         self.assertEqual(set(boardstatus.STATUSES), set(boardstatus.LEVELS))
         self.assertEqual("ready", boardstatus.LEVELS[boardstatus.READY])
@@ -693,6 +709,43 @@ class RunnerBoardTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await self.stop(service, task)
 
+    async def test_a_slow_scan_does_not_hold_up_the_heartbeat(self):
+        # ioreg's own timeout is longer than a heartbeat interval, so a
+        # heartbeat that waited for a fresh scan could arrive late enough
+        # for the controller to call the target offline mid-run. It carries
+        # the last list read and refreshes on its own.
+        scanning = asyncio.Event()
+
+        class Slow:
+            def serials(self):
+                import time as clock
+                scanning.set()
+                clock.sleep(5)
+                return frozenset({FIRST})
+
+            def devices(self):
+                return ()
+
+        async with StubController() as controller:
+            service, task, register = await self.registered(
+                controller, enumerator=Slow()
+            )
+            try:
+                # Registration read it once (slowly, before the connection
+                # was serving); every heartbeat after that is prompt.
+                self.assertEqual(
+                    {"UT_Local0", "UT_Local1"},
+                    {entry["alias"] for entry in register["boards"]},
+                )
+                scanning.clear()
+                start = time.monotonic()
+                await controller.next("heartbeat", skip=())
+                await controller.next("heartbeat", skip=())
+                waited = time.monotonic() - start
+                self.assertLess(waited, 3.0, f"heartbeats took {waited:.1f}s")
+            finally:
+                await self.stop(service, task)
+
     async def test_a_registry_that_will_not_load_costs_the_list_not_the_target(self):
         self.fixture.hardware.write_text("resources: broken\n", encoding="utf-8")
         async with StubController() as controller:
@@ -1040,3 +1093,251 @@ class PageTests(unittest.TestCase):
         self.assertNotRegex(self.html, r"\sstyle\s*=")
         for text in (self.html, self.js, self.css):
             self.assertNotRegex(text, r"(?i)(https?:)?//[a-z0-9.-]+\.[a-z]{2,}/")
+
+
+# ----- what the review round found -----------------------------------------
+
+
+class EditedFileShapeTests(unittest.TestCase):
+    """Registries whose shape the surgical edit has to survive."""
+
+    def edit(self, text, action="add", **fields):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "hardware.yaml"
+            path.write_text(text, encoding="utf-8")
+            registryedit.apply_edit(
+                path, "Host_Local",
+                BoardEdit(action=action, **({"serial": THIRD} if action == "add"
+                                            else {}), **fields),
+            )
+            return path.read_text(encoding="utf-8")
+
+    def test_a_resources_mapping_that_is_not_the_last_key_still_edits(self):
+        # The parser's end mark for the resources mapping is the next
+        # top-level key's own line, so a block has to end at the last line
+        # indented past `resources:`; otherwise an add lands under that key
+        # and a remove deletes it.
+        text = HARDWARE + textwrap.dedent("""\
+            notes:
+              bench: the one by the window
+            """)
+        added = self.edit(text, alias="UT_Local2")
+        self.assertIn("notes:", added)
+        self.assertIn("  bench: the one by the window", added)
+        registry = None
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "hardware.yaml"
+            path.write_text(added, encoding="utf-8")
+            registry = FileResourceRegistry.load(path)
+        self.assertEqual(THIRD, registry.get("UT_Local2").identity["serial"])
+        # And a removal takes only the board.
+        removed = self.edit(text, action="remove", alias="UT_Local1")
+        self.assertIn("notes:", removed)
+        self.assertIn("  bench: the one by the window", removed)
+        self.assertNotIn("UT_Local1", removed)
+
+    def test_a_crlf_registry_keeps_its_line_endings(self):
+        text = HARDWARE.replace("\n", "\r\n")
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "hardware.yaml"
+            with path.open("w", encoding="utf-8", newline="") as stream:
+                stream.write(text)
+            registryedit.apply_edit(
+                path, "Host_Local",
+                BoardEdit(action="add", alias="UT_Local2", serial=THIRD),
+            )
+            with path.open("r", encoding="utf-8", newline="") as stream:
+                added = stream.read()
+        self.assertNotIn("\n", added.replace("\r\n", ""))
+        self.assertIn('\r\n      serial: "' + THIRD + '"\r\n', added)
+
+    def test_the_scratch_files_are_this_process_own(self):
+        # Two runners editing one registry must not find each other's
+        # half-written file under the same name.
+        path = Path("/tmp/hardware.yaml")
+        self.assertIn(str(os.getpid()), registryedit._temporary(path, ".tmp").name)
+        self.assertIn(
+            str(os.getpid()), registryedit._temporary(path, ".candidate").name
+        )
+
+    def test_a_controller_with_an_unknown_driver_costs_only_itself(self):
+        another = (
+            "  Hub_Local1:\n"
+            "    type: USB power controller\n"
+            "    attached to: Host_Local\n"
+            "    identity:\n"
+            '      serial: "0x87654321"\n'
+            "    driver: a hub this harness does not switch\n"
+        )
+        marker = "\n# A note at the end of the file"
+        text = HARDWARE.replace(marker, "\n" + another + marker)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "hardware.yaml"
+            path.write_text(text, encoding="utf-8")
+            registry = FileResourceRegistry.load(path)
+        listed = registryedit.power_controllers(registry, "Host_Local")
+        self.assertEqual(["Hub_Local0", "Hub_Local1"],
+                         [item["alias"] for item in listed])
+        # The hub whose driver the harness does not switch offers no port,
+        # and the one it does still offers its own.
+        self.assertEqual([], listed[1]["ports"])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], listed[0]["ports"])
+
+
+class HolderTextTests(unittest.TestCase):
+    """What a board's holder line may say.
+
+    It travels to a browser and into a refusal, so it names who and since
+    when, and never the command line a lease by hand records as its purpose.
+    """
+
+    def test_the_purpose_a_manual_lease_records_is_not_reported(self):
+        from ubertooth_harness.runner_service import _holder_line
+
+        holder = leases.holder_info(
+            run_id=None, owner="agent-1",
+            purpose="lease: /home/someone/ubertooth-lab/build/bin/ubertooth-util -v",
+        )
+        line = _holder_line(holder, {})
+        self.assertIn("agent-1", line)
+        self.assertNotIn("ubertooth-lab", line)
+        self.assertNotIn("/home", line)
+        self.assertIn(f"pid {os.getpid()}", line)
+
+    def test_a_bench_lock_is_named_beside_the_lease(self):
+        from ubertooth_harness.runner_service import _holder_line
+
+        line = _holder_line(
+            leases.holder_info(run_id="run-x", owner="agent-1", purpose=""),
+            {"held": True, "holder": "someone else"},
+        )
+        self.assertIn("run run-x", line)
+        self.assertIn("a bench lock (someone else)", line)
+
+    def test_a_free_board_has_no_holder_line(self):
+        from ubertooth_harness.runner_service import _holder_line
+
+        self.assertEqual("", _holder_line({}, {}))
+
+
+class LeaseHeldEditTests(unittest.IsolatedAsyncioTestCase):
+    """Unregistering a board holds its lease, so it cannot slip through."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.root = Path(self._dir.name)
+        self.fixture = RunnerFixture(self.root)
+        self.fixture.hardware.write_text(HARDWARE, encoding="utf-8")
+        self.leases = self.root / "leases"
+        self.leases.mkdir()
+        self._environment = mock.patch.dict(
+            os.environ, {leases.LEASE_DIR_ENV: str(self.leases)}
+        )
+        self._environment.start()
+
+    def tearDown(self):
+        self._environment.stop()
+        self._dir.cleanup()
+
+    def service(self):
+        return RunnerService(
+            self.fixture.config("ws://127.0.0.1:1/ws/runner", host="Host_Local"),
+            enumerator=StubEnumerator([FIRST]), log=lambda text: None,
+        )
+
+    def test_the_board_is_leased_while_it_is_unregistered(self):
+        service = self.service()
+        edit = BoardEdit(action="remove", alias="UT_Local1")
+        inside = {}
+
+        real = registryedit.apply_edit
+
+        def watched(path, host, edit):
+            # While the edit runs, nobody else can take the board.
+            with self.assertRaises(leases.LeaseError):
+                leases.acquire(
+                    [leases.Board("UT_Local1", SECOND)],
+                    leases.holder_info(run_id=None, owner="other", purpose=""),
+                    directory=self.leases,
+                )
+            inside["held"] = True
+            return real(path, host, edit)
+
+        with mock.patch.object(registryedit, "apply_edit", watched):
+            answer, fields = service._apply_edit(edit)
+        self.assertEqual("registry_updated", answer)
+        self.assertTrue(inside.get("held"))
+        # And it is given back afterwards.
+        leases.acquire(
+            [leases.Board("UT_Local1", SECOND)],
+            leases.holder_info(run_id=None, owner="other", purpose=""),
+            directory=self.leases,
+        ).release()
+
+    def test_a_board_somebody_holds_is_not_unregistered(self):
+        held = leases.acquire(
+            [leases.Board("UT_Local1", SECOND)],
+            leases.holder_info(run_id="run-x", owner="agent-1", purpose="test"),
+            directory=self.leases,
+        )
+        try:
+            service = self.service()
+            answer, fields = service._apply_edit(
+                BoardEdit(action="remove", alias="UT_Local1")
+            )
+            self.assertEqual("registry_refused", answer)
+            self.assertEqual(409, fields["status"])
+            self.assertIn("in use", fields["reason"])
+            self.assertEqual(HARDWARE, self.fixture.hardware.read_text())
+        finally:
+            held.release()
+
+    def test_a_lease_directory_that_cannot_be_read_fails_closed(self):
+        service = self.service()
+        with mock.patch.object(
+            leases, "acquire", side_effect=OSError("permission denied")
+        ):
+            answer, fields = service._apply_edit(
+                BoardEdit(action="remove", alias="UT_Local1")
+            )
+        self.assertEqual("registry_refused", answer)
+        self.assertEqual(503, fields["status"])
+        self.assertIn("cannot hold", fields["reason"])
+        self.assertEqual(HARDWARE, self.fixture.hardware.read_text())
+
+    def test_registering_a_board_takes_no_lease(self):
+        # There is nothing to hold: the alias does not exist yet.
+        service = self.service()
+        with mock.patch.object(
+            leases, "acquire", side_effect=AssertionError("took a lease")
+        ):
+            answer, _ = service._apply_edit(
+                BoardEdit(action="add", alias="UT_Local2", serial=THIRD)
+            )
+        self.assertEqual("registry_updated", answer)
+
+    def test_one_board_this_protocol_cannot_describe_costs_its_own_line(self):
+        service = self.service()
+        real = service._registry
+
+        def registry():
+            loaded = real()
+            # A serial too long for the schema to carry.
+            object.__setattr__(
+                loaded.resources["UT_Local1"], "identity",
+                {"serial": "f" * 5000},
+            )
+            return loaded
+
+        with mock.patch.object(service, "_registry", registry):
+            states = service._board_states([FIRST])
+        self.assertEqual(["UT_Local0"], [item["alias"] for item in states])
+
+    def test_the_revision_map_is_bounded(self):
+        service = self.service()
+        for index in range(300):
+            service._learn_revision({
+                "event_type": "build_flash_board_finished",
+                "details": {"serial": f"{index:032x}", "after": "git-1"},
+            })
+        self.assertLessEqual(len(service._revisions), 256)

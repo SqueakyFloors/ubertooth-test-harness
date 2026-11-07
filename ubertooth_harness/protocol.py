@@ -358,9 +358,10 @@ def valid_file_page(page) -> bool:
 def valid_boards(boards) -> bool:
     """Whether ``boards`` can be carried in ``register`` or ``heartbeat``.
 
-    For the runner, which builds the list from a registry a person wrote: an
-    alias or a serial that will not fit the schema must cost the board its
-    line in the Targets card, not cost the target its connection.
+    For the runner, which builds the list from a registry a person wrote and
+    checks one entry at a time: an alias or a serial that will not fit the
+    schema must cost that board its line in the Targets card, not cost the
+    target its connection.
     """
     return _boards(boards)
 

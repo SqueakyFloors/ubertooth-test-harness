@@ -13,6 +13,7 @@ controller.
 
 import asyncio
 import collections
+import contextlib
 import dataclasses
 import ipaddress
 import json
@@ -42,6 +43,7 @@ from ubertooth_harness.protocol import (
     encode_runner_message,
 )
 from ubertooth_harness.protocol import (
+    MAX_BOARDS,
     valid_boards,
     valid_devices,
     valid_file_page,
@@ -64,6 +66,9 @@ _STDERR_TAIL_LINES = 20
 # the run's run.jsonl, which a soak makes tens of megabytes, so a flood of
 # requests is held rather than served: the controller asks again.
 MAX_FILE_REQUESTS = 4
+# Board firmware revisions kept, by serial. Far past any bench; a bound so a
+# runner that outlives many registry changes cannot grow the map forever.
+_MAX_REVISIONS = 256
 _NO_BUILD = (
     "this runner has no libbtbb, so it cannot build; restart it with "
     "--libbtbb-source and --libbtbb-ref (scripts/deploy.sh sets them up by "
@@ -191,7 +196,13 @@ def _log(message: str) -> None:
 
 
 def _holder_line(holder: Mapping, external: Mapping) -> str:
-    """Who holds a board, in the words a listing uses; "" when free.
+    """Who holds a board, in words a browser may see; "" when free.
+
+    Built field by field rather than from ``leases.describe_holder``, which
+    also carries the lease's ``purpose``: for a lease taken by hand that is
+    the whole command line, which names paths on the target. This answer
+    travels to the GUI and into a refusal, so it keeps to who and since
+    when.
 
     Both parties when both hold it: the harness lease and the bench's own
     lock file are separate claims, and a reader who sees only one wonders
@@ -199,7 +210,14 @@ def _holder_line(holder: Mapping, external: Mapping) -> str:
     """
     parts = []
     if holder:
-        parts.append(leases.describe_holder(holder))
+        said = [str(holder.get("owner") or holder.get("user") or "someone")]
+        if holder.get("run_id"):
+            said.append(f"run {holder['run_id']}")
+        if holder.get("pid"):
+            said.append(f"pid {holder['pid']}")
+        if holder.get("acquired_at"):
+            said.append(f"since {holder['acquired_at']} UTC")
+        parts.append(", ".join(said))
     if external.get("held"):
         said = str(external.get("holder") or "").strip()
         parts.append(
@@ -264,6 +282,10 @@ class RunnerService:
         # no board is opened for it; empty until a run has flashed or read
         # one, which is what the board's status then says.
         self._revisions: dict[str, str] = {}
+        # The board list last read, which register and every heartbeat
+        # carry, and the task that refreshes it.
+        self._boards: list = []
+        self._refreshing: asyncio.Task | None = None
 
     # ----- lifecycle -------------------------------------------------------
 
@@ -398,6 +420,7 @@ class RunnerService:
     def _registration(self) -> dict:
         identity = capture()
         serials, enumeration_error = self._enumerated()
+        self._boards = self._board_states(serials)
         return {
             "host": self.config.host,
             "hostname": platform.node(),
@@ -406,7 +429,7 @@ class RunnerService:
             "python": identity["python"]["version"],
             "ubertooth_serials": serials,
             "enumeration_error": enumeration_error,
-            "boards": self._board_states(serials),
+            "boards": list(self._boards),
             "heartbeat_interval_s": self.config.heartbeat_interval_s,
             "active_run_id": self._run.run_id if self._run else None,
         }
@@ -489,7 +512,7 @@ class RunnerService:
                 # case, because USB reports it that way and one serial
                 # written two ways is still one board.
                 serial = str(resource.identity.get("serial", "") or "").strip()
-                states.append({
+                entry = {
                     "alias": board.alias,
                     "serial": serial,
                     "present": (
@@ -508,13 +531,25 @@ class RunnerService:
                         and not isinstance(power.get("port"), bool)
                         else None
                     ),
-                })
-            if valid_boards(states):
-                return states
-            self.log(
-                "the registered boards cannot be reported over this protocol; "
-                "registering without the board list"
-            )
+                }
+                # One entry at a time, so a board this protocol cannot
+                # describe costs its own line and not the whole list.
+                if not valid_boards([entry]):
+                    self.log(
+                        f"board {board.alias} cannot be reported over this "
+                        "protocol; leaving it out of the board list"
+                    )
+                    continue
+                states.append(entry)
+            if len(states) > MAX_BOARDS:
+                # More registered boards than one message carries. The
+                # first MAX_BOARDS of them, in registry order, beats none.
+                self.log(
+                    f"this host has {len(states)} registered Ubertooths; "
+                    f"reporting the first {MAX_BOARDS}"
+                )
+                states = states[:MAX_BOARDS]
+            return states
         except Exception as error:  # noqa: BLE001 - registration comes first
             self.log(f"cannot list the registered boards: {error}")
         return []
@@ -556,26 +591,48 @@ class RunnerService:
             details.get("after") or details.get("before") or ""
         ).strip()
         if serial and revision:
+            if (
+                len(self._revisions) >= _MAX_REVISIONS
+                and serial not in self._revisions
+            ):
+                # A bench has a handful of boards, so this never fills in
+                # practice; a long-lived runner whose registry keeps
+                # changing must still not grow a map forever.
+                self._revisions.pop(next(iter(self._revisions)))
             self._revisions[serial] = revision[:200]
 
     async def _heartbeat(self) -> None:
         while True:
             await asyncio.sleep(self.config.heartbeat_interval_s)
             run = self._run
-            # Off the event loop: the scan runs a command on macOS and the
-            # lease listing touches files, and neither may stall an active
-            # run's events.
-            boards = await asyncio.to_thread(self._heartbeat_boards)
             await self._send(
                 "heartbeat",
                 active_run_id=run.run_id if run else None,
                 elapsed_s=round(time.monotonic() - run.started, 3) if run else None,
                 last_event_sequence=run.last_sequence if run else None,
                 last_event_type=run.last_event_type if run else None,
-                boards=boards,
+                # The last list read, never a fresh one: the scan runs a
+                # command (ioreg's own timeout is longer than a heartbeat
+                # interval) and reads lock files, and a heartbeat that waited
+                # for it could arrive late enough for the controller to call
+                # this target offline in the middle of a run.
+                boards=list(self._boards),
             )
+            self._start_board_refresh()
 
-    def _heartbeat_boards(self) -> list:
+    def _start_board_refresh(self) -> None:
+        """Read the boards again off the event loop, one read at a time."""
+        if self._refreshing is not None and not self._refreshing.done():
+            return
+        self._refreshing = asyncio.create_task(self._refresh_boards())
+
+    async def _refresh_boards(self) -> None:
+        try:
+            self._boards = await asyncio.to_thread(self._read_boards)
+        except Exception as error:  # noqa: BLE001 - the heartbeat goes on
+            self.log(f"could not read the registered boards: {error}")
+
+    def _read_boards(self) -> list:
         serials, _ = self._enumerated()
         return self._board_states(serials)
 
@@ -737,11 +794,21 @@ class RunnerService:
 
         A read-only scan of what the kernel already knows: no device is
         opened and no command is sent, so a board in the middle of a capture
-        is not disturbed. Read off the event loop, because the scan runs a
-        command on macOS.
+        is not disturbed. In its own task, as a file request is: the scan
+        runs a command whose own timeout is longer than a heartbeat
+        interval, and nothing may hold up the next message on this
+        connection, which may be a cancel.
         """
+        task = asyncio.create_task(self._answer_devices(message))
+        self._file_tasks.add(task)
+        task.add_done_callback(self._file_tasks.discard)
+
+    async def _answer_devices(self, message: dict) -> None:
         fields = await asyncio.to_thread(self._devices)
-        await self._send("devices", request_id=message["request_id"], **fields)
+        try:
+            await self._send("devices", request_id=message["request_id"], **fields)
+        except Exception as error:  # noqa: BLE001 - the connection may have gone
+            self.log(f"could not answer the device listing: {error}")
 
     def _devices(self) -> dict:
         registry = self._registry()
@@ -835,12 +902,10 @@ class RunnerService:
     def _apply_edit(self, edit: BoardEdit) -> tuple[str, dict]:
         """Make the change, or say why it was not made. Never raises."""
         try:
-            held = self._held_alias(edit)
-            if held:
-                raise RegistryEditError(held, 409)
-            registry = registryedit.apply_edit(
-                self.config.hardware, self.config.host, edit
-            )
+            with self._not_in_use(edit):
+                registry = registryedit.apply_edit(
+                    self.config.hardware, self.config.host, edit
+                )
         except RegistryEditError as error:
             return "registry_refused", {
                 "status": error.status, "reason": error.detail,
@@ -860,41 +925,79 @@ class RunnerService:
                           f"registry: {type(error).__name__}",
             }
         serials, _ = self._enumerated()
+        self._boards = self._board_states(serials, registry)
         return "registry_updated", {
             "action": edit.action, "alias": edit.alias,
-            "boards": self._board_states(serials, registry),
+            "boards": list(self._boards),
             "ubertooth_serials": serials,
         }
 
-    def _held_alias(self, edit: BoardEdit) -> str:
-        """Why a lease keeps this board from being unregistered, or "".
+    @contextlib.contextmanager
+    def _not_in_use(self, edit: BoardEdit):
+        """Hold the board's lease while it is unregistered, or refuse.
 
-        Only for ``remove``: a board that is not registered yet cannot be
-        leased under an alias the registry has not got.
+        Taking the lease is what makes "not while somebody has it" true
+        rather than merely checked: a lease taken between a check and the
+        write would otherwise let a board be unregistered just as a run
+        picked it up, and a ``run-suite`` somebody started on the host by
+        hand is not this runner's own run. It also fails closed, because a
+        lease directory that cannot be read means the lease cannot be taken.
+
+        Nothing is held for an ``add``: a board the registry has not got
+        cannot be leased under an alias that does not exist yet.
         """
         if edit.action != registryedit.REMOVE:
-            return ""
+            yield
+            return
+        board = self._board_to_lease(edit.alias)
+        if board is None:
+            # Not registered, or registered without the serial its lease key
+            # comes from. apply_edit says which, and why, in its own words.
+            yield
+            return
+        try:
+            held = leases.acquire(
+                [board],
+                leases.holder_info(
+                    run_id=None, owner=None,
+                    purpose="unregistering this board",
+                ),
+                external_template=leases.external_lock_template(
+                    self.config.external_board_lock
+                ) or None,
+                note=lambda line: self.log(line),
+            )
+        except leases.LeaseError as error:
+            raise RegistryEditError(
+                f"{edit.alias} is in use, so it stays registered until "
+                f"whatever has it gives it back: {error}", 409,
+            ) from error
+        except OSError as error:
+            raise RegistryEditError(
+                f"this target could not take {edit.alias}'s lease, so it "
+                f"will not unregister a board it cannot hold: "
+                f"{type(error).__name__}", 503,
+            ) from error
+        try:
+            yield
+        finally:
+            held.release()
+
+    def _board_to_lease(self, alias: str):
+        """The board to hold while unregistering ``alias``, or None."""
         registry = self._registry()
         if registry is None:
-            return ""
+            return None
         try:
-            resource = registry.get(edit.alias)
+            resource = registry.get(alias)
         except RegistryError:
-            return ""  # apply_edit says it is not registered, and why
+            return None
         if resource.type != registryedit.UBERTOOTH_TYPE:
-            return ""
-        state = self._lease_states([leases.board_for_resource(resource)]).get(
-            edit.alias, {}
-        )
-        if not state.get("held"):
-            return ""
-        holder = _holder_line(
-            state.get("holder") or {}, state.get("external") or {}
-        )
-        return (
-            f"{edit.alias} is leased by {holder}"
-            if holder else f"{edit.alias} is leased by another command"
-        ) + "; it stays registered until that command gives it back"
+            return None
+        try:
+            return leases.board_for_resource(resource)
+        except leases.LeaseError:
+            return None
 
     # ----- saved output files ----------------------------------------------
 
