@@ -1091,13 +1091,17 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # cannot be measured here; the three commands of a case like it cost
     # about 0.3 s on the hosts above, hence 2.8 + 0.3 = 3.1. A Linux
     # measurement should replace that estimate rather than this reasoning.
-    # 12 cases and 53 commands in smoke, 30 and 130 comprehensive (11 and 48,
-    # and 29 and 125, where there is no /proc and the one case about it is not
+    # Then the record-fields case, five commands at that same 0.1 s each, in
+    # both profiles, and one more command on the comprehensive filtered-PCAP
+    # case: 3.1 + 0.5 = 3.6 and 9.0 + 0.6 = 9.6, reasoned the same way
+    # because the host it would be measured on was carrying other work.
+    # 13 cases and 58 commands in smoke, 31 and 136 comprehensive (12 and 53,
+    # and 30 and 131, where there is no /proc and the one case about it is not
     # applicable); the smoke figure carries that case, so a macOS run comes
     # in a little under it. Each pair of command-time figures was taken back
     # to back, because a busy host takes two to six times longer, which is
     # why an estimate is a countdown and never a timeout.
-    "Raw receive replay": _profiles(Estimate(3.1), Estimate(9.0)),
+    "Raw receive replay": _profiles(Estimate(3.6), Estimate(9.6)),
     # Two replays of a handful of records in smoke, four in comprehensive,
     # each with the fixture writer and the directory listing beside it.
     # The cases' own commands, timed back to back on the macOS host against

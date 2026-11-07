@@ -247,7 +247,7 @@ word and symbol (colour only reinforces it).
   one the target's own platform does not run (`Exclusive Ubertooth topology`
   on a macOS target), is left out of the figure and then named, with the
   time it takes on the host that does run it: the release suite is about
-  669.1 s on a target that step does not name, and 1189.1 s counting it.
+  669.7 s on a target that step does not name, and 1189.7 s counting it.
   Choosing another target reloads the list and keeps the plan and suite you
   had chosen. A suite no step of which runs on the chosen target says that
   instead of a time. Estimates learned on the target are used wherever it

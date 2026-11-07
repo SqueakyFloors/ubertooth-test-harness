@@ -928,18 +928,45 @@ Raw receive replay:
   hardware: >-
     No board, no USB. Nothing transmits.
   expected: >-
-    Smoke runs 12 cases, 11 where there is no /proc: decode every LAP in the fixture, derive the UAP with
-    -l, replay into PCAPNG and into PCAP (link type 255, the fixture's packet
+    Smoke runs 13 cases, 12 where there is no /proc: decode every LAP in the fixture, derive the UAP with
+    -l, read every field of a filtered capture's records, replay into PCAPNG
+    and into PCAP (link type 255, the fixture's packet
     count), a -d file that cannot be opened (exit 1, one error line, no usage
     text, nothing created or changed anywhere in the directory), and -s
-    decoding the same as without it. Six smoke cases are about where a
+    decoding the same as without it.
+
+    The record-fields case replays with -l <LAP> into a PCAPNG and reads every
+    record with the same decoder the live Classic tests use. It is here
+    because that decoder's sharpest checks need a record the bench rarely
+    produces -- a payload-bearing record, and one that settled the piconet's
+    address part -- so on live traffic they are checks waiting for something
+    to fire on. Every record must carry the fixture's LAP, name it as the
+    reference LAP, and carry the fixture's own signal level, and none may
+    claim a measured noise power. Every record that carries a reference UAP
+    must name the fixture's; the records before the address part settles
+    carry none and are not asked to, since the rule is on the field a record
+    claims. At least four must carry it, at least one a payload, one a
+    passing payload CRC, and one a header HEC that passed with a reference
+    UAP to check it against; a DH1/2-DH1 record must be among them with its
+    transport named ACL; the file must name the LAP, with an empty UAP mask,
+    as the address it was following; and the record that settled the address
+    part must carry its own header and the payload whose CRC settled it. The
+    comprehensive filtered-PCAP case reads the same records in the other
+    format, which carries no interface option and so leaves that one check
+    out. Every packet line of a replay must also carry that level with
+    `n=none snr=none`, required rather than accepted, which a pattern for a
+    live capture cannot ask for. The -l case also requires the start of
+    the CLK1-27 search that follows a discovered UAP, and forbids a CLK6
+    note, which libbtbb reports only for a UAP the caller stated;
+    comprehensive's correct -u requires that note, at offset 0, with the
+    candidates after it. Six smoke cases are about where aSix smoke cases are about where a
     capture goes: -q - writes a readable PCAP to the redirected stream with
     the packet report printed on neither stream, /dev/stdout and /dev/fd/1
     mean that stream too and so does /proc/self/fd/1 on Linux, /dev/fd/3 is
     the caller's own file so the report keeps standard output, -q and -r naming one file are refused naming both
     options, and a -d that names the dump -i is replaying is refused. Each
     states the whole directory afterwards with the input's SHA-256.
-    Comprehensive runs 30, 29 where there is no /proc, adding the survey
+    Comprehensive runs 31, 30 where there is no /proc, adding the survey
     listing of both piconets, a LAP filter, a correct and a wrong -u, -e 0
     dropping the packet with an error, a -d dump compared byte for byte with
     the fixture, a filtered PCAP, an empty file, a file whose last record is
@@ -962,7 +989,13 @@ Raw receive replay:
     tool calls libbtbb's LE file replay. The capture-destination cases are
     ubertooth-rx's; the same checks in ubertooth-btle and ubertooth-follow are
     not covered, and nor is a capture written to a terminal, which no run has.
-    Five things the fork's own code calls out are uncovered too: /dev/stdin
+    The level and noise rules are pinned to this fixture's own readings, so
+    they say nothing about what a live capture reports; what they cover is a
+    level taken from the packet's own average reading rather than from
+    anything around it, and the absence of a background figure where the
+    records carry no estimate; the distinct-figure
+    floors a bench capture would need are not established. Five things the
+    fork's own code calls out are uncovered too: /dev/stdin
     and /dev/stderr, which are not standard output but are still identified
     as the descriptors they name; the BSD leading-zero spelling /dev/fd/01;
     /proc/self/fd/1 as an -r destination, which the -q cases cover and the -r
@@ -1768,7 +1801,10 @@ Classic capture record fields:
     so a record with no payload must name none and a record with one must name
     its own type's -- ACL for the data types, SCO for the voice types, eSCO for
     the extended ones, and either for the one code an HV3 and an EV3 share,
-    which is the case nothing else in a record settles. On top of those the
+    which is the case nothing else in a record settles. A payload-bearing
+    record naming none fails: the escape that accepted it was for a run naming
+    a libbtbb from before the library named transports at all, and such a run
+    turns the rule off outright instead. On top of those the
     bench contributes what it knows -- the piconet's LAP, the reference LAP and
     UAP the capture was given, and the address recorded in a PCAPNG interface
     option. A reference UAP of 0x00 is an address like any other and is
@@ -1834,14 +1870,21 @@ Classic capture record fields:
     separate reads, so a packet caught as the count ticks over carries a time
     a whole period out; no bench capture has shown one, and the summary names
     the size of what it saw. No case requires a clock to be reached at all.
-    No floor is put on records that name a transport, because payload-bearing
-    records are rare here. A record naming no transport passes, and that is a
-    real gap rather than only backward compatibility: at the libbtbb the fork
-    pins, a payload-bearing record always names one, so a library that stopped
-    filling the field in would pass here. It is accepted because the harness's
-    own pin predates that change and names no transport at all, so a strict
-    default would fail every payload-bearing record of a run built at the
-    harness's own pin; harness #339 tightens it once the pin moves. The survey
+    No floor is put here on records that name a transport, that carry a
+    payload, or that pass a payload CRC, because payload-bearing records are
+    rare on this bench -- about 11 in 2620 -- so a floor would count the room
+    rather than the decoder. Raw receive replay is where those are required
+    rather than applied, over a capture whose answer the harness wrote, and it
+    is also where the one record that settles the address part is checked as
+    itself; every floor here is met by the records around such a record, so
+    reverting a fix about it costs one record out of hundreds and passes. The
+    level fields are the same: the dBm range is wide enough for a figure taken
+    from another packet, and the noise-power flag is how libbtbb's writer
+    computes it from the two figures, so neither rule can fail on a level that
+    stopped being the packet's own; the replay pins both against a known
+    answer. A floor on how many distinct figures a live capture carries would
+    be the bench's version of that, and no run has measured one to set it
+    with. The survey
     case
     cannot assert whose records it reads. The flag rules assume the libbtbb
     this harness pins. The error flags do fire, on a clear board as well as an

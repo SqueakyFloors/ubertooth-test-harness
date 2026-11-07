@@ -199,7 +199,7 @@ class EstimateTests(unittest.TestCase):
         # cases add 5.3 s to its own (#333, catalog.py).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(1189.1, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1189.7, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 
