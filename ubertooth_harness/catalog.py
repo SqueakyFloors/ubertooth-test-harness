@@ -1898,11 +1898,11 @@ def builtin_catalog() -> TestCatalog:
                 # How often the run writes a progress record, which is what
                 # a long run is watched and reviewed through.
                 "sample every": ArgumentRule(_duration, default="1m"),
-                # What the fixture puts on the air: the peripheral's
-                # advertising interval, the connection interval the central
-                # asks for, and what it writes while the link is up.
-                "advertising interval": ArgumentRule(
-                    _advertising_interval, default=100),
+                # What the fixture puts on the air: the connection interval
+                # the central asks for, and what it writes while the link is
+                # up. Not its advertising interval: the peripheral role has
+                # no command for one, and advertises at the firmware's own
+                # 100 to 150 ms (followsoak.PERIPHERAL_ADV_INTERVAL_MAX_MS).
                 "connection interval": ArgumentRule(
                     _connection_interval, default=30),
                 "write bytes": ArgumentRule(_write_bytes, default=244),

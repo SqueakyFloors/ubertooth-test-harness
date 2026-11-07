@@ -40,8 +40,11 @@ suites:
   #   `detect within`      <= `advertising`     (the phase must outlast its
   #                                              own detection deadline)
   #   `connect within`     <= `acquire within`  <= `connected`
-  #   `quiet after`         < `absent`
+  #   `absent` - `quiet after` >= 0.45s (three advertising events at the
+  #                            firmware's own slowest interval)
   #   `detect within`      <= `maximum gap`      < `advertising`
+  #   `presence window`    >= 3 advertising events at the firmware's own
+  #                            slowest connectable interval (150 ms)
   #   `liveness timeout`    > `connected` + `absent` + `detect within`
   #   two cycles           <= `checkpoint every` <= half the duration
   #
@@ -76,7 +79,6 @@ suites:
         absent: 20s
         checkpoint every: 2m
         sample every: 10s
-        advertising interval: 100
         connection interval: 30
         write bytes: 244
         write period: 50
@@ -113,7 +115,6 @@ suites:
         absent: 20s
         checkpoint every: 30m
         sample every: 1m
-        advertising interval: 100
         connection interval: 30
         write bytes: 244
         write period: 50
@@ -149,7 +150,6 @@ suites:
         absent: 20s
         checkpoint every: 1h
         sample every: 5m
-        advertising interval: 100
         connection interval: 30
         write bytes: 244
         write period: 50
@@ -186,7 +186,6 @@ suites:
         absent: 20s
         checkpoint every: 1h
         sample every: 15m
-        advertising interval: 100
         connection interval: 30
         write bytes: 244
         write period: 50

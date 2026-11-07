@@ -9,7 +9,7 @@ Run as a script by the `Intermittent follow soak` case::
         [--central-port PATH --central-alias NAME]
         --advertising S --connected S --absent S
         --checkpoint-every S --sample-every S
-        --adv-interval MS --conn-interval MS --write-bytes N --write-period MS
+        --conn-interval MS --write-bytes N --write-period MS
         --presence-window S --presence-windows N
         --liveness-timeout S --detect-within S --connect-within S
         --acquire-within S --quiet-after S --max-gap S
@@ -210,6 +210,23 @@ IDLE_PAUSE_S = 1.0
 # How often the central's own status is read while the run waits for the link
 # it was told to make.
 CONNECT_POLL_S = 0.5
+# The connectable advertising interval the peripheral role uses, in
+# milliseconds. It is the firmware's own and not a figure a plan can set:
+# `start_peripheral_locked` advertises with BT_GAP_ADV_FAST_INT_MIN_2 to
+# BT_GAP_ADV_FAST_INT_MAX_2 (firmware/nrf52840dk/src/connection.c), and the
+# `adv interval` command belongs to the advertiser role, which this soak does
+# not use. The presence-window check uses the slower end, because that is the
+# worst case a window has to hold an advertising event in.
+PERIPHERAL_ADV_INTERVAL_MIN_MS = 100
+PERIPHERAL_ADV_INTERVAL_MAX_MS = 150
+# How short a stretch of an absent phase is worth judging: long enough for a
+# peripheral that was still advertising to have sent several events into it,
+# which is the same reasoning a presence window is sized by. Below this, a
+# phase whose checkpoint ran nearly to its end would join the judged
+# population -- raising the allowance -- with no room for the fixture to have
+# been heard in it at all.
+MIN_ABSENT_STRETCH_S = (PERIPHERAL_ADV_INTERVAL_MAX_MS / 1000.0
+                        * MIN_EVENTS_PER_WINDOW)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +243,7 @@ class Peer(DkShell):
     """
 
     def __init__(self, dk: nrfdk.Dk, role: str, address: str):
-        super().__init__(dk)
+        super().__init__(dk, label=role)
         self.role = role
         self.address = address
 
@@ -271,6 +288,16 @@ class Peripheral(Peer):
                 f"not {options.channel}")
         return status
 
+    def advertise(self) -> None:
+        """Start advertising connectable. It does not wait for a link.
+
+        The firmware's own `conn start` returns as soon as advertising is up
+        for a peripheral, and waits for the link only for a central
+        (firmware/nrf52840dk/src/connection.c, `cmd_start`), so this is an
+        ordinary shell command with the ordinary timeout.
+        """
+        self.command("conn start")
+
 
 class Central(Peer):
     """The DK that makes the link and writes to it for the whole phase."""
@@ -299,6 +326,19 @@ class Central(Peer):
                 "the central still has its own connection cycling or automatic "
                 "parameter update switched on")
         return status
+
+    def connect(self) -> None:
+        """Make the link, which this command does not return until it has.
+
+        The firmware waits on the connection for up to its own five seconds
+        and answers with an error if none came
+        (firmware/nrf52840dk/src/connection.c, `cmd_start`:
+        `CONNECT_TIMEOUT_MS`). So the shell's ordinary three-second timeout
+        would time out a link that was merely slow, and the retry behind it
+        would then send `conn start` to a board that is already starting.
+        `nrfdk.central` passes the same longer timeout for the same command.
+        """
+        self.command("conn start", timeout=nrfdk.CONNECT_TIMEOUT_S)
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +418,12 @@ class Phase:
     planned_gaps: int = 0
     unplanned_gaps: int = 0
     checkpoints: int = 0
-    cut_by_duration: bool = False
+    # The run itself ended this phase: its duration ran out, or it stopped
+    # early because its capture budget could not be kept. Every run ends in
+    # one, and it is the run's own doing, so it is not counted against the
+    # share of its phases a run has to be able to judge -- and it is not
+    # called `cut_by_duration`, because the budget can end a run too.
+    ended_by_the_run: bool = False
     listening_from: float | None = None
 
     @property
@@ -413,7 +458,7 @@ class Phase:
             "planned_capture_gaps": self.planned_gaps,
             "unplanned_capture_gaps": self.unplanned_gaps,
             "checkpoints": self.checkpoints,
-            "cut_by_duration": self.cut_by_duration,
+            "ended_by_the_run": self.ended_by_the_run,
         }
 
 
@@ -560,7 +605,6 @@ class Timings:
     acquire_within_s: float
     quiet_after_s: float
     max_gap_s: float
-    adv_interval_ms: int = 100
     write_period_ms: int = 50
     min_connection_packets: int = 1
 
@@ -588,7 +632,6 @@ class Options:
     absent_s: float
     checkpoint_every_s: float
     sample_every_s: float
-    adv_interval_ms: int
     conn_interval_ms: int
     write_bytes: int
     write_period_ms: int
@@ -622,7 +665,6 @@ class Options:
             connect_within_s=self.connect_within_s,
             acquire_within_s=self.acquire_within_s,
             quiet_after_s=self.quiet_after_s, max_gap_s=self.max_gap_s,
-            adv_interval_ms=self.adv_interval_ms,
             write_period_ms=self.write_period_ms,
             min_connection_packets=self.min_connection_packets,
         )
@@ -688,11 +730,15 @@ def check_timings(options: Timings | Options) -> None:
             f"'acquire within' ({options.acquire_within_s:g}s), so a link that "
             "came up in time would miss the follow deadline measured from the "
             "same moment")
-    if options.quiet_after_s >= options.absent_s:
+    if options.absent_s - options.quiet_after_s < MIN_ABSENT_STRETCH_S:
+        # Not merely shorter: the stretch past the settle point has to be
+        # long enough for a peripheral that was still advertising to have
+        # been heard in it, or every absent phase would join the judged
+        # population and none of them could ever fail.
         raise SoakError(
-            f"'quiet after' ({options.quiet_after_s:g}s) is not shorter than the "
-            f"{options.absent_s:g}s the fixture is off the air, so no absent "
-            "phase would have a stretch to judge")
+            f"'quiet after' ({options.quiet_after_s:g}s) leaves less than "
+            f"{MIN_ABSENT_STRETCH_S:g}s of the {options.absent_s:g}s the fixture "
+            "is off the air, which is too short a stretch to judge it on")
     # The longest silence a healthy run really has: the connected phase, where
     # only the link is on the air and a sniffer may catch none of it, then the
     # absent phase, then the wait for the next advertising phase's first
@@ -749,13 +795,13 @@ def check_timings(options: Timings | Options) -> None:
         raise SoakError(
             f"'sample every' ({options.sample_every_s:g}s) is shorter than "
             f"{MIN_SAMPLE_EVERY_S:g}s; each sample is a synced record")
-    interval_s = options.adv_interval_ms / 1000.0
+    interval_s = PERIPHERAL_ADV_INTERVAL_MAX_MS / 1000.0
     if interval_s * MIN_EVENTS_PER_WINDOW > options.window_s:
         raise SoakError(
-            f"the peripheral's {interval_s:g}s advertising interval leaves fewer "
-            f"than {MIN_EVENTS_PER_WINDOW} advertising events in a "
-            f"{options.window_s:g}s presence window, so a window would be empty "
-            "whenever one event is lost or late")
+            f"the peripheral role advertises every {interval_s:g}s at its "
+            f"slowest, which leaves fewer than {MIN_EVENTS_PER_WINDOW} "
+            f"advertising events in a {options.window_s:g}s presence window, so a "
+            "window would be empty whenever one event is lost or late")
     # The floor on a connection's packets cannot be above what the central
     # could send in the phase: the sniffer catches a fraction of a followed
     # connection, so a floor at or above the writes themselves can never be
@@ -788,6 +834,7 @@ class Soak:
         self.attempts: list[Attempt] = []
         self.intervals: list[Interval] = []
         self.intervals_forgotten = 0
+        self.intervals_opened = 0
         self.checkpoints: list[Checkpoint] = []
         # Connections the fixture announced, newest last, bounded: a phase
         # keeps its own link, so what falls out here is only the lookup.
@@ -918,24 +965,18 @@ class Soak:
     def phase(self) -> Phase | None:
         return self.phases[-1] if self.phases else None
 
-    def open_phase(self, state: str) -> Phase:
-        """Tell the fixture, then start counting the phase.
+    def drive(self, phase: Phase, state: str) -> None:
+        """Tell the fixture to be in ``state``, recording a failure on ``phase``.
 
-        In that order, so the time the shell commands themselves take is not
-        charged to the detection or follow deadline: a phase begins when the
-        fixture has been told, not when the run decided to tell it. A
-        transition that failed twice is recorded against the phase it
+        A transition that failed twice is recorded against the phase it
         belongs to, which leaves that phase out of the verdict rather than
         counting the fixture's trouble against the board.
         """
-        previous = self.phase()
-        failure = ""
         try:
             if state == ADVERTISING:
-                # The peripheral advertises connectable and waits.
-                self.peripheral.command("conn start")
+                self.peripheral.advertise()
             elif state == CONNECTED:
-                self.central.command("conn start")
+                self.central.connect()
             else:
                 # The central disconnects first: a peripheral that stopped
                 # advertising while still connected would leave the link up
@@ -943,17 +984,45 @@ class Soak:
                 self.central.command("conn stop")
                 self.peripheral.command("conn stop")
         except SoakError as error:
-            failure = str(error)
+            phase.schedule_error = str(error)
             self.schedule_errors += 1
+
+    def open_phase(self, state: str) -> Phase:
+        """Start a phase, and tell the fixture, in the order that phase needs.
+
+        For an advertising or an absent phase the fixture is told first and
+        the phase begins afterwards, so the shell command's own latency is
+        charged to neither the detection deadline nor the settle time: a
+        phase runs for the length it was given, measured from when the
+        fixture was told.
+
+        A connected phase is the other way round, and it has to be. The
+        central's `conn start` does not return until the link is up
+        (firmware/nrf52840dk/src/connection.c, `cmd_start` waits on
+        `connected_sem`), so the CONNECT_IND is already on the air while the
+        command is still running. A phase that began afterwards would not
+        contain its own acquisition: the record would fall between two
+        phases, `acquired_at` would stay unset, and every connected phase
+        would read as a follow that never happened. So the phase is counting
+        before the command goes out, and the connect latency is inside the
+        follow deadline by construction -- which is why the catalog requires
+        `acquire within` to be at least `connect within`.
+        """
+        previous = self.phase()
         if state == ADVERTISING:
             self.cycles += 1
         phase = Phase(len(self.phases), state, self.cycles, self.elapsed,
                       after_absence=(previous is not None
-                                     and previous.state == ABSENT),
-                      schedule_error=failure)
-        self.phases.append(phase)
-        if state == CONNECTED and not failure:
-            self.wait_for_link(phase)
+                                     and previous.state == ABSENT))
+        if state == CONNECTED:
+            self.phases.append(phase)
+            self.drive(phase, state)
+            if not phase.schedule_error:
+                self.wait_for_link(phase)
+        else:
+            self.drive(phase, state)
+            phase.started = self.elapsed
+            self.phases.append(phase)
         self.record({"record": "phase_started", "index": phase.index,
                      "cycle": phase.cycle, "state": state,
                      "after_absence": phase.after_absence,
@@ -1001,10 +1070,14 @@ class Soak:
         if phase.state == ADVERTISING:
             phase.structural.close(phase.ended, phase.started)
             phase.text.close(phase.ended, phase.started)
-        if phase.state == CONNECTED and not phase.schedule_error:
+        if phase.state == CONNECTED and not phase.schedule_error and not self.canceled:
             # The central's own counters over the phase, read before the
             # disconnect the next phase sends: a phase whose link the
             # fixture did not make is a schedule failure, not a follow one.
+            # Skipped on a cancellation, where the run has about two seconds
+            # left and the summary is what must not be lost: this is a shell
+            # command with a reopen-and-retry behind it, and the phase it
+            # would judge is the one the cancellation ended.
             try:
                 status = nrfdk.require_connection_fields(self.central.status())
             except (SoakError, nrfdk.NrfDkError) as error:
@@ -1428,7 +1501,11 @@ class Soak:
     # -- the watchdog record, and the intervals it closes -----------------
 
     def open_interval(self) -> Interval:
-        interval = Interval(len(self.intervals), self.elapsed)
+        # Its own counter, not the list's length: the list is pruned in a
+        # long restarting run (MAX_HELD_INTERVALS), and an index that came
+        # back would stop identifying the records already written.
+        self.intervals_opened += 1
+        interval = Interval(self.intervals_opened - 1, self.elapsed)
         interval.phases = len(self.phases)
         interval.cycles = self.cycles
         interval.advertising_packets = self.advertising_packets
@@ -1575,7 +1652,10 @@ class Soak:
         if not self.canceled:
             mark.capture_restarted = self.start_capture(
                 f"after checkpoint {mark.index}", checkpoint=True)
-        else:
+        # Either it never got that far, or the cancel arrived inside the
+        # readiness wait and left it looking like a checkpoint that could not
+        # restart the capture.
+        if self.canceled:
             mark.canceled = True
         mark.seconds = self.elapsed - mark.at
         self.record(mark.to_dict())
@@ -1727,7 +1807,7 @@ class Soak:
                 break
 
         if self.phase() is not None and self.phase().ended is None:
-            self.phase().cut_by_duration = True
+            self.phase().ended_by_the_run = True
             self.close_phase(self.phase())
         final = self.stop_capture("the run was stopped" if self.canceled
                                   else "the run finished")
@@ -1784,7 +1864,7 @@ class Soak:
         return [phase for phase in self.phases
                 if phase.state == state and phase.ended is not None
                 and not phase.schedule_error and not phase.capture_gap
-                and not phase.cut_by_duration
+                and not phase.ended_by_the_run
                 and phase.seconds >= length_s * PHASE_COMPLETE_SHARE]
 
     def phase_counts(self, state: str, length_s: float) -> dict:
@@ -1793,8 +1873,8 @@ class Soak:
         return {
             "ran": len(ran),
             # The one the run's own duration ended, which every run has.
-            "ended_by_the_run": sum(1 for phase in ran if phase.cut_by_duration),
-            "cut_short": sum(1 for phase in ran if not phase.cut_by_duration
+            "ended_by_the_run": sum(1 for phase in ran if phase.ended_by_the_run),
+            "cut_short": sum(1 for phase in ran if not phase.ended_by_the_run
                              and (phase.ended is None
                                   or phase.seconds < length_s * PHASE_COMPLETE_SHARE)),
             "schedule_error": sum(1 for phase in ran if phase.schedule_error),
@@ -1803,11 +1883,13 @@ class Soak:
             # Credited against the coverage floor, so it is only the phases
             # whose one trouble was the run's own doing: a phase that was
             # also cut short, or whose transition failed, was not judgeable
-            # for a reason the run did not choose.
+            # for a reason the run did not choose. A planned gap always
+            # takes a phase of these two states out of the judged
+            # population, so every one of them is credited.
             "planned_capture_gap": sum(
                 1 for phase in ran
                 if phase.planned_gaps and not phase.unplanned_gaps
-                and not phase.cut_by_duration and not phase.schedule_error
+                and not phase.ended_by_the_run and not phase.schedule_error
                 and phase.seconds >= length_s * PHASE_COMPLETE_SHARE),
             "judged": len(self.judgeable(state, length_s)),
         }
@@ -1933,7 +2015,7 @@ class Soak:
         phase, because then the capture's own health is in question.
         """
         if (phase.state != ABSENT or phase.ended is None
-                or phase.schedule_error or phase.cut_by_duration
+                or phase.schedule_error or phase.ended_by_the_run
                 or phase.seconds < self.options.absent_s * PHASE_COMPLETE_SHARE):
             return None
         if phase.unplanned_gaps:
@@ -1943,8 +2025,10 @@ class Soak:
             if phase.listening_from is None:
                 return None
             start = max(start, phase.listening_from)
-        # A stretch of nothing is not a quiet phase, it is an unmeasured one.
-        return start if start < phase.ended else None
+        # A stretch of nothing is not a quiet phase, it is an unmeasured
+        # one, and nor is a stretch too short to have held an advertising
+        # event (MIN_ABSENT_STRETCH_S).
+        return start if phase.ended - start >= MIN_ABSENT_STRETCH_S else None
 
     def absent_phases(self) -> list[Phase]:
         return [phase for phase in self.phases
@@ -1954,9 +2038,9 @@ class Soak:
         ran = [phase for phase in self.phases if phase.state == ABSENT]
         return {
             "ran": len(ran),
-            "ended_by_the_run": sum(1 for phase in ran if phase.cut_by_duration),
+            "ended_by_the_run": sum(1 for phase in ran if phase.ended_by_the_run),
             "cut_short": sum(
-                1 for phase in ran if not phase.cut_by_duration
+                1 for phase in ran if not phase.ended_by_the_run
                 and (phase.ended is None
                      or phase.seconds < self.options.absent_s * PHASE_COMPLETE_SHARE)),
             "schedule_error": sum(1 for phase in ran if phase.schedule_error),
@@ -1965,10 +2049,16 @@ class Soak:
             "planned_capture_gap": sum(
                 1 for phase in ran
                 if phase.planned_gaps and not phase.unplanned_gaps
-                and not phase.cut_by_duration and not phase.schedule_error
+                and not phase.ended_by_the_run and not phase.schedule_error
                 and phase.seconds >= self.options.absent_s * PHASE_COMPLETE_SHARE),
             # A checkpoint or rollover that left no stretch to judge: the
             # phase is not in the judged population and the run says so.
+            # This, and not `planned_capture_gap`, is what the coverage
+            # floor credits for this state: an absent phase is judged from
+            # the moment something was listening again, so one the run
+            # interrupted and could still judge is in `judged` already, and
+            # crediting it twice would loosen the floor by the number of
+            # checkpoints.
             "nothing_left_to_judge": sum(
                 1 for phase in ran
                 if phase.planned_gaps and not phase.unplanned_gaps
@@ -2072,6 +2162,11 @@ class Soak:
         if not self.connect_inds:
             problems.append("the capture held no CONNECT_IND between the two "
                             "registered DKs, so no connection was ever followed")
+        elif not self.connection_packets:
+            problems.append(
+                f"the capture held {self.connect_inds} CONNECT_IND(s) of this "
+                "fixture and not one packet on the connections they handed out, "
+                "so no connection was followed past its own start")
         elif not self.valid_connection_packets:
             problems.append(
                 f"none of the {self.connection_packets} packet(s) on the "
@@ -2111,10 +2206,19 @@ class Soak:
             problems.append(
                 f"{self.forced_stops} capture(s) did not stop on SIGTERM within "
                 f"{options.term_grace_s:g}s and had to be killed")
-        if self.schedule_errors:
+        transitions = self.allowance(len(self.phases))
+        if self.schedule_errors > transitions:
+            # Over the allowance, not over zero. Each failed transition
+            # already takes its own phase out of the verdict, and the
+            # coverage floors are what catch a fixture that is failing
+            # systematically; a run of three days turns the fixture over
+            # about eleven thousand times, and ending it for one DK that
+            # hiccuped would fail the board for the bench's trouble. The
+            # count is reported either way.
             problems.append(
-                f"{self.schedule_errors} fixture transition(s) failed, so the "
-                "cycle is not known for those phases")
+                f"{self.schedule_errors} fixture transition(s) failed, more than "
+                f"the allowance of {transitions}, so the cycle is not known for "
+                "too many phases to judge the run")
         unanswered = sorted(key for key, read in self.board_after.items()
                             if not read["answered"])
         if unanswered:
@@ -2155,12 +2259,14 @@ class Soak:
         """
         options = self.options
         problems = []
-        for state, length, counts in (
-                (ADVERTISING, options.advertising_s,
-                 self.phase_counts(ADVERTISING, options.advertising_s)),
-                (CONNECTED, options.connected_s,
-                 self.phase_counts(CONNECTED, options.connected_s)),
-                (ABSENT, options.absent_s, self.absent_counts())):
+        for state, counts, credited in (
+                (ADVERTISING, self.phase_counts(ADVERTISING, options.advertising_s),
+                 "planned_capture_gap"),
+                (CONNECTED, self.phase_counts(CONNECTED, options.connected_s),
+                 "planned_capture_gap"),
+                # Not the same key: an absent phase the run interrupted and
+                # could still judge is in `judged` already (absent_counts).
+                (ABSENT, self.absent_counts(), "nothing_left_to_judge")):
             meant = counts["ran"] - counts["ended_by_the_run"]
             judged = counts["judged"]
             if not meant:
@@ -2177,14 +2283,14 @@ class Soak:
                     f"{counts['capture_gap']} with a capture gap), so what "
                     f"happened while the fixture was {state} was never measured")
                 continue
-            usable = judged + counts["planned_capture_gap"]
+            usable = judged + counts[credited]
             if usable < options.min_detection_share * meant:
                 problems.append(
                     f"only {judged} of {meant} {state} phases could be judged "
                     f"({counts['cut_short']} cut short, "
                     f"{counts['schedule_error']} with a failed transition, "
                     f"{counts['capture_gap']} with a capture gap, of which "
-                    f"{counts['planned_capture_gap']} were the run's own doing), "
+                    f"{counts[credited]} were the run's own doing), "
                     f"below {options.min_detection_share:.2f}")
         return problems
 
@@ -2270,7 +2376,10 @@ class Soak:
             "fixture": {
                 "peripheral": options.peripheral_address,
                 "central": options.central_address,
-                "advertising_interval_ms": options.adv_interval_ms,
+                # The firmware's, not a plan's: the peripheral role has no
+                # interval command (PERIPHERAL_ADV_INTERVAL_MAX_MS).
+                "advertising_interval_ms": [PERIPHERAL_ADV_INTERVAL_MIN_MS,
+                                            PERIPHERAL_ADV_INTERVAL_MAX_MS],
                 "connection_interval_ms": options.conn_interval_ms,
                 "write_bytes": options.write_bytes,
                 "write_period_ms": options.write_period_ms,
@@ -2552,7 +2661,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--absent", required=True, type=float)
     parser.add_argument("--checkpoint-every", required=True, type=float)
     parser.add_argument("--sample-every", required=True, type=float)
-    parser.add_argument("--adv-interval", required=True, type=int)
     parser.add_argument("--conn-interval", required=True, type=int)
     parser.add_argument("--write-bytes", required=True, type=int)
     parser.add_argument("--write-period", required=True, type=int)
@@ -2652,7 +2760,6 @@ def options_from(args) -> Options:
         absent_s=args.absent,
         checkpoint_every_s=args.checkpoint_every,
         sample_every_s=args.sample_every,
-        adv_interval_ms=args.adv_interval,
         conn_interval_ms=args.conn_interval,
         write_bytes=args.write_bytes,
         write_period_ms=args.write_period,

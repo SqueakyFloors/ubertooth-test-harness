@@ -202,18 +202,18 @@ class SoakTestCase(unittest.TestCase):
     def argv(self, **overrides):
         values = {
             "--out": str(self.out), "--serial": SERIAL, "--channel": "37",
-            "--duration": "13",
+            "--duration": "14",
             "--peripheral-jlink": PERIPHERAL_JLINK,
             "--peripheral-address": PERIPHERAL,
             "--central-jlink": CENTRAL_JLINK, "--central-address": CENTRAL,
-            "--advertising": "1", "--connected": "1", "--absent": "1",
-            "--checkpoint-every": "6", "--sample-every": "1",
-            "--adv-interval": "100", "--conn-interval": "30",
+            "--advertising": "1.5", "--connected": "1", "--absent": "1",
+            "--checkpoint-every": "7", "--sample-every": "1",
+            "--conn-interval": "30",
             "--write-bytes": "244", "--write-period": "50",
-            "--presence-window": "0.35", "--presence-windows": "2",
-            "--liveness-timeout": "3", "--detect-within": "0.5",
+            "--presence-window": "0.5", "--presence-windows": "2",
+            "--liveness-timeout": "4", "--detect-within": "0.5",
             "--connect-within": "0.5", "--acquire-within": "0.75",
-            "--quiet-after": "0.3", "--max-gap": "0.8",
+            "--quiet-after": "0.3", "--max-gap": "1",
             "--min-detection-share": "0.9", "--min-follow-share": "0.8",
             "--min-connection-packets": "3", "--max-restarts": "0",
             "--restart-min-interval": "0.2", "--term-grace": "1",
@@ -450,7 +450,7 @@ class TimingTests(unittest.TestCase):
             "sample_every_s": 60.0, "window_s": 2.0, "windows_needed": 5,
             "liveness_timeout_s": 120.0, "detect_within_s": 10.0,
             "connect_within_s": 10.0, "acquire_within_s": 15.0,
-            "quiet_after_s": 3.0, "max_gap_s": 15.0, "adv_interval_ms": 100,
+            "quiet_after_s": 3.0, "max_gap_s": 15.0,
             "write_period_ms": 50, "min_connection_packets": 3,
         }
         values.update(overrides)
@@ -489,9 +489,14 @@ class TimingTests(unittest.TestCase):
                       "moment",
                       self.refuses(connect_within_s=20.0, acquire_within_s=15.0))
 
-    def test_a_settle_time_as_long_as_the_absence_is_refused(self):
-        self.assertIn("no absent phase would have a stretch to judge",
+    def test_a_settle_time_that_leaves_no_stretch_to_judge_is_refused(self):
+        self.assertIn("too short a stretch to judge it on",
                       self.refuses(quiet_after_s=20.0))
+        # And one that leaves a stretch too short to have held an
+        # advertising event, which would make every absent phase judged and
+        # none of them failable.
+        self.assertIn("too short a stretch to judge it on",
+                      self.refuses(quiet_after_s=19.8))
 
     def test_a_liveness_timeout_the_cycle_itself_would_trip_is_refused(self):
         # The difference from the address soak: this fixture is deliberately
@@ -522,9 +527,11 @@ class TimingTests(unittest.TestCase):
                       self.refuses(duration_s=140.0, checkpoint_every_s=70.0,
                                    sample_every_s=10.0))
 
-    def test_an_advertiser_too_slow_for_its_window_is_refused(self):
-        self.assertIn("advertising events in a 2s presence window",
-                      self.refuses(adv_interval_ms=1000))
+    def test_a_window_too_narrow_for_the_firmwares_own_interval_is_refused(self):
+        # The peripheral role has no interval command, so this is a check on
+        # the window alone against what the firmware really sends.
+        self.assertIn("advertising events in a 0.4s presence window",
+                      self.refuses(window_s=0.4, windows_needed=2))
 
     def test_a_packet_floor_above_what_the_central_sends_is_refused(self):
         self.assertIn("more than the about 600 writes the central makes",
@@ -536,7 +543,7 @@ class TimingTests(unittest.TestCase):
             absent_s=1.0, detect_within_s=1.0, max_gap_s=1.0,
             acquire_within_s=1.0, connect_within_s=1.0, quiet_after_s=0.5,
             window_s=0.5, windows_needed=1, liveness_timeout_s=10.0,
-            checkpoint_every_s=3600.0, adv_interval_ms=100))
+            checkpoint_every_s=3600.0))
 
 
 class VerdictTests(unittest.TestCase):
@@ -563,7 +570,7 @@ class VerdictTests(unittest.TestCase):
             "--advertising": str(self.ADVERTISING),
             "--connected": str(self.CONNECTED), "--absent": str(self.ABSENT),
             "--checkpoint-every": "1800", "--sample-every": "60",
-            "--adv-interval": "100", "--conn-interval": "30",
+            "--conn-interval": "30",
             "--write-bytes": "244", "--write-period": "50",
             "--presence-window": "2", "--presence-windows": "5",
             "--liveness-timeout": "120", "--detect-within": "10",
@@ -866,7 +873,7 @@ class IntervalTests(unittest.TestCase):
                 "--central-jlink", CENTRAL_JLINK, "--central-address", CENTRAL,
                 "--advertising", "20", "--connected", "30", "--absent", "20",
                 "--checkpoint-every", "1800", "--sample-every", "60",
-                "--adv-interval", "100", "--conn-interval", "30",
+                "--conn-interval", "30",
                 "--write-bytes", "244", "--write-period", "50",
                 "--presence-window", "2", "--presence-windows", "5",
                 "--liveness-timeout", "120", "--detect-within", "10",

@@ -820,8 +820,11 @@ class DkShell:
     of them would be two places for a fix to land (followsoak.py).
     """
 
-    def __init__(self, dk: nrfdk.Dk):
+    def __init__(self, dk: nrfdk.Dk, label: str = "advertiser"):
         self.dk = dk
+        # What a message calls this board, since one run can hold two
+        # (followsoak.py drives a central and a peripheral).
+        self.label = label
         self.shell = None
         self.transitions = 0
         self.retries = 0
@@ -847,19 +850,27 @@ class DkShell:
             # A reopen that failed leaves none: every caller handles a
             # SoakError, and an attribute error on the next transition would
             # end the run in a traceback with no report.
-            raise SoakError("the advertiser's shell is not open")
+            raise SoakError(f"the {self.label}'s shell is not open")
         return self.shell
 
-    def command(self, text: str) -> list[str]:
-        """One shell command, retried once on a reopened shell."""
+    def command(self, text: str, timeout: float | None = None) -> list[str]:
+        """One shell command, retried once on a reopened shell.
+
+        ``timeout`` is for the commands the firmware does not answer at once:
+        the central's ``conn start`` does not return until the link is up or
+        its own five seconds are gone, and the shell's ordinary three would
+        time out a link that was merely slow (nrfdk.CONNECT_TIMEOUT_S is what
+        `nrfdk.central` passes for the same command).
+        """
         self.transitions += 1
+        wait = nrfdk.COMMAND_TIMEOUT_S if timeout is None else timeout
         try:
-            return self._shell().command(text)
+            return self._shell().command(text, wait)
         except (nrfdk.NrfDkError, OSError) as first:
             self.retries += 1
             try:
                 self._reopen()
-                return self._shell().command(text)
+                return self._shell().command(text, wait)
             except (nrfdk.NrfDkError, OSError) as second:
                 self.errors += 1
                 raise SoakError(f"'{text}' failed twice: {first}; then {second}") from second

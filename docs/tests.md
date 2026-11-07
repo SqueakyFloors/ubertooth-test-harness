@@ -2708,12 +2708,13 @@ driver's own command line gets, so the plan is judged by what will really run:
 | `detect within` ≤ `advertising` | a phase must outlast its own detection deadline |
 | `presence window` × `presence windows` ≤ `advertising` | sustained presence has to fit |
 | `connect within` ≤ `acquire within` ≤ `connected` | a link allowed up after the follow deadline would miss it for the fixture's own slowness |
-| `quiet after` < `absent` | an absent phase needs a stretch to judge |
+| `absent` − `quiet after` ≥ 0.45 s | an absent phase needs a stretch long enough for a peripheral still advertising to have been heard in |
 | `detect within` ≤ `maximum gap` < `advertising` | a gap is measured inside one phase |
 | `liveness timeout` > `connected` + `absent` + `detect within` | the cycle's own silence must not restart the capture |
 | two cycles ≤ `checkpoint every` ≤ half the duration | above |
 | duration ≥ three cycles | the first advertising phase is not a reacquisition |
 | `minimum connection packets` ≤ the central's writes in a phase | a floor above what the fixture sends can never be met |
+| `presence window` ≥ three advertising events | a window would be empty whenever one event was lost or late |
 
 The liveness one is the real difference from the address soak, and it makes
 this soak's liveness rule weaker on purpose. There, the only silence a healthy
@@ -2728,13 +2729,23 @@ it.
 serial, on an ordinary link), one `central` and one `peripheral` nRF52840 DK.
 `duration` and `channel`; the cycle's `advertising`, `connected`, and `absent`
 legs; `checkpoint every` and `sample every`; what the fixture puts on the air
-(`advertising interval`, `connection interval`, `write bytes`, `write
-period`); `presence window` and `presence windows`; `liveness timeout`;
+(`connection interval`, `write bytes`, `write period`); `presence window` and
+`presence windows`; `liveness timeout`;
 `detect within` and `minimum detection share`; `connect within`, `acquire
 within`, `minimum follow share`, and `minimum connection packets`; `quiet
 after` and `maximum gap`; `maximum restarts` and the optional `maximum memory
 growth`; and `capture file limit` and `capture budget`, which are what keep a
 run of days inside the host's disk.
+
+**The peripheral's advertising interval is the firmware's, not a plan's.**
+The peripheral role advertises connectable at 100 to 150 ms
+(`BT_GAP_ADV_FAST_INT_MIN_2` to `MAX_2` in
+`firmware/nrf52840dk/src/connection.c`, `start_peripheral_locked`) and takes
+no interval command: `adv interval` belongs to the advertiser role, which
+this test does not use. So there is no argument for it, and the
+presence-window check reads the firmware's own slower end — the worst case a
+window has to hold an event in — rather than a figure a plan could set and
+the fixture would ignore.
 
 **Two things it deliberately does not do**, and both are about running beside
 other work. It **writes no firmware**: the first case checks that both DKs

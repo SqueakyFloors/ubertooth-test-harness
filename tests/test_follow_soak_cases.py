@@ -122,8 +122,8 @@ class CaseTests(unittest.TestCase):
         argv = self.cases(**{
             "duration": "1h", "channel": 39, "advertising": "30s",
             "connected": "40s", "absent": "30s", "checkpoint every": "10m",
-            "sample every": "2m", "advertising interval": 250,
-            "connection interval": 50, "write bytes": 100, "write period": 20,
+            "sample every": "2m", "connection interval": 50,
+            "write bytes": 100, "write period": 20,
             "presence window": "3s", "presence windows": 4,
             "liveness timeout": "90s", "detect within": "15s",
             "minimum detection share": 0.8, "connect within": "15s",
@@ -142,9 +142,9 @@ class CaseTests(unittest.TestCase):
                          (found.advertising_s, found.connected_s, found.absent_s))
         self.assertEqual(600.0, found.checkpoint_every_s)
         self.assertEqual(120.0, found.sample_every_s)
-        self.assertEqual((250, 50, 100, 20),
-                         (found.adv_interval_ms, found.conn_interval_ms,
-                          found.write_bytes, found.write_period_ms))
+        self.assertEqual((50, 100, 20),
+                         (found.conn_interval_ms, found.write_bytes,
+                          found.write_period_ms))
         self.assertEqual((3.0, 4), (found.window_s, found.windows_needed))
         self.assertEqual(90.0, found.liveness_timeout_s)
         self.assertEqual((15.0, 0.8),
@@ -246,6 +246,14 @@ class DeadlineTests(unittest.TestCase):
 
 class ArgumentTests(unittest.TestCase):
 
+    def test_the_peripherals_advertising_interval_is_not_a_plan_argument(self):
+        # The peripheral role has no interval command: it advertises at the
+        # firmware's own 100 to 150 ms, and the window check reads that
+        # rather than a figure a plan could contradict.
+        self.assertNotIn("advertising interval",
+                         builtin_catalog().get(TEST_NAME).arguments)
+        self.assertEqual(150, followsoak.PERIPHERAL_ADV_INTERVAL_MAX_MS)
+
     def test_the_timings_a_plan_sets_are_what_the_driver_checks(self):
         found = timings(arguments(**{"duration": "4h", "advertising": "25s",
                                      "connected": "35s", "absent": "25s"}))
@@ -266,8 +274,7 @@ class ArgumentTests(unittest.TestCase):
                  "could end before its own follow deadline"),
                 ({"connect within": "20s"},
                  "would miss the follow deadline measured from the same moment"),
-                ({"quiet after": "30s"},
-                 "no absent phase would have a stretch to judge"),
+                ({"quiet after": "30s"}, "too short a stretch to judge it on"),
                 ({"liveness timeout": "45s"},
                  "the cycle's own silence would restart the capture"),
                 ({"maximum gap": "5s"},
@@ -277,8 +284,8 @@ class ArgumentTests(unittest.TestCase):
                 ({"checkpoint every": "80s"},
                  "would interrupt every absent phase"),
                 ({"duration": "2m"}, "less than three"),
-                ({"advertising interval": 1000},
-                 "advertising events in a 2s presence window"),
+                ({"presence window": "300ms", "presence windows": 2},
+                 "advertising events in a 0.3s presence window"),
                 ({"minimum connection packets": 1000},
                  "writes the central makes"),
                 ({"capture file limit": 8192, "capture budget": 1024},
