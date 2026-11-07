@@ -418,6 +418,11 @@ class PlanCompiler:
         try:
             for step in plan.steps(suite):
                 step_start = len(invocations)
+                # Where the numbering stood before this step, so a step
+                # dropped below (no case of it runs on any of the hosts the
+                # plan left to the bench) gives its numbers back and the IDs
+                # of the suite stay consecutive.
+                step_sequence = sequence
                 definition = self.catalog.get(step.test_name)
                 arguments = step.arguments
                 role_names = tuple(definition.hardware_roles or {})
@@ -721,12 +726,14 @@ class PlanCompiler:
                     # Left to the bench (`each`): the step is left out on
                     # every host here, as a platform mismatch is, so one plan
                     # can hold a step for a platform this bench has not got
-                    # (#154). Its invocations go with it.
+                    # (#154). Its invocations go with it, and so do the
+                    # numbers they took.
                     for host, reasons in case_reasons.items():
                         not_applicable.append(
                             NotApplicable(host, step.test_name, reasons[0])
                         )
                     del invocations[step_start:]
+                    sequence = step_sequence
         except RegistryError as error:
             raise PlanningError(str(error)) from error
         if not invocations:

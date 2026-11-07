@@ -73,6 +73,9 @@
     // finished runs measured, and `runs_on_target` says which steps it runs
     // at all, which is what makes a host eligible for the chosen suite.
     plansByHost: new Map(),
+    // host -> why its list could not be read, so its row says that instead
+    // of going on claiming to be loading.
+    plansErrors: new Map(),
     // The hosts a load is under way for, and their platforms, so an update
     // that changes neither does not start another load; and a token, so a
     // slower answer for hosts already left cannot replace a newer list.
@@ -86,6 +89,10 @@
     // host to register), so it may be moved to a host that can run the
     // chosen suite. The operator's own tick is never moved.
     autoChosen: false,
+    // Whether that first tick has been made at all. Without it a host the
+    // operator unticked would be ticked again by the next heartbeat, so
+    // they could never leave the set empty.
+    autoTicked: false,
     // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
     refOptions: new Map(),
     selected: null, // group_id shown in the live view
@@ -223,10 +230,12 @@
             el("dt", { text: "Last seen" }), el("dd", {}, timeElement(target.last_seen_at)),
             el("dt", { text: "Active run" }), el("dd", {}, active))));
     }));
-    // The first runner to register is ticked, so the page is ready to run
-    // on one host without a choice; after that the operator's ticks stand.
-    if (!state.chosen.size && targets.length) {
+    // The first runner to register is ticked once, so the page is ready to
+    // run on one host without a choice; after that the ticks are the
+    // operator's, including a deliberately empty set (autoTicked).
+    if (!state.autoTicked && !state.chosen.size && targets.length) {
       state.chosen.add(targets[0].host);
+      state.autoTicked = true;
       state.autoChosen = true;
     }
     renderHostChoices();
@@ -333,6 +342,14 @@
     if (!state.targets.has(host)) {
       return "Not registered now; its runner has to be connected to be part of a group.";
     }
+    const failed = state.plansErrors.get(host);
+    if (failed) {
+      // Nothing is known about what the suite would do here, so the row
+      // says that rather than a figure or a reason it has not got. The
+      // next target update tries again (loadPlans).
+      return `Could not read this host's plans: ${failed}. It is read again`
+        + " as soon as the host reports in.";
+    }
     const blocked = hostRefusal(host);
     if (blocked) return blocked;
     const suite = suiteFor(host);
@@ -436,8 +453,13 @@
       state.plans = any.plans;
     }
     state.plansByHost = new Map();
+    state.plansErrors = new Map();
     for (const answer of perHost) {
       if (answer.error) {
+        // Kept per host as well as in the status line: that host's own row
+        // is where a reader looks, and it must not go on saying it is still
+        // reading the plans.
+        state.plansErrors.set(answer.host, answer.error.message);
         problems.push(`Cannot list plans for ${answer.host}: ${answer.error.message}`);
         continue;
       }
@@ -461,6 +483,10 @@
     }
     // A failure from an earlier load is not this list's status.
     $("plan-status").textContent = problems.join(". ");
+    // A host whose own list could not be read is tried again on the next
+    // target update (a heartbeat is enough), by forgetting what this load
+    // was for: nothing else would ask for that host again.
+    if (state.plansErrors.size) state.plansWanted = "";
     const keep = [current, "fast"].find(
       (name) => name && usable.some((plan) => plan.name === name));
     if (keep) select.value = keep;
@@ -772,6 +798,9 @@
       // arrived while it was in flight.
       fetching: false, again: false, fetchedAt: 0, timer: null,
       transcripts: new Map(),
+      // The pills the clock still moves: one per cell that is running with
+      // an estimate, as the last render drew them (tickFills).
+      fills: [],
     };
   }
 
@@ -818,13 +847,11 @@
     $("live").hidden = false;
     $("cancel-status").textContent = "";
     renderGroup();
+    // Every host's own records come with the first fetch of the group, which
+    // backfills a transcript for each host that has a run (and for a host
+    // that gets one later).
     await refreshGroup();
     if (state.selected !== groupId) return;
-    // Each host's own records, which is what its transcript shows. One
-    // request per host, as the group's own answer reads one run at a time.
-    for (const member of (view.detail ? view.detail.members : [])) {
-      if (member.run_id) await loadTranscript(groupId, member.host, member.run_id);
-    }
     if (wanted && view.tab) {
       const member = memberOf(view, view.tab);
       if (member && member.run_id) await openOutputFile(member.run_id, wanted, 0);
@@ -838,8 +865,13 @@
   }
 
   // The group's rows, members and progress, at most one fetch at a time and
-  // at most one every GROUP_POLL_MS while it runs; a record that arrives
-  // during a fetch leaves a trailing one behind it.
+  // at most one every GROUP_POLL_MS; a record that arrives during a fetch
+  // leaves a trailing one behind it.
+  //
+  // A fetch never asks for another by itself: it stores what it read without
+  // scheduling (``storeGroup``), so only a record or an update from the
+  // stream makes the page ask again and a group nothing is happening to is
+  // left alone.
   async function refreshGroup() {
     const view = state.group;
     if (!view) return;
@@ -853,11 +885,15 @@
       if (state.group !== view) return;
       view.detail = detail;
       view.group = detail.group;
-      upsertGroup(detail.group);
+      storeGroup(detail.group);
       for (const member of detail.members) {
-        if (member.run) upsertRun(member.run);
+        if (member.run) storeRun(member.run);
         if (member.run_id && !view.transcripts.has(member.host)) {
+          // This host's transcript, and its own records from the start: a
+          // child accepted after an earlier fetch would otherwise have the
+          // records that arrived before this moment in no transcript at all.
           view.transcripts.set(member.host, newTranscript(member.host, member.run_id));
+          loadTranscript(view.group_id, member.host, member.run_id);
         }
       }
       if (!view.tab || !memberOf(view, view.tab)) {
@@ -1315,6 +1351,11 @@
     const note = $("checklist-note");
     const hosts = ((view && view.group && view.group.members) || [])
       .map((member) => member.host);
+    // The fills of the pills this render draws, so the clock can move them
+    // without the rows being rebuilt: a checklist rebuilt every second
+    // would announce itself to a screen reader and take the focus out of
+    // whatever pill or link a reader was on.
+    if (view) view.fills = [];
     note.textContent = steps.length
       ? `One pill per host that runs the step, and only those: ${hosts.join(", ")}.`
         + " A test no host has reached yet has pending pills; a test a host"
@@ -1324,8 +1365,11 @@
     $("checklist").replaceChildren(...steps.map((step) => {
       const shown = statusWord(step.status);
       // The row's cells in the group's own host order, which is the order
-      // the hosts were asked for.
-      const cells = Object.values(step.hosts);
+      // the hosts were asked for, rather than whatever order the answer's
+      // own object keys come in.
+      const cells = hosts.map((host) => step.hosts[host])
+        .filter(Boolean)
+        .concat(Object.values(step.hosts).filter((cell) => !hosts.includes(cell.host)));
       return el("li", {
         className: `check check-${shown.replace(/ /g, "-")}`,
         "aria-current": shown === "running" ? "step" : null,
@@ -1366,13 +1410,45 @@
         ? `, took ${formatSeconds(cell.elapsed_s)}` : "")
       + (cell.estimated_s ? `, estimated ${formatSeconds(cell.estimated_s)}` : "")
       + (cell.reason ? ` — ${cell.reason}` : "");
-    return hostPill(cell.host, cell.status, {
+    const pill = hostPill(cell.host, cell.status, {
       title: about,
       // Each pill's own button opens that host's transcript of this step.
       label: `Transcript of ${cell.host}: ${about}`,
       onclick: () => showHost(cell.host),
       fill: fill ? { ...fill, what: `${step.name} on ${cell.host}` } : null,
     });
+    if (fill && state.group) {
+      // Followed for as long as this render stands, so the clock can move
+      // this one pill (see tickFills).
+      state.group.fills.push({ pill, cell, what: `${step.name} on ${cell.host}` });
+    }
+    return pill;
+  }
+
+  // Move the fill of every pill that is still running, from the clock
+  // rather than the network, without touching anything else on the page.
+  function tickFills() {
+    const view = state.group;
+    if (!view || !view.fills || !view.fills.length) return;
+    for (const followed of view.fills) {
+      const fill = cellFill(followed.cell);
+      const node = followed.pill.querySelector(".pill-fill");
+      if (!fill || !node) continue;
+      setFill(followed.pill, node, { ...fill, what: followed.what });
+    }
+  }
+
+  // The one place a fill's width and its value for a screen reader are set.
+  function setFill(pill, node, fill) {
+    node.setAttribute("aria-label", fill.what);
+    node.setAttribute("aria-valuenow", String(fill.percent));
+    node.setAttribute("aria-valuetext", fill.over
+      ? "over the estimate" : `${fill.percent}% of the estimate`);
+    // A width is never set from script: the page sets no style attribute at
+    // all, so the fill is one of the stylesheet's own steps, named in a
+    // data attribute.
+    node.setAttribute("data-fill", String(Math.round(fill.percent / 5) * 5));
+    pill.classList.toggle("pill-over", Boolean(fill.over));
   }
 
   // The pill both the checklist and the history list are drawn with: the
@@ -1380,32 +1456,30 @@
   // opens that host's transcript.
   function hostPill(host, status, { title, label, onclick, fill = null } = {}) {
     const shown = statusWord(status);
-    const known = STATUS_TEXT[shown] || ["•", shown];
-    return el("span", {
-      className: `pill pill-${shown.replace(/ /g, "-")}`
-        + (fill && fill.over ? " pill-over" : ""),
+    const known = STATUS_TEXT[shown];
+    const [icon, word] = known || ["•", shown];
+    // A status this page has no entry for is styled as unknown rather than
+    // put into a class of its own, as statusBadge does with one.
+    const kind = known ? shown.replace(/ /g, "-") : "unknown";
+    const node = fill ? el("span", {
+      className: "pill-fill", role: "progressbar",
+      "aria-valuemin": "0", "aria-valuemax": "100",
+    }) : null;
+    const pill = el("span", {
+      className: `pill pill-${kind}`,
       title: title || `${host}: ${shown}`,
     },
-      fill ? el("span", {
-        className: "pill-fill", role: "progressbar",
-        "aria-label": fill.what,
-        "aria-valuemin": "0", "aria-valuemax": "100",
-        "aria-valuenow": String(fill.percent),
-        "aria-valuetext": fill.over
-          ? "over the estimate" : `${fill.percent}% of the estimate`,
-        // A width is never set from script: the page sets no style
-        // attribute at all, so the fill is one of the stylesheet's own
-        // steps, named in a data attribute.
-        "data-fill": String(Math.round(fill.percent / 5) * 5),
-      }) : null,
+      node,
       el("button", {
         type: "button", className: "pill-text",
         "aria-label": label || `${host}: ${shown}`,
         onclick,
       },
         el("span", { className: "pill-host", text: hostLabel(host) }),
-        el("span", { "aria-hidden": "true", text: known[0] }),
-        el("span", { className: "pill-status", text: known[1] })));
+        el("span", { "aria-hidden": "true", text: icon }),
+        el("span", { className: "pill-status", text: word })));
+    if (node) setFill(pill, node, fill);
+    return pill;
   }
 
   // How far a running step is through its estimate, or null when nothing can
@@ -1451,6 +1525,8 @@
   }
 
   // One tab per host of the group, each opening that host's own transcript.
+  // The tabs follow the ARIA tabs pattern: one stop in the tab order, and
+  // the arrow keys move between hosts (onTabKey).
   function renderHostTabs() {
     const view = state.group;
     const members = (view && view.detail && view.detail.members) || [];
@@ -1472,12 +1548,36 @@
     }));
   }
 
-  function showHost(host) {
+  // Arrow keys along the host tabs, as the tabs pattern asks: the tab that
+  // becomes current is the one focus moves to, so a keyboard reader can
+  // reach every host's transcript.
+  function onTabKey(event) {
+    const view = state.group;
+    const members = (view && view.detail && view.detail.members) || [];
+    if (!members.length) return;
+    const hosts = members.map((member) => member.host);
+    const at = Math.max(0, hosts.indexOf(view.tab));
+    const steps = {
+      ArrowRight: at + 1, ArrowDown: at + 1, ArrowLeft: at - 1, ArrowUp: at - 1,
+      Home: 0, End: hosts.length - 1,
+    };
+    if (!(event.key in steps)) return;
+    event.preventDefault();
+    const wanted = (steps[event.key] + hosts.length) % hosts.length;
+    showHost(hosts[wanted], { focus: true });
+  }
+
+  function showHost(host, { focus = false } = {}) {
     const view = state.group;
     if (!view || !memberOf(view, host)) return;
     view.tab = host;
     renderGroup();
-    $("log-heading").scrollIntoView({ block: "nearest" });
+    if (focus) {
+      const tab = $(`host-tab-${host}`);
+      if (tab) tab.focus();
+    } else {
+      $("log-heading").scrollIntoView({ block: "nearest" });
+    }
   }
 
   // The host whose transcript is on show: its log tail, its boards, and the
@@ -1534,11 +1634,15 @@
     const lines = transcript
       ? (transcript.partial ? [...transcript.log, transcript.partial] : transcript.log)
       : [];
+    // Pinned to the end only for a reader who is already there, so a render
+    // for something else (another host's record, a heartbeat) does not pull
+    // somebody reading further up back to the bottom.
+    const atEnd = logNode.scrollHeight - logNode.scrollTop - logNode.clientHeight < 40;
     logNode.textContent = lines.length ? lines.join("\n")
       : member && !member.run_id
         ? `No run on ${member.host}: ${member.error || "it was never started"}.`
         : "Nothing recorded yet.";
-    logNode.scrollTop = logNode.scrollHeight;
+    if (atEnd) logNode.scrollTop = logNode.scrollHeight;
     $("host-files").textContent = member && member.run_id
       ? `Run ${member.run_id} on ${member.host}.` : "";
   }
@@ -1634,6 +1738,14 @@
   // ----- history -----------------------------------------------------------
 
   function upsertRun(run) {
+    storeRun(run);
+    // A run moved, so a cell of it may have: the rows are the group's own
+    // answer, so they are asked for again rather than worked out here.
+    if (state.group && transcriptOf((run || {}).run_id)) scheduleRefresh();
+  }
+
+  // What a run update changes on the page, without asking for anything.
+  function storeRun(run) {
     if (!run || typeof run.run_id !== "string") return;
     state.runs.set(run.run_id, run);
     const view = state.group;
@@ -1641,6 +1753,19 @@
   }
 
   function upsertGroup(group) {
+    storeGroup(group);
+    const view = state.group;
+    if (view && group && view.group_id === group.group_id) {
+      // A host of it may have gained a run, or ended one, which is a cell in
+      // every row.
+      scheduleRefresh();
+    }
+  }
+
+  // What a group update changes on the page, without asking for anything:
+  // this is also how a fetch stores what it just read, so reading the group
+  // can never ask for it again (refreshGroup).
+  function storeGroup(group) {
     if (!group || typeof group.group_id !== "string") return;
     state.groups.set(group.group_id, group);
     for (const member of group.members || []) {
@@ -1651,10 +1776,6 @@
     if (view && view.group_id === group.group_id) {
       view.group = group;
       renderGroup();
-      // A host of it may have gained a run, or ended one, which is a cell
-      // in every row: the rows are the group's answer, so they are asked
-      // for again rather than worked out here.
-      scheduleRefresh();
     }
   }
 
@@ -1958,11 +2079,12 @@
     }
     connect();
     window.setInterval(renderClock, 1000);
-    // The pills' fill moves with the clock: a cell's share of its estimate
-    // is read from the time it started, so nothing is fetched for it.
-    window.setInterval(() => {
-      if (state.group && state.group.group) renderChecklist();
-    }, 1000);
+    // The pills' fill moves with the clock: each running cell's share of
+    // its estimate is read from the time it started, so nothing is fetched
+    // and no row is rebuilt (which would announce the checklist to a screen
+    // reader, and take the focus off a pill, once a second).
+    window.setInterval(tickFills, 1000);
+    $("host-tabs").addEventListener("keydown", onTabKey);
   }
 
   document.addEventListener("DOMContentLoaded", start);

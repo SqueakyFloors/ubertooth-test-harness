@@ -1204,6 +1204,28 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("Tick the host, or hosts, to run the plan on.", button)
         self.assertIn("No ticked host can run this suite", button)
         self.assertIn('$("run-button").disabled = Boolean(reason);', button)
+        # The page ticks the first host to register once, and never again:
+        # a host the operator unticked must not come back on the next
+        # heartbeat, which would start a run there.
+        targets = self.js[self.js.index("function renderTargets()"):
+                          self.js.index("const plansKey = ()")]
+        self.assertIn(
+            "if (!state.autoTicked && !state.chosen.size && targets.length) {",
+            targets)
+        self.assertIn("state.autoTicked = true;", targets)
+        self.assertIn("state.autoChosen = false;", body)
+
+    def test_a_host_whose_plans_cannot_be_read_says_so_and_is_tried_again(self):
+        body = self.js[self.js.index("async function loadPlans()"):
+                       self.js.index("function findSuite(")]
+        self.assertIn("state.plansErrors.set(answer.host, answer.error.message);",
+                      body)
+        # Tried again on the next target update, by forgetting what this
+        # load was for: nothing else would ask for that host again.
+        self.assertIn('if (state.plansErrors.size) state.plansWanted = "";', body)
+        note = self.js[self.js.index("function hostNote(host)"):
+                       self.js.index("function chosenText()")]
+        self.assertIn("Could not read this host's plans", note)
 
     def test_a_group_is_started_on_every_ticked_host_at_once(self):
         body = self.js[self.js.index("async function submitRun("):
@@ -1397,7 +1419,9 @@ class GroupViewTests(unittest.TestCase):
         body = self.js[self.js.index("function renderChecklist()"):
                        self.js.index("function stepPill(step, cell)")]
         self.assertIn("view.detail && view.detail.steps", body)
-        self.assertIn("const cells = Object.values(step.hosts);", body)
+        # The cells in the group's own host order, not the answer's object
+        # key order, so a host name of digits alone cannot reorder them.
+        self.assertIn("const cells = hosts.map((host) => step.hosts[host])", body)
         self.assertIn("One pill per host that runs the step, and only those",
                       body)
         refresh = self.js[self.js.index("async function refreshGroup()"):
@@ -1410,6 +1434,20 @@ class GroupViewTests(unittest.TestCase):
         schedule = self.js[self.js.index("function scheduleRefresh()"):
                            self.js.index("async function loadTranscript(")]
         self.assertIn("GROUP_POLL_MS - (Date.now() - view.fetchedAt)", schedule)
+        # A fetch stores what it read without asking for another, so a group
+        # on display cannot poll itself for ever.
+        self.assertIn("storeGroup(detail.group);", refresh)
+        self.assertIn("storeRun(member.run);", refresh)
+        store = self.js[self.js.index("function storeGroup(group)"):
+                        self.js.index("function renderHistory()")]
+        self.assertNotIn("scheduleRefresh", store)
+        upsert = self.js[self.js.index("function upsertGroup(group)"):
+                         self.js.index("function storeGroup(group)")]
+        self.assertIn("scheduleRefresh();", upsert)
+        # A host whose child run is accepted after an earlier fetch gets its
+        # own transcript, and its records from the start.
+        self.assertIn("loadTranscript(view.group_id, member.host, member.run_id);",
+                      refresh)
 
     def test_each_pill_names_its_host_its_status_and_its_own_transcript(self):
         pill = self.js[self.js.index("function hostPill(host, status,"):
@@ -1417,10 +1455,15 @@ class GroupViewTests(unittest.TestCase):
         # The host and the status, as text, in the pill itself; the
         # stylesheet is what makes it LINUX ✓ PASSED.
         self.assertIn('className: "pill-host", text: hostLabel(host)', pill)
-        self.assertIn('className: "pill-status", text: known[1]', pill)
+        self.assertIn('className: "pill-status", text: word', pill)
         self.assertIn("text-transform: uppercase", self.css)
+        # A status this page has no entry for is styled as unknown, as a
+        # status badge does with one, rather than put into a class of its
+        # own out of controller text.
+        self.assertIn('const kind = known ? shown.replace(/ /g, "-") : "unknown";',
+                      pill)
         step = self.js[self.js.index("function stepPill(step, cell)"):
-                       self.js.index("function hostPill(host, status,")]
+                       self.js.index("function tickFills()")]
         self.assertIn("onclick: () => showHost(cell.host),", step)
         self.assertIn("Transcript of ${cell.host}", step)
         # A short label for the pill, with the full name in its own label.
@@ -1450,19 +1493,30 @@ class GroupViewTests(unittest.TestCase):
         pill = self.js[self.js.index("function hostPill(host, status,"):
                        self.js.index("function cellFill(cell)")]
         self.assertIn('role: "progressbar"', pill)
-        self.assertIn('"aria-valuenow": String(fill.percent)', pill)
-        self.assertIn('"aria-valuetext"', pill)
+        set_fill = self.js[self.js.index("function setFill(pill, node, fill)"):
+                           self.js.index("// How far a running step is")]
+        self.assertIn('node.setAttribute("aria-valuenow", String(fill.percent));',
+                      set_fill)
+        self.assertIn('"aria-valuetext"', set_fill)
         # No style attribute is ever set: the width is one of the
         # stylesheet's own steps, named in a data attribute.
-        self.assertIn('"data-fill": String(Math.round(fill.percent / 5) * 5)', pill)
+        self.assertIn('String(Math.round(fill.percent / 5) * 5)', set_fill)
         for percent in (0, 5, 50, 95, 100):
             self.assertIn(f'[data-fill="{percent}"] {{ width: {percent}%; }}', self.css)
         self.assertNotIn(".style", self.js)
         self.assertIn(".pill-over .pill-fill { animation: pulse", self.css)
-        # It moves between fetches, from the clock rather than the network.
+        # It moves with the clock, and moves nothing else: the fill of each
+        # running pill is set again where it stands, never by drawing the
+        # rows afresh, which would announce the whole checklist to a screen
+        # reader and take the focus off a pill once a second.
+        tick = self.js[self.js.index("function tickFills()"):
+                       self.js.index("function setFill(pill, node, fill)")]
+        self.assertIn('followed.pill.querySelector(".pill-fill")', tick)
+        self.assertIn("setFill(followed.pill,", tick)
+        self.assertNotIn("renderChecklist", tick)
         start = self.js[self.js.index("function start()"):]
-        self.assertIn("if (state.group && state.group.group) renderChecklist();",
-                      start)
+        self.assertIn("window.setInterval(tickFills, 1000);", start)
+        self.assertNotIn("setInterval(renderChecklist", self.js)
 
     def test_the_card_title_is_the_whole_group_s_progress(self):
         self.assertRegex(
@@ -1478,12 +1532,26 @@ class GroupViewTests(unittest.TestCase):
 
     def test_one_transcript_per_host_each_with_its_own_tab(self):
         tabs = self.js[self.js.index("function renderHostTabs()"):
-                       self.js.index("function showHost(host)")]
+                       self.js.index("function onTabKey(event)")]
         self.assertIn('role: "tab"', tabs)
         self.assertIn('"aria-controls": "log"', tabs)
         self.assertIn("view.detail && view.detail.members", tabs)
         self.assertRegex(self.html, r'id="host-tabs"[^>]*role="tablist"')
         self.assertRegex(self.html, r'id="log"[^>]*role="tabpanel"')
+        # One stop in the tab order, and the arrow keys along the hosts, as
+        # the ARIA tabs pattern asks; the tab that becomes current is the
+        # one focus moves to.
+        self.assertIn('tabindex: chosen ? "0" : "-1"', tabs)
+        keys = self.js[self.js.index("function onTabKey(event)"):
+                       self.js.index("function showHost(host,")]
+        for key in ("ArrowRight", "ArrowLeft", "Home", "End"):
+            self.assertIn(key, keys)
+        self.assertIn("showHost(hosts[wanted], { focus: true });", keys)
+        self.assertIn('$("host-tabs").addEventListener("keydown", onTabKey);',
+                      self.js)
+        show = self.js[self.js.index("function showHost(host,"):
+                       self.js.index("function renderTranscript()")]
+        self.assertIn("if (tab) tab.focus();", show)
         # Each host's records go to that host's transcript, and a run this
         # group has nothing to do with is left out (the stream is
         # unfiltered, so every run's records arrive).
@@ -1491,11 +1559,14 @@ class GroupViewTests(unittest.TestCase):
                        self.js.index("function pushLog(transcript, line)")]
         self.assertIn("if (transcript.run_id === runId) return transcript;", body)
         self.assertIn("const live = transcriptOf(runId);", self.js)
-        # The boards, the leases and the log tail are the open host's.
+        # The boards, the leases and the log tail are the open host's, and
+        # the tail follows only a reader who is already at the end of it.
         transcript = self.js[self.js.index("function renderTranscript()"):
                              self.js.index("function renderClock()")]
         self.assertIn("view.transcripts.get(view.tab)", transcript)
         self.assertIn('$("log").setAttribute("aria-labelledby"', transcript)
+        self.assertIn("if (atEnd) logNode.scrollTop = logNode.scrollHeight;",
+                      transcript)
 
     def test_the_summary_the_clock_and_cancel_are_the_group_s(self):
         body = self.js[self.js.index("function renderGroup()"):

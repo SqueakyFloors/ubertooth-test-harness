@@ -346,7 +346,12 @@ def omitted_reason(
     The absences this cannot answer are the ones that need the target's
     resource registry, which the controller has not got: hardware no host
     here has, and a board placed differently from what the test needs. Those
-    steps are counted, and the run itself reports them.
+    steps are counted, and the run itself reports them. A step whose own
+    *cases* are what a platform cannot run belongs with them: building the
+    cases needs the resources they are built for, so only the test-wide
+    needs are read here. On a bench where no host can run any case of such a
+    step the planner leaves it out there (#154) while this still counts it,
+    and that run's own ``not applicable`` record is what says so.
 
     One of those is why a step is reported as left out rather than as the
     run's undoing. A step whose hosts the plan left to the bench

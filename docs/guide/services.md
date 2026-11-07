@@ -260,7 +260,10 @@ word and symbol (colour only reinforces it).
   has them (see [Learned durations](#learned-durations)), and the line says
   how many of them are its own measurements. Hardware the bench has not got
   is not part of this: the controller has no copy of a target's registry,
-  so the run itself is what reports a step whose device is missing.
+  so the run itself is what reports a step whose device is missing — and
+  the same goes for a step whose own cases are what a platform cannot run,
+  which the planner leaves out on that host while this count still includes
+  it.
   **A host is held out of the group** when it could not measure the chosen
   suite, with its own row saying why and its box disabled: a suite no step of
   which runs there, and one holding a
