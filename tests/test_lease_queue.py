@@ -1418,7 +1418,7 @@ class QueueCliTests(QueueFixture):
         web = Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
         js = (web / "app.js").read_text(encoding="utf-8")
         self.assertIn('kind === "lease_queued"', js)
-        self.assertIn('$("live-queued").hidden = live.queued.length === 0;', js)
+        self.assertIn('$("live-queued").hidden = queued.length === 0;', js)
         self.assertIn(
             'Queued behind another command',
             (web / "index.html").read_text(encoding="utf-8"),

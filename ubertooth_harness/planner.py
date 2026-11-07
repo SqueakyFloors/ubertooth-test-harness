@@ -400,6 +400,14 @@ class PlanCompiler:
         ``validate-plan --hardware`` wants: there a registry is named on
         purpose, so a host or a role it cannot provide is either a typo in
         the plan or a bench that is not set up as the plan expects.
+
+        A step a host cannot run at all is left out there whenever the plan
+        left its hosts to the bench (``hosts: each``, the default), even
+        when that is every host this registry has: one plan then holds a
+        Linux-only step and still compiles on a Mac, which is what lets a
+        run group run the same plan on both (#154). Where the plan *named*
+        the hosts and none of them can run the step, the plan contradicts
+        itself and that is still an error.
         """
         invocations = []
         not_applicable: list[NotApplicable] = []
@@ -430,6 +438,15 @@ class PlanCompiler:
                 )
                 hosts, absent = self._selected_hosts(host_selector, strict_hardware)
                 absent_hosts.update(absent)
+                # Whether the plan named this step's hosts or left them to
+                # the bench (`each`). A naming is a promise about those
+                # hosts, so one of them that cannot run the step is a plan
+                # that contradicts itself; `each` means wherever it applies,
+                # so a host that cannot run it is left out there (#154).
+                names_hosts = (
+                    isinstance(host_selector, (tuple, list, str))
+                    and host_selector != "each"
+                )
                 # The plan says this step's hardware is what it measures, so
                 # its absence is blocked rather than left out (`blocked`).
                 required_hardware = (
@@ -454,8 +471,9 @@ class PlanCompiler:
                 # First what the hosts that are here can run at all: the
                 # plan's platforms: and the definition's needs, then the RF
                 # placement each role must have. A host is left out as not
-                # applicable, and a step no host here can run this way is a
-                # plan error, as it was before hardware absence was recorded.
+                # applicable, and a step none of the hosts the plan *named*
+                # can run this way is a plan error, as it was before hardware
+                # absence was recorded.
                 candidates = []
                 # Hosts that are here and cannot run the step at all
                 # (platform, RF placement). Not `blocked` hardware: see
@@ -485,10 +503,14 @@ class PlanCompiler:
                     else:
                         candidates.append(alias)
                 left_out.extend(host_left_out)
-                if not candidates and host_left_out and not absent:
-                    # Every host the step names is here, and none can run it.
-                    # With an absent host among them the step was written for
-                    # a bench this is not, so it is left out instead.
+                if not candidates and host_left_out and not absent and names_hosts:
+                    # Every host the plan named for the step is here, and
+                    # none can run it. With an absent host among them the
+                    # step was written for a bench this is not, so it is left
+                    # out instead; and a step the plan left to the bench
+                    # (`each`) is left out on every host that cannot run it,
+                    # which is what lets one plan hold a Linux-only step and
+                    # still run on a Mac (#154).
                     raise PlanningError(
                         f"{step.test_name}: no selected host can run it: "
                         + "; ".join(
@@ -681,9 +703,30 @@ class PlanCompiler:
                             for host, roles in host_choices.items()
                         )
                     )
-                self._check_some_case_applies(
-                    definition, invocations[step_start:], host_left_out
+                case_reasons = self._cases_that_cannot_run(
+                    definition, invocations[step_start:]
                 )
+                if case_reasons:
+                    named = [f"{item.host}: {item.reason}" for item in host_left_out]
+                    named += [
+                        f"{host}: {reason}"
+                        for host, reasons in case_reasons.items()
+                        for reason in reasons
+                    ]
+                    if names_hosts:
+                        raise PlanningError(
+                            f"{definition.name}: no case can run on any "
+                            "selected host: " + "; ".join(named)
+                        )
+                    # Left to the bench (`each`): the step is left out on
+                    # every host here, as a platform mismatch is, so one plan
+                    # can hold a step for a platform this bench has not got
+                    # (#154). Its invocations go with it.
+                    for host, reasons in case_reasons.items():
+                        not_applicable.append(
+                            NotApplicable(host, step.test_name, reasons[0])
+                        )
+                    del invocations[step_start:]
         except RegistryError as error:
             raise PlanningError(str(error)) from error
         if not invocations:
@@ -711,10 +754,20 @@ class PlanCompiler:
             plan, suite, strict_hardware=strict_hardware
         ).invocations
 
-    def _check_some_case_applies(self, definition, invocations, left_out):
-        """A plan error when, by platform alone, no case of the test can run
-        on any of its hosts (for example only BlueZ cases on macOS hosts)."""
-        reasons = [f"{item.host}: {item.reason}" for item in left_out]
+    def _cases_that_cannot_run(self, definition, invocations) -> dict[str, list[str]]:
+        """Why no case of this step can run, per host, or ``{}`` if one can.
+
+        By platform alone (``split_cases``): a test every case of which
+        needs BlueZ has nothing to run on a macOS host. Empty as soon as one
+        host of the step has a case to run, because the sequencer then
+        leaves the cases that do not apply out per host, which is an
+        ordinary run and not a planning question.
+
+        The caller decides what an answer means: a plan that named the hosts
+        contradicts itself, and one that left them to the bench (``each``)
+        has the step left out on these hosts.
+        """
+        reasons: dict[str, list[str]] = {}
         for invocation in invocations:
             try:
                 cases = definition.command_cases(
@@ -722,16 +775,19 @@ class PlanCompiler:
                     invocation.resource_identities,
                 )
             except CatalogError:
-                return  # the run reports a builder error; nothing to decide
+                return {}  # the run reports a builder error; nothing to decide
             capabilities = platform_capabilities(
                 invocation.host, self.registry.get(invocation.host).platform
             )
             runnable, omitted = split_cases(cases, capabilities)
             if runnable:
-                return
-            reasons += sorted({f"{invocation.host}: {reason}" for _case, reason in omitted})
-        if invocations:
-            raise PlanningError(
-                f"{definition.name}: no case can run on any selected host: "
-                + "; ".join(reasons)
+                return {}
+            reasons.setdefault(
+                invocation.host,
+                sorted({reason for _case, reason in omitted})
+                # A test with no case at all is a catalog question, not a
+                # platform one, and the run says so; this keeps the answer
+                # about the host either way.
+                or [f"no case of {definition.name} can run on this host"],
             )
+        return reasons

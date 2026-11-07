@@ -194,12 +194,12 @@ controller is on another machine; a browser that asks `GET /` for HTML is
 sent there). It is three static files in `ubertooth_harness/web/` (vanilla
 JavaScript, no build step, nothing loaded from another site) and uses only the
 REST and `/ws/live` endpoints below. Each section is a card: Targets and
-Run setup side by side on a wide window, Live run and History full width
+Run setup side by side on a wide window, Live run group and History full width
 below, one column on a narrow one. It follows the system light or dark
 setting, uses the system font, and shows every status as a pill with its
 word and symbol (colour only reinforces it).
 
-![The web GUI with one target, a live run and its history](../gui.png)
+![The web GUI with two targets, a live run group with a pill per host on every row, and its history](../gui.png)
 
 - **Targets:** one card per registered target: host, host name, OS, Python,
   Ubertooth serials (or why they are unknown), online/offline (plus busy
@@ -208,7 +208,10 @@ word and symbol (colour only reinforces it).
 - **Run setup:** git ref (default branch, branches and tags from
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
   only runnable plans are offered, and plans of planned tests such as
-  `backlog` are named as not runnable), target, whether to build the ref first,
+  `backlog` are named as not runnable), the **hosts** to run it on (one tick
+  per registered host, each ticked host getting its own child run of the
+  plan, started together as one [run group](#run-groups-one-plan-on-several-hosts)),
+  whether to build the ref first,
   "Flash the firmware to the boards first" (ticked by default; disabled,
   with a note, while Build is unticked; see [Flashing the boards with the
   run's build](builds-and-firmware.md#flashing-the-boards-with-the-runs-build)), and the three
@@ -239,24 +242,28 @@ word and symbol (colour only reinforces it).
   the suite list, with the `--artifact` line to run it with, because a run
   started from the GUI cannot carry one and would be refused before its
   tests.
-  Everything under the selectors is what the **chosen target** would do with
-  the suite: the plan list is fetched for that target, so the estimate adds
-  up only the steps it runs, and so do the build options the suite asks for.
+  Everything under the selectors is what **each host you tick** would do with
+  the suite: one plan list is fetched per registered host, so each host's row
+  says how many of the suite's tests run there and what they are estimated to
+  take, and the estimate line has one sentence per host of the group. The
+  build options are the union of what those hosts need, since a step one host
+  runs has to be built.
   A step whose plan entry names other hosts (`Recover AFH map` in the
   release suite, which names the host its ESP32 Classic peers are on), or
-  one the target's own platform does not run (`Exclusive Ubertooth topology`
-  on a macOS target), is left out of the figure and then named, with the
-  time it takes on the host that does run it: the release suite is about
-  654.5 s on a target that step does not name, and 1174.5 s counting it.
-  Choosing another target reloads the list and keeps the plan and suite you
-  had chosen. A suite no step of which runs on the chosen target says that
-  instead of a time. Estimates learned on the target are used wherever it
+  one a host's own platform does not run (`Exclusive Ubertooth topology`
+  on a macOS target), is left out of that host's figure and then named, with
+  the time it takes on the host that does run it: the release suite is about
+  654.5 s on a host that step does not name, and 1174.5 s counting it.
+  Ticking another host reloads its list and keeps the plan and suite you
+  had chosen. A suite no step of which runs on a host says that
+  instead of a time. Estimates learned on a host are used wherever it
   has them (see [Learned durations](#learned-durations)), and the line says
   how many of them are its own measurements. Hardware the bench has not got
-  is not part of this: the controller has no copy of the target's registry,
+  is not part of this: the controller has no copy of a target's registry,
   so the run itself is what reports a step whose device is missing.
-  **Run is held** for a suite this target could not measure, with the reason
-  above the button: a suite no step of which runs there, and one holding a
+  **A host is held out of the group** when it could not measure the chosen
+  suite, with its own row saying why and its box disabled: a suite no step of
+  which runs there, and one holding a
   step whose own hardware is what it measures
   ([`required hardware:`](plans-and-resources.md#hardware-a-step-is-about-blocked-not-left-out))
   whose `hosts:` names no host of the run — a release gate that run could
@@ -266,20 +273,46 @@ word and symbol (colour only reinforces it).
   Classic peer (acceptor), ESP32 Classic peer (initiator) there". Starting
   it anyway through the API is refused the same way (422), and a run group
   is judged by its hosts together, so the release plan across the bench
-  starts and measures the gate once. Everything else about the bench is the
+  starts and measures the gate once: ticking both hosts is what makes that
+  suite runnable, and **Run is held** only while no ticked host can run it.
+  Everything else about the bench is the
   run's to report: hardware a host of the run has not got blocks that step
   and fails the run, and the unrelated tests still run.
-- **Live run:** the suite's tests as a checklist that ticks from the run's
+- **Live run group:** one row per step of the group — Build, Flash the
+  boards, Preflight, then one row per test — each carrying **one pill per
+  host that runs that step, and only those**: a Linux-only test shows a
+  Linux pill alone, a test both hosts run shows one each, side by side, with
+  its own status (`LINUX ✓ PASSED`, `MAC ✗ FAILED`, `LINUX ○ PENDING`;
+  always the host, text and a symbol). A host that does not run a step has no
+  pill in that row, which is how a test the planner left out there is read;
+  a test the run ended before reaching says `not reached`. The rows and every
+  pill's status come from `GET /api/run-groups/{group_id}`, so nothing the
+  page shows is worked out from records twice over. While a step runs on a
+  host, its pill fills from the time it has taken against what that step is
+  estimated to take there, and keeps pulsing once it is past it; the fill is
+  decorative (the pill's own text still says the status) and carries
+  `role=progressbar` with its value for a screen reader. The card's title bar
+  is the same thing for the whole group: the steps its hosts have finished
+  against the steps they are planned to take.
+  The summary, the clock and Cancel are the group's: its status (passed only
+  when every host it asked for ran and passed), the hosts and how many
+  started, elapsed time against the **longest** host's estimate rather than
+  the sum, because the hosts run at the same time, and one Cancel that stops
+  every child.
+  The transcript below has **one tab per host**, each streaming that host's
+  own runner: its log tail (the last 200 log lines in a scrolling console
+  panel), its Boards list, and its lease lines. Every pill is a button that
+  opens the tab of the host it names.
+  A checklist row ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
-  plus symbol), under each test the [known target](../reference/run-records.md#known-targets) it ran
-  against or a line saying it had none, the current stage (building,
-  preflight, tests), elapsed time,
-  a Cancel button, a "Queued behind another command" line for each device the
+  plus symbol), with the [known target](../reference/run-records.md#known-targets) each invocation ran
+  against or a line saying it had none, and a "Queued behind another command"
+  line for each device the
   run waited behind before it started (see
   [Why a board can be free and still nobody's](leases.md#why-a-board-can-be-free-and-still-nobodys),
-  shown only when it waited behind somebody), and the last 200 log lines in a
-  scrolling console panel. A countdown is shown only when
-  every test in the suite has an estimate. Every implemented test has a
+  shown only when it waited behind somebody). A countdown is shown only when
+  every step of every host has an estimate, which a group that flashes its
+  boards has not got. Every implemented test has a
   catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each
   coverage profile: fixed seconds, plus a multiple of its `duration` argument
   for tests that capture (for example comprehensive `Raw receive` is 9 s plus
@@ -295,15 +328,15 @@ word and symbol (colour only reinforces it).
   board's firmware watchdog record: each board with the times it has reset
   itself during this run and the last warning if there was one (see
   [Firmware watchdog](transitions-guards-watchdog.md#firmware-watchdog)). An estimate is per invocation: `Ubertooth: each` runs the test
-  once per board the target selects. Run setup counts such a test once and
-  says so; once the run's manifest arrives (before preflight) the live
-  checklist lists every planned invocation on the target with its estimate,
-  so the countdown counts every board, and each invocation's estimate is the
+  once per board a host selects. Run setup counts such a test once and
+  says so; once a host's manifest arrives (before preflight) its cells in
+  the checklist carry every planned invocation on that host, with its
+  estimate, so the countdown counts every board, and each invocation's
+  estimate is the
   one [learned on that target](#learned-durations) once its own runs have
-  measured it. Build and preflight time are not included: the countdown
-  starts with the first test. Otherwise the view shows elapsed time and says
-  why. Under each test is a line of links, one per file that test saved (the
-  build's and preflight's are listed under the checklist), with the stream,
+  measured it. Under each cell is a line of links, one per file that
+  invocation saved, named with the host it was saved on (the
+  build's and preflight's are listed under the checklist, per host), with the stream,
   the size and the number of checks that read it in the link's tooltip and
   the failure color on a file a check came out against; opening one shows a
   bounded page of it in a panel beside the log tail, black on white in a
@@ -313,11 +346,15 @@ word and symbol (colour only reinforces it).
   that runner's own run directory, so the controller asks the runner for the
   page; while the runner is not connected the file is listed as `name (on
   the target)` and is not a link. The view is linkable as
-  `/ui/#run=<run_id>`, and `/ui/#run=<run_id>&file=<path>` opens that file.
-- **History:** every run, newest first, with started/finished times, ref,
-  plan/suite, target and status, a link to its `report.md`, and for a run
-  that did not pass a failure summary (each failed phase or test with its
-  reason and last output lines, then the run's own reason).
+  `/ui/#group=<group_id>`; `/ui/#run=<run_id>` opens the group that run is a
+  host of, with that host's transcript, and `&file=<path>` opens that file.
+- **History:** every run group, newest first, with started/finished times,
+  ref, plan/suite, one pill per host with that host's own result, the
+  group's status, a link to each host's `report.md`, and for a group that
+  did not pass a failure summary host by host (each failed phase or test
+  with its reason and last output lines, then each run's own reason, and a
+  host that got no run at all with the reason it did not). A run of one host
+  is listed as a group of one, by its own run ID.
 
 Every HTTP response carries `Content-Security-Policy: default-src 'self';
 script-src 'self'; style-src 'self'; connect-src 'self' ws://<host>;
@@ -334,9 +371,10 @@ same run request with a `hosts` list and starts **one child run per host**,
 together. Each child is an ordinary run of its own host, with its own runner,
 boards, leases and run directory, and records the group it belongs to as
 `group_id` in its `run.json`; the runner protocol is unchanged, so a target
-needs nothing new. The GUI side of this (choosing several hosts, a pill per
-host on every row, a transcript tab per host) is the next step and is not
-built yet, so for now a group is started through the API.
+needs nothing new. In the GUI, the hosts are ticked in Run setup, every row
+of the live checklist carries one pill per host that runs that step and only
+those, and the transcript has one tab per host (see **Live run group**
+above).
 
 The ref is resolved once and every child is sent that commit, so a branch
 that moves while the runs are starting cannot leave one host on another

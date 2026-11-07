@@ -349,12 +349,14 @@ def omitted_reason(
     steps are counted, and the run itself reports them.
 
     One of those is why a step is reported as left out rather than as the
-    run's undoing: where every host a step names is in that bench's registry
-    and none of them can run it, compiling the suite is a plan error there
-    and the run is refused outright ("no selected host can run it"). Which
-    hosts that bench has is exactly what is not known here, so what is
-    reported is the one answer that holds either way: this target does not
-    run the step.
+    run's undoing. A step whose hosts the plan left to the bench
+    (``hosts: each``) is left out on a host that cannot run it, which is
+    what this answers; a step that *names* its hosts, where every one of
+    them is in that bench's registry and none can run it, is a plan error
+    there and the run is refused outright ("no selected host can run it").
+    Which hosts that bench has is exactly what is not known here, so what
+    is reported is the one answer that holds either way: this target does
+    not run the step.
     """
     if not target:
         return ""

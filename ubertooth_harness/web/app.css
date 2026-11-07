@@ -193,6 +193,21 @@ code { overflow-wrap: anywhere; }
   font-size: 0.8rem; font-weight: 700; margin: 0;
   text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
 }
+/* The live card's title bar is the whole group's progress bar: the steps its
+   hosts have finished against the steps they are planned to take, gray on
+   gray behind the title, with the count written beside it. The bar carries
+   the progressbar role and its own value, so it is not only a shade. */
+.panel-head-progress { position: relative; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+.panel-head-progress h2, .panel-head-progress .group-progress-text { position: relative; }
+.group-progress {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  background: var(--line-strong); opacity: 0.55;
+}
+.group-progress-text {
+  margin: 0; font-size: 0.75rem; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  font-variant-numeric: tabular-nums; margin-left: auto;
+}
 .panel-body { padding: 1rem 1.1rem 1.1rem; }
 
 .subpanel {
@@ -303,6 +318,100 @@ button.primary:disabled:hover { background: var(--primary); }
 .field-check input { width: 1.05rem; height: 1.05rem; margin: 0; accent-color: var(--primary); }
 .field-check label { font-weight: normal; }
 
+/* ----- the hosts a group runs on ---------------------------------------- */
+
+/* One row per registered host: a tick, what it is, and what the chosen
+   suite would do there. A host the suite runs nothing on cannot be part of
+   the group, and its row says why rather than the run finding out. */
+fieldset.hosts {
+  margin: 0; padding: 0.7rem 0.85rem 0.85rem;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-small);
+}
+fieldset.hosts legend { font-weight: 600; font-size: 0.9rem; padding: 0 0.3rem; }
+.host-choices { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.host-choice {
+  display: grid; grid-template-columns: 1.1rem minmax(0, 1fr); gap: 0.2rem 0.5rem;
+  align-items: start;
+}
+.host-choice input { width: 1.05rem; height: 1.05rem; margin: 0.25rem 0 0; accent-color: var(--primary); }
+.host-choice label {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+  font-weight: 600;
+}
+.host-choice .hint { grid-column: 2; margin: 0; }
+.host-choice-out .host-choice-name { text-decoration: line-through; }
+.status-platform {
+  color: var(--neutral-fg); background: var(--neutral-bg);
+  border-color: var(--neutral-line);
+}
+
+/* ----- per-host pills --------------------------------------------------- */
+
+/* One pill per host that runs a step, and only those. The pill's text says
+   the host and the status; while the step runs there, a fill shows the time
+   it has taken against what it is estimated to take, which is decorative
+   (the text still says the status) and carries a progressbar role. */
+.pills { display: flex; flex-wrap: wrap; gap: 0.3rem; flex: none; }
+.pill {
+  position: relative; display: inline-flex; align-items: stretch;
+  border-radius: 999px; border: 1px solid var(--neutral-line);
+  background: var(--neutral-bg); overflow: hidden;
+}
+.pill-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  background: var(--run-fg); opacity: 0.3;
+}
+.pill-text {
+  position: relative; background: none; border: 0; border-radius: 999px;
+  min-height: 1.6rem; padding: 0.05rem 0.65rem; gap: 0.3rem;
+  font-size: 0.78rem; font-weight: 700; letter-spacing: 0.02em;
+  text-transform: uppercase; white-space: nowrap;
+  color: var(--neutral-fg); cursor: pointer;
+}
+.pill-text:hover { background: rgba(127, 127, 127, 0.18); }
+.pill-host { font-weight: 800; }
+.pill-passed { background: var(--ok-bg); border-color: var(--ok-line); }
+.pill-passed .pill-text { color: var(--ok-fg); }
+.pill-failed, .pill-error, .pill-blocked, .pill-lost {
+  background: var(--bad-bg); border-color: var(--bad-line);
+}
+.pill-failed .pill-text, .pill-error .pill-text, .pill-blocked .pill-text,
+.pill-lost .pill-text { color: var(--bad-fg); }
+.pill-running, .pill-starting {
+  background: var(--run-bg); border-color: var(--run-line);
+}
+.pill-running .pill-text, .pill-starting .pill-text { color: var(--run-fg); }
+.pill-not-reached .pill-text, .pill-not-applicable .pill-text,
+.pill-skipped .pill-text { opacity: 0.8; }
+/* Past its estimate: the fill stays full and keeps moving, so a step that
+   is taking longer than it should is visible rather than simply finished. */
+.pill-over .pill-fill { animation: pulse 1.6s ease-in-out infinite; }
+
+/* The fill of a pill, and of the card's own title bar, in twentieths. A
+   width is never set from script: the page sets no style attribute at all,
+   so each step is a rule here. */
+[data-fill="0"] { width: 0%; }
+[data-fill="5"] { width: 5%; }
+[data-fill="10"] { width: 10%; }
+[data-fill="15"] { width: 15%; }
+[data-fill="20"] { width: 20%; }
+[data-fill="25"] { width: 25%; }
+[data-fill="30"] { width: 30%; }
+[data-fill="35"] { width: 35%; }
+[data-fill="40"] { width: 40%; }
+[data-fill="45"] { width: 45%; }
+[data-fill="50"] { width: 50%; }
+[data-fill="55"] { width: 55%; }
+[data-fill="60"] { width: 60%; }
+[data-fill="65"] { width: 65%; }
+[data-fill="70"] { width: 70%; }
+[data-fill="75"] { width: 75%; }
+[data-fill="80"] { width: 80%; }
+[data-fill="85"] { width: 85%; }
+[data-fill="90"] { width: 90%; }
+[data-fill="95"] { width: 95%; }
+[data-fill="100"] { width: 100%; }
+
 .form-actions {
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;
   padding-top: 0.9rem; border-top: 1px solid var(--line);
@@ -393,7 +502,6 @@ button.primary:disabled:hover { background: var(--primary); }
 }
 .check .status { min-width: 6.5rem; }
 .check-name { flex: 1 1 8rem; min-width: 0; overflow-wrap: anywhere; }
-.check-estimate { flex: none; margin: 0; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .check .reason { flex-basis: 100%; padding-left: 2.1rem; font-size: 0.85rem; }
 .check-target { overflow-wrap: anywhere; }
 .check-running {
@@ -409,6 +517,25 @@ button.primary:disabled:hover { background: var(--primary); }
 
 .status-running > [aria-hidden="true"] { animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.35; } }
+
+/* ----- one transcript per host ------------------------------------------ */
+
+/* A tab per host of the group, each opening that host's own transcript:
+   every pill in the checklist opens the tab of the host it names. */
+.host-tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.6rem; }
+.host-tab {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  min-height: 2rem; padding: 0.2rem 0.7rem; font-size: 0.85rem;
+}
+.host-tab .hint { margin: 0; font-size: 0.78rem; }
+.host-tab-current {
+  border-color: var(--primary); box-shadow: inset 0 -3px 0 var(--primary);
+}
+.host-tab-name { font-weight: 700; }
+.host-files {
+  margin: 0.35rem 0 0; color: var(--muted); font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
 
 .log {
   margin: 0; padding: 0.75rem 0.9rem; max-height: 24rem; min-height: 6rem; overflow: auto;
@@ -471,6 +598,8 @@ td.actions, .history td code { white-space: nowrap; }
 td.actions button, td.actions .button-link {
   min-height: 1.9rem; padding: 0.2rem 0.65rem; font-size: 0.8rem;
 }
+/* One pill per host of the group, so a row says which host did what. */
+.host-cell { display: flex; flex-wrap: wrap; gap: 0.3rem; }
 .panel-history .empty { padding-top: 0.75rem; }
 
 .failures { list-style: none; margin: 0.8rem 0 0; padding: 0; display: grid; gap: 0.6rem; }

@@ -55,10 +55,12 @@
           </div>
         </div>
         <p id="suite-tests" class="hint suite-tests"></p>
-        <div class="field">
-          <label for="target">Target</label>
-          <select id="target" name="target" required></select>
-        </div>
+        <fieldset class="field hosts" aria-describedby="hosts-note">
+          <legend>Targets</legend>
+          <ul id="host-choices" class="host-choices"></ul>
+          <p id="hosts-note" class="hint">Every host you tick gets its own run of the plan, started together as one run group; the group passes only if every one of them passes.</p>
+          <p id="hosts-status" class="hint" role="status"></p>
+        </fieldset>
         <div class="field field-check">
           <input type="checkbox" id="build" name="build" checked>
           <label for="build">Build the ref on the target first</label>
@@ -102,11 +104,15 @@
   </section>
 
   <section class="panel panel-live" aria-labelledby="live-heading">
-    <div class="panel-head">
-      <h2 id="live-heading">Live run</h2>
+    <div class="panel-head panel-head-progress">
+      <div id="group-progress" class="group-progress" role="progressbar"
+           aria-labelledby="live-heading" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow="0" aria-valuetext="nothing to do yet" hidden></div>
+      <h2 id="live-heading">Live run group</h2>
+      <p id="group-progress-text" class="group-progress-text"></p>
     </div>
     <div class="panel-body">
-      <p id="live-empty" class="empty">No run selected. Start one, or choose Watch on a target or a history row.</p>
+      <p id="live-empty" class="empty">No run group selected. Start one, or choose Watch on a target or a history row.</p>
       <div id="live" class="live" hidden>
         <div class="live-overview">
           <dl id="live-summary" class="summary"></dl>
@@ -115,21 +121,24 @@
             <p id="live-estimate" class="hint"></p>
           </div>
           <div class="live-actions">
-            <button type="button" id="cancel-button" class="danger" hidden>Cancel run</button>
+            <button type="button" id="cancel-button" class="danger" hidden>Cancel the group</button>
             <p id="cancel-status" class="hint" role="status"></p>
           </div>
+        </div>
+        <div class="live-checklist">
+          <h3 id="checklist-heading">Checklist</h3>
+          <p id="checklist-note" class="hint"></p>
+          <ol id="checklist" class="checklist" aria-labelledby="checklist-heading"
+              aria-live="polite" aria-relevant="additions text"></ol>
+        </div>
+        <div class="live-log">
+          <h3 id="log-heading">Transcript</h3>
+          <div id="host-tabs" class="host-tabs" role="tablist" aria-labelledby="log-heading"></div>
           <div id="live-boards" class="live-boards" hidden>
             <h3 id="boards-heading">Boards</h3>
             <ul id="boards" class="boards" aria-labelledby="boards-heading"></ul>
             <p id="bootloader-expected" class="hint" hidden></p>
           </div>
-        </div>
-        <div class="live-checklist">
-          <h3 id="checklist-heading">Checklist</h3>
-          <ol id="checklist" class="checklist" aria-labelledby="checklist-heading"
-              aria-live="polite" aria-relevant="additions text"></ol>
-        </div>
-        <div class="live-log">
           <div id="live-queued" class="live-queued" hidden>
             <h3 id="queued-heading">Queued behind another command</h3>
             <ul id="queued" class="queued" aria-labelledby="queued-heading"></ul>
@@ -138,8 +147,8 @@
             <h3 id="pairings-heading">Leases from a wired pair</h3>
             <ul id="pairings" class="pairings" aria-labelledby="pairings-heading"></ul>
           </div>
-          <h3 id="log-heading">Log tail</h3>
-          <pre id="log" class="log" tabindex="0" aria-labelledby="log-heading"></pre>
+          <pre id="log" class="log" tabindex="0" role="tabpanel" aria-labelledby="log-heading"></pre>
+          <p id="host-files" class="host-files"></p>
         </div>
         <div id="live-file" class="live-file" hidden>
           <h3 id="file-heading">Saved output file</h3>
@@ -163,15 +172,15 @@
     <div class="panel-body">
       <div class="table-wrap">
         <table class="history">
-          <caption>Runs, newest first</caption>
+          <caption>Run groups, newest first; a run of one host is a group of one</caption>
           <thead>
             <tr>
               <th scope="col" class="time">Started</th>
               <th scope="col" class="time">Finished</th>
-              <th scope="col">Run</th>
+              <th scope="col">Group</th>
               <th scope="col">Ref</th>
               <th scope="col">Plan / suite</th>
-              <th scope="col">Target</th>
+              <th scope="col">Hosts</th>
               <th scope="col">Status</th>
               <th scope="col" class="actions">Actions</th>
             </tr>
