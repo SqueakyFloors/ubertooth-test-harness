@@ -18,7 +18,7 @@ clocks, lets libbtbb derive UAP_A; ID packets (no header) for LAP_B, one with
 a single access-code bit error; and decoy records with a valid LAP_DECOY
 access code that cb_rx must skip. Each record's timestamp also puts its
 access code a chosen distance past a CLKN edge, so every packet line's
-CLK1-6 offset is a figure computed here rather than merely a number.
+clock offset is a figure computed here rather than merely a number.
 
 A transition step runs ``python <this file> ...`` as an ordinary logged
 command. It imports only the standard library, so it runs from any working
@@ -166,10 +166,10 @@ CLK100NS_PER_SLOT = 2 * CLK100NS_PER_CLKN
 BANK_100NS = SYMBOLS * 10
 # How far past a CLKN edge each record's access code sits, one step further
 # per record. Every value stays under one CLKN tick, so each record's CLKN
-# still comes out as the central clock it was built for, while the CLK1-6
+# still comes out as the central clock it was built for, while the clock
 # offset the packet line reports differs from record to record: a fixture
 # with one offset throughout would pass against a decoder that printed a
-# constant (libbtbb#98, harness#357).
+# constant (harness#357).
 CLK_SLACK_STEP = 195
 
 LAP_A, UAP_A = 0x5A3C96, 0x6B   # piconet with headers: LAP and UAP decode
@@ -214,7 +214,7 @@ def _records() -> tuple[Record, ...]:
         A[7],
     )
     # One slack step further per record, so no two packet lines report the
-    # same CLK1-6 offset.
+    # same clock offset.
     return tuple(replace(record, slack=CLK_SLACK_STEP * (index + 1))
                  for index, record in enumerate(records))
 
@@ -235,10 +235,13 @@ def record_clk100ns(record: Record) -> int:
 
 
 def clk_offset(record: Record) -> int:
-    """The CLK1-6 offset a packet line reports for this record.
+    """The clock offset a packet line reports for this record.
 
     libubertooth's own arithmetic (cb_rx): the 100 ns from the rising edge of
-    CLKN to the first bit of the access code, within one slot.
+    CLKN to the first bit of the access code, within one slot. Not the CLK1-6
+    slot offset btbb_piconet_get_clk_offset() reports, which is a different
+    quantity in different units and which the fork reads only on a live
+    follow.
     """
     return ((record_clk100ns(record) + SYNC_AT * 10 + CLK100NS_PER_SLOT
              - BANK_100NS) % CLK100NS_PER_SLOT)
@@ -272,7 +275,7 @@ def record_bytes(record: Record, host_time: int) -> bytes:
     )
     # cb_rx: clkn = (clkn_high << 20) + (clk100ns + offset*10 - 4000) / 3125,
     # offset being the sync word's first symbol. The record's own slack is
-    # what the packet line reports as its CLK1-6 offset (clk_offset()).
+    # what the packet line reports as its clock offset (clk_offset()).
     header = struct.pack(
         "<BBBBIbbbB2x", record.pkt_type, record.status, record.channel, 0,
         record_clk100ns(record), -40, -90, -70, 1,
@@ -327,7 +330,7 @@ def fixture_base_time(now=None) -> int:
 
 def expected_packets(variant: str = "full", lap: int | None = None,
                      max_errors: int = 2) -> list[tuple[int, int, int, int]]:
-    """(LAP, access-code errors, channel, CLK1-6 offset) of each packet line.
+    """(LAP, access-code errors, channel, clock offset) of each packet line.
 
     In the order the lines appear. The offset is the figure libubertooth
     computes from the record's own timestamp, so a packet line is checked

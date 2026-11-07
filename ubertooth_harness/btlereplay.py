@@ -11,7 +11,7 @@ CRC -- so a fixture is written from the Bluetooth Core specification's own
 encoding and the decode is known in advance.
 
 This module builds two such files. Nothing in either was received over the
-air: every address, identifier and parameter below is made up here.
+air: every address, identifier, and parameter below is made up here.
 
 ``connection`` is a promiscuous capture of one connection. It holds the five
 parameter records promiscuous mode sends as it works out which connection it
@@ -126,7 +126,7 @@ def connect_ind() -> bytes:
     An advertising PDU: the advertising access address, the header (type 5
     with the initiator's address marked random), and the payload the Core
     specification lays out -- InitA, AdvA, the connection's access address,
-    the CRC seed, the transmit window, the interval, latency and timeout, the
+    the CRC seed, the transmit window, the interval, latency, and timeout, the
     channel map, and the hop increment beside the clock accuracy.
     """
     payload = (

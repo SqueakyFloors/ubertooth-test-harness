@@ -60,7 +60,7 @@ def bits_to_int(bits):
 
 
 def decode_record(record, laps, max_errors=2):
-    """(LAP, errors, channel, CLK1-6 offset, packet) as cb_rx sees one record.
+    """(LAP, errors, channel, clock offset, packet) as cb_rx sees one record.
 
     None where cb_rx skips the record or finds no access code in it. The
     offset is libubertooth's own arithmetic, written out here a second time:

@@ -15,7 +15,7 @@ the air. Two of them:
   halves of what the capture found: the five parameter records promiscuous
   mode sends, which carry no packet and so reach no capture file, and the
   CONNECT_IND that opened the connection, whose interval, latency, timeout,
-  channel map and hop increment say what the data packets on that access
+  channel map, and hop increment say what the data packets on that access
   address belong to;
 - one advertisement carrying three Manufacturer Specific Data fields, which
   is how the company identifier table is read: libbtbb names the two
@@ -198,6 +198,6 @@ def btle_replay_cases(arguments, _resources, _resource_identities, *, now=None):
                          source=_CONNECTION, returncodes=(1,),
                          patterns=(_NEEDS_A_MODE,),
                          forbidden=(_PACKET_LINE_PATTERN,)),
-        ), "refused (exit 1) naming -f, -n and -p; no packet decoded"),
+        ), "refused (exit 1) naming -f, -n, and -p; no packet decoded"),
     ]
     return tuple(cases)

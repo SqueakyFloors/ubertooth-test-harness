@@ -1496,7 +1496,7 @@ every packet, because the harness writes the input. The fixture
 errors, chosen channels, chosen host times, chosen distances from a CLKN
 edge, and decoy records, so the expected output is computed rather than
 pattern-matched: which packet lines appear, in what order, with which systime
-and which CLK1-6 offset, which ones a filter drops, and how many packets
+and which clock offset, which ones a filter drops, and how many packets
 reach a capture file. That makes it possible to check decode behavior
 that no live run can pin down, and to run the whole thing in CI.
 
@@ -1511,13 +1511,16 @@ default.
 
 Every case that reads packet lines requires each line's `clk_offset` to be
 the figure the record's own timestamp calls for, and not merely a number.
-libubertooth computes it from the record's `clk100ns` and the bit offset of
-the access code within the record, so the fixture reproduces that arithmetic
-and puts each record's access code one step further past a CLKN edge than
-the last. A decoder that reported a constant, or the same offset for every
-packet, fails
-([libbtbb#98](https://github.com/SqueakyFloors/libbtbb/pull/98),
-[harness#357](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/357)).
+libubertooth computes it in `cb_rx` from the record's `clk100ns` and the bit
+offset of the sync word within the record, in 100 ns ticks within one slot,
+so the fixture reproduces that arithmetic and puts each record's access code
+one step further past a CLKN edge than the last. A decoder that reported a
+constant, or the same offset for every packet, fails
+([harness#357](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/357)).
+It is not the CLK1-6 slot offset `btbb_piconet_get_clk_offset()` reports,
+which the fork reads only on a live follow
+([libbtbb#98](https://github.com/SqueakyFloors/libbtbb/pull/98) is still
+uncovered).
 
 **Which note each command line prints.** libbtbb reports a clock out of the
 address-part search as a CLK6 note only when it already held the UAP, which is
@@ -1603,7 +1606,9 @@ instead of 0.
 **Known limits.** The fixture is synthetic, never an over-the-air capture, so
 this covers the decode path and not the receive path. The low-energy
 equivalent is [BLE replay](#ble-replay), which replays a synthetic dump
-through `ubertooth-btle -R`; no tool calls libbtbb's own LE file replay. The capture-destination
+through `ubertooth-btle -R`: that tool reads its own dump, and neither
+library has a low-energy file reader for a tool to call.
+The capture-destination
 cases are `ubertooth-rx`'s; the same checks in `ubertooth-btle` and
 `ubertooth-follow` are not covered, and nor is a capture written to a
 terminal, which no run has. Five more things the fork's own code calls out go
@@ -1657,8 +1662,8 @@ third idle Classic device, so the dump is the cheap way to it.
 **Expected outcome.** Smoke runs two cases. The promiscuous replay
 (`-p -R <dump>`) begins by requiring `ubertooth-btle -h` to list `-R` and
 `-d`, so a build too old to have them fails saying which option is missing
-rather than on a refusal the checks cannot parse. It must then print the five
-parameter lines in the order the records hold them -- access address, CRC seed, hop interval, hop increment, and the
+rather than on a refusal the checks cannot parse. It must then print the
+five parameter lines in the order the records hold them -- access address, CRC seed, hop interval, hop increment, and the
 algorithm 2 event counter -- then the `CONNECT_IND` decoded field by field:
 the connection's access address, CRC seed, transmit window size and offset,
 interval, peripheral latency, supervision timeout, channel map, hop increment
