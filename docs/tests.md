@@ -3425,6 +3425,37 @@ which rolls the capture over to a new file at the start of an off period; and
 cost (past it the oldest complete capture and its transcript are removed,
 newest kept, each removal recorded).
 
+**Commands.** `nrfdk.py` writes and identifies the DK's firmware and holds it
+idle, `addresssoak.py` is the driver that runs the capture and both readers,
+and `ubertooth-util` reads the board's settings before the capture and writes
+them back after it. The driver runs the `ubertooth-btle -n` capture itself,
+with the channel and the capture file the plan gave it:
+
+```text
+nrfdk.py identify --jlink <serial> --alias <alias> --port <port>
+nrfdk.py flash --jlink <serial> --alias <alias> --port <port> --hex <image>
+nrfdk.py advertise --jlink <serial> --alias <alias> --port <port> --address <addr>
+nrfdk.py idle --jlink <serial> --alias <alias> --port <port>
+addresssoak.py --serial <serial> --channel <37|38|39> --out <capture dir> \
+    --jlink <serial> --dk-alias <alias> --dk-port <port> \
+    --address <addr> --interval <ms> --payload <bytes> \
+    --duration <s> --advertiser-on <s> --advertiser-off <s> \
+    --sample-every <s> --presence-window <s> --presence-windows <n> \
+    --liveness-timeout <s> --detect-within <s> --min-detection-share <share> \
+    --max-gap <s> --min-packets-per-minute <n> \
+    --max-disagreement-share <share> --max-restarts <n> \
+    --max-capture-bytes <n> --max-total-capture-bytes <n> \
+    [--restart-probe]
+ubertooth-util -U <serial> -S                 # idle before the reads
+ubertooth-util -U <serial> -C                 # channel, PA level, squelch,
+ubertooth-util -U <serial> -a                 # and LEDs: read, then written
+ubertooth-util -U <serial> -z                 # back after the capture
+ubertooth-util -U <serial> -d
+ubertooth-util -U <serial> -c <channel>       # the restores
+ubertooth-util -U <serial> -l <leds>
+ubertooth-util -U <serial> -s                 # the identity read that ends it
+```
+
 **Plans.** `testplans/address-soak.yaml`, four suites, none of them in `fast`
 or in the non-soak `release` plan: `address-parity` (about a minute of
 capture, with the restart probe, for development and for a short bench
