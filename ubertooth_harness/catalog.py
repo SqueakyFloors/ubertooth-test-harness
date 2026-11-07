@@ -19,9 +19,10 @@ from ubertooth_harness import weaklink
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     FIRMWARE_PATTERN,
+    HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
-    VERSION_ANSWER,
+    VERSION_ANSWER_PATTERNS,
     serial_pattern,
 )
 from ubertooth_harness.outputfiles import output_of
@@ -29,6 +30,7 @@ from ubertooth_harness.resources import BLUETOOTH_ADAPTER, ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
     advertiser_cases, afh_cases, bluez_cases, boardstate_cases, btbr_cases,
+    btle_replay_cases,
     capture_failure_cases, classic_cases, connection_cases, dfu_cases,
     dfu_host_cases, interrupt_cases, invalidapp_cases, python_cases,
     receive_cases,
@@ -713,11 +715,12 @@ def _device_test(name, description, argv=None, extra=None):
 
 
 # ubertooth_print_host_version() in libubertooth, the first line of every
-# tool's -V answer. Anchored to its label, so a board's firmware lines under
-# it cannot stand in for it.
-_HOST_VERSION_PATTERN = (
-    r"(?m)^Host tools version: libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)$"
-)
+# tool's -V answer: patterns.HOST_VERSION_LINE, which is the one statement of
+# the line's layout. Anchored to its label, so the board's firmware line
+# under it cannot stand in for it. Which versions a given commit must print
+# is decided where the resolved commit is known (preflight.py); a case has
+# only the tool in front of it.
+_HOST_VERSION_PATTERN = HOST_VERSION_LINE
 # That line needs no board, but the command goes on to read every attached
 # one and exits 1 if any cannot be read -- in use by another program, or not
 # answering -- which may be a board this run does not use. The line is what
@@ -835,14 +838,14 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         ),
         # -V is the version command, not an identity query: since fork
         # f898fe5 (SqueakyFloors/ubertooth#813) it answers with the host
-        # tools' version and the board's firmware version and build, then
+        # tools' version and the board's firmware version, then
         # ends the command. So it is read on its own, and the composition
         # below asks for the four queries that do compose.
         CommandCase(
             "firmware-compile-info",
             "Firmware compile info",
             common + ("-V",),
-            (VERSION_ANSWER,),
+            VERSION_ANSWER_PATTERNS,
             timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(
@@ -1024,6 +1027,13 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # to back, because a busy host takes two to six times longer, which is
     # why an estimate is a countdown and never a timeout.
     "Raw receive replay": _profiles(Estimate(3.1), Estimate(9.0)),
+    # Two replays of a handful of records in smoke, four in comprehensive,
+    # each with the fixture writer and the directory listing beside it.
+    # The cases' own commands, timed back to back on the macOS host against
+    # a build of fork 4b28aec9: 0.89-0.95 s in smoke and 1.58-1.66 s
+    # comprehensive, most of it starting the processes rather than replaying
+    # eight records.
+    "BLE replay": _profiles(Estimate(0.9), Estimate(1.6)),
     # Two cases and 35 commands in smoke, three and 52 comprehensive.
     # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
     # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three
@@ -1212,7 +1222,7 @@ def builtin_catalog() -> TestCatalog:
     definitions = [
         TestDefinition(
             "Host version",
-            "Host tools version and git identity",
+            "Host tools version line",
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
             ("ubertooth-util", "-V"),
@@ -1501,6 +1511,19 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=receive_cases.replay_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            btle_replay_cases.TEST_NAME,
+            "ubertooth-btle -R replays a synthetic low-energy dump with no "
+            "Ubertooth: a promiscuous capture's connection parameters and the "
+            "CONNECT_IND beside the packets on that access address, the "
+            "company identifiers libbtbb names and the one it does not, the "
+            "-d records written back, and the refusal of a replay with no "
+            "major mode",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=btle_replay_cases.btle_replay_cases,
             continue_on_case_failure=True,
         ),
         TestDefinition(

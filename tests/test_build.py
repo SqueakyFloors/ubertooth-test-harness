@@ -31,12 +31,18 @@ LIBBTBB_BRANCH = "master"
 
 UBERTOOTH = SourceRevision(
     "Ubertooth", "/repos/ubertooth", "https://example.invalid/ubertooth.git",
-    "main", "a" * 40, "aaaaaaa",
+    "main", "a" * 40, "aaaaaaa", build_version="2026-11-DEV2",
 )
 LIBBTBB = SourceRevision(
     "libbtbb", "/repos/libbtbb", "https://example.invalid/libbtbb.git",
-    LIBBTBB_BRANCH, "b" * 40, "bbbbbbb",
+    LIBBTBB_BRANCH, "b" * 40, "bbbbbbb", build_version="2020-12-R1+79",
 )
+# The host tools' version line for those two, as every build has printed it
+# since fork `ce13614c6`: one release name with libbtbb's beside it.
+HOST_LINE = "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)"
+# The same line for another Ubertooth release, which is what a build that
+# installed the wrong tools reports.
+OTHER_HOST_LINE = "Host tools version: 2026-11-DEV1 (libbtbb 2020-12-R1+79)"
 
 
 def make_plan(work, platform="linux", with_firmware=False, include=None,
@@ -65,9 +71,7 @@ class FakeBuildExecutor:
         self.installed_tools = (
             required_tools(plan) if installed_tools is None else installed_tools
         )
-        self.host_version = host_version or (
-            "Host tools version: libubertooth 1.1 (git-aaaaaaa), libbtbb 1.0 (git-bbbbbbb)\n"
-        )
+        self.host_version = host_version or f"{HOST_LINE}\n"
         self.fail_step = fail_step
         self.missing_library = missing_library
         self.calls = []
@@ -250,7 +254,7 @@ class BuilderTests(unittest.TestCase):
             self.assertIn("    === BUILD ===", report)
             self.assertIn("    +++ Configure Ubertooth host tools +++", report)
             self.assertIn("[C] cmake -S", report)
-            self.assertIn("Host tools version: libubertooth 1.1 (git-aaaaaaa)", result.host_version)
+            self.assertIn(HOST_LINE, result.host_version)
             manifest = result.to_manifest()
             self.assertEqual(len(plan.commands), len(manifest["commands"]))
             host_configure = next(c for c in plan.commands if c.step_id == "host-configure")
@@ -271,9 +275,13 @@ class BuilderTests(unittest.TestCase):
 
     def test_built_tools_must_report_the_resolved_revision(self):
         for reported in (
-            "Host tools version: libubertooth 1.1 (git-ccccccc), libbtbb 1.0 (git-bbbbbbb)\n",
-            "Host tools version: libubertooth 1.1 (git-aaaaaaa*), libbtbb 1.0 (git-bbbbbbb)\n",
-            "Host tools version: libubertooth 1.1 (git-aaaaaaa), libbtbb 1.0 (git-ddddddd)\n",
+            f"{OTHER_HOST_LINE}\n",
+            "Host tools version: 2026-11-DEV2* (libbtbb 2020-12-R1+79)\n",
+            "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+80)\n",
+            # The layout a build printed before fork `ce13614c6`: no
+            # requirement accepts it any more (#358).
+            "Host tools version: libubertooth 1.1 (git-aaaaaaa), "
+            "libbtbb 1.0 (git-bbbbbbb)\n",
         ):
             with tempfile.TemporaryDirectory() as work, self.subTest(reported=reported):
                 plan = make_plan(work)
@@ -287,7 +295,7 @@ class BuilderTests(unittest.TestCase):
 
             result = Builder(executor, publisher_in(work), run_dir=work).run(plan)
 
-            self.assertIn("libubertooth 1.1 (git-aaaaaaa)", result.host_version)
+            self.assertIn(HOST_LINE, result.host_version)
             commands = [c for c, _cwd in executor.calls
                         if c[0].endswith("ubertooth-util")]
             self.assertEqual([("-V",), ("-H",)], [c[1:] for c in commands])
@@ -310,9 +318,7 @@ class BuilderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work:
             plan = make_plan(work)
             executor = FakeBuildExecutor(
-                plan,
-                host_version=("Host tools version: libubertooth 1.1 (git-ccccccc), "
-                              "libbtbb 1.0 (git-bbbbbbb)\n"),
+                plan, host_version=f"{OTHER_HOST_LINE}\n",
             )
 
             with self.assertRaisesRegex(BuildError, "expected"):
@@ -358,26 +364,19 @@ class BuilderTests(unittest.TestCase):
                 Builder(Neither(plan), publisher_in(work), run_dir=work).run(plan)
 
     def test_the_recorded_version_is_the_host_line_alone(self):
-        # -V prints a board's firmware lines under the host line; the
+        # -V prints a board's firmware line under the host line; the
         # manifest and the report call this field the built tools' version.
         with tempfile.TemporaryDirectory() as work:
             plan = make_plan(work)
             whole = (
-                "Host tools version: libubertooth 1.1 (git-aaaaaaa), "
-                "libbtbb 1.0 (git-bbbbbbb)\n"
-                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
-                "Firmware version: bluetooth_rxtx git-aaaaaaa (API:1.35)\n"
-                "Firmware build: ubertooth git-aaaaaaa (builder@host) now\n"
+                f"{HOST_LINE}\n"
+                "Firmware version: bluetooth_rxtx 2026-11-DEV2 (API:1.58)\n"
             )
 
             result = Builder(FakeBuildExecutor(plan, host_version=whole),
                              publisher_in(work), run_dir=work).run(plan)
 
-            self.assertEqual(
-                "Host tools version: libubertooth 1.1 (git-aaaaaaa), "
-                "libbtbb 1.0 (git-bbbbbbb)",
-                result.host_version,
-            )
+            self.assertEqual(HOST_LINE, result.host_version)
 
     def test_a_board_that_cannot_be_read_does_not_fail_the_build(self):
         # -V prints the host version first, then reads every attached board
@@ -399,7 +398,7 @@ class BuilderTests(unittest.TestCase):
 
             result = Builder(BusyBoard(plan), publisher_in(work), run_dir=work).run(plan)
 
-            self.assertIn("libubertooth 1.1 (git-aaaaaaa)", result.host_version)
+            self.assertIn(HOST_LINE, result.host_version)
 
     def test_every_step_says_how_it_ended(self):
         with tempfile.TemporaryDirectory() as work:
@@ -493,9 +492,7 @@ class BuilderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work:
             plan = make_plan(work)
             executor = FakeBuildExecutor(
-                plan,
-                host_version=("Host tools version: libubertooth 1.1 "
-                              "(git-ccccccc), libbtbb 1.0 (git-bbbbbbb)\n"),
+                plan, host_version=f"{OTHER_HOST_LINE}\n",
             )
 
             with self.assertRaisesRegex(BuildError, "expected"):
@@ -549,9 +546,8 @@ class BuilderTests(unittest.TestCase):
             executor = FakeBuildExecutor(
                 plan,
                 host_version=(
-                    "Host tools version: libubertooth 1.1 (git-ccccccc), "
-                    "libbtbb 1.0 (git-bbbbbbb)\n"
-                    "Firmware version: bluetooth_rxtx git-ccccccc (API:1.07)\n"
+                    f"{OTHER_HOST_LINE}\n"
+                    "Firmware version: bluetooth_rxtx 2026-11-DEV1 (API:1.58)\n"
                     "libusb_claim_interface error -6\n"
                 ),
             )
@@ -563,8 +559,7 @@ class BuilderTests(unittest.TestCase):
             step = [e for e in events if e["event_type"] == "build_step_finished"][-1]
 
             self.assertEqual(
-                "not the resolved revision: Host tools version: libubertooth "
-                "1.1 (git-ccccccc), libbtbb 1.0 (git-bbbbbbb)",
+                f"not the resolved revision: {OTHER_HOST_LINE}",
                 step["details"]["reason"],
             )
             marker = next(text for text in render_run(events).splitlines()

@@ -1527,6 +1527,9 @@ def _transcript(run: _Run) -> list[str]:
                          f"observed {inline(details.get('observed'))})")
             elif details.get("observed") is not None:
                 text += f" (recorded {inline(details['observed'])})"
+            if details.get("uncompared"):
+                text += (f" (nothing recorded for {details['uncompared']}, "
+                         "so it was not compared)")
             if details.get("reason"):
                 # A step's reason opens with its own name, which this line
                 # has said already (#342).

@@ -69,6 +69,7 @@ from ubertooth_harness.preflight import (
     NO_FLASH_FIX,
     PreflightError,
     PreflightPolicy,
+    require_release_output,
 )
 from ubertooth_harness.power import (
     PowerControllerError,
@@ -330,6 +331,12 @@ def _resolve_sources(args: argparse.Namespace):
         sources.append(
             resolver.resolve("libbtbb", args.libbtbb_source, libbtbb_ref, ref_name)
         )
+    # Before anything is built or written to a board: a commit whose build
+    # reports no release prints none of the output this validation checks, so
+    # a run of one is refused here rather than after a build and a flash
+    # (#358). --dry-run reaches this too, so it answers for the ref it was
+    # given.
+    require_release_output(sources[0])
     return tuple(sources)
 
 

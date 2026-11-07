@@ -285,6 +285,9 @@ class TerminalEventSink:
             )
             if details.get("attempt"):
                 line += f" (attempt {details['attempt']})"
+            if details.get("uncompared"):
+                line += (f" (nothing recorded for {details['uncompared']}, "
+                         "so it was not compared)")
             reason = inline(details.get("reason") or "")
             if reason:
                 # Said once here too: a step's reason opens with its name.

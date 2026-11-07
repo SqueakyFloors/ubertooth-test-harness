@@ -14,7 +14,7 @@ elapsed time since the run started) and a tag::
 A command that printed one line is two lines; the response follows the result::
 
     2026-10-23T23:49:01.114 [C] ubertooth-util -V
-    2026-10-23T23:49:01.155 [X] ubertooth-util exit 0 in 0.040s; [O] Host tools version: libubertooth 1.1 (git-f81348f)
+    2026-10-23T23:49:01.155 [X] ubertooth-util exit 0 in 0.040s; [O] Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
 
 Longer output stamps each line when it arrived, in arrival order, then the
 result line. Timestamps use the same clock and format as ``run.jsonl``.

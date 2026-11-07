@@ -15,6 +15,7 @@ from typing import Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from ubertooth_harness import environment as harness_environment
+from ubertooth_harness import release as release_version
 from ubertooth_harness.events import validate_run_id
 from ubertooth_harness.planner import TestInvocation
 
@@ -140,10 +141,33 @@ class SourceRevision:
     # run took from the Ubertooth commit's own install.sh. Recorded only,
     # never resolved.
     ref_name: str | None = None
+    # The release a build of this commit reports, worked out the way the
+    # build works it out (release.py): "2026-11-DEV1+22", or the release and
+    # "+unknown" where no release tag is in reach. Empty for a commit from
+    # before the fork reported releases, whose build stamps "git-<hash>"
+    # instead, and empty for a revision a caller built by hand without
+    # asking a checkout.
+    build_version: str = ""
 
     @property
     def expected_revision(self) -> str:
-        return f"git-{self.short_commit}"
+        """The version string a build of this commit reports.
+
+        The release this commit came from where its build names one, else the
+        ``git-<hash>`` an older commit's build stamps. Compared against what
+        the installed tools, a board's firmware and a built image report
+        (patterns.same_revision).
+        """
+        return self.build_version or f"git-{self.short_commit}"
+
+    @property
+    def names_release(self) -> bool:
+        """Does a build of this commit name a release rather than a commit?
+
+        Which says how its version *lines* are laid out as well as what they
+        carry: the fork rewrote both in one change (#352).
+        """
+        return bool(self.build_version)
 
     def to_dict(self) -> dict:
         data = {
@@ -157,6 +181,8 @@ class SourceRevision:
         }
         if self.ref_name is not None:
             data["ref_name"] = self.ref_name
+        if self.build_version:
+            data["build_version"] = self.build_version
         return data
 
 
@@ -181,6 +207,16 @@ def _fetch_remote(path: Path, requested_ref: str) -> str | None:
     return remotes[0] if len(remotes) == 1 else None
 
 
+def _is_release_tag_name(ref: str) -> bool:
+    """Is ``ref`` named like a release the fork tags (``2026-11-DEV2``)?
+
+    Only such a name is worth a fetch of its own when the checkout has the
+    commit but not the ref: it is the name the version a build reports comes
+    from (release.py).
+    """
+    return release_version.RELEASE_TAG_FORM.match(ref) is not None
+
+
 def _last_line(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     line = lines[-1] if lines else "no output"
@@ -193,9 +229,12 @@ class GitRevisionResolver:
 
     A ref the checkout does not have (a commit pushed since it was last
     fetched, typically) is fetched once from the checkout's remote, within
-    ``fetch_timeout_s``, and resolved again. Fetching only updates
-    remote-tracking refs, tags and objects: the working tree, HEAD and local
-    branches are never touched.
+    ``fetch_timeout_s``, and resolved again. A run named for a release tag
+    the checkout has not got has that tag fetched too, and is refused when it
+    cannot be got, because the release a build reports is worked out from
+    this checkout's tags (#358). Fetching only updates remote-tracking refs,
+    tags and objects: the working tree, HEAD and local branches are never
+    touched.
     """
 
     def __init__(self, *, fetch_timeout_s: float = FETCH_TIMEOUT_S, log=None):
@@ -262,6 +301,85 @@ class GitRevisionResolver:
             f"{failure}; fetched from {remote}, which does not have it either"
         )
 
+    def _require_release_tag(self, name: str, path: Path, ref_name: str,
+                             commit: str) -> None:
+        """Make sure ``ref_name`` is in ``path``, fetching it if it is not.
+
+        Raises where it cannot be got, because the release a build reports
+        would then be the nearest earlier tag and a distance -- a version
+        that is not the one the run was named for, agreed on by the build and
+        by every expectation derived from the same checkout, and so reported
+        by nobody as wrong (#358). A run that cannot have its own release
+        name is stopped instead, with the fix in the reason.
+
+        Only the one tag is asked for, and only for a ref named like a
+        release: an ordinary run resolves its ref without a fetch and must
+        not pay for one it has no use for.
+        """
+        if _rev_parse(path, ref_name) is not None:
+            self._warn_if_elsewhere(path, ref_name, commit)
+            return
+        failure = (
+            f"{name} ref '{ref_name}' names a release, and {path} has the "
+            "commit but not the tag, so a build of it would report the "
+            "release before it and a count rather than this one"
+        )
+        remote = _fetch_remote(path, ref_name)
+        if remote is None:
+            raise ManifestError(f"{failure}; it has no remote to fetch it from")
+        self.log(
+            f"{name} ref '{ref_name}' is not in {path}, though its commit is; "
+            f"fetching the tag from {remote} so the release a build of it "
+            "reports is the one that ref names"
+        )
+        command = [
+            "git", "-C", str(path), "fetch", "--quiet",
+            "--no-recurse-submodules", remote,
+            f"+refs/tags/{ref_name}:refs/tags/{ref_name}",
+        ]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True,
+                timeout=self.fetch_timeout_s, stdin=subprocess.DEVNULL,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ManifestError(
+                f"{failure}; fetching it from {remote} timed out after "
+                f"{self.fetch_timeout_s:g}s"
+            ) from error
+        except OSError as error:
+            raise ManifestError(
+                f"{failure}; fetching it from {remote} failed: {error}"
+            ) from error
+        if result.returncode != 0:
+            raise ManifestError(
+                f"{failure}; fetching it from {remote} failed: "
+                f"{_last_line(result.stderr or result.stdout)}"
+            )
+        if _rev_parse(path, ref_name) is None:
+            raise ManifestError(
+                f"{failure}; fetched it from {remote}, which has no "
+                f"'{ref_name}' either"
+            )
+        self._warn_if_elsewhere(path, ref_name, commit)
+
+    def _warn_if_elsewhere(self, path: Path, ref_name: str, commit: str) -> None:
+        """Say so when the tag names another commit than the one resolved.
+
+        Not a failure: a run may be asked for a commit past a tag, and the
+        release a build reports then carries the distance, which is right.
+        What it may not do is go unsaid, since the two came from different
+        places -- a caller resolved the commit, this checkout holds the tag.
+        """
+        tagged = _rev_parse(path, ref_name)
+        if tagged is not None and tagged != commit:
+            self.log(
+                f"'{ref_name}' names {tagged[:12]} in {path}, and this run "
+                f"resolved {commit[:12]}; the release a build reports carries "
+                "the distance between them"
+            )
+
     def resolve(
         self, name: str, source_path: Path | str, requested_ref: str,
         ref_name: str | None = None,
@@ -290,8 +408,33 @@ class GitRevisionResolver:
             commit = self._fetch_and_retry(name.strip(), path, requested_ref)
         if not _COMMIT_RE.fullmatch(commit):
             raise ManifestError(f"resolved {name} commit is invalid: {commit}")
+        if ref_name is not None and _is_release_tag_name(ref_name):
+            # The run was named for a release tag, and the release a build
+            # reports is the nearest release tag in this very checkout and the
+            # distance to it. A checkout holding the commit and not the tag --
+            # which is what a checkout that fetches a branch has, and what a
+            # caller passing a commit it resolved elsewhere leaves -- makes a
+            # build of an exactly tagged commit report the release before it
+            # and a count: "2026-11-DEV1+25" where the commit is
+            # 2026-11-DEV2 (#358). The build's own clone of this checkout
+            # would say the same, so nothing in the run says so.
+            #
+            # Checked after the commit resolved either way, because the fetch
+            # that brings a missing commit asks for that commit alone and
+            # brings no tag with it.
+            self._require_release_tag(name.strip(), path, ref_name, commit)
         short_commit = _git(path, "rev-parse", "--short", commit)
         repository = _repository_for_ref(path, requested_ref)
+        # What a build of this commit reports, worked out the way the build
+        # works it out. A commit whose build names a release carries the
+        # release name here; an older one leaves it empty and
+        # expected_revision falls back to the git-<hash> its build stamps.
+        try:
+            version = release_version.build_version(
+                path, commit, kind=name.strip(), short_commit=short_commit
+            )
+        except release_version.ReleaseVersionError as error:
+            raise ManifestError(str(error)) from error
         return SourceRevision(
             name=name.strip(),
             source_path=str(path),
@@ -300,6 +443,9 @@ class GitRevisionResolver:
             commit=commit.lower(),
             short_commit=short_commit.lower(),
             ref_name=ref_name,
+            build_version=(
+                version.value if version.names_release else ""
+            ),
         )
 
 

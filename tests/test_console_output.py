@@ -552,23 +552,62 @@ class ConsoleSummaryTests(unittest.TestCase):
             self.assertIn(str(root / "report.md"), stream.getvalue())
 
 
+#: The Ubertooth file that derives a build's version string, as a commit whose
+#: build names a release has it (`ubertooth_harness.release`).
+UBERTOOTH_RELEASE_FILE = """\
+set(LATEST_RELEASE "2020-12-R1")
+set(RELEASE_TAG_MATCH
+\t--match "[0-9][0-9][0-9][0-9]-[0-9][0-9]-R[0-9]*"
+\t--match "[0-9][0-9][0-9][0-9]-[0-9][0-9]-RC[0-9]*"
+\t--match "[0-9][0-9][0-9][0-9]-[0-9][0-9]-DEV[0-9]*")
+set(RELEASE_TAG_FORM "^[0-9][0-9][0-9][0-9]-[0-9][0-9]-(R|RC|DEV)[0-9]+$")
+"""
+#: libbtbb's own, as the commit the fork pins has it: it looks again at the tag
+#: name git handed back, and names no floor.
+LIBBTBB_RELEASE_FILE = """\
+set(BTBB_RELEASE_TAG_GLOBS
+\t"[0-9][0-9][0-9][0-9]-[0-9][0-9]-R[0-9]*"
+\t"[0-9][0-9][0-9][0-9]-[0-9][0-9]-RC[0-9]*"
+\t"[0-9][0-9][0-9][0-9]-[0-9][0-9]-DEV[0-9]*")
+function(btbb_release_from_describe out describe)
+\tif(NOT text MATCHES "^[0-9][0-9][0-9][0-9]-[0-9][0-9]-(R|RC|DEV)[0-9]+$")
+\t\tset(${out} "" PARENT_SCOPE)
+\tendif()
+endfunction()
+"""
+#: The release the sample source is tagged at, so a build of it reports a
+#: release name rather than a commit hash.
+SAMPLE_RELEASE = "2026-11-DEV1"
+
+
 def source_repo(root: Path) -> tuple[Path, str]:
-    """A real checkout at a real commit, as every resolved source is."""
+    """A real checkout at a real commit, as every resolved source is.
+
+    It carries the version files the fork derives a release name in, and sits
+    on a release tag, so the run resolves the release the host tools report
+    rather than being refused as a commit from before the fork named releases.
+    Returns the checkout and that release name.
+    """
     source = root / "source"
     source.mkdir()
-    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
     (source / "README.md").write_text("source\n")
-    subprocess.run(["git", "-C", str(source), "add", "README.md"], check=True)
+    for name, text in (
+        ("host/cmake/set_release.cmake", UBERTOOTH_RELEASE_FILE),
+        ("cmake/set_release.cmake", LIBBTBB_RELEASE_FILE),
+    ):
+        target = source / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
     subprocess.run(
         ["git", "-C", str(source), "-c", "user.name=Test",
          "-c", "user.email=test@example.invalid", "commit", "-qm", "source"],
         check=True,
     )
-    short = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "--short", "HEAD"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    return source, short
+    subprocess.run(
+        ["git", "-C", str(source), "tag", SAMPLE_RELEASE], check=True)
+    return source, SAMPLE_RELEASE
 
 
 class BenchTools:
@@ -581,8 +620,7 @@ class BenchTools:
 
     def __init__(self, bench, revision):
         self.bench = bench
-        self.line = (f"Host tools version: libubertooth 1.07 ({revision}), "
-                     "libbtbb 1.3 (git-7e1cdf0)\n")
+        self.line = f"Host tools version: {revision} (libbtbb {revision})\n"
         self.answered = False
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
@@ -613,17 +651,14 @@ def run_sample(
     a libbtbb source, which is what makes the run record its own start
     before the sequencer takes over.
     """
-    source, short = source_repo(root)
+    source, revision = source_repo(root)
     (root / "hardware.yaml").write_text(hardware((A, B)))
     (root / "plan.yaml").write_text(
         step_plan(test_name, extra="        coverage: smoke\n")
     )
-    revision = f"git-{short}"
     bench = Bench(
-        FakeUbertooth(serial=A, firmware=revision,
-                      compile_info=f"ubertooth {revision} (builder@host) timestamp"),
-        FakeUbertooth(serial=B, firmware=revision,
-                      compile_info=f"ubertooth {revision} (builder@host) timestamp"),
+        FakeUbertooth(serial=A, firmware=revision),
+        FakeUbertooth(serial=B, firmware=revision),
     )
     live, out = live if live is not None else io.StringIO(), io.StringIO()
     with (
@@ -674,9 +709,9 @@ class WholeRunTests(unittest.TestCase):
             self.assertIn("VERDICT: PASS", live)
             self.assertEqual(1, live.count("RUN SUMMARY"))
             self.assertIn(f"device UT_0        Ubertooth, serial {A}: "
-                          "firmware git-", live)
-            self.assertIn("host tools         Host tools version: libubertooth "
-                          "1.07 (git-", live)
+                          f"firmware {SAMPLE_RELEASE}", live)
+            self.assertIn("host tools         Host tools version: "
+                          f"{SAMPLE_RELEASE} (libbtbb ", live)
             self.assertIn(str(root / "runs" / "console-demo" / "report.md"), live)
 
     def test_the_summary_is_on_stderr_so_stdout_stays_the_summary_json(self):
@@ -872,13 +907,12 @@ class WholeRunTests(unittest.TestCase):
         # its manifest.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source, short = source_repo(root)
+            source, revision = source_repo(root)
             (root / "hardware.yaml").write_text(hardware((A, B)))
             (root / "plan.yaml").write_text(
                 step_plan("Radio setting transitions",
                           extra="        coverage: smoke\n")
             )
-            revision = f"git-{short}"
             tools = BenchTools(
                 Bench(FakeUbertooth(serial=A, firmware=revision),
                       FakeUbertooth(serial=B, firmware=revision)),
