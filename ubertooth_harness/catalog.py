@@ -8,7 +8,7 @@ from typing import Callable, Mapping
 
 from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
 from ubertooth_harness.hostneeds import (
-    BLUEZ_TOOLS, NO_NEEDS, PLATFORMS, Needs, tool_needs,
+    ALWAYS_BUILT_TOOLS, BLUEZ_TOOLS, NO_NEEDS, PLATFORMS, Needs, tool_needs,
 )
 from ubertooth_harness.rf import (
     NORMAL_LINK, PlacementError, PlacementRequirement,
@@ -780,58 +780,68 @@ _HOST_VERSION_PATTERN = HOST_VERSION_LINE
 # these cases check, as it is in preflight (preflight.py).
 HOST_VERSION_RETURNCODES = (0, 1)
 
+# Every host tool `Host CLI surface` runs, with what each one needs from the
+# host: the tools the fork always builds, then the two it builds only with
+# BlueZ. The list is the build's own (hostneeds.ALWAYS_BUILT_TOOLS), so a
+# tool the fork adds arrives here with the build rather than being added to
+# a second list by hand.
+HOST_CLI_TOOLS = tuple(
+    (tool, tool_needs(tool))
+    for tool in ALWAYS_BUILT_TOOLS + BLUEZ_TOOLS
+)
+
 
 def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
-    expected = (
-        ("ubertooth-util", 0),
-        ("ubertooth-debug", 0),
-        ("ubertooth-specan", 0),
-        ("ubertooth-rx", 0),
-        ("ubertooth-tx", 0),
-        ("ubertooth-dump", 0),
-        # -h exits 0 on every tool: btle since fork e4f1dc5 (fork #377), dfu,
-        # scan and follow since 12211ce (fork #406); each was 1.
-        ("ubertooth-btle", 0),
-        ("ubertooth-dfu", 0),
-        ("ubertooth-ego", 0),
-        ("ubertooth-afh", 0),
-        ("ubertooth-ducky", 0),
-    )
-    cases = [
-        CommandCase(
-            f"{tool}-help",
-            f"{tool} help",
-            (tool, "-h"),
-            (re.escape(tool),),
-            expected_returncodes=(returncode,),
+    """`<tool> -h` and `<tool> -V` for every host tool the fork builds.
+
+    Both run over one list of tools (``HOST_CLI_TOOLS``), so a tool cannot
+    be asked its usage and not its version: `-V` used to be asked of four of
+    the thirteen. What was read at Ubertooth 2026-11-DEV1, and no further
+    back: every one of the thirteen sources carries `V` in its `getopt`
+    option string and a `case 'V'` that calls
+    ``ubertooth_print_versions()`` after the option loop and returns its
+    status, so `-V` ends the command in all of them; and the eleven a macOS
+    build produces were built from that tag and run, each printing the same
+    host version line and exiting 0 with no board attached
+    ([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
+    These cases have no `-H` fallback, so against a fork from before the one
+    `-V` answer (ubertooth#813) all thirteen fail: the host version came from
+    `-H` there and `-V` was the board's compile info, and the pattern asks
+    for the `Host tools version:` line. Preflight's own host version check
+    does have the fallback (preflight.HOST_VERSION_FALLBACK_ARGV).
+
+    The two BlueZ-only tools carry their host need on both cases, so a host
+    without BlueZ leaves out each one's help and version together.
+    """
+    cases = []
+    for tool, needs in HOST_CLI_TOOLS:
+        label = " (BlueZ builds)" if needs else ""
+        cases.append(
+            CommandCase(
+                f"{tool}-help",
+                f"{tool} -h{label}",
+                (tool, "-h"),
+                (re.escape(tool),),
+                # -h exits 0 on every tool: btle since fork e4f1dc5 (fork
+                # #377), dfu, scan and follow since 12211ce (fork #406);
+                # each was 1.
+                expected_returncodes=(0,),
+                needs=needs,
+            )
         )
-        for tool, returncode in expected
-    ]
-    # Built only with BlueZ (libbluetooth); not applicable where they are not
-    # built (every macOS host).
-    cases.extend(
-        CommandCase(
-            f"{tool}-help",
-            f"{tool} help (BlueZ builds)",
-            (tool, "-h"),
-            (re.escape(tool),),
-            expected_returncodes=(0,),
-            needs=tool_needs(tool),
+    for tool, needs in HOST_CLI_TOOLS:
+        label = " (BlueZ builds)" if needs else ""
+        cases.append(
+            CommandCase(
+                f"{tool}-version",
+                f"{tool} -V{label}",
+                (tool, "-V"),
+                (_HOST_VERSION_PATTERN,),
+                timeout_s=HOST_VERSION_TIMEOUT_S,
+                expected_returncodes=HOST_VERSION_RETURNCODES,
+                needs=needs,
+            )
         )
-        for tool in BLUEZ_TOOLS
-    )
-    cases.extend(
-        CommandCase(
-            f"{tool}-version",
-            f"{tool} -V",
-            (tool, "-V"),
-            (_HOST_VERSION_PATTERN,),
-            timeout_s=HOST_VERSION_TIMEOUT_S,
-            expected_returncodes=HOST_VERSION_RETURNCODES,
-        )
-        for tool in ("ubertooth-util", "ubertooth-rx", "ubertooth-tx",
-                     "ubertooth-afh")
-    )
     return tuple(cases)
 
 
@@ -1033,7 +1043,15 @@ def _default(estimate: Estimate) -> Mapping[str, Estimate]:
 ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Host version": _default(Estimate(0.5)),
     "Help smoke": _default(Estimate(0.5)),
-    "Host CLI surface": _default(Estimate(3.6)),
+    # 15 cases took 3.6 s on the calibration host, so 0.24 s a case; asking
+    # `-V` of every tool rather than four (#347) makes it 26 cases on a
+    # Linux host and 22 on macOS, scaled here to 6.2 s. It is a rate from
+    # one mix of cases applied to another: the nine new ones are all `-V`,
+    # which reads every attached board, so expect it to run low on a bench
+    # with several boards and high on a macOS host, which has four fewer
+    # cases. A target's own runs replace it as soon as three of them have
+    # measured it (learned.py), which is what the countdown then uses.
+    "Host CLI surface": _default(Estimate(6.2)),
     "Ubertooth count": _default(Estimate(0.5)),
     "Ubertooth identity": _default(Estimate(0.4)),
     "Debug register read": _default(Estimate(0.5)),
@@ -1291,6 +1309,13 @@ def builtin_catalog() -> TestCatalog:
             output_pattern=_HOST_VERSION_PATTERN,
             expected_returncodes=HOST_VERSION_RETURNCODES,
         ),
+        # `Host CLI surface` asks this of every tool, so this entry adds no
+        # coverage. It is kept, where the five unimplemented identity
+        # entries were removed (#347), because it is the cheapest step a
+        # plan can hold: one command, no board, no pattern, and it answers
+        # "did this build produce a runnable tool" in half a second. The
+        # five were removed for having no implementation and no plan to be
+        # the cheap version of anything.
         TestDefinition(
             "Help smoke",
             "ubertooth-util help executes",
@@ -1300,7 +1325,7 @@ def builtin_catalog() -> TestCatalog:
         ),
         TestDefinition(
             "Host CLI surface",
-            "Help and parser availability for every always-built host tool",
+            "Help and host version for every C host tool the fork builds",
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
             command_builder=_host_cli_surface_cases,
@@ -1314,20 +1339,25 @@ def builtin_catalog() -> TestCatalog:
             command_builder=_ubertooth_count_cases,
             guards_other_ubertooths=True,
         ),
-        _device_test("Firmware version", "Firmware revision"),
-        _device_test("Firmware compile info", "Firmware compile identity"),
-        _device_test("Device serial", "Microcontroller serial"),
         # Which bootloader is under the application firmware. Preflight reads
         # it on every run whose commit has the read at all, which is what no
         # catalog case can do: a case cannot tell whether the commit under
         # test has `ubertooth-util -B`, and against one that has not it would
         # fail on a board that is perfectly set up (bootloader.py).
+        #
+        # It is the one identity read left as a catalog name with no cases.
+        # `Firmware version`, `Firmware compile info`, `Device serial`,
+        # `Part ID` and `Board ID` were names here too, and every one of
+        # them is a case of `Ubertooth identity` with the same command and
+        # the same check, so a plan could never have wanted the standalone
+        # entry; they were removed rather than reimplemented
+        # (#347). Preflight still reports its per-board checks under the
+        # first three of those names, and "Mandatory preflight" in
+        # docs/tests.md is where those reads are written down.
         _device_test(
             "Bootloader identity",
             "Which bootloader is installed under the application firmware",
         ),
-        _device_test("Part ID", "Microcontroller part ID"),
-        _device_test("Board ID", "Ubertooth board ID"),
         TestDefinition(
             "Ubertooth identity",
             "Isolated and composed firmware and hardware identity readback",
@@ -2015,12 +2045,6 @@ def builtin_catalog() -> TestCatalog:
             command_builder=bluez_cases.follow_over_hci_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
-        ),
-        TestDefinition(
-            "CLI usage smoke",
-            "Exercise host tool usage paths",
-            MappingProxyType({"hosts": HOSTS}),
-            MappingProxyType({}),
         ),
         _device_test(
             "BLE soak",

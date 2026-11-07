@@ -628,7 +628,7 @@ class PlanningTests(unittest.TestCase):
                 """plan: default devices
 suites:
   fast:
-    - Firmware version:
+    - Bootloader identity:
         hosts: each
         Ubertooth: default
 """,
@@ -661,7 +661,7 @@ suites:
                 """plan: each device
 suites:
   fast:
-    - Firmware version:
+    - Bootloader identity:
         hosts: [Host_Linux]
         Ubertooth: each
 """,
@@ -676,7 +676,7 @@ suites:
                 tuple(item.resources["Ubertooth"] for item in invocations),
             )
             self.assertEqual(
-                ("001-Firmware version", "002-Firmware version"),
+                ("001-Bootloader identity", "002-Bootloader identity"),
                 tuple(item.invocation_id for item in invocations),
             )
 

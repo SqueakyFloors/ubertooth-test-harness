@@ -375,7 +375,7 @@ is `blocked` instead and does fail the run (see
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
-| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines`; every case of `Bluetooth inquiry scan` and `Follow Classic piconet over HCI` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
+| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | both `Host CLI surface` cases of each, `-h` and `-V`; every `follow` and `scan` case of `Refused command lines`; every case of `Bluetooth inquiry scan` and `Follow Classic piconet over HCI` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
 | host tools the harness does not install (`tshark`, `hciconfig`, `hcitool`) | `BLE extcap in tshark`; every case of `Bluetooth inquiry scan` and `Follow Classic piconet over HCI` | the program is not on the host's `PATH` |
 | Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
 | firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` (a `--build` run that flashes its boards builds the firmware anyway, so the case applies there) |
