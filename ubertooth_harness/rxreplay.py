@@ -16,7 +16,9 @@ whitening 7.2, FEC 1/3 7.4), in the bit order libbtbb decodes. The fixture
 holds a piconet that shows LAP_A and, over several POLL packets at different
 clocks, lets libbtbb derive UAP_A; ID packets (no header) for LAP_B, one with
 a single access-code bit error; and decoy records with a valid LAP_DECOY
-access code that cb_rx must skip.
+access code that cb_rx must skip. Each record's timestamp also puts its
+access code a chosen distance past a CLKN edge, so every packet line's
+clock offset is a figure computed here rather than merely a number.
 
 A transition step runs ``python <this file> ...`` as an ordinary logged
 command. It imports only the standard library, so it runs from any working
@@ -46,7 +48,7 @@ import re
 import struct
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # --- Bluetooth baseband encoding ---------------------------------------------
@@ -152,12 +154,52 @@ PREAMBLE_AT = 16         # where the access code starts in the 400 symbols
 SYNC_AT = PREAMBLE_AT + 4
 BR_PACKET, LE_PACKET = 0, 1
 DISCARD = 0x20
+# The status bit that says a record's average reading is this packet's own
+# power (usb_pkt_rx.status, the fork's ubertooth_interface.h). Without it a
+# reader falls back to the strongest reading, which is what a record from a
+# board or a dump older than the measurement carries.
+SIGNAL_VALID = 0x80
 POLL, DH1 = 1, 4
 DH1_BODY = bytes(range(4))      # a made-up 4-byte body
+
+# libubertooth's clock arithmetic (ubertooth_callback.c): a CLKN tick is
+# 312.5 us, a slot is two of them, and a record's timestamp is taken at the
+# end of its 400-symbol bank, so the bank's first symbol is BANK_100NS
+# earlier.
+CLK100NS_PER_CLKN = 3125
+CLK100NS_PER_SLOT = 2 * CLK100NS_PER_CLKN
+BANK_100NS = SYMBOLS * 10
+# How far past a CLKN edge each record's access code sits, one step further
+# per record. Every value stays under one CLKN tick, so each record's CLKN
+# still comes out as the central clock it was built for, while the clock
+# offset the packet line reports differs from record to record: a fixture
+# with one offset throughout would pass against a decoder that printed a
+# constant (harness#357).
+CLK_SLACK_STEP = 195
 
 LAP_A, UAP_A = 0x5A3C96, 0x6B   # piconet with headers: LAP and UAP decode
 LAP_B = 0x0F1E2D                # ID packets only: LAP decodes, no UAP
 LAP_DECOY = 0x3E1D07            # only in records cb_rx must skip
+
+# The signal level every packet of this fixture reports, on screen and in a
+# capture record, worked out once here so a case states it rather than a
+# number nobody can trace.
+#
+# Each record below carries three readings and the SIGNAL_VALID status bit,
+# which says the average is this packet's own power -- the measurement
+# SqueakyFloors/ubertooth#754 put there -- so that is the reading a reader
+# shows, and the fork's piece-wise model of the CC2400's curve
+# (`cc2400_rssi_to_dbm` in its `host/libubertooth/src/ubertooth_callback.c`)
+# turns RSSI_AVG into the dBm below. Re-derive the figure from that function
+# if the fork ever retunes the curve; nothing else here can tell.
+#
+# That makes the level a known answer for a figure worked out from anything
+# but this packet's own average: the strongest reading of the packet gives
+# -82 dBm, and the loudest of the last ten records of its channel -- which
+# reported one packet's level for another's, until #754 -- is not this figure
+# either. The three readings are deliberately far apart for that reason.
+RSSI_MAX, RSSI_MIN, RSSI_AVG = -30, -90, -40
+SIGNAL_DBM = -91
 FIXTURE_AGE_S = 3600            # record times are this long before generation
 
 
@@ -171,6 +213,7 @@ class Record:
     pkt_type: int = BR_PACKET
     status: int = 0
     decoy: bool = False         # cb_rx must skip it (or it holds no packet)
+    slack: int = CLK_SLACK_STEP  # 100 ns from the CLKN edge to the access code
 
 
 def _records() -> tuple[Record, ...]:
@@ -184,7 +227,7 @@ def _records() -> tuple[Record, ...]:
     A = [Record(LAP_A, ch, clk, kind) for ch, clk, kind in a]
     B = [Record(LAP_B, 9, 0x3000 + 4 * i, "id", flip=5 if i == 2 else None)
          for i in range(3)]
-    return (
+    records = (
         A[0], A[1], A[2], A[3], B[0],
         Record(LAP_DECOY, 12, 0x4000, pkt_type=LE_PACKET, decoy=True),
         A[4], B[1],
@@ -195,9 +238,38 @@ def _records() -> tuple[Record, ...]:
         Record(None, 30, 0x5000, decoy=True),
         A[7],
     )
+    # One slack step further per record, so no two packet lines report the
+    # same clock offset.
+    return tuple(replace(record, slack=CLK_SLACK_STEP * (index + 1))
+                 for index, record in enumerate(records))
 
 
 RECORDS = _records()
+
+
+def record_clk100ns(record: Record) -> int:
+    """The timestamp a record carries: the end of its bank, in 100 ns ticks.
+
+    Built backwards from where the access code is to sit. cb_rx reads
+    ``clkn = (clkn_high << 20) + (clk100ns + offset*10 - BANK_100NS) /
+    CLK100NS_PER_CLKN``, with ``offset`` the sync word's first symbol, so a
+    slack below one CLKN tick leaves CLKN at the record's own central clock.
+    """
+    return (record.clock * CLK100NS_PER_CLKN + BANK_100NS - SYNC_AT * 10
+            + record.slack)
+
+
+def clk_offset(record: Record) -> int:
+    """The clock offset a packet line reports for this record.
+
+    libubertooth's own arithmetic (cb_rx): the 100 ns from the rising edge of
+    CLKN to the first bit of the access code, within one slot. Not the CLK1-6
+    slot offset btbb_piconet_get_clk_offset() reports, which is a different
+    quantity in different units and which the fork reads only on a live
+    follow.
+    """
+    return ((record_clk100ns(record) + SYNC_AT * 10 + CLK100NS_PER_SLOT
+             - BANK_100NS) % CLK100NS_PER_SLOT)
 
 
 def _symbols(record: Record) -> list[int]:
@@ -227,11 +299,16 @@ def record_bytes(record: Record, host_time: int) -> bytes:
         for i in range(0, SYMBOLS, 8)
     )
     # cb_rx: clkn = (clkn_high << 20) + (clk100ns + offset*10 - 4000) / 3125,
-    # offset being the sync word's first symbol. Leave 1000 (100 ns) of slack.
-    clk100ns = record.clock * 3125 + 4000 - SYNC_AT * 10 + 1000
+    # offset being the sync word's first symbol. The record's own slack is
+    # what the packet line reports as its clock offset (clk_offset()).
     header = struct.pack(
-        "<BBBBIbbbB2x", record.pkt_type, record.status, record.channel, 0,
-        clk100ns, -40, -90, -70, 1,
+        # SIGNAL_VALID on every record: a current board sets it on any
+        # packet it took readings over, and it is what says the average is
+        # this packet's own power rather than the board's running average
+        # for the channel.
+        "<BBBBIbbbB2x", record.pkt_type, record.status | SIGNAL_VALID,
+        record.channel, 0, record_clk100ns(record),
+        RSSI_MAX, RSSI_MIN, RSSI_AVG, 1,
     )
     return struct.pack(">I", host_time) + header + data
 
@@ -282,8 +359,13 @@ def fixture_base_time(now=None) -> int:
 
 
 def expected_packets(variant: str = "full", lap: int | None = None,
-                     max_errors: int = 2) -> list[tuple[int, int, int]]:
-    """(LAP, access-code errors, channel) of each packet line, in order."""
+                     max_errors: int = 2) -> list[tuple[int, int, int, int]]:
+    """(LAP, access-code errors, channel, clock offset) of each packet line.
+
+    In the order the lines appear. The offset is the figure libubertooth
+    computes from the record's own timestamp, so a packet line is checked
+    against a number rather than against ``clk_offset=\\d+``.
+    """
     records = list(RECORDS)
     if variant in ("empty", "partial", "skipped"):
         records = []
@@ -298,7 +380,7 @@ def expected_packets(variant: str = "full", lap: int | None = None,
             continue
         if errors > max_errors:
             continue
-        out.append((record.lap, errors, record.channel))
+        out.append((record.lap, errors, record.channel, clk_offset(record)))
     return out
 
 
@@ -328,23 +410,28 @@ def packet_record_indices(lap: int | None = None,
 
 # --- output checks ------------------------------------------------------------
 
-# The noise figure and the ratio beside it are either both figures or both
-# the word `none`: the ratio comes from the noise, so a line with one of each
-# is malformed and does not count as a packet. The fixture's records set no
-# NOISE_ESTIMATE status bit, so there is no background for this channel and a
-# current ubertooth-rx prints `none` for both (fork 532adc19).
+# The noise figure and the ratio beside it: `none` for both, required rather
+# than allowed for. The ratio comes from the noise, so a line with one of each
+# is malformed; and these records set no NOISE_ESTIMATE status bit, so there
+# is no background figure for the packet's channel and the word is what a
+# current ubertooth-rx prints for both (fork 532adc19, and
+# SqueakyFloors/ubertooth#909, which made an unmeasured background a figure no
+# receiver reports instead of one that reads like a measurement). A live
+# capture's packet can carry either, which is why receive_cases' pattern
+# accepts a figure there and this one does not: a replay of this fixture has
+# nothing to measure a background from, so a build that went back to printing
+# one here is a build that made a figure up.
 #
-# The level column is a figure in every line of a replay of this fixture, and
-# that is pinned rather than allowed for: the column reads `none` only where
-# the board's own reading is at the top of the radio's scale (fork
-# SqueakyFloors/ubertooth#1192), and these records carry a fixed strongest
-# reading far below it. A live capture can print `none` there, which is why
-# receive_cases' pattern accepts it and this one does not.
-_NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
+# The level column is pinned the same way, to the fixture's own figure: it
+# reads `none` only where the board's own reading is at the top of the radio's
+# scale (SqueakyFloors/ubertooth#1192), and these records carry a strongest
+# reading far below it.
+_NOISE_AND_SNR = r"n=none snr=none"
 
 PACKET_LINE = re.compile(
     rf"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{{6}}) "
-    rf"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ {_NOISE_AND_SNR}$"
+    rf"err=(?P<err>\d+) clkn=\d+ clk_offset=(?P<clk_offset>\d+) "
+    rf"s={SIGNAL_DBM} {_NOISE_AND_SNR}$"
 )
 UAP_LINE = re.compile(r"UAP = 0x(?P<uap>[0-9a-f]+) found after \d+ total packets")
 # libbtbb works the UAP out from the packets' CRCs and says so. Since libbtbb
@@ -378,12 +465,13 @@ def uap_note(uap: int) -> str:
     return rf"UAP = 0x{uap:x} found after \d+ total packets"
 
 
-def packets_check(expected: list[tuple[int, int, int]]):
+def packets_check(expected: list[tuple[int, int, int, int]]):
     """A Step.output_check: exactly these packet lines, in this order."""
 
     def check(output) -> str:
         seen = [
-            (int(m["lap"], 16), int(m["err"]), int(m["ch"]))
+            (int(m["lap"], 16), int(m["err"]), int(m["ch"]),
+             int(m["clk_offset"]))
             for m in map(PACKET_LINE.match, text_lines(output)) if m
         ]
         if seen == expected:
@@ -396,14 +484,15 @@ def packets_check(expected: list[tuple[int, int, int]]):
         for index, (got, want) in enumerate(zip(seen, expected)):
             if got != want:
                 return (f"packet line {index + 1}: LAP {got[0]:06x} err {got[1]} "
-                        f"ch {got[2]}, expected LAP {want[0]:06x} err {want[1]} "
-                        f"ch {want[2]}")
+                        f"ch {got[2]} clk_offset {got[3]}, expected LAP "
+                        f"{want[0]:06x} err {want[1]} ch {want[2]} clk_offset "
+                        f"{want[3]}")
         return "packet lines differ"  # pragma: no cover
 
     return check
 
 
-def uap_check(expected: list[tuple[int, int, int]]):
+def uap_check(expected: list[tuple[int, int, int, int]]):
     """Packet lines as expected, and no UAP note among them.
 
     The note is libbtbb's, and standard output holds the packet lines (or a

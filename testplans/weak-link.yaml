@@ -5,6 +5,10 @@ plan: Weak-link receiver
 # plan they belong to:
 #
 #   ble.yaml     ble-weak-link       a DK advertiser capture at 20 and 40 dB
+#   ble.yaml     connection-weak-link  a DK-pair connection captured at
+#                                    40 dB and followed across its end at
+#                                    20 dB (measured 2026-11-04, once the
+#                                    bench had two DKs)
 #   classic.yaml classic-weak-link   piconet follow and AFH recovery at
 #                                    20 dB, UAP/clock recovery and the
 #                                    access-code error threshold at 40 dB
@@ -18,31 +22,6 @@ plan: Weak-link receiver
 # and `docs/tests.md` says per test what a weak link changes for it.
 runnable: false
 suites:
-  # Blocked on hardware, which is *why* these two are unmeasured: a
-  # connection needs two distinct DKs and the bench registers one declaring
-  # the `central` and `peripheral` roles, so neither entry can be bound at
-  # any attenuation and no figure can be taken. Planning says so rather than
-  # skipping, naming the roles it could not fill distinctly. A second DK
-  # declaring those roles is the whole fix, after which these need one
-  # capture each like any other entry here.
-  weak-link-needs-a-dk-pair:
-    - Capture known BLE connection:
-        hosts: [Host_Linux]
-        Ubertooth: default
-        central: default
-        peripheral: default
-        weak link: {Ubertooth: 40}
-        coverage: smoke
-        duration: 8s
-
-    - Follow a BLE connection across its end:
-        hosts: [Host_Linux]
-        Ubertooth: default
-        central: default
-        peripheral: default
-        weak link: {Ubertooth: 20}
-        duration: 20s
-
   # Waiting on a measurement, or on a case that does not exist yet. Each of
   # these was promoted on the sweep's evidence and sent back by review, which
   # is the gate working: the sweep measured a weak link, not necessarily the

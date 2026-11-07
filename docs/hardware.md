@@ -10,7 +10,9 @@ appears (it is git-ignored; [`hardware.example.yaml`](../hardware.example.yaml)
 is the template).
 
 Companions: [`docs/tests.md`](tests.md) says what each test does with this
-hardware, [`README.md`](../README.md) how to register and run it,
+hardware, [`README.md`](../README.md) how to set the harness up and run it,
+[`hardware-utilization.md`](hardware-utilization.md) which test uses which
+fixture,
 [`scripts/lab/`](../scripts/lab/README.md) holds the by-hand helpers (holding
 a device, switching a hub port, the udev rule), and
 [`DESIGN.md`](../DESIGN.md) describes the harness itself.
@@ -74,8 +76,8 @@ box. Every other Ubertooth test receives only.
 
 ### nRF52840 DK
 
-Nordic nRF52840 DK boards (PCA10056) are the Bluetooth LE peers: the Ubertooth
-stays receive-only and the DKs do the transmitting, so a capture can be checked
+Nordic nRF52840 DK boards (PCA10056) are the Bluetooth LE peers: in these
+tests the Ubertooth only receives and the DKs transmit, so a capture can be checked
 against an address, an interval, and a payload that were chosen rather than
 observed.
 
@@ -144,8 +146,16 @@ address soak's, taken with `-n` on channel 37 — so treat the budget as the
 bound it is rather than as a prediction, and record a measured rate here once
 a long run has produced one. Both DKs' serial ports stay open for the run.
 
-Registered by its J-Link serial, quoted so leading zeros survive, plus the
-BLE address its `status` reports. That address is a static random address
+Registered by its J-Link serial, plus the BLE address its `status` reports.
+The serial is all 12 digits, as the `/dev/serial/by-id` name carries it and
+quoted so the leading zeros survive: that is the one spelling the registry
+takes, because the DK's external lock file is named after the serial and the
+zero-stripped spelling of the same number would name a second file
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
+A shorter all-digit serial is refused with the padded form to write instead.
+Either spelling still *names* the board to `scripts/lab/hold`, and the lease
+key is `nrf52840dk-<serial without its leading zeros>` either way. That
+address is a static random address
 derived from the chip's FICR, so it is the same on every boot of the same
 board, which is what makes it worth registering:
 
@@ -191,7 +201,7 @@ Hands-Free Profile, so the air carries reserved-slot voice packets. An audio
 session is that link and the profile's own service level connection, an ACL
 link; it starts no data stream, and a board can hold both at once if a test
 asks for them. `sco type ev3` asks for a plain EV3
-link, whose payload is on the air at the basic rate a receive-only Ubertooth
+link, whose payload is on the air at the basic rate a receiving Ubertooth
 can decode; the 2-EV3 link the stack chooses by default carries the same
 payload as enhanced rate, which a basic-rate decoder cannot read. The
 hands-free unit has to be listening before the gateway pages it, so a session
@@ -772,6 +782,24 @@ of the commit it is against, and fails when either pair differs with
 `UTDK_FW_VERSION` unchanged
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)).
 
+CI compiles both peer firmwares, each in its vendor's own toolchain image for
+the version its sources pin, on a change under that firmware's directory,
+once a week, and on request: `scripts/ci.sh firmware-dk` for the DK
+([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147))
+and `scripts/ci.sh firmware-esp32` for the ESP32 peer
+([#326](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/326)).
+Neither is a required check, because each image is gigabytes. The peer step
+builds once and compares nothing: nothing in the harness flashes an ESP32
+peer, so a missing version bump fails a run on the bench rather than leaving
+the old image in place with nothing to say so. It does check that the image
+carries `UTESP_FW_VERSION`; that each setting `sdkconfig.defaults` asks for
+by value came back out of Kconfig verbatim and each one it asks to stay off
+did not come back on; and that neither configuring nor building warned about
+the firmware's own files, which is also what catches a withdrawn option that
+now disables nothing. The
+[firmware README](../firmware/esp32-classic-peer/README.md#without-installing-the-sdk)
+has the whole rule, and what it does not reach.
+
 ### Which Ubertooth firmware, and why
 
 The harness never tests host tools against firmware from another commit:
@@ -789,8 +817,7 @@ needs `arm-none-eabi-gcc`, and is refused up front without it.
 
 Guard boards are not flashed: preflight only requires their firmware API to be
 the host tools' own — any other, newer as well as older, is refused there,
-because `ubertooth-btle` may stop such a board rather than read it (README,
-"Guard Ubertooths") — not the resolved revision. Boards that a firmware-writing test
+because `ubertooth-btle` may stop such a board rather than read it (guide/transitions-guards-watchdog.md, "Guard Ubertooths") — not the resolved revision. Boards that a firmware-writing test
 (`Flash reliability`, `DFU images`, `Classic btbr console`) writes itself are
 not flashed either.
 
@@ -865,10 +892,15 @@ flashes an ESP32 peer, so a run fails instead when one reports a version
 older than the test needs. The hashes above let a bench confirm it holds the
 same image this repository's sources produce. Each was built as its firmware
 README says; a reproducible build is not claimed, so compare the version
-first and the hash second. The same sources do build the same peer image
-twice, but the ESP32 image holds the line numbers its error checks report,
-so even a comment added above one of them gives a different hash for the
-same version.
+first and the hash second. For the ESP32 image, that is not a caution but a
+measurement: CI built identical peer sources on two runs and got two hashes
+(`6741480e…` and `f47da7bc…`, 2026-11-06). ESP-IDF's
+`CONFIG_APP_REPRODUCIBLE_BUILD` is off by default and this firmware does not
+ask for it, so the image carries a compile date and time; the sources also
+hold the line numbers their error checks report, so even a comment added
+above one of them moves the hash for the same version. A bench whose copy
+hashes differently from the table has to be judged on the version it
+reports.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
@@ -1079,7 +1111,7 @@ its boot state does, or by being the first to open a port nobody held.
 Measured for #317: an overlapping open of an already-open port leaves the
 board running, while a reset pulse from a second process restarts it and the
 board then reports `boot reason power on`. See
-[Sharing boards: leases](../README.md#sharing-boards-leases).
+[Sharing boards: leases](guide/leases.md#sharing-boards-leases).
 
 **One lock file is one device.** No two devices may be registered with one
 serial, whatever their types and whichever way each is written: the bench's
@@ -1157,10 +1189,12 @@ tools); `tshark` from the distribution (no GUI) for
 Add `--with-acroname` to `bootstrap.py` on a host with an Acroname hub.
 Install the peer SDKs only on the host that builds the peer
 images: nRF Connect SDK v3.4.1 with `nrfutil sdk-manager` (about 6 GB), and
-ESP-IDF v5.5.6 (about 3 GB). A host with docker can build the DK image
-without that install, with `scripts/ci.sh firmware-dk` (see the
-[firmware README](../firmware/nrf52840dk/README.md)); flashing still needs
-`nrfutil`.
+ESP-IDF v5.5.6 (about 3 GB). A host with docker can build either peer image
+without that install, with `scripts/ci.sh firmware-dk` and
+`scripts/ci.sh firmware-esp32` (see the
+[DK](../firmware/nrf52840dk/README.md) and
+[ESP32 peer](../firmware/esp32-classic-peer/README.md) firmware READMEs);
+flashing still needs `nrfutil` for a DK and `esptool` for a peer.
 
 ### macOS
 
@@ -1168,7 +1202,7 @@ A Mac needs no udev rules and has no BlueZ, so `ubertooth-scan` and
 `ubertooth-follow` are not applicable there. A Mac is a test host with its own
 Ubertooths and runs a runner, never the controller; the peers and the power
 controllers stay on the Linux host. See
-[A Mac test host](../README.md#a-mac-test-host).
+[A Mac test host](guide/deploy.md#a-mac-test-host).
 
 ## Known limits
 

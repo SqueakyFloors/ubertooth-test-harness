@@ -16,6 +16,7 @@ import unittest
 
 from ubertooth_harness import bootloader, catalog, sequencer
 from ubertooth_harness.outputfiles import output_of
+from ubertooth_harness.preflight import PreflightCheck
 
 
 class Result:
@@ -38,12 +39,24 @@ class Publisher:
         self.events.append((kind, status, details))
 
 
-class Check:
-    def __init__(self, expectation):
-        self.resource_alias = "UT_Debug"
-        self.resource_identity = {"serial": "0B70DEADBEEF"}
-        self.host = "Host_Linux"
-        self.bootloader = expectation
+def Check(expectation, *, serial="0A1B2C3DEEFF"):
+    """The real preflight check, so the record reads the real verdict.
+
+    A stand-in with only the fields the record touches would have to repeat
+    the verdict rule, which is the one thing the record must not have a
+    second copy of.
+    """
+    return PreflightCheck(
+        check_id="preflight-001-bootloader-identity",
+        name="Bootloader identity",
+        host="Host_Linux",
+        resource_alias="UT_Debug",
+        resource_identity={"serial": serial},
+        argv=bootloader.identity_argv(serial.lower()),
+        expected_patterns=expectation.patterns("UT_Debug"),
+        expected_revision="git-1a2b3c4",
+        bootloader=expectation,
+    )
 
 
 IDENTITY = "Bootloader: 2.00 git-1a2b3c4, CRC32:0x9d2fe1b4\n"
@@ -63,8 +76,7 @@ class HostVersionOutputPatternTests(unittest.TestCase):
 
     def test_matching_output_is_not_a_failure(self):
         result = Result(
-            stdout="Host tools version: libubertooth 1.58 (git-abc1234), "
-                   "libbtbb 1.3 (git-7e1cdf0)\n"
+            stdout="Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n"
         )
         self.assertEqual("", self.definition.result_failure(result))
 
@@ -97,7 +109,7 @@ class BootloaderIdentityRecordTests(unittest.TestCase):
         self.assertEqual(("bootloader_identity", "passed"), (kind, status))
         self.assertEqual("UT_Debug", details["resource"])
         # Lower cased, so one serial is one board in the GUI's board list.
-        self.assertEqual("0b70deadbeef", details["serial"])
+        self.assertEqual("0a1b2c3deeff", details["serial"])
         self.assertIsNotNone(details["installed"])
         self.assertFalse(details["written"])
 

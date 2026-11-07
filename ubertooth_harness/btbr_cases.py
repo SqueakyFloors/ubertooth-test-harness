@@ -58,7 +58,7 @@ from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.patterns import (
     APPLICATION_IMAGE,
     BTBR_IMAGE,
-    COMPILE_INFO_PATTERN,
+    FIRMWARE_UNSUPPORTED_PATTERN,
     image_name_pattern,
 )
 from ubertooth_harness.pytools import SKIP_EXIT
@@ -73,7 +73,12 @@ from ubertooth_harness.stateful import (
     artifact_key,
     require,
 )
-from ubertooth_harness.transitions import _serial, _util
+from ubertooth_harness.transitions import (
+    GUARD_BOOTLOADER_PATTERN,
+    GUARD_UNSUPPORTED,
+    _serial,
+    _util,
+)
 
 TEST_NAME = "Classic btbr console"
 CASE_ID = "btbr-console"
@@ -101,9 +106,22 @@ _WRITTEN_REVISION = r"Verified firmware revision: (?P<value>\S+)"
 # The revision on a `ubertooth-util -v` line, whether or not it names an
 # image; which image it is comes from the pattern beside this observation.
 _REVISION = r"Firmware version:\s+(?:\S+\s+)?(?P<value>\S+)\s+\(API:"
-# The build string on a `-V` line, which is image-agnostic.
-_BUILD_REVISION = r"\bubertooth\s+(?P<value>\S+)\s+\("
+# The revision is read off the `Firmware version:` line of the `-V` answer,
+# which since fork #1233 is the whole of what that answer says about a board:
+# the build string beside it has gone, because an image records only its
+# version now and this line already names it. So `-V` still asks the same
+# question the `-v` step above asked, through another command.
 VERSION_TIMEOUT_S = 20.0
+# The bootloader line, read once under each of the two images. The first read
+# is the baseline the second is held to.
+_BTBR_BOOTLOADER_KEY = "btbr bootloader"
+_RESTORED_BOOTLOADER_KEY = "restored bootloader"
+# One control transfer against a board whose report was worked out at
+# startup. The same figure bootloader.IDENTITY_TIMEOUT_S gives the preflight
+# read; written out here because importing that module from a catalog case
+# would close an import cycle, and tests/test_btbr_cases.py keeps the two in
+# step.
+BOOTLOADER_TIMEOUT_S = 5.0
 
 
 def _image(label):
@@ -134,6 +152,59 @@ def _image_step(serial: str, step_id: str, name: str, image: str, key: str) -> S
         output_patterns=(image_name_pattern(image),),
         observe=Observation(key, _REVISION, _revision),
     )
+
+
+def _bootloader_step(serial: str, step_id: str, name: str, key: str) -> Step:
+    """Record `ubertooth-util -B` while the board runs one of the two images.
+
+    `ubertooth-dfu` writes the application region only, so a board keeps its
+    bootloader across both of this case's writes, and both images implement
+    the request (the alternate image's own vendor request handler answers
+    it). The reading is taken under each: once the run's `btbr` image is on
+    the board, and again in the cleanup with the application image back, so
+    the run record carries the board's bootloader as each image reports it
+    (#327, #329).
+
+    Recorded, not compared. A read that refuses is the reading too, which is
+    what a fork commit with the `btbr` image but without `-B` answers, and
+    what a board carrying firmware older than the request answers before the
+    write; this test establishes its board's image, so it is the one test
+    whose board can arrive on such firmware. Asserting the two lines equal
+    would mean a cleanup step that compares against a baseline a failed case
+    may never have recorded, and a cleanup step that cannot run stops the
+    test whether it is skipped or failed (sequencer.py, ``cleanup_unverified``),
+    so a case that failed at its own write would be reported as a board left
+    unrestored. The equality is worth asserting and needs a way to say
+    "compare only if there is something to compare with", which is
+    ubertooth-test-harness#366.
+    """
+    pattern, value = _tolerant_bootloader()
+    return Step(
+        step_id, name, _util(serial, "-B"), timeout_s=BOOTLOADER_TIMEOUT_S,
+        # A board whose firmware has not got the request says so and exits 1.
+        expected_returncodes=(0, 1),
+        observe=Observation(key, pattern, convert=value),
+    )
+
+
+def _tolerant_bootloader():
+    """The `-B` pattern and convert: the line, or "this host could not read it".
+
+    The same two answers the guard reads accept, and the same marker, so one
+    reader understands a bootloader reading wherever it was taken
+    (transitions.GUARD_UNSUPPORTED).
+    """
+    combined = (
+        rf"(?:{GUARD_BOOTLOADER_PATTERN})"
+        rf"|(?P<unsupported>{FIRMWARE_UNSUPPORTED_PATTERN})"
+    )
+
+    def value(match):
+        if match.groupdict().get("unsupported"):
+            return GUARD_UNSUPPORTED
+        return match.group("value")
+
+    return combined, value
 
 
 def console_argv(serial: str, peer, *, comprehensive: bool) -> tuple[str, ...]:
@@ -309,11 +380,15 @@ def _case(serial, peer, number: int, sessions: int, *,
         _image_step(serial, "verify-btbr-image",
                     f"The board reports the {BTBR_IMAGE} image at the run's "
                     "revision", BTBR_IMAGE, "btbr revision"),
+        _bootloader_step(serial, "read-btbr-bootloader",
+                         f"Record the bootloader the {BTBR_IMAGE} image "
+                         "reports", _BTBR_BOOTLOADER_KEY),
         Step("verify-btbr-build",
-             f"The {BTBR_IMAGE} build string is the run's revision",
+             f"The {BTBR_IMAGE} image answers -V with its own name and the "
+             "run's revision",
              _util(serial, "-V"), timeout_s=VERSION_TIMEOUT_S,
-             output_patterns=(COMPILE_INFO_PATTERN,),
-             observe=Observation("btbr build revision", _BUILD_REVISION,
+             output_patterns=(image_name_pattern(BTBR_IMAGE),),
+             observe=Observation("btbr build revision", _REVISION,
                                  _revision)),
         _reset_peer("reset-peer-before", peer),
         _console_step(serial, peer, comprehensive=comprehensive),
@@ -325,6 +400,9 @@ def _case(serial, peer, number: int, sessions: int, *,
         _image_step(serial, "verify-restored-image",
                     f"The board reports {APPLICATION_IMAGE} at the run's "
                     "revision again", APPLICATION_IMAGE, "restored revision"),
+        _bootloader_step(serial, "read-restored-bootloader",
+                         f"Record the bootloader {APPLICATION_IMAGE} reports",
+                         _RESTORED_BOOTLOADER_KEY),
         _reset_peer("reset-peer-after", peer),
     )
     name = (f"The {BTBR_IMAGE} image runs a console session against "

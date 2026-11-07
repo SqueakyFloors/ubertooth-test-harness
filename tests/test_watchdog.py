@@ -40,7 +40,7 @@ from ubertooth_harness.watchdog import (
 
 from tests import watchdog_samples as samples
 from tests.test_catalog_resources import HARDWARE
-from tests.test_sequencer import CollectSink, run_contract
+from tests.test_sequencer import CollectSink, VERSION_LINE, run_contract
 
 
 SERIAL = "aaaa0000aaaa0000aaaa0000aaaa0000"
@@ -65,9 +65,70 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(0, record.transfer_errors)
         self.assertEqual(
             {"fs_lock": 0, "fs_unlock": 0, "oscillator": 0, "state_machine": 0,
+             "packet_bytes": 0, "packet_lead": 0},
+            dict(record.radio_waits),
+        )
+        self.assertEqual("", record.radio_waits_unread)
+
+    def test_the_counters_are_read_by_name_in_the_order_the_tool_prints_them(self):
+        record = parse_report(samples.report(radio_waits=(1, 2, 3, 4, 5, 6)))
+
+        self.assertEqual(
+            {"fs_lock": 1, "fs_unlock": 2, "oscillator": 3, "state_machine": 4,
+             "packet_bytes": 5, "packet_lead": 6},
+            dict(record.radio_waits),
+        )
+        self.assertEqual(
+            "synthesizer lock 1, unlock 2, oscillator 3, state machine 4, "
+            "packet bytes 5, packet lead 6",
+            watchdog.wait_counts(record.radio_waits),
+        )
+
+    def test_a_build_from_before_the_sixth_counter_is_still_read(self):
+        """`packet lead` arrived with SqueakyFloors/ubertooth#1081; a board
+        read with host tools from before it prints the five without it, and
+        the counter those tools have not got is absent rather than zero."""
+        record = parse_report(samples.FIVE_COUNTERS)
+
+        self.assertEqual(
+            {"fs_lock": 0, "fs_unlock": 0, "oscillator": 0, "state_machine": 0,
              "packet_bytes": 0},
             dict(record.radio_waits),
         )
+        self.assertEqual("", record.radio_waits_unread)
+
+    def test_a_counter_line_the_reader_cannot_take_apart_is_kept_to_say_so(self):
+        """What ubertooth-test-harness#343 was: the fork's report gained a
+        counter, the pattern stopped matching the line at all, and every read
+        recorded no figures while still reading as a healthy board. A line
+        this reader cannot take apart is now kept, so a warning can name it."""
+        record = parse_report(samples.report(radio_waits=(0,) * 7))
+
+        self.assertIsNone(record.radio_waits)
+        self.assertIn("counter 6 0", record.radio_waits_unread)
+        self.assertIn("packet lead 0", record.radio_waits_unread)
+        self.assertEqual(record.radio_waits_unread,
+                         record.to_dict()["radio_waits_unread"])
+
+    def test_a_counter_line_with_nothing_after_it_is_unread_too(self):
+        """Otherwise it reads as "not reported", with nothing said, which is
+        the shape #343 is about."""
+        record = parse_report(samples.report(radio_waits=()))
+
+        self.assertIsNone(record.radio_waits)
+        self.assertEqual("nothing", record.radio_waits_unread)
+        warning = watchdog.unread_waits_warning("UT (serial s)",
+                                                record.radio_waits_unread)
+        self.assertIn("UT (serial s) printed radio-wait counters this harness "
+                      "cannot read", warning)
+        self.assertIn("go unchecked for this run", warning)
+        self.assertIn("WAIT_NAMES", warning)
+
+    def test_a_report_with_no_counter_line_at_all_has_nothing_to_say(self):
+        record = parse_report(samples.WITHOUT_WAITS)
+
+        self.assertIsNone(record.radio_waits)
+        self.assertEqual("", record.radio_waits_unread)
 
     def test_older_host_tools_leave_the_last_two_lines_out(self):
         # The same board read with a build from before those lines: the rest
@@ -498,6 +559,47 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(2, event[2]["resets"])
         self.assertEqual(0, event[2]["new_resets"])
 
+    def test_a_counter_line_the_reader_cannot_read_is_warned_about_once(self):
+        """The baseline says it, and the reads after it do not repeat it: the
+        reader being behind the fork's report does not change during a run,
+        and a line per read would bury the run's own findings. What it must
+        not be is silent, which is ubertooth-test-harness#343."""
+        drifted = samples.report(radio_waits=(0,) * 7)
+        monitor, _commands, publisher, _clock = self.monitor(
+            {SERIAL: [drifted, drifted, drifted]})
+
+        baseline = monitor.baseline()
+
+        (warning,) = baseline.warnings
+        self.assertIn("printed radio-wait counters this harness cannot read",
+                      warning)
+        self.assertEqual("", baseline.failure)
+        self.assertEqual("warning",
+                         [e for e in publisher.events if e[0] == "watchdog"][-1][1])
+
+        self.assertEqual((), monitor.after_test(invocation()).warnings)
+        self.assertEqual((), monitor.after_test(invocation()).warnings)
+
+    def test_an_unread_counter_that_ticks_over_does_not_warn_again(self):
+        """What names the wording is the line with its figures taken out: a
+        counter counts, so keyed on the whole text every read of a board
+        whose unread counter moved would be a new wording."""
+        monitor, _commands, _publisher, _clock = self.monitor({SERIAL: [
+            samples.report(radio_waits=(0,) * 7),
+            samples.report(radio_waits=(0, 0, 0, 0, 0, 0, 4)),
+            samples.report(radio_waits=(1, 0, 0, 0, 0, 0, 9)),
+        ]})
+
+        self.assertEqual(1, len(monitor.baseline().warnings))
+        self.assertEqual((), monitor.after_test(invocation()).warnings)
+        self.assertEqual((), monitor.after_test(invocation()).warnings)
+
+    def test_a_board_whose_counters_are_read_warns_about_nothing(self):
+        monitor, _commands, _publisher, _clock = self.monitor(
+            {SERIAL: [samples.FULL, samples.FIVE_COUNTERS]})
+        self.assertEqual((), monitor.baseline().warnings)
+        self.assertEqual((), monitor.after_test(invocation()).warnings)
+
     def test_a_reset_during_a_test_warns_and_the_test_still_passes(self):
         monitor, _commands, publisher, _clock = self.monitor({SERIAL: [
             samples.report(resets=0, boots=1),
@@ -650,11 +752,9 @@ class MonitorTests(unittest.TestCase):
     def test_firmware_with_the_record_and_not_the_radio_waits_still_reads(self):
         # A fork commit has the watchdog record and not the radio waits: the
         # record prints, the second read is refused, and the command exits 1.
-        output = samples.FULL.replace(
-            "Radio waits that gave up since boot: synthesizer lock 0, unlock 0, "
-            "oscillator 0, state machine 0, packet bytes 0\n",
+        output = samples.WITHOUT_WAITS + (
             "error: could not read the radio wait timeouts: the board's firmware "
-            "does not support it (stalled, libusb -9)\n",
+            "does not support it (stalled, libusb -9)\n"
         )
         monitor, commands, publisher, _clock = self.monitor({SERIAL: [output]})
 
@@ -990,10 +1090,7 @@ class RunExecutor:
         elif command[-1] == "-h":
             output = "usage\n"
         else:
-            output = (
-                "Host tools version: libubertooth 1.1 (git-test), "
-                "libbtbb 1.0 (git-btbb)\n"
-            )
+            output = VERSION_LINE
         if on_output:
             on_output("stdout", output)
         return CommandResult(command, 0, output, "", 0.01, False)
@@ -1155,7 +1252,7 @@ class FlashSoakTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source, short = make_source(root)
+            source, revision = make_source(root)
             test_image = root / "test.dfu"
             kgv_image = root / "kgv.dfu"
             test_image.write_bytes(b"test")
@@ -1194,8 +1291,8 @@ class FlashSoakTests(unittest.TestCase):
                     identity: {{serial: {guard}}}
                 """))
             executor = FlashDeviceExecutor(
-                f"git-{short}",
-                {str(test_image.resolve()): f"git-{short}",
+                revision,
+                {str(test_image.resolve()): revision,
                  str(kgv_image.resolve()): "2020-12-R1"},
                 selected, guard,
             )

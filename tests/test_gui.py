@@ -450,7 +450,7 @@ class PlanTests(ControllerTestCase):
             return suite
 
         suite = await release(other)
-        self.assertAlmostEqual(659.6, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(669.7, suite["estimated_s"], delta=0.2)
         self.assertEqual(
             [{"name": "Recover AFH map",
               "reason": f"runs on {named}, not on {other}",
@@ -466,7 +466,7 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(0, suite["unestimated_tests"])
         # The host the step names, and no target at all, count every step.
         for suite in (await release(named), await release()):
-            self.assertAlmostEqual(1179.6, suite["estimated_s"], delta=0.2)
+            self.assertAlmostEqual(1189.7, suite["estimated_s"], delta=0.2)
             self.assertEqual([], suite["omitted_tests"])
             self.assertEqual(0.0, suite["omitted_estimated_s"])
             self.assertEqual(
@@ -604,7 +604,7 @@ class PlanTests(ControllerTestCase):
             (suite,) = list_plans(root, target="Host_Mac")[0]["suites"]
         self.assertIsNone(suite["omitted_estimated_s"])
         self.assertEqual(
-            [("Host CLI surface", 3.6), ("Receive-only firmware", None)],
+            [("Host CLI surface", 6.2), ("Receive-only firmware", None)],
             [(test["name"], test["estimated_s"]) for test in suite["omitted_tests"]],
         )
 
@@ -773,7 +773,7 @@ class PlanTests(ControllerTestCase):
             mac = list_plans(root, target="Host_Mac", platform="macos")[0]["suites"][0]
             linux = list_plans(root, target="Host_Linux", platform="linux")[0]["suites"][0]
             unknown = list_plans(root, target="Host_Mac")[0]["suites"][0]
-        self.assertEqual((3.6, 0), (mac["estimated_s"], mac["per_board_tests"]))
+        self.assertEqual((6.2, 0), (mac["estimated_s"], mac["per_board_tests"]))
         self.assertEqual(
             [{"name": "Exclusive Ubertooth topology",
               "reason": "runs only on Linux, and Host_Mac is macOS",
@@ -781,7 +781,7 @@ class PlanTests(ControllerTestCase):
             mac["omitted_tests"],
         )
         for suite in (linux, unknown):
-            self.assertEqual((18.6, 1), (suite["estimated_s"], suite["per_board_tests"]))
+            self.assertEqual((21.2, 1), (suite["estimated_s"], suite["per_board_tests"]))
             self.assertEqual([], suite["omitted_tests"])
 
     async def test_plans_say_which_build_options_a_suite_needs(self):
@@ -942,7 +942,7 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(0, plans["timed"]["suites"][0]["unestimated_tests"])
         # Not implemented and no duration argument: no estimate.
         partial = plans["timed"]["suites"][1]
-        self.assertEqual([3.6, None], [t["estimated_s"] for t in partial["tests"]])
+        self.assertEqual([6.2, None], [t["estimated_s"] for t in partial["tests"]])
         self.assertIsNone(partial["estimated_s"])
         self.assertEqual(1, partial["unestimated_tests"])
         self.assertTrue(plans["broken"]["error"])

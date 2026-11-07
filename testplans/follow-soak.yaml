@@ -20,7 +20,7 @@ plan: Intermittent follow soak
 # shortest of them is minutes and the longest is three days. The long ones
 # run on the persistent target runner, which keeps running when whatever
 # started the run disconnects; the run directory holds the record
-# (README, "Target runner service").
+# (docs/guide/services.md, "Target runner service").
 #
 #   python -m ubertooth_harness run-suite \
 #     --plan testplans/follow-soak.yaml --suite follow-soak \

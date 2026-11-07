@@ -69,6 +69,7 @@ from ubertooth_harness.preflight import (
     NO_FLASH_FIX,
     PreflightError,
     PreflightPolicy,
+    require_release_output,
 )
 from ubertooth_harness.power import (
     PowerControllerError,
@@ -77,7 +78,11 @@ from ubertooth_harness.power import (
     snapshot_ports,
 )
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
-from ubertooth_harness.report import render_runs, write_report
+from ubertooth_harness.report import (
+    render_runs,
+    write_console_summary,
+    write_report,
+)
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import guard_boards, ubertooth_roles
@@ -247,13 +252,19 @@ def _build(
 def _finish_failed_run(
     publisher, output_dir: Path, reason: str, status: str = "failed"
 ) -> None:
-    """Close a run that stopped before its tests started, then write report.md."""
+    """Close a run that stopped before its tests started, then write report.md.
+
+    The console summary goes out here too, so a run that failed in its build,
+    its flash stage, or preflight still ends with the block that says which
+    commits and boards it was about (#342).
+    """
     try:
         publisher.emit(
             "run_finished", status, {"status": status, "failure_reason": reason}
         )
     finally:
         write_report(output_dir)
+        write_console_summary(output_dir)
 
 
 FORK_PIN = libbtbbpin.FORK_PIN
@@ -320,6 +331,12 @@ def _resolve_sources(args: argparse.Namespace):
         sources.append(
             resolver.resolve("libbtbb", args.libbtbb_source, libbtbb_ref, ref_name)
         )
+    # Before anything is built or written to a board: a commit whose build
+    # reports no release prints none of the output this validation checks, so
+    # a run of one is refused here rather than after a build and a flash
+    # (#358). --dry-run reaches this too, so it answers for the ref it was
+    # given.
+    require_release_output(sources[0])
     return tuple(sources)
 
 
@@ -416,9 +433,11 @@ def _build_command(args: argparse.Namespace) -> int:
     output.mkdir(parents=True)
     publisher = open_run_publisher(output, generate_run_id(), _terminal_sink())
     publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
-    _record_libbtbb_pin(publisher, sources)
-    _record_dfu_part_table(publisher, sources)
     try:
+        # Inside, so a failure in either comparison closes this record and
+        # ends with the block, as _run_leased does with the same two.
+        _record_libbtbb_pin(publisher, sources)
+        _record_dfu_part_table(publisher, sources)
         result = _build(
             # No suite here to read the need off, so the alternate image is
             # built when --with-btbr asks for it and not otherwise.
@@ -426,11 +445,16 @@ def _build_command(args: argparse.Namespace) -> int:
             args.with_python, run_dir=output,
             firmware_images=_firmware_images(with_btbr=args.with_btbr),
         )
-    except BuildError as error:
-        _finish_failed_run(publisher, output, str(error))
+    except BaseException as error:
+        # Every way out: a build error, a cancellation, or an error of the
+        # harness's own closes the record it opened and ends with the block.
+        _finish_failed_run(publisher, output, str(error) or type(error).__name__)
         raise
     publisher.emit("run_finished", "passed", {"status": "passed", "failure_reason": ""})
     write_report(output)
+    # A build records a run of its own, so it ends with the same block,
+    # whether it passed or failed (#342).
+    write_console_summary(output)
     print(json.dumps({
         "sources": [source.to_dict() for source in sources],
         "build": result.to_manifest(),
@@ -913,7 +937,15 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
     artifact build and, in ``update`` mode, the write.
     """
     mode = args.bootloader
+    # Two sets. `boards` is what this mode may install on; `read_boards` adds
+    # the boards whose application image a test of the suite writes itself,
+    # which are read and compared like the rest and never written here:
+    # `update` installs on the boards whose firmware preflight requires, and a
+    # board the suite reflashes would then have to be verified against an
+    # application revision the run does not require (#327).
     boards = tuple(getattr(args, "bootloader_boards", ()))
+    established = frozenset(getattr(args, "bootloader_established", ()))
+    read_boards = tuple(getattr(args, "bootloader_read_boards", ())) or boards
     ubertooth = next(source for source in sources if source.name == "Ubertooth")
     if not bootloader.supported_at(ubertooth):
         # A fork commit from before `ubertooth-util -B`. Nothing can be read,
@@ -930,14 +962,14 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
                 "mode": mode, "reason": reason, "expected": None, "boards": [],
             })
         return None, None
-    if not boards:
+    if not read_boards:
         if publisher is not None:
             publisher.emit("bootloader_stage_finished", "skipped", {
-                "mode": mode, "reason": "no board needs the run's firmware",
+                "mode": mode, "reason": "no board of this suite is read",
                 "expected": None, "boards": [],
             })
         return None, None
-    if mode != bootloader.MODE_UPDATE:
+    if mode != bootloader.MODE_UPDATE or not boards:
         # Nothing here writes flash, and the build below can take minutes, so
         # the host's firmware lock goes back before it rather than after.
         _release_flash_host_lock(args, leases)
@@ -954,7 +986,29 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
                 output_dir=run_dir,
                 cancellation=token,
             )
-    if mode == bootloader.MODE_UPDATE:
+    if mode == bootloader.MODE_UPDATE and not boards:
+        # Every Ubertooth of this suite has its own application image written
+        # by a test in it, so there is no board this mode can install on. Said
+        # rather than left to look like a write that happened: the read below
+        # still compares, and a stale bootloader fails preflight with the
+        # reason that names the programmer path.
+        if publisher is not None:
+            publisher.emit("bootloader_stage_finished", "skipped", {
+                "mode": mode,
+                "reason": (
+                    "no board of this suite is installed on: a test in it "
+                    "writes the application image of every Ubertooth it uses, "
+                    "so each board's bootloader is read and compared only -- "
+                    "and a board carrying firmware older than the read "
+                    "answers that it has not got the request, which "
+                    "establishes nothing about its bootloader"
+                ),
+                "expected": (
+                    artifact.identity().to_dict() if artifact else None
+                ),
+                "boards": [],
+            })
+    elif mode == bootloader.MODE_UPDATE:
         with _signals_cancel(CancellationToken()) as token:
             summary = bootloader.BootloaderUpdater(executor).run(
                 boards, publisher, mode=mode, artifact=artifact,
@@ -971,7 +1025,8 @@ def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases
         bootloader.BootloaderExpectation(
             mode=mode,
             expected=artifact.identity() if artifact else None,
-            boards={board.alias: board for board in boards},
+            boards={board.alias: board for board in read_boards},
+            established=established,
         ),
         artifact,
     )
@@ -1128,11 +1183,24 @@ def _run_suite(args: argparse.Namespace) -> int:
             )
             for alias in needs_firmware
         )
-    # The boards whose bootloader this run reads, compares, or installs: the
-    # ones whose firmware preflight requires, which is where the bootloader
-    # read can be answered at all.
+    # The boards whose bootloader this run may install: the ones whose
+    # firmware preflight requires, which are also the ones a building run
+    # flashes, so the application the board answers from afterwards is this
+    # run's own.
     args.bootloader_boards = bootloader.boards_for_bootloader(
         registry, needs_firmware
+    )
+    # The rest of the suite's Ubertooths: a test in it writes their own
+    # application image. Their bootloader is read and compared too, since no
+    # firmware write replaces it and for one test it is the subject (#327),
+    # but it is never installed here. They are built as boards like the rest,
+    # so a reason about one can name the programmer its registry pairs with
+    # it, or say there is none.
+    args.bootloader_established = PreflightPolicy(
+        registry, catalog
+    ).boards_establishing_firmware(invocations)
+    args.bootloader_read_boards = bootloader.boards_for_bootloader(
+        registry, tuple(needs_firmware) + tuple(args.bootloader_established)
     )
     if args.bootloader == bootloader.MODE_UPDATE:
         without = [
@@ -1161,6 +1229,7 @@ def _run_suite(args: argparse.Namespace) -> int:
         )
     if (
         args.bootloader == bootloader.MODE_UPDATE
+        and args.bootloader_boards
         and not args.dry_run
         and shutil.which(bootloader.PROGRAMMER_TOOL) is None
     ):
@@ -1491,6 +1560,14 @@ def _run_leased(
             signal.signal(signum, handler)
         if isolation is not None:
             isolation.close()
+        # On stderr, with the live stream a reader is tailing: what was
+        # tested, on which board and firmware, and how it went (#342). In the
+        # finally, so a sequencer that raises still ends with the block; the
+        # records it is compiled from are already on disk. Once per run: the
+        # paths that close a run before this one re-raise instead of reaching
+        # it. stdout keeps the summary JSON alone, so a caller parsing it is
+        # unaffected.
+        write_console_summary(run_dir)
     try:
         print(json.dumps(asdict(summary), indent=2, sort_keys=True))
     except OSError:

@@ -3,11 +3,13 @@
 A transition case is an ordered list of steps followed by mandatory cleanup.
 Steps may observe a device setting and either record it (for later
 restoration) or compare it with an expected value derived from earlier
-observations. Cleanup always runs, even after failure or cancellation, and a
-cleanup failure always fails the case.
+observations. A comparison with a reading only some runs of the case take
+(``Observation.compare_with``) is made where the reading is there and left
+out where it is not, without skipping the step. Cleanup always runs, even
+after failure or cancellation, and a cleanup failure always fails the case.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import combinations
 import re
 from typing import Callable, Iterable, Mapping, Sequence
@@ -73,6 +75,33 @@ class Unrestorable(LookupError):
     """
 
 
+class NothingToCompare(LookupError):
+    """A comparison has no earlier reading to compare with.
+
+    Raised by ``Observation.expected_value`` for an observation whose
+    ``compare_with`` reading no earlier step of this case took: the case
+    stopped, was canceled, or was skipped before the step that records it.
+    The step still runs and every other check it carries still applies; only
+    this one comparison is left out, and the step records which reading was
+    missing.
+
+    It is neither of the other two absences. ``MissingContext`` means the
+    step cannot run at all, which is a cleanup failure once something has
+    changed; ``Unrestorable`` means a recorded value cannot be written back,
+    so the step is skipped. Either way the step did not run, which leaves the
+    cleanup unverified, and the parent test stops rather than continue from a
+    device no cleanup checked. A step that is only missing something to
+    compare with does run: it does its own work, and still proves what it is
+    there to prove, so it passes or fails on its own checks and the cleanup
+    stays verified.
+
+    Only a case's own steps are given it. ``StateCase`` is what refuses a
+    comparison with a reading no earlier step of it records, so a step from
+    anywhere else fails on the absence instead (sequencer
+    ``_run_state_step``).
+    """
+
+
 def coverage_profile(value) -> str:
     if value not in COVERAGE_PROFILES:
         raise ValueError(
@@ -130,14 +159,44 @@ class Observation:
     values: Mapping[str, str] | None = None
     reject: Callable[[str], str] | None = None
     convert: Callable[[re.Match], str] | None = None
+    # The observation key of an earlier reading in the same case that this
+    # one must equal -- the two answers to one question, read either side of
+    # something that must not have changed it. It is last so the fields
+    # before it keep taking positional arguments.
+    #
+    # It is for a reading only some runs of the case take: a baseline a
+    # mutating step has to establish first, which a case that stopped before
+    # that step never recorded. Where the reading is always there, say so
+    # with ``expected`` instead, so its absence fails loudly. Nothing is
+    # invented in either case: this compares with the recorded reading when
+    # the case took it, and with nothing at all when it did not
+    # (``NothingToCompare``). StateCase refuses a key no earlier step of the
+    # case records, so a misspelling cannot quietly stop comparing.
+    compare_with: str | None = None
 
     def __post_init__(self):
         if self.convert is None and "(?P<value>" not in self.pattern:
             raise StateCaseError(
                 f"observation {self.key} pattern needs a (?P<value>...) group"
             )
+        if self.compare_with is None:
+            return
+        if self.expected is not None:
+            raise StateCaseError(
+                f"observation {self.key}: expected and compare_with are two "
+                "ways to say what to compare with; give one"
+            )
+        if self.compare_with == self.key:
+            raise StateCaseError(
+                f"observation {self.key} cannot compare with itself"
+            )
 
     def expected_value(self, context: Context) -> str | None:
+        if self.compare_with is not None:
+            try:
+                return context[self.compare_with]
+            except KeyError as error:
+                raise NothingToCompare(self.compare_with) from error
         if callable(self.expected):
             return str(self.expected(context))
         return self.expected
@@ -168,6 +227,10 @@ class StepOutcome:
     expected: str | None = None
     observed: str | None = None
     skipped: str = ""
+    # The reading this step would have compared with, when the case never
+    # recorded it: the comparison was left out, and the step is reported on
+    # its own checks alone (``NothingToCompare``).
+    uncompared: str = ""
 
 
 @dataclass(frozen=True)
@@ -218,12 +281,26 @@ class Step:
         return command
 
     def evaluate(self, result, context: Context) -> StepOutcome:
+        """How this step came out, with the expected value resolved first.
+
+        A ``compare_with`` reading the case never recorded leaves the
+        comparison out rather than ending the step: the step runs on its own
+        checks, and the outcome names the reading that was missing.
+        """
         expected = None
+        uncompared = ""
         if self.observe is not None:
             try:
                 expected = self.observe.expected_value(context)
+            except NothingToCompare as error:
+                uncompared = error.args[0]
             except MissingContext as error:
                 return StepOutcome(f"{self.name}: missing recorded {error.args[0]}")
+        outcome = self._judge(result, expected)
+        return replace(outcome, uncompared=uncompared) if uncompared else outcome
+
+    def _judge(self, result, expected: str | None) -> StepOutcome:
+        """The step's outcome, once its expected value is known."""
         if result.cancelled:
             return StepOutcome(f"{self.name}: command canceled", expected)
         if self.continuous:
@@ -397,6 +474,33 @@ class StateCase:
         ]
         if len(set(keys)) != len(keys):
             raise StateCaseError(f"{self.case_id}: duplicate observation key")
+        self._check_comparisons()
+
+    def _check_comparisons(self) -> None:
+        """Every ``compare_with`` names a reading an earlier step records.
+
+        A comparison with a reading this case never takes would be left out
+        of every run of it (``NothingToCompare``), and nothing would say so,
+        because leaving it out is the ordinary outcome when the case stops
+        early. So a key no earlier step records, or one recorded only later,
+        is refused where the case is built.
+        """
+        recorded: list[str] = []
+        for step in self.steps + self.cleanup:
+            if step.observe is None:
+                continue
+            wanted = step.observe.compare_with
+            if wanted is not None and wanted not in recorded:
+                later = any(
+                    other.observe is not None and other.observe.key == wanted
+                    for other in self.steps + self.cleanup
+                )
+                raise StateCaseError(
+                    f"{self.case_id}: {step.step_id} compares with '{wanted}', "
+                    + ("which a later step records, not an earlier one"
+                       if later else "which no step of this case records")
+                )
+            recorded.append(step.observe.key)
 
     def retry_window(self) -> tuple[int, int] | None:
         """Step indices [first, last + 1) the last step's failure runs again."""
