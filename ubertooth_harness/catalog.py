@@ -29,7 +29,8 @@ from ubertooth_harness.outputfiles import output_of
 from ubertooth_harness.resources import BLUETOOTH_ADAPTER, ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, afh_cases, bluez_cases, boardstate_cases, btbr_cases,
+    addresssoak, advertiser_cases, advertiser_soak_cases, afh_cases,
+    bluez_cases, boardstate_cases, btbr_cases,
     capture_failure_cases, classic_cases, connection_cases, dfu_cases,
     dfu_host_cases, interrupt_cases, invalidapp_cases, python_cases,
     receive_cases,
@@ -246,6 +247,58 @@ def _check_follow_end_duration(arguments) -> None:
             f"duration must be longer than {least:g}s, so the capture spans "
             f"{connection_cases.MIN_CYCLES} of the central's connections, and "
             f"at most {most:g}s, so one case does not hold the boards for long")
+
+
+def _advertising_channel(value):
+    # The three primary advertising channels ubertooth-btle -A takes. The
+    # type is checked as well: `channel: 37.0` is a float in YAML and would
+    # otherwise reach the tool as -A37.0.
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or value not in (37, 38, 39)):
+        raise CatalogError("must be an advertising channel 37, 38 or 39")
+    return value
+
+
+def _share(value):
+    """A share of something, as a fraction above 0 and at most 1.
+
+    Written as a fraction rather than a percentage because that is how the
+    run reports it, so a plan and a result read the same way.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CatalogError("must be a fraction above 0 and at most 1")
+    number = float(value)
+    if not 0 < number <= 1:
+        raise CatalogError(f"must be a fraction above 0 and at most 1 (got {value})")
+    return number
+
+
+def _check_address_soak(arguments) -> None:
+    """Refuse soak figures that could not judge what they ask for.
+
+    Each of these is a relationship between two arguments -- a detection
+    deadline longer than the advertiser is on for, a liveness timeout the
+    schedule's own silence would trip, a gap limit every period crosses --
+    and they are checked when the plan loads rather than on the bench: the
+    run leases an Ubertooth and a DK and then holds them for hours, so a
+    plan whose figures contradict each other has to fail before any of that.
+    The rules themselves are the driver's (addresssoak.check_timings), read
+    through the same conversion the driver's own command line gets, so the
+    plan is judged by what will really run.
+    """
+    if arguments["capture file limit"] > arguments["capture budget"]:
+        # The budget is what the run's captures may cost altogether, so a
+        # per-file limit above it would prune down to one over-budget file
+        # at every rotation. Here rather than in the driver because it is a
+        # relationship between two plan figures, like the rest.
+        raise CatalogError(
+            f"'capture file limit' ({arguments['capture file limit']} MiB) is "
+            f"larger than 'capture budget' ({arguments['capture budget']} MiB), "
+            "which is what the whole run's captures may cost")
+    try:
+        addresssoak.check_timings(advertiser_soak_cases.timings(arguments))
+    except addresssoak.SoakError as error:
+        raise CatalogError(str(error)) from error
 
 
 def _payload_tag(value):
@@ -1158,6 +1211,13 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # and the check after it, on a host with six other boards. Rounded up for
     # a bench with more guards to read, or a slower hub.
     invalidapp_cases.TEST_NAME: _default(Estimate(70.0)),
+    # ESTIMATE_PENDING_HW: the capture runs for the whole duration the plan
+    # asks for, and around it are the advertiser check (which may flash the
+    # DK), the board and watchdog reads at either end, and the cleanup. The
+    # fixed part is the sum of those bounded commands rather than a
+    # measurement; the duration is what a soak's time really is, and it is
+    # hours, so the figure around it hardly moves the countdown.
+    advertiser_soak_cases.TEST_NAME: _default(Estimate(60.0, per_duration=1)),
 })
 
 
@@ -1176,6 +1236,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "Capture known BLE connection",
         "Classic btbr console",
         "Follow a BLE connection across its end",
+        advertiser_soak_cases.TEST_NAME,
         # The Classic peer tests: each one captures a piconet the ESP32 pair
         # holds, and wants an ordinary link for the same reason as the rest.
         # On a bench whose default board is the attenuated one they would
@@ -1678,6 +1739,88 @@ def builtin_catalog() -> TestCatalog:
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
             # Its first case flashes a DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
+        ),
+        TestDefinition(
+            advertiser_soak_cases.TEST_NAME,
+            "A long ubertooth-btle -n capture of a registered nRF52840 DK "
+            "advertising its address on a schedule, read twice from the one "
+            "capture -- the documented AdvA text line and the capture's own "
+            "records, CRC checked -- and judged on whether both readers met "
+            "the detection objective, agreed about which windows the address "
+            "was present in, and found no gap, unexplained process death, or "
+            "unrecovered board",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "advertiser": ArgumentRule(_selector, default="default"),
+                # No `coverage:`: one capture either way, and what the run
+                # costs and decides is in the figures below.
+                "duration": DURATION,
+                "channel": ArgumentRule(_advertising_channel, default=37),
+                "interval": ArgumentRule(_advertising_interval, default=100),
+                "payload": ArgumentRule(_payload_tag, default="c0ffee"),
+                # The advertiser's schedule: every on period is a detection
+                # with a deadline, every off period a silence with a known
+                # cause.
+                "advertiser on": ArgumentRule(_duration, default="30s"),
+                "advertiser off": ArgumentRule(_duration, default="30s"),
+                # How often the run writes a progress record, which is what
+                # a long run is watched and reviewed through.
+                "sample every": ArgumentRule(_duration, default="30s"),
+                # Presence: how wide a window is, and how many in a row
+                # count as sustained rather than a first sighting.
+                "presence window": ArgumentRule(_duration, default="2s"),
+                "presence windows": ArgumentRule(_positive_integer, default=5),
+                # A capture with no packet at all for this long is restarted.
+                "liveness timeout": ArgumentRule(_duration, default="60s"),
+                # How soon after an on period starts the advertiser must be
+                # heard, and in what share of the periods.
+                "detect within": ArgumentRule(_duration, default="10s"),
+                "minimum detection share": ArgumentRule(_share, default=0.9),
+                # The longest silence allowed inside an on period, and the
+                # floor on the rate over the minutes the advertiser was on.
+                # A gap is measured inside one period, so the limit has to
+                # sit between `detect within` and `advertiser on`
+                # (_check_address_soak).
+                "maximum gap": ArgumentRule(_duration, default="15s"),
+                "minimum packets per minute": ArgumentRule(
+                    _nonnegative_integer, default=10),
+                # How far the two readers may differ: a share of the windows
+                # either of them saw the address in, because the readers
+                # differ for reasons that scale with the run (docs/tests.md).
+                "maximum window disagreement share": ArgumentRule(_share, default=0.02),
+                # Restarts the run may make and still pass. A restart is
+                # recorded whatever this says; this is what makes one a
+                # failure.
+                "maximum restarts": ArgumentRule(_nonnegative_integer, default=0),
+                # Optional, like `max_watchdog_resets`: without it the
+                # capture process's memory is reported and nothing fails on
+                # it, since what counts as growth over three days is not
+                # established.
+                "maximum memory growth": ArgumentRule(_positive_integer),
+                # Kill the capture once, at the middle of the run, with no
+                # stop sent to the board, so the run carries evidence that
+                # the restart path recovers.
+                "restart probe": ArgumentRule(_boolean, default=False),
+                # How large one capture file may grow, in MiB, before the run
+                # starts another at the next off period. The capture records
+                # every advertiser on the channel, so this is what keeps a
+                # run of days out of the host's disk.
+                "capture file limit": ArgumentRule(_positive_integer, default=256),
+                # And how much of the captures the whole run keeps, in MiB.
+                # Past it the oldest complete capture and transcript are
+                # removed, newest kept: every figure is counted as the
+                # records arrive, so what a run loses is the oldest bytes to
+                # read by hand rather than its result.
+                "capture budget": ArgumentRule(_positive_integer, default=4096),
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth", "advertiser": "nRF52840 DK"}),
+            check_arguments=_check_address_soak,
+            command_builder=advertiser_soak_cases.address_soak_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Its first case flashes the DK when the board runs another
             # firmware version, so the run holds the host lock.
             writes_firmware=True,
         ),
