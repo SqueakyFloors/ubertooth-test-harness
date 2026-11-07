@@ -1,0 +1,217 @@
+"""Sanitization and the scan that refuses what it missed (#370).
+
+Every check here is deterministic text in and text out: no run directory, no
+hardware, and no clock.
+"""
+
+import unittest
+
+from ubertooth_harness import sanitize
+from ubertooth_harness.sanitize import (
+    ADDRESS,
+    EMAIL,
+    HOME,
+    HOST,
+    SERIAL,
+    TMP,
+    USER,
+    Private,
+    Unsafe,
+    findings,
+    line_findings,
+    require_safe,
+)
+
+
+BENCH = Private(
+    serials=("aaaa0000bbbb1111cccc2222dddd3333", "001050210121"),
+    users=("ada",),
+    hosts=("bench-linux-7",),
+    aliases={"Host_Linux": "host 1", "UT_0": "Ubertooth 1", "UT": "Ubertooth 9"},
+)
+
+
+class SanitizeTests(unittest.TestCase):
+    def test_a_home_directory_goes_and_the_checkout_stays(self):
+        for path, expected in (
+            ("/Users/ada/src/ubertooth/host", f"{HOME}/src/ubertooth/host"),
+            ("/home/ada/src/ubertooth", f"{HOME}/src/ubertooth"),
+            ("/root/runs/report.md", f"{HOME}/runs/report.md"),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(sanitize.sanitize(path), expected)
+
+    def test_a_temporary_or_runtime_directory_goes(self):
+        for path, expected in (
+            ("/tmp/build-1/prefix", f"{TMP}/build-1/prefix"),
+            ("/private/var/folders/aa/bb/T/x", f"{TMP}/T/x"),
+            ("/run/user/1000/bus", f"{TMP}/bus"),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(sanitize.sanitize(path), expected)
+
+    def test_a_named_prefix_wins_over_the_general_rules(self):
+        private = Private().with_paths(("/Users/ada/bench",))
+        self.assertEqual(
+            sanitize.sanitize("/Users/ada/bench/runs/r1", private),
+            f"{sanitize.PATH}/runs/r1",
+        )
+
+    def test_the_lease_holder_and_the_machine_go(self):
+        text = "waiting for UT_0, held by ada on bench-linux-7 since 10:00"
+        self.assertEqual(
+            sanitize.sanitize(text, BENCH),
+            f"waiting for Ubertooth 1, held by {USER} on {HOST} since 10:00",
+        )
+
+    def test_a_user_and_machine_written_together_become_the_machine(self):
+        self.assertEqual(
+            sanitize.sanitize("rsync ada@bench-linux-7:/x", BENCH),
+            f"rsync {HOST}:/x",
+        )
+
+    def test_a_mail_address_goes_whole(self):
+        self.assertEqual(
+            sanitize.sanitize("filed by ada@example.com", BENCH),
+            f"filed by {EMAIL}",
+        )
+
+    def test_a_name_in_a_private_domain_goes(self):
+        self.assertEqual(
+            sanitize.sanitize("dialed runner.bench.internal", Private()),
+            f"dialed {HOST}",
+        )
+
+    def test_an_address_goes_and_loopback_stays(self):
+        self.assertEqual(
+            sanitize.sanitize("controller on 127.0.0.1:8765 via 10.1.2.3"),
+            f"controller on 127.0.0.1:8765 via {ADDRESS}",
+        )
+
+    def test_four_numbers_that_are_not_an_address_are_left(self):
+        self.assertEqual(sanitize.sanitize("API 1.2.3.999"), "API 1.2.3.999")
+
+    def test_a_serial_is_masked_the_way_a_report_masks_it(self):
+        text = "Ubertooth UT_0, serial aaaa0000bbbb1111cccc2222dddd3333"
+        self.assertEqual(
+            sanitize.sanitize(text, BENCH),
+            f"Ubertooth Ubertooth 1, serial {SERIAL}",
+        )
+
+    def test_a_serial_inside_a_port_name_is_masked_and_the_port_stays(self):
+        text = "/dev/serial/by-id/usb-SEGGER_J-Link_001050210121-if00"
+        self.assertEqual(
+            sanitize.sanitize(text, BENCH),
+            f"/dev/serial/by-id/usb-SEGGER_J-Link_{SERIAL}-if00",
+        )
+
+    def test_an_alias_inside_a_longer_alias_is_not_replaced_on_its_own(self):
+        # `UT` is a registered alias of its own and `UT_0` is another: the
+        # longer one is replaced as itself, not as `UT` and a stray `_0`.
+        self.assertEqual(
+            sanitize.sanitize("UT_0 and UT", BENCH), "Ubertooth 1 and Ubertooth 9")
+
+    def test_an_alias_is_not_found_inside_a_word(self):
+        self.assertEqual(sanitize.sanitize("UT_01 stays", BENCH), "UT_01 stays")
+
+    def test_the_evidence_a_release_needs_is_kept(self):
+        text = (
+            "https://github.com/SqueakyFloors/ubertooth at "
+            "9903b4251f0e4c0c8b1f2a3d4e5f60718293a4b5, Host tools version: "
+            "2026-11-DEV1+22 (libbtbb 2020-12-R1+79), suite release, "
+            "2026-11-05T09:12:33.004, passed in 139.0s"
+        )
+        self.assertEqual(sanitize.sanitize(text, BENCH), text)
+        self.assertEqual(findings(text, BENCH), ())
+
+
+class ScanTests(unittest.TestCase):
+    def test_a_system_path_is_not_a_finding(self):
+        for path in ("/usr/local/bin/ubertooth-util", "/dev/bus/usb/001/004",
+                     "/opt/homebrew/lib/libbtbb.dylib", "/etc/udev/rules.d"):
+            with self.subTest(path=path):
+                self.assertEqual(line_findings(path), [])
+
+    def test_an_unrecognized_absolute_path_is_a_finding(self):
+        found = line_findings("built in /srv/bench/runs/r1")
+        self.assertEqual([item.rule for item in found], [sanitize.RULE_PATH])
+        self.assertEqual(found[0].text, "/srv/bench/runs/r1")
+
+    def test_a_placeholder_is_not_a_finding(self):
+        line = " ".join(sanitize.PLACEHOLDERS) + f" {HOME}/src {TMP}/build"
+        self.assertEqual(line_findings(line), [])
+
+    def test_a_relative_path_and_a_count_are_not_paths(self):
+        self.assertEqual(
+            line_findings("output/016-dump.stderr.log: 12/12 passed"), [])
+
+    def test_a_sanitized_line_of_everything_comes_back_clean(self):
+        line = (
+            "UT_0 serial aaaa0000bbbb1111cccc2222dddd3333 held by "
+            "ada@bench-linux-7, built in /Users/ada/src, logs in /tmp/x, "
+            "runner.bench.internal 10.0.0.9, ada@example.com"
+        )
+        self.assertEqual(findings(sanitize.sanitize(line, BENCH), BENCH), ())
+
+    def test_each_rule_is_read_over_the_finished_text(self):
+        for line, rule in (
+            ("/home/ada/x", sanitize.RULE_HOME),
+            ("/tmp/x", sanitize.RULE_TMP),
+            ("/run/user/1000", sanitize.RULE_RUNTIME),
+            ("ada@example.com", sanitize.RULE_MAIL),
+            ("ada@bench-linux-7", sanitize.RULE_AT_HOST),
+            ("runner.bench.internal", sanitize.RULE_HOST),
+            ("10.0.0.9", sanitize.RULE_ADDRESS),
+            ("aaaa0000bbbb1111cccc2222dddd3333", sanitize.RULE_SERIAL),
+            ("ssh -o BatchMode=yes somewhere", sanitize.RULE_SSH),
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, [item.rule for item in line_findings(line)])
+
+    def test_a_private_name_that_survived_is_a_finding(self):
+        found = line_findings("held by ada", BENCH)
+        self.assertEqual([item.rule for item in found], [sanitize.RULE_NAME])
+
+    def test_a_long_run_of_digits_is_not_read_as_a_serial(self):
+        self.assertEqual(line_findings("counter 111122223333444455556666"), [])
+
+    def test_a_hex_piece_of_a_serial_is_read_as_one(self):
+        found = line_findings("a1b2c3d4e5f6face7890abcdef1234")
+        self.assertEqual([item.rule for item in found], [sanitize.RULE_SERIAL])
+
+    def test_a_private_bundle_keeps_its_serials_and_every_other_rule(self):
+        private = Private(keep_serials=True)
+        self.assertEqual(line_findings("serial aaaa0000bbbb1111cccc2222dddd3333",
+                                       private), [])
+        self.assertIn(
+            sanitize.RULE_HOME,
+            [item.rule for item in line_findings("/home/ada/x", private)],
+        )
+
+    def test_a_finding_names_where_and_which_line(self):
+        found = findings("clean\n/srv/bench\n", where="runs/r1/report.md")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].line, 2)
+        self.assertEqual(found[0].where, "runs/r1/report.md")
+        self.assertIn("runs/r1/report.md:2:", found[0].describe())
+
+    def test_require_safe_refuses_and_names_what_it_found(self):
+        with self.assertRaises(Unsafe) as refused:
+            require_safe("held by ada on bench-linux-7", BENCH, where="summary")
+        message = str(refused.exception)
+        self.assertIn("summary", message)
+        self.assertIn("--strip-path", message)
+
+    def test_require_safe_returns_text_it_allows(self):
+        self.assertEqual(require_safe("suite release passed"),
+                         "suite release passed")
+
+    def test_a_refusal_naming_many_findings_stays_bounded(self):
+        text = "\n".join(f"/srv/bench/run-{number}" for number in range(100))
+        with self.assertRaises(Unsafe) as refused:
+            require_safe(text)
+        self.assertIn("and 80 more", str(refused.exception))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

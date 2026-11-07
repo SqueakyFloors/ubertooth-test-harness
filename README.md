@@ -23,6 +23,7 @@ document that answers your question. The architecture is in
 | run the services or the GUI | [docs/guide/services.md](docs/guide/services.md) |
 | deploy them | [docs/guide/deploy.md](docs/guide/deploy.md) |
 | read a run's records | [docs/reference/run-records.md](docs/reference/run-records.md) |
+| publish a release's evidence | [docs/reference/release-evidence.md](docs/reference/release-evidence.md) |
 | switch USB power | [docs/reference/power-control.md](docs/reference/power-control.md) |
 | know which CLI option is covered | [COVERAGE.md](COVERAGE.md) |
 
@@ -180,6 +181,7 @@ board behind an attenuator asks for it with `weak link:`
 | `build` | build and install the resolved commits into a prefix |
 | `validate <run dir>` | re-run a finished run's recorded output checks |
 | `report <run dir>...` | render one Markdown report from one or more runs |
+| `release-evidence <run dir>...` | build one release's public-safe summary, sanitized logs, and sums ([release-evidence.md](docs/reference/release-evidence.md)); uploads nothing |
 | `runner`, `controller` | the persistent services ([services.md](docs/guide/services.md)) |
 
 By-hand bench helpers (holding a device, driving a peer, switching a hub port)
