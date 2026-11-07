@@ -55,6 +55,13 @@ SUMMARY_EVENT = "watchdog_summary"
 # `-w` is two control reads; 10 s covers a board that answers slowly without
 # holding the run up for one that has gone.
 READ_TIMEOUT_S = 10.0
+
+
+def record_argv(serial: str) -> tuple[str, ...]:
+    """The firmware watchdog record read of one board."""
+    return ("ubertooth-util", "-U", serial, "-w")
+
+
 # How long a long test runs between reads. Reads happen between cases, never
 # beside a running command, so a test whose cases are longer than this is read
 # as often as its cases allow.
@@ -895,7 +902,7 @@ class WatchdogMonitor:
         for attempt in range(1, tries + 1):
             result = self.run_command(
                 command_id=f"{tag}-{board.serial}-{attempt}",
-                argv=("ubertooth-util", "-U", board.serial, "-w"),
+                argv=record_argv(board.serial),
                 timeout_s=READ_TIMEOUT_S,
                 owner=owner,
             )

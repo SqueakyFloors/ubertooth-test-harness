@@ -1341,7 +1341,7 @@ class FullCaseTests(unittest.TestCase):
             check = PreflightCheck(
                 "preflight-001-host-version", "Host version", "Host_Linux", None,
                 {}, ("ubertooth-util", "-V"),
-                (r"libubertooth\s+\S+\s+\(git\-test\)",), REVISION)
+                (r"Host tools version: 2026\-11\-DEV2 \(libbtbb \S+\)",), REVISION)
             executor = HelperExecutor(board, bus, controller)
             sink = CollectSink()
             summary = NamedTestSequencer(

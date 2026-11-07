@@ -28,7 +28,7 @@ from ubertooth_harness.sequencer import NamedTestSequencer
 from tests.test_sequencer import run_contract
 
 
-VERSION = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+VERSION = "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n"
 BLOCKS = 1000
 
 

@@ -478,6 +478,32 @@ LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE, ADAPTER_TYPE)
 # A 48-bit address with its colons taken out, which is what names an adapter's
 # lock; the registry has already refused anything else (resources.py).
 _ADAPTER_ADDRESS = re.compile(r"^[0-9a-f]{12}$")
+# How wide the canonical spelling of a J-Link serial is: the 12 digits the
+# registry carries and udev's by-id name holds (targets.DK_BY_ID). A DK is
+# the one device reachable by two spellings of one serial -- that one, and
+# the same number with its leading zeros gone, which is what the harness
+# puts on a DK command line (preflight.py) and what a bench note writes --
+# and the external lock file takes a serial, so the two spellings would name
+# two files and whichever a wrapper chose the other would be unmet (#324).
+# The registry requires this one (resources.py), and the zero-stripped
+# spelling stays a name `scripts/lab/hold` resolves.
+JLINK_SERIAL_DIGITS = 12
+_JLINK_DIGITS = re.compile(r"^[0-9]{1,%d}$" % JLINK_SERIAL_DIGITS)
+
+
+def canonical_jlink_serial(value: str) -> str:
+    """A J-Link serial as the bench's own lock file for a DK spells it.
+
+    The padded spelling, because that is what the registry carries and what
+    a wrapper written against the registry or the by-id name sees.
+    A value that is not a plain decimal serial of at most that many digits
+    comes back as it was: the registry refuses such a serial where it loads,
+    and padding something else would name a file nothing else takes.
+    """
+    serial = str(value or "").strip()
+    if not _JLINK_DIGITS.fullmatch(serial):
+        return serial
+    return serial.rjust(JLINK_SERIAL_DIGITS, "0")
 
 
 def plain_serial(resource) -> str:
@@ -488,22 +514,27 @@ def plain_serial(resource) -> str:
     prefix, so the lab's file and the lease file have different names and
     ``board_for_resource`` has to say which is which.
 
-    Every one of them is taken exactly as registered. The registry is also
-    what names the device on USB and what a lab script was written against,
-    and ``resource_key`` spells its key from the same string, so one
+    A peer's and a programmer's are taken exactly as registered. The registry
+    is also what names the device on USB and what a lab script was written
+    against, and ``resource_key`` spells its key from the same string, so one
     spelling is one device: a serial registered in capitals that was
     lowercased here would name a file the lab's own wrapper never locks, on
     any filesystem that tells the two apart.
+
+    A DK's is the canonical padded spelling of its J-Link serial
+    (``canonical_jlink_serial``), which is the one the registry accepts. The
+    padding here is the backstop for a resource built in code rather than
+    loaded from a file: a DK answers to two spellings of one serial, so
+    without it one such resource could name a second file, which is the gap
+    #324 closed.
     """
     if resource.type == PROGRAMMER_TYPE:
         return str(resource.identity.get("serial", "") or "").strip()
-    if resource.type not in (DK_TYPE, PEER_TYPE):
+    if resource.type == DK_TYPE:
+        return canonical_jlink_serial(resource.identity.get("jlink serial", ""))
+    if resource.type != PEER_TYPE:
         return ""
-    for key in ("jlink serial", "bridge serial"):
-        value = str(resource.identity.get(key, "") or "").strip()
-        if value:
-            return value
-    return ""
+    return str(resource.identity.get("bridge serial", "") or "").strip()
 
 
 def resource_key(resource) -> str:

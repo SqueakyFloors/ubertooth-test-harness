@@ -50,7 +50,7 @@ class FakeDfu:
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n")
+            return self._result(command, 0, "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n")
         if command[0] == "mkdir":
             os.mkdir(command[1])
             return self._result(command, 0, "")
@@ -222,7 +222,7 @@ def run(executor, coverage="comprehensive", test_build=None):
         )
         check = PreflightCheck("preflight-001-host-version", "Host version", "Host_Mac",
                                None, {}, ("ubertooth-util", "-V"),
-                               (r"libubertooth\s+\S+\s+\(git\-test\)",), "git-test")
+                               (r"Host tools version: 2026\-11\-DEV2 \(libbtbb \S+\)",), "git-test")
         sink = CollectSink()
         # What a macOS run without --build has, from its manifest.
         capabilities = run_capabilities(

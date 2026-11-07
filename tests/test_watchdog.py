@@ -40,7 +40,7 @@ from ubertooth_harness.watchdog import (
 
 from tests import watchdog_samples as samples
 from tests.test_catalog_resources import HARDWARE
-from tests.test_sequencer import CollectSink, run_contract
+from tests.test_sequencer import CollectSink, VERSION_LINE, run_contract
 
 
 SERIAL = "aaaa0000aaaa0000aaaa0000aaaa0000"
@@ -1090,10 +1090,7 @@ class RunExecutor:
         elif command[-1] == "-h":
             output = "usage\n"
         else:
-            output = (
-                "Host tools version: libubertooth 1.1 (git-test), "
-                "libbtbb 1.0 (git-btbb)\n"
-            )
+            output = VERSION_LINE
         if on_output:
             on_output("stdout", output)
         return CommandResult(command, 0, output, "", 0.01, False)
@@ -1255,7 +1252,7 @@ class FlashSoakTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source, short = make_source(root)
+            source, revision = make_source(root)
             test_image = root / "test.dfu"
             kgv_image = root / "kgv.dfu"
             test_image.write_bytes(b"test")
@@ -1294,8 +1291,8 @@ class FlashSoakTests(unittest.TestCase):
                     identity: {{serial: {guard}}}
                 """))
             executor = FlashDeviceExecutor(
-                f"git-{short}",
-                {str(test_image.resolve()): f"git-{short}",
+                revision,
+                {str(test_image.resolve()): revision,
                  str(kgv_image.resolve()): "2020-12-R1"},
                 selected, guard,
             )

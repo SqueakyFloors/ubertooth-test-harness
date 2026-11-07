@@ -292,6 +292,29 @@ class HoldLockKeys(Bench):
         self.assertEqual(PROG_KEY, board.key)
         self.assertEqual(PROG_SERIAL, board.lock_name)
 
+    def test_either_spelling_of_a_dk_s_serial_takes_the_one_lock_file(self):
+        """A DK is named two ways and held one way (harness #324).
+
+        `nrfutil device list` prints a J-Link serial without the leading
+        zeros the registry and the by-id name carry, so a bench note may use
+        either; the registry takes the padded spelling alone, and the lock
+        file a hold takes is named after that, whichever name resolved it.
+        """
+        import _bench
+
+        registry = self.load_registry()
+        for name in (JLINK, JLINK.lstrip("0")):
+            with self.subTest(name=name):
+                resource = hold.resolve(registry, name)
+                self.assertEqual("DK0", resource.alias)
+                board = _bench.board(resource)
+                self.assertEqual(f"nrf52840dk-{JLINK.lstrip('0')}", board.key)
+                self.assertEqual(JLINK, board.lock_name)
+                self.assertEqual(
+                    self.locks / f"board-{JLINK}.lock",
+                    leases.external_lock_path(self.template, board),
+                )
+
     def test_a_type_this_does_not_hold_is_refused(self):
         from ubertooth_harness.resources import RegistryError
 
