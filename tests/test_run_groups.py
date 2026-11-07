@@ -849,8 +849,8 @@ class GroupStartTests(RunGroupTestCase):
                     {LINUX, MAC}, self.controller._pending_hosts(group_id)
                 )
                 # The watchdog's own work, run here rather than waited for:
-                # with the clock still, and half a grace period into it, it
-                # has nothing to expire and the group stays whole.
+                # with the clock held half a grace period on, it has nothing
+                # to expire and the group stays whole.
                 clock.advance(self.controller.late_reply_grace_s / 2)
                 for _ in range(3):
                     self.controller.expire_pending()
@@ -1220,7 +1220,7 @@ class GroupStartTests(RunGroupTestCase):
                          [member["status"] for member in view["members"]])
 
     async def test_the_watchdog_outlives_a_results_directory_it_cannot_write(self):
-        linux, _mac = await self.runners()
+        linux, _mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
         clock = self.manual_clock()
         self.controller.reply_timeout_s = 0
         self.controller.late_reply_grace_s = 5
@@ -1238,6 +1238,10 @@ class GroupStartTests(RunGroupTestCase):
                 "could not record" in line for line in self.logs
             ))
             self.assertFalse(self.server._monitor_task.done())
+            # The target has not gone overdue on the way here, so what it does
+            # next is the work of a later round of the watchdog's and not of
+            # the round the write failed in.
+            self.assertTrue(self.controller.targets[LINUX].online)
             # Still watching: the target goes offline when its heartbeats stop.
             allowance = (
                 MISSED_HEARTBEATS
@@ -1570,6 +1574,7 @@ class GroupLiveTests(RunGroupTestCase):
         await wait_until(
             lambda: self.controller._pending_hosts(group_id) == {LINUX}
         )
+        self.assertIn(group_id, self.controller.groups)
         clock.advance(self.controller.late_reply_grace_s)
         while True:
             message = await self.received(ws, {"group"}, limit=200)
