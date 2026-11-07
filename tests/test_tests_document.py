@@ -206,7 +206,7 @@ _collapsed("Util mode refusals", "ubertooth-util", "-<mode>",
            "-I", "-e", "-n", "-t")
 # `<refusal>`: the file option, the later value, the repeat or the stray
 # word each refusal case writes after the tool.
-_collapsed("Refused command lines", "ubertooth-btle", "<refusal>", "-A", "-a", "-f", "-h")
+_collapsed("Refused command lines", "ubertooth-btle", "<refusal>", "-a", "-f", "-h")
 _collapsed("Refused command lines", "ubertooth-rx", "<refusal>", "-h", "-l", "-u", "-z")
 _collapsed("Refused command lines", "ubertooth-dump", "<refusal>", "-U", "-h")
 _collapsed("Refused command lines", "ubertooth-specan", "<refusal>", "-h", "-l", "-u")
