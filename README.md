@@ -3,7 +3,10 @@
 Standalone test-harness application for
 [`SqueakyFloors/ubertooth`](https://github.com/SqueakyFloors/ubertooth) and its
 companion [libbtbb](https://github.com/SqueakyFloors/libbtbb) builds. The application is described in
-[DESIGN.md](DESIGN.md). The first implemented slice is a local, sequential
+[DESIGN.md](DESIGN.md). The mandatory under-six-hour release procedure and
+hardware schedule are in [docs/release-testing.md](docs/release-testing.md),
+and [docs/hardware.md](docs/hardware.md) details every test fixture and how the
+harness uses it. The first implemented slice is a local, sequential
 firmware-flash reliability runner. The persistent [target runner](#target-runner-service)
 dials the [controller](#controller), which listens on `127.0.0.1` only; remote
 access is an SSH tunnel.
