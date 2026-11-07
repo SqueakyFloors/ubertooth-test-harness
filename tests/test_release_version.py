@@ -35,9 +35,9 @@ set(RELEASE_TAG_MATCH
 \t--match "[0-9][0-9][0-9][0-9]-[0-9][0-9]-DEV[0-9]*")
 set(RELEASE_TAG_FORM "^[0-9][0-9][0-9][0-9]-[0-9][0-9]-(R|RC|DEV)[0-9]+$")
 """
-# libbtbb as its earlier commits had it: a floor, and no second look at the
-# tag name. Both differ at the commit the fork pins, which is why neither is
-# fixed per repository (LIBBTBB_PINNED_FILE below).
+# libbtbb as the commit before the pinned one had it: a floor, and no second
+# look at the tag name. Both differ at the commit the fork pins, which is why
+# neither is fixed per repository (LIBBTBB_PINNED_FILE below).
 LIBBTBB_EARLIER_FILE = """\
 set(LATEST_RELEASE "2020-12-R1")
 set(BTBB_RELEASE_TAG_GLOBS

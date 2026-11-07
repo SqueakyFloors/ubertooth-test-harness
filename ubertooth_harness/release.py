@@ -37,8 +37,8 @@ Two of these are read off the file rather than fixed, because they differ
 between commits of one repository and not only between repositories:
 
 * whether the tag name git handed back is looked at again. The fork's two
-  files do, and so does libbtbb at the commit the fork pins; libbtbb's
-  earlier commits did not, so a tag a glob let through is the release one of
+  files do, and so does libbtbb at the commit the fork pins; the libbtbb
+  commit before it did not, so a tag a glob let through is the release one of
   them reports and no release at all to the other.
 * the floor a tree with no release tag in reach reports. The fork names one
   and reports ``<floor>+unknown``; libbtbb named one until it began taking a
@@ -113,7 +113,7 @@ _FIRMWARE_LATEST_RELEASE_RE = re.compile(
 # holds it in a variable (RELEASE_TAG_FORM) and libbtbb writes it inline in a
 # function -- and it is read off the file rather than assumed per repository,
 # because libbtbb's own commits differ: the commit the fork pins makes this
-# check and its earlier commits did not.
+# check and the libbtbb commit before it did not.
 _TAG_FORM_CHECK_MARKER = "-(R|RC|DEV)[0-9]+$"
 
 # The two styles a build reports in.
@@ -216,8 +216,8 @@ def release_name(source_path: Path | str, commit: str, floor: str | None, *,
     is the release that stands in when no release tag is in reach. Both are
     read off the file that decides the string (``build_version``) rather than
     fixed per repository, because libbtbb's own commits differ in both: the
-    commit the fork pins names a floor and makes no second check, and a later
-    one makes the check and names no floor.
+    commit the fork pins makes the second check and names no floor, and the
+    libbtbb commit before it names a floor and makes no such check.
 
     With no floor there is no release to name, so the answer is the distance
     alone -- ``unknown`` -- which is what such a build reports.
