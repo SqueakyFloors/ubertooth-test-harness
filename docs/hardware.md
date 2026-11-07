@@ -1038,7 +1038,7 @@ last `isolation_applied` event, and write it back.
 
 | Command | What it does |
 |---|---|
-| `nrfutil device list` | lists attached probes with their serials, padded to 12 digits |
+| `nrfutil device list` | lists attached probes with their serials and virtual COM ports |
 | `nrfutil device program --serial-number <serial> --firmware <hex> --options chip_erase_mode=ERASE_ALL,verify=VERIFY_READ,reset=RESET_SYSTEM` | flashes a DK and verifies the write |
 | `nrfutil device reset` | reboots a DK, which is the only remote reset it has when it is not on a switchable port |
 | `JLinkExe` | J-Link Commander: updates the probe's own firmware, and `vcom enable` turns its virtual COM port on |
@@ -1046,6 +1046,14 @@ last `isolation_applied` event, and write it back.
 The harness checks the pinned `nrfutil` (8.2.1) and `nrfutil device` (2.23.0)
 versions before it flashes, and every command fails closed with an `error:`
 line. SEGGER J-Link 9.88 is the validated host software.
+
+A probe's serial is one number, and the harness puts it on an `nrfutil`
+command line with its leading zeros gone (`preflight.py`, `nrfdk.py`), which
+is also how it matches the serial `nrfutil device list` reports: as a number,
+so neither spelling of the digits matters there. The registry is the one
+place that insists on a spelling: register the 12 digits the
+`/dev/serial/by-id` name carries, padding a reading that arrives without its
+leading zeros (see "Registered by its J-Link serial" above).
 
 ### esptool
 
