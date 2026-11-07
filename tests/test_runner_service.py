@@ -21,6 +21,7 @@ from unittest.mock import patch
 from websockets.asyncio.server import serve
 
 from ubertooth_harness import cli
+from ubertooth_harness import release as release_version
 from ubertooth_harness.cli import main
 from ubertooth_harness.protocol import (
     PROTOCOL_VERSION,
@@ -36,6 +37,8 @@ from ubertooth_harness.runner_service import (
     RunnerService,
     validate_controller_url,
 )
+
+from tests.test_manifest_preflight import RELEASE, make_git_repo
 
 TIMEOUT_S = 60
 # libbtbb's default branch: that repository's name for it, not ours to
@@ -103,20 +106,14 @@ class StubController:
 
 
 def make_source(root: Path):
+    """A source checkout whose build names a release, and that release.
+
+    Current-release validation requires the release-name `-V` answer (#358),
+    so this is the fixture preflight's own tests use.
+    """
     source = root / "source"
-    subprocess.run(["git", "init", "-q", str(source)], check=True)
-    (source / "tracked.txt").write_text("source\n")
-    subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
-    subprocess.run(
-        ["git", "-C", str(source), "-c", "user.name=Test",
-         "-c", "user.email=test@example.invalid", "commit", "-qm", "source"],
-        check=True,
-    )
-    short = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "--short", "HEAD"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    return source, short
+    make_git_repo(source)
+    return source, RELEASE
 
 
 # Never read the developer's git configuration in a fixture repository.
@@ -155,7 +152,7 @@ class RunnerFixture:
 
     def __init__(self, root: Path):
         self.root = root
-        self.source, short = make_source(root)
+        self.source, release = make_source(root)
         platform = "macos" if sys.platform == "darwin" else "linux"
         self.plans = root / "plans"
         self.plans.mkdir()
@@ -169,20 +166,24 @@ class RunnerFixture:
         )
         self.bin = root / "bin"
         self.bin.mkdir()
-        self.write_tool(short, "btbb")
+        self.write_tool(release, "btbb")
         self.output = root / "runs"
 
-    def write_tool(self, ubertooth_short: str, libbtbb_short: str) -> None:
+    def write_tool(self, ubertooth_release: str, libbtbb_short: str) -> None:
         """The fake ubertooth-util that answers the host-version checks."""
         tool = self.bin / "ubertooth-util"
         # FAKE_SLEEP keeps the command running so a cancel can arrive.
         tool.write_text(
             "#!/bin/sh\n"
             'if [ -n "$FAKE_SLEEP" ]; then sleep "$FAKE_SLEEP"; fi\n'
-            f'echo "Host tools version: libubertooth 1.1 (git-{ubertooth_short}), '
-            f'libbtbb 1.0 (git-{libbtbb_short})"\n'
+            f'echo "Host tools version: {ubertooth_release} '
+            f'(libbtbb git-{libbtbb_short})"\n'
         )
         tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+
+    def source_release(self, commit: str = "HEAD") -> str:
+        """The release a build of ``commit`` in the source reports."""
+        return release_version.build_version(self.source, commit).value
 
     def pin_libbtbb(self, commit: str, libbtbb_short: str) -> str:
         """Pin `commit` in the source's own install.sh; returns the new HEAD."""
@@ -193,7 +194,7 @@ class RunnerFixture:
         )
         _git(self.source, "add", "install.sh")
         _git(self.source, "commit", "-qm", "pin libbtbb")
-        self.write_tool(_git(self.source, "rev-parse", "--short", "HEAD"), libbtbb_short)
+        self.write_tool(self.source_release(), libbtbb_short)
         return _git(self.source, "rev-parse", "HEAD")
 
     def config(self, url, **overrides):

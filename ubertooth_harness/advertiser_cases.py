@@ -75,18 +75,24 @@ _ADVCAPTURE = str(Path(advcapture.__file__).resolve())
 _COUNTER = r"(?m)^counter: (?P<value>\d+)$"
 
 
-def _advertiser(resources: Mapping, resource_identities: Mapping) -> dict:
+def _advertiser(resources: Mapping, resource_identities: Mapping,
+                test_name: str = TEST_NAME) -> dict:
+    """The advertiser DK's identity, for whichever test asked for it.
+
+    ``test_name`` so a refusal names the test the operator ran: every test
+    that binds an advertiser reads it through here.
+    """
     identity = resource_identities.get(ADVERTISER_ROLE)
     if not identity:
-        raise StateCaseError(f"{TEST_NAME} requires an advertiser (nRF52840 DK)")
+        raise StateCaseError(f"{test_name} requires an advertiser (nRF52840 DK)")
     try:
         serial = nrfdk.jlink_serial(identity.get("jlink serial", ""))
         address = nrfdk.normalize_address(identity.get("BLE address", ""))
     except nrfdk.NrfDkError as error:
-        raise StateCaseError(f"{TEST_NAME}: advertiser {error}") from error
+        raise StateCaseError(f"{test_name}: advertiser {error}") from error
     if not nrfdk.is_static_random(address):
         raise StateCaseError(
-            f"{TEST_NAME}: advertiser BLE address {address} is not a static random "
+            f"{test_name}: advertiser BLE address {address} is not a static random "
             "address (the two top bits must be set)")
     port = identity.get("serial device") or None
     return {"serial": str(serial), "address": address, "port": port,

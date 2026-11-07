@@ -48,6 +48,18 @@ used, including
 only read are checked first, so the refused image neither creates nor
 replaces <file>.dfu (ubertooth-dfu.md).
 
+The ubertooth-rx board list (fork ubertooth#1063) is read here too. A capture
+may name several boards, -U a,b,c, with one channel each; what the boards then
+share depends on which of them hears what, so that half is not asserted
+anywhere. The command lines the list cannot be given are deterministic, need
+no traffic, and are all refused before a board is opened or a file created,
+which is exactly what this test already establishes for the file options: a
+board named twice, an empty or over-long list entry, a channel count that is
+neither one nor one per board, and -V, -d or -i beside several boards. Each
+is one error: line on standard error with standard output left empty, so a
+reader cannot mistake a refusal for an answer, and the order between them is
+asserted where two would otherwise apply.
+
 ubertooth-btle's replay (fork 04dbe53c, fork #1129) decides four things of
 its own, each before a board is asked for and before any destination is
 opened for writing, so they belong here (ubertooth-btle.md, REPLAYING A
@@ -103,6 +115,7 @@ from ubertooth_harness.stateful import (
     Observation,
     StateCase,
     Step,
+    nothing_on_stdout,
     require,
 )
 
@@ -775,6 +788,199 @@ def bluez_stray_cases(coverage: str):
     )
 
 
+# The board list of ubertooth-rx (fork ubertooth#1063, RX_MAX_BOARDS 8).
+# Selectors the harness invents: no board is opened in any of these cases, so
+# what they name need not exist, and they are not registry serials, so a
+# reader cannot mistake one for a bench board. libubertooth reads an all-digit
+# selector as a USB index, so each begins with a letter and stays a selector.
+_SEL = ("ba11", "bb22", "bc33")
+_MAX_BOARDS = 8
+_OVER_LONG = ",".join(f"b{index:02d}" for index in range(_MAX_BOARDS + 1))
+# Each refusal, in the order the tool reaches it. Two of them would both
+# apply to one command line, and the message that must come out is the one
+# named here, so the other is forbidden: the board list is read before the
+# channel list, and -d is refused on the boards rather than on its file.
+_NAMED_TWICE = rf"(?m)^error: board {_SEL[0]} is named twice$"
+_CHANNEL_COUNT = (r"(?m)^error: -c names 2 channels for 3 boards; give one each "
+                  r"or one for all$")
+# The count message whatever the numbers in it: forbidden where another
+# refusal must come out instead.
+_CHANNEL_NAMES = r"error: -c names \d+ channel"
+_DUMP_ONE_BOARD = (r"(?m)^error: -d writes one dump for -i to replay as one "
+                   r"board, so it cannot be given several boards$")
+_VERSION_ONE_BOARD = (r"(?m)^error: -V reports one board; name one with -U, or "
+                      r"none to report every board attached$")
+_REPLAY_ONE_BOARD = (r"(?m)^error: -i names one saved capture, so it cannot be "
+                     r"given several boards to read$")
+# What the refusal must be, beyond carrying its own line: one error: line and
+# nothing else. Expecting the message alone would pass a tool that printed it
+# and then went on to say something else -- a second reason, a note about a
+# board, a warning about a file -- which is a refusal a reader cannot act on.
+# Standard output is required empty by nothing_on_stdout, so between them the
+# whole of what the tool said is pinned.
+_SECOND_ERROR = r"(?m)^error:[^\n]*\n(?:[^\n]*\n)*?error:"
+_ANY_NOTE = r"(?m)^note:"
+_ANY_WARNING = r"(?m)^warning:"
+_ONE_ERROR_ONLY = (_SECOND_ERROR, _ANY_NOTE, _ANY_WARNING)
+
+
+# Where a case names a capture file, the word to put it in. Each such case
+# refuses the command twice, once naming a file that does not exist and once
+# naming a seeded one, as every other case in this test does: "creates
+# nothing" and "truncates nothing" are two statements, and a destination
+# opened for writing before the refusal would break only the second.
+DEST = object()
+
+
+def _multi_board_case(case_id, label, words, patterns, *, forbidden=(),
+                      extension="", seeded=(), absent=(), kept=(),
+                      expected) -> StateCase:
+    """One ubertooth-rx command line the board list cannot be given.
+
+    Every case requires exit 1, that one error: line and no other error, note
+    or warning line, an empty standard output (so a refusal is never read as
+    an answer), and that the command came nowhere near a board: the no-devices
+    note is forbidden, as it is in every other refusal here.
+
+    ``extension`` gives the case a capture destination: DEST in ``words`` is
+    replaced by a file of that extension, and the command is refused once
+    naming a new file and once naming a seeded one.
+    """
+    forbidden = (NO_BOARD_NOTE,) + _ONE_ERROR_ONLY + tuple(forbidden)
+
+    def refuse(step_id, name):
+        return tool_step(
+            step_id, "ubertooth-rx",
+            tuple(("file", name) if word is DEST else word for word in words),
+            patterns=patterns, forbidden=forbidden, check=nothing_on_stdout)
+
+    steps = [probe_step("ubertooth-rx")]
+    if extension:
+        new, existing = f"new.{extension}", f"kept.{extension}"
+        seeded, absent, kept = (existing,), (new,), (existing,)
+        steps += [_seed(seeded), refuse("refuse-new", new),
+                  refuse("refuse-kept", existing)]
+    else:
+        if seeded:
+            steps.append(_seed(seeded))
+        steps.append(refuse("refuse", ""))
+    steps.append(_check(absent, kept))
+    return _case(f"rx-{case_id}", f"rx {label}", steps, expected)
+
+
+def _multi_board_cases(coverage):
+    """ubertooth-rx board and channel list refusals: no board, no traffic."""
+    one, two, three = _SEL
+    cases = [
+        # The duplicate check comes before the channel list and before the
+        # -d check, so a command line that would also fail those two must
+        # still report the board that was named twice.
+        _multi_board_case(
+            "boards-named-twice", f"-U {one},{one} -d <file>: the board named twice",
+            ("-U", f"{one},{one}", "-d", DEST),
+            (_NAMED_TWICE,), forbidden=(_DUMP_ONE_BOARD,), extension="dump",
+            expected="refused (exit 1) naming the board given twice, before the "
+                     "-d refusal and before any board is asked for; the dump "
+                     "named is neither created nor truncated; no other file"),
+        _multi_board_case(
+            "boards-empty-entry", f"-U {one},,{two} -d <file>: an empty list entry",
+            ("-U", f"{one},,{two}", "-d", DEST),
+            (r"(?m)^error: the board list has an empty entry$",), extension="dump",
+            expected="refused (exit 1) naming the empty entry, before any board "
+                     "is asked for; the dump named is neither created nor "
+                     "truncated; no other file"),
+        # One channel each or one for all: anything else is a command line
+        # whose boards and channels do not line up, and which board got which
+        # channel could not be read back off the output.
+        _multi_board_case(
+            "channel-count", f"-U {one},{two},{three} -c 39,39 -q <file>: two "
+            "channels for three boards",
+            ("-U", f"{one},{two},{three}", "-c", "39,39", "-q", DEST),
+            (_CHANNEL_COUNT,), extension="pcap",
+            expected="refused (exit 1) naming both counts, before any board is "
+                     "asked for; the capture named is neither created nor "
+                     "truncated; no other file"),
+        # A dump record carries no board and -i hands a whole dump to one
+        # piconet, so a dump of several boards' records could not be replayed:
+        # it is refused rather than written.
+        _multi_board_case(
+            "dump-several-boards", f"-U {one},{two} -d <file>: one dump, several boards",
+            ("-U", f"{one},{two}", "-d", DEST),
+            (_DUMP_ONE_BOARD,), extension="dump",
+            expected="refused (exit 1) because -d writes one dump to replay as "
+                     "one board, before any board is asked for; the dump named "
+                     "is neither created nor truncated; no other file"),
+        # -V reports one board, and with no -U at all it reports every board
+        # attached, so a list beside it cannot be answered as asked. Standard
+        # output must stay empty: that is where the version answer would go.
+        _multi_board_case(
+            "version-several-boards", f"-U {one},{two} -V: -V reports one board",
+            ("-U", f"{one},{two}", "-V"),
+            (_VERSION_ONE_BOARD,),
+            forbidden=(r"Host tools version:", r"Firmware version"),
+            expected="refused (exit 1) with no version answer on stdout, before "
+                     "any board is asked for; nothing created"),
+    ]
+    if coverage != "comprehensive":
+        return tuple(cases)
+    cases += [
+        # The channel list is split against the tool's limit rather than
+        # against the boards named, so one mistake gets one message: a list
+        # that does not line up is the count above, and only a list longer
+        # than the tool takes at all is refused as too long.
+        _multi_board_case(
+            "channel-empty-entry", f"-U {one},{two} -c 39, -q <file>: an empty "
+            "channel entry",
+            ("-U", f"{one},{two}", "-c", "39,", "-q", DEST),
+            (r"(?m)^error: the channel list has an empty entry$",),
+            forbidden=(_CHANNEL_NAMES,), extension="pcap",
+            expected="refused (exit 1) naming the empty entry rather than the "
+                     "count, before any board is asked for; the capture named "
+                     "is neither created nor truncated; no other file"),
+        _multi_board_case(
+            "boards-over-long", f"-U <{_MAX_BOARDS + 1} boards> -d <file>: more "
+            "boards than the tool takes",
+            ("-U", _OVER_LONG, "-d", DEST),
+            (rf"(?m)^error: at most {_MAX_BOARDS} boards can be given$",),
+            extension="dump",
+            expected=f"refused (exit 1) naming the {_MAX_BOARDS}-board limit, "
+                     "before any board is asked for; the dump named is neither "
+                     "created nor truncated; no other file"),
+        _multi_board_case(
+            "channels-over-long", f"-U {one},{two} -c <{_MAX_BOARDS + 1} channels> "
+            "-q <file>: more channels than the tool takes",
+            ("-U", f"{one},{two}", "-c", ",".join(["39"] * (_MAX_BOARDS + 1)),
+             "-q", DEST),
+            (rf"(?m)^error: at most {_MAX_BOARDS} channels can be given$",),
+            forbidden=(_CHANNEL_NAMES,), extension="pcap",
+            expected=f"refused (exit 1) naming the {_MAX_BOARDS}-channel limit "
+                     "rather than the count, before any board is asked for; the "
+                     "capture named is neither created nor truncated; no other file"),
+        # A replay reads one saved capture, so it has no second board to read
+        # from. Refused before the input is opened: it must come back byte for
+        # byte, with nothing written beside it.
+        _multi_board_case(
+            "replay-several-boards", f"-i <file> -U {one},{two}: one saved capture, "
+            "several boards",
+            ("-i", ("file", "kept.dump"), "-U", f"{one},{two}"),
+            (_REPLAY_ONE_BOARD,),
+            seeded=("kept.dump",), kept=("kept.dump",),
+            expected="refused (exit 1) because a replay reads one saved capture, "
+                     "with its input unchanged and nothing created beside it"),
+        # Two refusals in one command line the other way round from the -d
+        # case: here the channel list is what the duplicate check comes
+        # before.
+        _multi_board_case(
+            "boards-named-twice-before-channels",
+            f"-U {one},{one} -c 1,2,3: the board named twice, not the channel count",
+            ("-U", f"{one},{one}", "-c", "1,2,3"),
+            (_NAMED_TWICE,), forbidden=(_CHANNEL_NAMES,),
+            expected="refused (exit 1) naming the board given twice rather than "
+                     "the channel count, before any board is asked for; nothing "
+                     "created"),
+    ]
+    return tuple(cases)
+
 def refusal_cases(arguments, _resources, _resource_identities):
     """Host-only cases: every tool runs with UBERTOOTH_TEST_NO_DEVICES=1."""
     cases = []
@@ -786,6 +992,7 @@ def refusal_cases(arguments, _resources, _resource_identities):
     cases += _replay_cases(arguments["coverage"])
     cases += _upload_stdout_cases(arguments["coverage"])
     cases += bluez_stray_cases(arguments["coverage"])
+    cases += _multi_board_cases(arguments["coverage"])
     if arguments["coverage"] == "comprehensive":
         cases += _comprehensive_cases()
     return tuple(cases)

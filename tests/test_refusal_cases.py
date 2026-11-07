@@ -36,6 +36,8 @@ VALUE_OPTIONS = {
     "ubertooth-dump": "U", "ubertooth-specan": "luU", "ubertooth-dfu": "dU",
     "ubertooth-scan": "Uteb",
 }
+# ubertooth-rx's own limit on the boards one capture reads (RX_MAX_BOARDS).
+RX_MAX_BOARDS = 8
 # ubertooth-btle's options that drive, name, or tune a board, in the order the
 # fork asks about them beside -R, and the interference letters among them.
 REPLAY_BOARD_OPTIONS = ("k", "t", "A", "U", "i", "I", "j", "J")
@@ -81,6 +83,17 @@ class FakeTools:
     the -A-with-p one), missing-input-at-the-board (a -R input that is not
     there is left to the board lookup),
     upload-stdout-allowed (dfu -u takes a name of standard output as a file).
+    before fork d3429234). ubertooth-rx's board and channel lists are the
+    tool's own (fork ubertooth#1063), with four more switches for them:
+    board-twice-allowed (one board named twice is taken as two, so the next
+    refusal on the list speaks instead), channel-count-ignored (a channel
+    count that lines up with nothing is taken), version-several-boards (-V
+    answers for the first board of a list) and replay-several-boards (-i is
+    given a list), dump-several-boards (-d is given one), and
+    list-checks-skipped (rx_split_list takes an empty entry and a list longer
+    than the tool reads). Three more add to a refusal that is otherwise right,
+    which a check for the message alone would accept: second-error-line,
+    note-after-refusal and warning-after-refusal.
     ``missing`` tools are not installed; ``switch`` False is a library from
     before b6d8ede."""
 
@@ -94,7 +107,7 @@ class FakeTools:
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n")
+            return self._result(command, 0, "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n")
         if command[0] == sys.executable:
             assert Path(command[1]).name == "refusal.py", command
             if command[2] == "probe":
@@ -189,12 +202,47 @@ class FakeTools:
         if operands:
             return self._result(command, 1, "".join(out), "".join(err)
                                 + f"error: unexpected argument '{operands[0]}'\n")
+        # ubertooth-rx reads its board list, and then the channels for it,
+        # after the operand check and before -h and -V: how many channels are
+        # allowed depends on -U, which may be written after -c.
+        n_boards = 1
+        if tool == "ubertooth-rx":
+            refused, n_boards = self._rx_lists(flags)
+            if refused:
+                return self._result(command, 1, "".join(out),
+                                    "".join(err) + refused + self._chatter())
+            if n_boards > 1 and ("V", None) in flags:
+                if "version-several-boards" in self.bugs:
+                    # A fork without the guard answers for the first board of
+                    # the list, which is not what the command line asked for.
+                    return self._result(
+                        command, 0, "".join(out) + "Host tools version: libubertooth"
+                        " 1.1 (git-test), libbtbb 1.0\n", "".join(err))
+                return self._result(
+                    command, 1, "".join(out), "".join(err)
+                    + "error: -V reports one board; name one with -U, or none to"
+                      " report every board attached\n" + self._chatter())
         if ("h", None) in flags:
             return self._result(command, 0,
                                 "".join(out) + USAGE[tool], "".join(err))
         refused = self._after_loop(tool, flags, files)
         if refused:
             return self._result(command, 1, "".join(out), "".join(err) + refused)
+        # The replay and the dump each read or write one board's records, so
+        # neither can be given a list; both are refused after the checks
+        # above and before any file is opened.
+        if tool == "ubertooth-rx" and n_boards > 1:
+            if dict(flags).get("i") is not None \
+                    and "replay-several-boards" not in self.bugs:
+                return self._result(
+                    command, 1, "".join(out), "".join(err)
+                    + "error: -i names one saved capture, so it cannot be given"
+                      " several boards to read\n" + self._chatter())
+            if "d" in files and "dump-several-boards" not in self.bugs:
+                return self._result(
+                    command, 1, "".join(out), "".join(err)
+                    + "error: -d writes one dump for -i to replay as one board,"
+                      " so it cannot be given several boards\n" + self._chatter())
         if tool == "ubertooth-btle":
             refused = self._replay(flags, files)
             if refused:
@@ -354,6 +402,66 @@ class FakeTools:
         if tool == "ubertooth-btle" and option == "r" and value == "-":
             return "error: PCAPNG capture to stdout is not supported; use -q - or -c -\n"
         return ""
+
+    @staticmethod
+    def _split_list(text, what, bugs=frozenset()):
+        """ubertooth-rx's rx_split_list(): the entries, or the one refusal.
+
+        The empty-entry check comes before the limit, per entry, so a list
+        that is both too long and ends empty reports the empty entry.
+        """
+        words = []
+        for part in text.split(","):
+            if part == "" and "list-checks-skipped" not in bugs:
+                return None, f"error: the {what} list has an empty entry\n"
+            if len(words) == RX_MAX_BOARDS and "list-checks-skipped" not in bugs:
+                return None, (f"error: at most {RX_MAX_BOARDS} {what}s can be "
+                              "given\n")
+            words.append(part)
+        return words, ""
+
+    def _chatter(self):
+        """What a refusal must not say after its own line.
+
+        The real tool prints one error: line and stops. These are the three
+        ways a regression could add to it and still look refused: a second
+        reason, a note, and a warning about a file.
+        """
+        if "second-error-line" in self.bugs:
+            return "error: no Ubertooth devices found\n"
+        if "note-after-refusal" in self.bugs:
+            return "note: give one -c channel per board\n"
+        if "warning-after-refusal" in self.bugs:
+            return "warning: the capture file was not written\n"
+        return ""
+
+    def _rx_lists(self, flags):
+        """The board list, then the channels for it: (refusal, n_boards)."""
+        values = dict(flags)
+        boards = None
+        if values.get("U") is not None:
+            boards, refused = self._split_list(values["U"], "board", self.bugs)
+            if refused:
+                return refused, 1
+            if "board-twice-allowed" not in self.bugs:
+                # The same board twice would be opened twice, and the second
+                # open would report whatever libusb says about a board
+                # already claimed, which says nothing about the command line.
+                for index, selector in enumerate(boards):
+                    if selector in boards[:index]:
+                        return f"error: board {selector} is named twice\n", 1
+        n_boards = len(boards) if boards else 1
+        if values.get("c") is not None:
+            channels, refused = self._split_list(values["c"], "channel", self.bugs)
+            if refused:
+                return refused, n_boards
+            if (len(channels) not in (1, n_boards)
+                    and "channel-count-ignored" not in self.bugs):
+                return ("error: -c names {} channel{} for {} board{}; give one "
+                        "each or one for all\n".format(
+                            len(channels), "" if len(channels) == 1 else "s",
+                            n_boards, "" if n_boards == 1 else "s")), n_boards
+        return "", n_boards
 
     @staticmethod
     def _after_loop(tool, flags, files):
@@ -542,16 +650,16 @@ class CaseTests(unittest.TestCase):
         _a, smoke = cases("smoke")
         # 3 ways for each of 13 file options (dump has its -U), plus the
         # extra-capture-file case, three repeated-option cases, three btle
-        # replay cases and the dfu -u stdout case, and a stray word on scan
-        # and follow.
-        self.assertEqual(13 * 3 + 1 + 3 + 4 + 2, len(smoke))
+        # replay cases and the dfu -u stdout case, a stray word on scan and
+        # follow, and five ubertooth-rx board-list refusals.
+        self.assertEqual(13 * 3 + 1 + 3 + 4 + 2 + 5, len(smoke))
         _a, full = cases("comprehensive")
         # The comprehensive cases: 16 of them here (the checks after the
         # option loop, both orders of dump's two modulation options, the
         # four repeated -d cases, and the dfu inputs), 8 more for the btle
-        # replay and the dfu read-back, and 6 more stray-word cases on scan
-        # and follow.
-        self.assertEqual(len(smoke) + 16 + 8 + 6, len(full))
+        # replay and the dfu read-back, 6 more stray-word cases on scan and
+        # follow, and 5 more board-list refusals.
+        self.assertEqual(len(smoke) + 16 + 8 + 6 + 5, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
@@ -589,9 +697,10 @@ class CaseTests(unittest.TestCase):
         # Every file option in every refusal, plus the four cases that name two
         # capture files: the first one is opened in the loop before the repeat
         # or the note. Plus the replay case whose -d names the dump, which the
-        # loop then empties. The scan and follow stray cases name no file, and
-        # a destination spelled "-" is not a file to create.
-        self.assertEqual(13 * 3 + 4 + 1, len(failed))
+        # loop then empties, and the four board-list cases that name a capture
+        # file. The scan and follow stray cases, and the -V case, name none,
+        # and a destination spelled "-" is not a file to create.
+        self.assertEqual(13 * 3 + 4 + 1 + 4, len(failed))
         self.assertFalse([name for name in failed if "'stray' is refused" in name])
 
     def test_extra_capture_note_on_stdout_fails(self):
@@ -717,6 +826,160 @@ class CaseTests(unittest.TestCase):
         summary, _events = run(old)
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertFalse(any(c[:2] == refusal_cases.NO_DEVICES for c in old.commands))
+
+
+class MultiBoardRefusalTests(unittest.TestCase):
+    """ubertooth-rx's board and channel lists (fork ubertooth#1063).
+
+    What several boards share -- a corroborated UAP, and the channels the
+    piconet was heard on across them -- depends on which board hears what, so
+    nothing here asserts it. These are the command lines the list cannot be
+    given, each refused before a board is opened or a file created.
+    """
+
+    SMOKE = ("rx-boards-named-twice", "rx-boards-empty-entry", "rx-channel-count",
+             "rx-dump-several-boards", "rx-version-several-boards")
+    COMPREHENSIVE = ("rx-channel-empty-entry", "rx-boards-over-long",
+                     "rx-channels-over-long", "rx-replay-several-boards",
+                     "rx-boards-named-twice-before-channels")
+
+    def _by_id(self, coverage):
+        _arguments, built = cases(coverage)
+        return {case.case_id: case for case in built}
+
+    def test_every_case_is_rx_with_no_board_and_an_empty_stdout(self):
+        smoke = self._by_id("smoke")
+        self.assertLessEqual(set(self.SMOKE), set(smoke))
+        self.assertFalse(set(self.COMPREHENSIVE) & set(smoke))
+        full = self._by_id("comprehensive")
+        self.assertLessEqual(set(self.SMOKE) | set(self.COMPREHENSIVE), set(full))
+        for case_id in self.SMOKE + self.COMPREHENSIVE:
+            case = full[case_id]
+            steps = [s for s in case.steps if s.step_id.startswith("refuse")]
+            with self.subTest(case_id):
+                # No BlueZ and no board role. A case that names a capture file
+                # refuses twice, once naming a new file and once a seeded one,
+                # so "creates nothing" and "truncates nothing" are both said.
+                self.assertEqual((), case.needs.bluez_tools)
+                names = [s.step_id for s in steps]
+                self.assertIn(names, (["refuse"], ["refuse-new", "refuse-kept"]))
+                for refuse in steps:
+                    argv = refuse.resolve_argv({"capture dir": "/x"})
+                    self.assertEqual(refusal_cases.NO_DEVICES + ("ubertooth-rx",),
+                                     argv[:3])
+                    self.assertEqual((1,), refuse.expected_returncodes)
+                    # The refusal must be one error: line on standard error,
+                    # with standard output left empty and no board ever asked
+                    # for.
+                    self.assertIs(refuse.output_check,
+                                  refusal_cases.nothing_on_stdout)
+                    self.assertIn(refusal_cases.NO_BOARD_NOTE,
+                                  refuse.forbidden_patterns)
+                    # Exactly one error: line and no note or warning: a
+                    # refusal that went on to say more would pass a check for
+                    # its own message alone.
+                    for pattern in refusal_cases._ONE_ERROR_ONLY:
+                        self.assertIn(pattern, refuse.forbidden_patterns)
+                    # One expected message, so a case cannot quietly accept two.
+                    self.assertEqual(1, len(refuse.output_patterns))
+                if names == ["refuse-new", "refuse-kept"]:
+                    # The second command must name the seeded file, or the
+                    # pair says nothing more than the first alone.
+                    new, existing = (s.resolve_argv({"capture dir": "/x"})[-1]
+                                     for s in steps)
+                    self.assertTrue(new.endswith("/x/new." + new.rsplit(".", 1)[1]))
+                    self.assertTrue(existing.startswith("/x/kept."))
+                    self.assertEqual(new.rsplit(".", 1)[1],
+                                     existing.rsplit(".", 1)[1])
+
+    def test_the_selectors_are_not_registry_serials(self):
+        """No board is opened, so the selectors are invented; each must still
+        begin with a letter, since libubertooth reads an all-digit selector as
+        a USB index rather than as a serial. That covers the over-long list's
+        own nine entries too: a digit-only one there would be an index."""
+        selectors = list(refusal_cases._SEL) + refusal_cases._OVER_LONG.split(",")
+        self.assertEqual(3 + 9, len(selectors))
+        for selector in selectors:
+            with self.subTest(selector):
+                self.assertRegex(selector, r"^[a-z][0-9a-z]+$")
+                self.assertFalse(selector.isdigit())
+
+    def test_a_split_list_that_takes_what_the_tool_refuses_fails(self):
+        """An empty entry and a list longer than the eight boards a capture
+        reads are rx_split_list's own refusals. A fork that dropped them would
+        carry on with the list, so the four cases that cover them must fail:
+        the message they require never comes."""
+        summary, events = run(FakeTools(bugs=("list-checks-skipped",)))
+        self.assertFalse(summary.passed)
+        full = self._by_id("comprehensive")
+        failed = failed_names(events)
+        for case_id in ("rx-boards-empty-entry", "rx-channel-empty-entry",
+                        "rx-boards-over-long", "rx-channels-over-long"):
+            with self.subTest(case_id):
+                self.assertIn(full[case_id].name, failed)
+
+    def test_fork_tools_pass_the_board_list_refusals(self):
+        for coverage in ("smoke", "comprehensive"):
+            with self.subTest(coverage):
+                summary, _events = run(FakeTools(), coverage=coverage)
+                self.assertTrue(summary.passed, summary.failure_reason)
+
+    def test_one_board_named_twice_and_taken_as_two_fails(self):
+        """Taken as two, the command line reaches the next refusal the list
+        has: the -d case would be told it cannot have several boards, and the
+        channel case that its counts do not line up. Each case forbids the
+        other message, so both notice."""
+        summary, events = run(FakeTools(bugs=("board-twice-allowed",)))
+        self.assertFalse(summary.passed)
+        failed = failed_names(events)
+        for case_id in ("rx-boards-named-twice",
+                        "rx-boards-named-twice-before-channels"):
+            case = self._by_id("comprehensive")[case_id]
+            self.assertIn(case.name, failed)
+
+    def test_a_channel_count_that_lines_up_with_nothing_fails(self):
+        summary, events = run(FakeTools(bugs=("channel-count-ignored",)))
+        self.assertFalse(summary.passed)
+        self.assertIn(self._by_id("comprehensive")["rx-channel-count"].name,
+                      failed_names(events))
+
+    def test_a_version_answer_for_the_first_board_of_a_list_fails(self):
+        """-V reports one board, so a list beside it cannot be answered as
+        asked: an answer for the first board of the list is not a refusal, and
+        it lands on standard output, which the case requires to stay empty."""
+        summary, events = run(FakeTools(bugs=("version-several-boards",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(
+            [self._by_id("comprehensive")["rx-version-several-boards"].name],
+            failed_names(events))
+
+    def test_a_replay_given_several_boards_fails(self):
+        summary, events = run(FakeTools(bugs=("replay-several-boards",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(
+            [self._by_id("comprehensive")["rx-replay-several-boards"].name],
+            failed_names(events))
+
+    def test_a_dump_given_several_boards_fails(self):
+        summary, events = run(FakeTools(bugs=("dump-several-boards",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(
+            [self._by_id("comprehensive")["rx-dump-several-boards"].name],
+            failed_names(events))
+
+    def test_a_refusal_that_goes_on_to_say_more_fails(self):
+        """A refusal is its own line and nothing else. A tool that printed the
+        right message and then a second reason, a note, or a warning would
+        pass a check for the message alone, and would leave a reader unable to
+        tell which of the two sentences to act on; every case must notice."""
+        expected = sorted(self._by_id("comprehensive")[case_id].name
+                          for case_id in self.SMOKE + self.COMPREHENSIVE)
+        for bug in ("second-error-line", "note-after-refusal",
+                    "warning-after-refusal"):
+            with self.subTest(bug):
+                summary, events = run(FakeTools(bugs=(bug,)))
+                self.assertFalse(summary.passed)
+                self.assertEqual(expected, failed_names(events))
 
 
 class BluezStrayWordTests(unittest.TestCase):

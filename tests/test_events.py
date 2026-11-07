@@ -121,7 +121,7 @@ class EventTests(unittest.TestCase):
 
         rendered = stream.getvalue()
         self.assertIn("[O] Firmware version: git-x\n[O] part\n", rendered)
-        self.assertIn("[R] ubertooth-util exit -9 in 25.000s, TIMED OUT", rendered)
+        self.assertIn("[X] ubertooth-util exit -9 in 25.000s, TIMED OUT", rendered)
 
     def test_terminal_sink_renders_command_live_output_and_result(self):
         stream = io.StringIO()
@@ -170,10 +170,10 @@ class EventTests(unittest.TestCase):
         self.assertIn("[C] tool --arg 'two words'", rendered)
         self.assertIn("[O] hello", rendered)
         self.assertIn("[E] warning", rendered)
-        self.assertIn("[R] tool exit 0 in 1.200s", rendered)
+        self.assertIn("[X] tool exit 0 in 1.200s", rendered)
         self.assertNotIn("[O] hello[E]", rendered)
         self.assertIn("[preflight] Firmware version", rendered)
-        self.assertIn("[passed] Firmware version", rendered)
+        self.assertIn("[PASS] Firmware version", rendered)
 
     def test_composite_sink_preserves_order_for_every_sink(self):
         calls = []

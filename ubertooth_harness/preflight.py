@@ -18,8 +18,9 @@ from ubertooth_harness.patterns import (
     APPLICATION_IMAGE,
     FIRMWARE_VERSION_RE,
     HOST_VERSION_TIMEOUT_S,
+    LIBBTBB_BRACKET,
+    NO_BUILD_LINE,
     commit_revision,
-    compile_info_pattern,
     firmware_version_pattern,
     matched_image,
     revision_pattern,
@@ -47,9 +48,18 @@ class PreflightError(ValueError):
 # The revision a board reports, for the firmware identity checks' reasons.
 # `-v` may name the image ahead of the revision, so the revision is the word
 # before `(API:`, not the first word after the label.
+# "Firmware compile info" reads the same answer out of `-V`. Where the build
+# string carried the revision it is read from there; since #352 it is the
+# build date alone, so the revision comes off that answer's own
+# `Firmware version:` line, which `-V` prints above it.
+_COMPILE_INFO_REVISION = re.compile(r"\bubertooth\s+(?P<revision>\S+)\s+\(")
 _FIRMWARE_REVISION = {
-    "Firmware version": FIRMWARE_VERSION_RE,
-    "Firmware compile info": re.compile(r"\bubertooth\s+(?P<revision>\S+)\s+\("),
+    "Firmware version": (FIRMWARE_VERSION_RE,),
+    # Each is tried in turn, and the first that is there decides. The build
+    # string carried the revision until #352 (fork #1230) and is the build
+    # date alone since, so a newer board's revision is read off the
+    # `Firmware version:` line of the same `-V` answer instead.
+    "Firmware compile info": (_COMPILE_INFO_REVISION, FIRMWARE_VERSION_RE),
 }
 # Fixes for a board whose firmware is not the run's revision, by run kind.
 FLASH_FIX = "flash it with this build (the default when building)"
@@ -151,8 +161,11 @@ class PreflightCheck:
             output.note_pattern("expected", self.name, pattern, present)
             if present is None:
                 target = self.resource_alias or self.host
-                found = _FIRMWARE_REVISION.get(self.name)
-                match = output.search(found.pattern) if found else None
+                match = None
+                for expression in _FIRMWARE_REVISION.get(self.name, ()):
+                    match = output.search(expression.pattern)
+                    if match is not None:
+                        break
                 # Name both revisions and how to fix it (#135). Only when they
                 # really differ: a board on the right commit but another image
                 # (btbr, a bench image) also fails this check, and saying it
@@ -189,10 +202,15 @@ class PreflightCheck:
                 "expected", f"{self.name} libbtbb", self.libbtbb.pattern, found
             )
             if found is None:
-                reported = output.search(_LIBBTBB_REPORTED)
+                reported = output.search(self.libbtbb.reported_pattern)
+                # The host-version pattern above required the whole line,
+                # the libbtbb bracket and all, so there is a version in it
+                # to name. The other wording is a backstop, not a case: it
+                # would take a host pattern that stopped requiring the
+                # bracket, and a reason must not then claim a version.
                 carries = (
                     f"libbtbb {reported['value']}" if reported
-                    else "no libbtbb version at all"
+                    else "a version line this cannot read"
                 )
                 return (
                     f"{self.name}: the host tools on {self.host} report "
@@ -231,11 +249,12 @@ class PreflightCheck:
 
 # `-V` is the version command in every tool the fork builds from C, and its
 # first line is the host tools' own version, printed before any board is
-# looked for (fork #813). Commits before that answered the host version on
-# `-H`/`--host-version`, where `-V` was the board's compile info, so the host
-# version check asks `-V` first and falls back to `-H`: the fallback output is
-# the same line, since both options print it from one function in
-# libubertooth.
+# looked for (fork #813). A tool that answers nothing under that label is
+# asked `-H`, where the same function printed the same line: a commit old
+# enough to need it is refused by require_release_output, but an older
+# install earlier on PATH than the run's prefix is not, and the fallback is
+# what makes such an install report its version instead of nothing. It costs
+# one extra command, and only where the label was missing.
 HOST_VERSION_ARGV = ("ubertooth-util", "-V")
 HOST_VERSION_FALLBACK_ARGV = ("ubertooth-util", "-H")
 
@@ -244,71 +263,141 @@ HOST_VERSION_FALLBACK_ARGV = ("ubertooth-util", "-H")
 # not a reason to ask the older option.
 HOST_VERSION_LABEL = "Host tools version:"
 
-# The start of the line the host version is on: `libubertooth` at the start
-# of a line, under the label or, on fork commits before the labels (fork
-# 201c3c49), on its own. Anchoring there keeps the firmware lines `-V` prints
-# under it out of the match, since one of them names the same revision
-# ("Firmware build: ubertooth git-... (builder@host) ...").
-_HOST_VERSION_LINE_START = (
-    rf"(?m)^(?:{re.escape(HOST_VERSION_LABEL)} )?libubertooth"
-)
+# The fork commit from which every version line names a release
+# (SqueakyFloors/ubertooth#1232; harness #352). Named in the reason a run of
+# an older commit is turned away with, so the reader knows where the line
+# this checks begins.
+RELEASE_OUTPUT_SINCE = "fork ce13614c6"
+
+# The line the host version is on, as the fork prints it since #352 (fork
+# #1230):
+#
+#     Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)
+#
+# One release name for the tools with libbtbb's beside it. The label is
+# required, because nothing else on the line marks it: the version is a bare
+# word, and a board's firmware line under it carries a version too.
+#
+# One layout, not two. A build named the two library ABI versions with the
+# commit each was built from until the fork gave every version line a release
+# name, and the harness held a run of such a commit to that older line; the
+# maintainer's decision on #358 is that current-release validation requires
+# the release-name answer and keeps no requirement that output carry a commit
+# hash or a build stamp. So a run of a commit from before that change is
+# refused with a reason (PreflightPolicy.compile) rather than checked against
+# an output format the release under test does not print.
+_RELEASE_LINE_START = rf"(?m)^{re.escape(HOST_VERSION_LABEL)} "
 
 
-def libbtbb_version_pattern(expected_revision: str) -> str:
-    """The host version line of tools linked against ``expected_revision``.
-
-    Both versions are on that one line, libbtbb's second, and the revision in
-    its brackets is what libbtbb's own build stamped into
-    ``btbb_get_release()``: the commit the installed library was built from.
-    """
+def host_version_pattern(expected_revision: str) -> str:
+    """The host tools' own half of that line, for ``expected_revision``."""
+    # The libbtbb bracket must follow, which is also what ends the version
+    # token: without it a longer release name starting with this one would
+    # match. The whole bracket, to the end of the line, because the line is
+    # exactly this and nothing else: a half-written one, and one with
+    # something after the bracket, are not the answer.
     return (
-        rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb[ \t]+\S+[ \t]+"
-        rf"\({revision_pattern(expected_revision)}\)"
+        rf"{_RELEASE_LINE_START}{revision_pattern(expected_revision)}"
+        rf"[ \t]+{LIBBTBB_BRACKET}$"
     )
 
 
-# The libbtbb half of that line as it was printed, for a reason that has to
-# name the revision found as well as the one wanted.
-_LIBBTBB_REPORTED = (
-    rf"{_HOST_VERSION_LINE_START}\b[^\n]*?\blibbtbb[ \t]+\S+[ \t]+"
-    r"\((?P<value>[^)\n]*)\)"
-)
+def libbtbb_version_pattern(expected_revision: str) -> str:
+    """The libbtbb half of that line, for ``expected_revision``.
+
+    Both versions are on the one line, libbtbb's second, and what it carries
+    is ``btbb_get_release()``: the release libbtbb's own build names since
+    `libbtbb#139`, and the commit the installed library was built from where
+    its build stamps one. Which of the two ``expected_revision`` is comes
+    from the libbtbb side (``libbtbb_identity``); the line it sits on is the
+    Ubertooth commit's, and there is one of those.
+    """
+    return (
+        rf"{_RELEASE_LINE_START}\S+[ \t]+\(libbtbb[ \t]+"
+        rf"{revision_pattern(expected_revision)}\)$"
+    )
+
+
+def libbtbb_reported_pattern() -> str:
+    """The libbtbb half of that line as printed, whatever it carries.
+
+    For a reason that has to name the revision found as well as the one
+    wanted.
+    """
+    return (
+        rf"{_RELEASE_LINE_START}\S+[ \t]+\(libbtbb[ \t]+"
+        r"(?P<value>[^)\n]*)\)$"
+    )
+
+
+def require_release_output(ubertooth) -> None:
+    """Refuse a commit whose build does not report a release (#358).
+
+    Every version line names the release the build came from since fork
+    `ce13614c6`, and fork #1233 left the `-V` answer two lines with no build
+    string. Current-release validation requires that answer and keeps no
+    requirement that output carry a commit hash or a build stamp (the
+    maintainer's decision on #358), so a commit whose build stamps
+    `git-<hash>` is turned away by name rather than failing every version
+    check against a layout it never prints.
+
+    Called where the resolved commit is first known, before anything is built
+    or written to a board, and again from ``PreflightPolicy.compile`` so a
+    caller that assembles preflight itself cannot skip it.
+    """
+    if ubertooth.names_release:
+        return
+    raise PreflightError(
+        f"Ubertooth {ubertooth.short_commit} is from before the fork named "
+        "releases in its version lines, so its tools and images report "
+        "git-<hash> and not the release-name `ubertooth-util -V` answer this "
+        f"checks; run a commit from {RELEASE_OUTPUT_SINCE} or later"
+    )
+
+
+def firmware_identity_patterns(expected_revision: str) -> tuple[str, ...]:
+    """What `ubertooth-util -V` must say about the board's firmware.
+
+    The same question the `-v` check asks, asked through the other command --
+    over a different pair of control requests -- so a board that answers one
+    and not the other is caught.
+
+    The revision comes off the `Firmware version:` line of the answer, which
+    is the whole of what `-V` says about a board: fork #1233 took the build
+    string out, because an image records only its version now and the line
+    above already names it. Nothing requires a build string any more, and a
+    build string being there is what says the answer is not the current one,
+    so its absence is required (#358).
+    """
+    return (firmware_version_pattern(expected_revision), NO_BUILD_LINE)
 
 
 def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
     """Patterns the host tools' version line must match for the resolved sources.
 
     The line is what `ubertooth-util -V` prints first, and what `-H` printed
-    on older fork commits, with or without its label. A trailing `*`
-    (modified source) does not match.
+    on older fork commits. A trailing `*` (modified source) does not match.
 
     Preflight passes only the Ubertooth source and carries the libbtbb half
     as a LibbtbbIdentity instead, so its reason can name both revisions and
     where the expectation came from; the build checks its own tools with both
     (build.py).
     """
-    # Spaces and tabs, not \s, so a match cannot run past the end of that
-    # line onto the version of something else.
-    patterns = (
-        rf"{_HOST_VERSION_LINE_START}[ \t]+\S+[ \t]+"
-        rf"\({revision_pattern(ubertooth.expected_revision)}\)",
-    )
+    patterns = (host_version_pattern(ubertooth.expected_revision),
+                NO_BUILD_LINE)
     if libbtbb is not None:
+        # The revision as that build reports it: the release name, or the
+        # abbreviation an older build stamps. Not the full commit
+        # libbtbb_identity compares against -- this is the build's own check
+        # of the library it just built, so git's own abbreviation of it is
+        # exactly what the line will carry.
         patterns += (libbtbb_version_pattern(libbtbb.expected_revision),)
     return patterns
 
 
 # How to put a libbtbb other than the wanted one right, by run kind. The
-# installed-library fixes name building or installing that commit first: a
-# library the run did not resolve is compared against a commit, so a library
-# that reports a release string instead (one built from a tarball) cannot be
-# made to match by naming any ref at all.
-LIBBTBB_INSTALL_FIX = (
-    "install libbtbb built from that commit's checkout over the one the tools "
-    "load, or run with --build so the run builds it; where the installed "
-    "library was built from a different commit on purpose, name that commit "
-    "with --libbtbb-source and --libbtbb-ref"
-)
+# resolved-library fix names installing that commit's build over the one the
+# tools load, or naming the commit the installed one came from.
 LIBBTBB_RESOLVED_FIX = (
     "install libbtbb built from that commit's checkout over the one the tools "
     "load, or name the commit the installed library was built from with "
@@ -320,6 +409,33 @@ LIBBTBB_BUILT_FIX = (
 )
 LIBBTBB_BUILT_ORIGIN = "the libbtbb this run built"
 LIBBTBB_RESOLVED_ORIGIN = "the libbtbb this run resolved (--libbtbb-ref)"
+# Why a run that resolved no libbtbb source cannot check one against an
+# Ubertooth commit whose version lines name releases. The pin in that commit's
+# install.sh is a commit, and what libbtbb reports on the version line may be
+# a release name, which is the tag its own checkout is nearest and how far
+# past it that commit is: neither is derivable from a commit without that
+# checkout to ask. So the run says so rather than comparing the wrong string.
+LIBBTBB_RELEASE_NOT_DERIVABLE = (
+    "{label} sets LIBBTBB_REF={ref} in install.sh, and a build of that commit "
+    "may report the release it came from rather than the commit; working that "
+    "out needs the libbtbb checkout, which this run has not got, so the "
+    "libbtbb the tools load was not checked. Name it with --libbtbb-source "
+    "and --libbtbb-ref (a deployed runner passes --libbtbb-ref fork-pin) to "
+    "have it checked"
+)
+
+
+def libbtbb_identity_revision(libbtbb) -> str:
+    """What a run must see on the libbtbb half of the version line.
+
+    The release a build of that commit names, where its build names one. Where
+    it stamps a commit, the commit in full rather than the abbreviation: a
+    short hash would also accept a longer one that merely starts with it, and
+    a run comparing a library somebody else built has nothing else to go on.
+    """
+    if libbtbb.names_release:
+        return libbtbb.expected_revision
+    return commit_revision(libbtbb.commit)
 
 
 @dataclass(frozen=True)
@@ -348,6 +464,10 @@ class LibbtbbIdentity:
     def pattern(self) -> str:
         return libbtbb_version_pattern(self.expected_revision)
 
+    @property
+    def reported_pattern(self) -> str:
+        return libbtbb_reported_pattern()
+
     def describe(self) -> str:
         """The revision required and where it came from; only for a required
         identity, since one requiring nothing has no revision to name."""
@@ -375,18 +495,23 @@ def libbtbb_identity(ubertooth, libbtbb=None, *, built=False) -> LibbtbbIdentity
     ``install.sh``: the only statement of which libbtbb that commit is meant
     to run against.
 
-    The full commit is compared wherever one is known, not the abbreviation:
-    a short hash would also accept a longer one that merely starts with it.
+    What the line must carry for a resolved libbtbb is
+    ``libbtbb_identity_revision``: the release a build of that commit names,
+    or the commit in full where its build stamps one.
 
-    An identity requiring nothing comes back where the Ubertooth commit names
-    no libbtbb at all (fork commits from before the pin landed); nothing is
-    claimed, so nothing is checked, and the run says so. PreflightError is
-    raised where the commit names one that cannot be compared with what the
-    tools report, rather than let a run measure an unverified library.
+    An identity requiring nothing comes back in two cases, and each records
+    its own reason: the Ubertooth commit names no libbtbb at all (fork
+    commits from before the pin landed), and it names one by commit while the
+    version line names releases, which a commit cannot be turned into without
+    the libbtbb checkout (LIBBTBB_RELEASE_NOT_DERIVABLE). Nothing is claimed
+    in either, so nothing is checked, and the run says so.
+    PreflightError is raised where the commit names a libbtbb that cannot be
+    compared with what the tools report for a reason somebody can put right,
+    rather than let a run measure an unverified library.
     """
     if libbtbb is not None:
         return LibbtbbIdentity(
-            commit_revision(libbtbb.commit),
+            libbtbb_identity_revision(libbtbb),
             LIBBTBB_BUILT_ORIGIN if built else LIBBTBB_RESOLVED_ORIGIN,
             LIBBTBB_BUILT_FIX if built else LIBBTBB_RESOLVED_FIX,
         )
@@ -411,7 +536,7 @@ def libbtbb_identity(ubertooth, libbtbb=None, *, built=False) -> LibbtbbIdentity
     if pin is None:
         return LibbtbbIdentity(
             "", f"{label} sets no LIBBTBB_REF in install.sh, so the libbtbb "
-            "the tools load was not checked"
+            "the tools load was not checked",
         )
     if not libbtbbpin.is_commit(pin.ref):
         # The tools report a commit, so a name that can move is nothing to
@@ -421,11 +546,51 @@ def libbtbb_identity(ubertooth, libbtbb=None, *, built=False) -> LibbtbbIdentity
             f"{label} sets LIBBTBB_REF={pin.ref} in install.sh, which is not "
             "a commit"
         )
+    # A commit, and what the line may carry is a release name. Not a
+    # refusal: the run is perfectly able to measure everything else, and a
+    # bench that wants this checked says which libbtbb its tools hold.
     return LibbtbbIdentity(
-        commit_revision(pin.ref),
-        f"the LIBBTBB_REF install.sh sets at {label}",
-        LIBBTBB_INSTALL_FIX,
+        "", LIBBTBB_RELEASE_NOT_DERIVABLE.format(label=label, ref=pin.ref),
     )
+
+
+def device_checks(serial: str, expected_revision: str):
+    """The reads preflight makes of every Ubertooth it binds, in order.
+
+    ``(name, argv, expected patterns)`` per read, from the lowercased serial
+    the board is selected by. It is a function of its own so that the one
+    statement of these commands is the one the run sends: the document's
+    preflight block is compared with it (tests/test_tests_document.py), so a
+    read added or removed here fails until the document says so.
+    """
+    common = ("ubertooth-util", "-U", serial)
+    return (
+        (
+            "Firmware version",
+            common + ("-v",),
+            (firmware_version_pattern(expected_revision),),
+        ),
+        (
+            "Firmware compile info",
+            common + ("-V",),
+            firmware_identity_patterns(expected_revision),
+        ),
+        (
+            "Device serial",
+            common + ("-s",),
+            (rf"Serial No:\s+{re.escape(serial)}(?:\s|$)",),
+        ),
+    )
+
+
+def guard_api_check(serial: str):
+    """The extra read of a guard-only board: which firmware API it carries.
+
+    The run refuses a guard whose API is not the host tools' own, either way
+    about, because `ubertooth-btle` may stop such a board rather than read it.
+    """
+    return ("Guard firmware API", ("ubertooth-util", "-U", serial, "-v"),
+            (r"Firmware version:",))
 
 
 _NRFDK = str(Path(nrfdk.__file__).resolve())
@@ -539,10 +704,6 @@ class PreflightPolicy:
                     found.append(alias)
         return tuple(found)
 
-    @staticmethod
-    def _pattern(text: str) -> str:
-        return re.escape(text)
-
     def compile(
         self,
         invocations: Sequence[TestInvocation],
@@ -563,6 +724,10 @@ class PreflightPolicy:
         if not manifest.matches_invocations(invocations):
             raise PreflightError("manifest invocations do not match selected tests")
         ubertooth_source = manifest.source("Ubertooth")
+        # The backstop: cli.py refuses such a commit before anything is built
+        # or written to a board (require_release_output), and a caller that
+        # assembles preflight itself still cannot skip it.
+        require_release_output(ubertooth_source)
         try:
             libbtbb_source = manifest.source("libbtbb")
         except ManifestError:
@@ -640,28 +805,11 @@ class PreflightPolicy:
                     )
                 selected_serial = serial.lower()
                 expected = ubertooth_source.expected_revision
-                common = ("ubertooth-util", "-U", selected_serial)
-                device_checks = (
-                    (
-                        "Firmware version",
-                        common + ("-v",),
-                        (firmware_version_pattern(expected),),
-                    ),
-                    (
-                        "Firmware compile info",
-                        common + ("-V",),
-                        (compile_info_pattern(expected),),
-                    ),
-                    (
-                        "Device serial",
-                        common + ("-s",),
-                        (rf"Serial No:\s+{self._pattern(serial.lower())}(?:\s|$)",),
-                    ),
-                )
+                reads = device_checks(selected_serial, expected)
                 required_api = None
                 if alias in established or alias not in tested:
-                    device_checks = tuple(
-                        check for check in device_checks if check[0] == "Device serial"
+                    reads = tuple(
+                        check for check in reads if check[0] == "Device serial"
                     )
                 if alias not in tested:
                     # Guard-only: refuse the run before any test if its API
@@ -672,9 +820,7 @@ class PreflightPolicy:
                         except StateCaseError as error:
                             raise PreflightError(str(error)) from error
                     required_api = host_api
-                    device_checks += (
-                        ("Guard firmware API", common + ("-v",), (r"Firmware version:",)),
-                    )
+                    reads += (guard_api_check(selected_serial),)
                 if (
                     bootloader is not None
                     and alias in tested
@@ -685,14 +831,14 @@ class PreflightPolicy:
                     # firmware may be older than the read, nor for a board a
                     # firmware-writing test establishes itself: both can be
                     # carrying firmware that refuses the request.
-                    device_checks += (
+                    reads += (
                         (
                             BOOTLOADER_CHECK_NAME,
                             bootloader_identity.identity_argv(selected_serial),
                             bootloader.patterns(),
                         ),
                     )
-                for name, argv, patterns in device_checks:
+                for name, argv, patterns in reads:
                     sequence += 1
                     checks.append(
                         PreflightCheck(
