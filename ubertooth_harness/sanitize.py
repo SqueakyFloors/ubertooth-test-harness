@@ -15,8 +15,10 @@ So the export has two halves, and the second one is the gate:
   and are replaced by a public label, so nothing has to be typed in by hand
   and a bench that registers its host as its host name is covered like any
   other. **Structural** ones are recognized by their form: a home directory,
-  a temporary build directory, an electronic mail address, an IP address, a
-  name in a private domain.
+  a temporary build directory, an electronic mail address, an IP address (v4
+  by its form, v6 by parsing a token of hex and colons, which is what keeps
+  the rule off a transcript's ``HH:MM:SS`` stamp and off a Bluetooth address,
+  both of which a record keeps on purpose), a name in a private domain.
 * :func:`findings` then reads the sanitized line again and reports anything
   that still looks private. It is a denylist over the finished text rather
   than a second guess at the input, which is what makes it a gate: a rule
@@ -31,7 +33,15 @@ allowed (:data:`SYSTEM_ROOTS`), and any other absolute path is a finding, on
 the view that a path this does not recognize is more likely a bench's own
 directory than something a reader needs. ``--strip-path`` is how an operator
 answers one: it names the prefix, which :func:`sanitize` then replaces before
-the scan ever sees it.
+the scan ever sees it. A root is judged by its first component only, so a
+bench that keeps its runs under an allowed root (``/opt/<bench name>``) has
+to name that prefix too; judging further would refuse the toolchain and
+library paths a build legitimately records.
+
+The two halves read a name with one function (:func:`_name_pattern`), which
+matters: a gate that read a name more widely than the rewriting would refuse
+a line the rewriting had decided to leave, and no option an operator could
+pass would clear it.
 
 What is deliberately kept: public repository URLs, release names, commits,
 tool and firmware versions, plan and suite names, timestamps, durations,
@@ -130,11 +140,17 @@ class Private:
     def names(self) -> tuple[str, ...]:
         """Every name whose survival in the output is a finding.
 
+        The users, the machines, and the aliases: names with a word of their
+        own, which the scan reads with the same boundaries the rewriting uses
+        (:func:`_name_pattern`). A path is not one of them -- it has no word
+        boundary and is matched as a prefix -- and neither is a serial, which
+        has rules of its own.
+
         Longest first, so a name that contains another is found as itself.
         The aliases' own labels are not in here: they are what the names
         became.
         """
-        found = {*self.users, *self.hosts, *self.aliases, *self.paths}
+        found = {*self.users, *self.hosts, *self.aliases}
         return tuple(sorted(found, key=lambda name: (-len(name), name)))
 
 
@@ -185,26 +201,60 @@ _DOTTED_QUAD = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w.])")
 # The addresses a public record may keep: the loopback the controller binds
 # and the unspecified address, which say nothing about a bench.
 PUBLIC_ADDRESSES = ("127.0.0.1", "0.0.0.0", "255.255.255.255")
+# An IPv6 address, as a token that could be one: hex groups and colons, with
+# at least two colons, checked with ipaddress rather than by a pattern. The
+# check is what keeps the rule off the two things that look like one and are
+# not -- a transcript's `HH:MM:SS.mmm` stamp and a Bluetooth address, which
+# the records keep on purpose -- since neither parses as an address.
+_COLON_TOKEN = re.compile(r"(?<![\w:.])[0-9A-Fa-f:]{3,45}(?![\w:])")
 
 
-def _alias_pattern(alias: str) -> re.Pattern:
-    """``alias`` where it stands on its own.
+def _ipv6(value: str):
+    """``value`` as an IPv6 address, or None when it is not one."""
+    if value.count(":") < 2:
+        return None
+    try:
+        return ipaddress.IPv6Address(value)
+    except ValueError:
+        return None
 
-    A registry alias is letters, digits and the separators a registry allows,
-    so it is bounded by anything that is not one of those: `UT_0` in
-    `serial of UT_0,` is the alias, and the `UT_0` inside `UT_01` is not.
+
+def _is_private_address(value: str) -> bool:
+    """Is this token an address a public record must not carry?
+
+    Loopback and the unspecified address say nothing about a bench and are
+    kept; everything else that parses as an address is taken out.
     """
-    return re.compile(rf"(?<![0-9A-Za-z_-]){re.escape(alias)}(?![0-9A-Za-z_-])")
+    found = _ipv6(value)
+    if found is None:
+        return False
+    return not (found.is_loopback or found.is_unspecified)
 
 
+def usable_prefix(prefix: str) -> bool:
+    """Is this a path prefix that can be replaced without mangling the text?
+
+    An absolute path with at least one named component. Without the check,
+    ``--strip-path /`` or an empty value would replace the empty string,
+    which interleaves the placeholder between every character of every line
+    and still passes every rule below.
+    """
+    prefix = str(prefix).rstrip("/")
+    return prefix.startswith("/") and len(prefix) > 1
+
+
+# A name with a word of its own: a registry alias, a user name, a machine
+# name. All three are bounded by anything that is not a letter, a digit, an
+# underscore or a hyphen, so `UT_0` in `serial of UT_0,` is the alias and the
+# `UT_0` inside `UT_01` is not, and `ada` in `the adapter` is not the user
+# `ada`. A dot is not a boundary, so a machine name is replaced inside a
+# domain name too and the suffix is left for the private-domain rule.
+#
+# The rewriting and the scan use this one function, deliberately: a gate that
+# read a name more widely than the rewriting would refuse a line the
+# rewriting had decided to leave, and nothing an operator could pass would
+# clear it.
 def _name_pattern(name: str) -> re.Pattern:
-    """A user or machine name where it stands on its own, in any case.
-
-    A machine name reaches a record as its own word (`held by ada on
-    lab-host`) and inside a domain name (`lab-host.internal`), so a dot is
-    not a boundary: the name is replaced and the domain suffix is left for
-    the private-domain rule above to take.
-    """
     return re.compile(rf"(?<![0-9A-Za-z_-]){re.escape(name)}(?![0-9A-Za-z_-])",
                       re.IGNORECASE)
 
@@ -224,11 +274,12 @@ def sanitize(text: str, private: Private = Private()) -> str:
     leave a piece with nothing to match.
     """
     for prefix in sorted(private.paths, key=len, reverse=True):
-        text = text.replace(prefix.rstrip("/"), PATH)
+        if usable_prefix(prefix):
+            text = text.replace(prefix.rstrip("/"), PATH)
     for alias, label in sorted(
         private.aliases.items(), key=lambda item: (-len(item[0]), item[0])
     ):
-        text = _alias_pattern(alias).sub(label, text)
+        text = _name_pattern(alias).sub(label, text)
     text = _EMAIL.sub(EMAIL, text)
     for name in sorted(private.users, key=len, reverse=True):
         text = _name_pattern(name).sub(USER, text)
@@ -241,6 +292,11 @@ def sanitize(text: str, private: Private = Private()) -> str:
         text = pattern.sub(TMP, text)
     text = _PRIVATE_HOST.sub(HOST, text)
     text = _DOTTED_QUAD.sub(_mask_address, text)
+    text = _COLON_TOKEN.sub(
+        lambda match: ADDRESS if _is_private_address(match.group(0))
+        else match.group(0),
+        text,
+    )
     if private.keep_serials:
         # A private bundle keeps them, and report.py's rules mask a serial by
         # its shape as well as by name (any standalone 32-hex token, any
@@ -275,16 +331,26 @@ SYSTEM_ROOTS = (
     "/Applications", "/Library", "/System", "/bin", "/dev", "/etc", "/lib",
     "/lib32", "/lib64", "/opt", "/proc", "/sbin", "/snap", "/sys", "/usr",
 )
-# A path as a transcript writes one: after whitespace or a delimiter, never
-# after a word character (`12/12 passed`), a colon or another slash (the
-# `//` of a URL), or the `>` a placeholder ends with (`<home>/host`).
+# A path as a transcript writes one: after whitespace or a delimiter, and
+# never after a word character (`12/12 passed`) or another slash (the `//` of
+# a URL). A colon ends a path rather than continuing one, so a bench path in
+# a colon-separated list (`PKG_CONFIG_PATH=/usr/lib:/srv/bench/lib`) is read
+# as the second path and not swallowed by the first; a `>` does not stop one
+# either, so a path after a shell redirect (`2>/srv/bench/out.log`) is read.
+# What that costs is the `>` a placeholder ends with and the `://` of a URL,
+# and ``_path_findings`` looks at the text before each match for both.
 _ABSOLUTE_PATH = re.compile(
-    r"(?<![\w:/>~])(/[A-Za-z0-9_.][^\s\"'`)\]},;|]*)"
+    r"(?<![\w/~])(/[A-Za-z0-9_.][^\s\"'`)\]},;|:]*)"
 )
 _MAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+")
 # `user@machine` without a domain, which is how an SSH destination and a
-# lease holder are written.
-_AT_HOST = re.compile(r"(?<![\w.@-])[A-Za-z0-9._-]+@[A-Za-z0-9][A-Za-z0-9.-]*")
+# lease holder are written. A placeholder is allowed on the left, because
+# this has to fire on what the rewriting leaves: it replaces a user name it
+# knows with `<user>` and may not know the machine after it, and a rule that
+# needed a word character there would go quiet on exactly that line.
+# `<user>@<host>` is not a finding: the rewriting collapses it to `<host>`
+# before this ever reads the line.
+_AT_HOST = re.compile(r"(?<![\w.@-])[A-Za-z0-9._<>-]+@[A-Za-z0-9][A-Za-z0-9.-]*")
 # A whole Ubertooth serial, and a piece of one wide enough to name a board;
 # report.py masks both, so one here is a rule that did not run. The piece is
 # judged as report.py judges it -- a run that wide carrying both letters and
@@ -299,8 +365,11 @@ _BY_ID = re.compile(r"/dev/serial/by-id/\S*\d{4,}\S*")
 _RUNTIME_DIR = re.compile(r"/run/user/\d+")
 # An SSH invocation. Its destination may be an alias from a private
 # configuration file, which has no form of its own to recognize, so the
-# command itself is the finding.
-_SSH_COMMAND = re.compile(r"(?<![\w-])(?:ssh|scp|sftp|rsync)\s+[-\w@.]")
+# command itself is the finding. A placeholder counts as a destination for
+# the reason `_AT_HOST` takes one, and the separator is a space or a tab
+# rather than any whitespace, so the rule cannot reach across a line ending
+# and report on the whole text what it would not report on one line.
+_SSH_COMMAND = re.compile(r"(?<![\w-])(?:ssh|scp|sftp|rsync)[ \t]+[-\w@.<]")
 
 # How much of a line a finding quotes. Long enough to see what was found and
 # short enough that a refusal naming many of them stays readable.
@@ -325,8 +394,25 @@ def _excerpt(line: str, found: str) -> str:
 
 
 def _path_findings(line: str) -> Iterable[str]:
+    """Every absolute path in the line this export does not recognize.
+
+    Two things that look like one are left: a path written straight after a
+    placeholder, which is what the rewriting produced (`<home>/src`), and the
+    `//` of a URL, which is evidence.
+
+    What this does not read is the rest of an allowed path: a root is judged
+    by its first component, so a bench that keeps its runs under
+    ``/opt/<bench name>`` publishes that name whole and has to be named with
+    ``--strip-path``. Judging further would refuse the toolchain and library
+    paths a build legitimately records.
+    """
     for match in _ABSOLUTE_PATH.finditer(line):
         path = match.group(1)
+        before = line[:match.start()]
+        if before.endswith("://") or any(
+            before.endswith(mark) for mark in PLACEHOLDERS
+        ):
+            continue
         root = "/" + path.split("/", 2)[1] if "/" in path[1:] else path
         if root in SYSTEM_ROOTS or path in SYSTEM_ROOTS:
             continue
@@ -346,8 +432,11 @@ def line_findings(line: str, private: Private = Private(),
         found.append(Finding(rule, where, number, _excerpt(line, text)))
 
     for name in private.names:
-        if _name_pattern(name).search(line) or name in line:
+        if _name_pattern(name).search(line):
             record(RULE_NAME, name)
+    for prefix in private.paths:
+        if usable_prefix(prefix) and prefix.rstrip("/") in line:
+            record(RULE_NAME, prefix)
     for match in _HOME_PATHS:
         hit = match.search(line)
         if hit:
@@ -379,6 +468,9 @@ def line_findings(line: str, private: Private = Private(),
         record(RULE_AT_HOST, hit.group(0))
     for match in _DOTTED_QUAD.finditer(line):
         if match.group(0) not in PUBLIC_ADDRESSES:
+            record(RULE_ADDRESS, match.group(0))
+    for match in _COLON_TOKEN.finditer(line):
+        if _is_private_address(match.group(0)):
             record(RULE_ADDRESS, match.group(0))
     for path in _path_findings(line):
         record(RULE_PATH, path)

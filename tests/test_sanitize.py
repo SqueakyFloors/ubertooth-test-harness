@@ -70,6 +70,46 @@ class SanitizeTests(unittest.TestCase):
             f"rsync {HOST}:/x",
         )
 
+    def test_a_machine_after_a_known_user_is_still_caught(self):
+        # The rewriting replaces the user it knows and cannot know every
+        # machine, so both `@` rules have to fire on what it leaves.
+        line = sanitize.sanitize("cloned from ada@buildbox:ubertooth.git", BENCH)
+        self.assertEqual(f"cloned from {USER}@buildbox:ubertooth.git", line)
+        self.assertEqual(
+            [item.rule for item in line_findings(line, BENCH)],
+            [sanitize.RULE_AT_HOST],
+        )
+
+    def test_a_remote_login_command_is_caught_after_the_user_is_masked(self):
+        line = sanitize.sanitize("ssh ada@buildbox", BENCH)
+        self.assertIn(sanitize.RULE_SSH,
+                      [item.rule for item in line_findings(line, BENCH)])
+
+    def test_the_gate_leaves_what_the_rewriting_leaves(self):
+        # `ada` is a lease holder and `UT_0` an alias; neither is found
+        # inside a longer word, by either half.
+        for line in ("the adapter was reset", "UT_01 answered"):
+            with self.subTest(line=line):
+                self.assertEqual(sanitize.sanitize(line, BENCH), line)
+                self.assertEqual(line_findings(line, BENCH), [])
+
+    def test_an_ipv6_address_goes_and_a_bluetooth_address_stays(self):
+        self.assertEqual(
+            sanitize.sanitize("peer at 2001:db8::1 answered"),
+            f"peer at {ADDRESS} answered")
+        for kept in ("00:00:10.438", "C0:00:00:00:00:01", "::1"):
+            with self.subTest(kept=kept):
+                self.assertEqual(sanitize.sanitize(kept), kept)
+                self.assertEqual(line_findings(kept), [])
+
+    def test_a_prefix_that_would_mangle_the_text_is_not_replaced(self):
+        for prefix in ("/", "", "   "):
+            with self.subTest(prefix=prefix):
+                self.assertFalse(sanitize.usable_prefix(prefix))
+                private = Private().with_paths((prefix,))
+                self.assertEqual(sanitize.sanitize("suite release", private),
+                                 "suite release")
+
     def test_a_mail_address_goes_whole(self):
         self.assertEqual(
             sanitize.sanitize("filed by ada@example.com", BENCH),
@@ -144,6 +184,19 @@ class ScanTests(unittest.TestCase):
     def test_a_relative_path_and_a_count_are_not_paths(self):
         self.assertEqual(
             line_findings("output/016-dump.stderr.log: 12/12 passed"), [])
+
+    def test_a_path_after_a_colon_or_a_redirect_is_read(self):
+        for line in ("PKG_CONFIG_PATH=/usr/lib:/srv/bench/lib",
+                     "ubertooth-dump 2>/srv/bench/out.log"):
+            with self.subTest(line=line):
+                self.assertIn(
+                    sanitize.RULE_PATH,
+                    [item.rule for item in line_findings(line)])
+
+    def test_a_url_and_a_placeholder_path_are_not_paths(self):
+        self.assertEqual(line_findings(
+            "https://github.com/SqueakyFloors/ubertooth/releases"), [])
+        self.assertEqual(line_findings(f"built in {sanitize.PATH}/host"), [])
 
     def test_a_sanitized_line_of_everything_comes_back_clean(self):
         line = (

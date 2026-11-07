@@ -40,6 +40,11 @@ from ubertooth_harness.sanitize import HOST, PATH, SERIAL, USER, Unsafe
 SERIAL_0 = "aaaa0000bbbb1111cccc2222dddd3333"
 SERIAL_1 = "bbbb0000bbbb1111cccc2222dddd4444"
 JLINK = "001050210121"
+# A board the run switched off and the hub it used, which an invocation
+# records beside the resources it binds rather than among them.
+SPARE_ALIAS = "UT_SPARE_bench3"
+HUB_ALIAS = "hub-bench-3"
+HUB_SERIAL = "3B9A7C21"
 OPERATOR = "ada"
 MACHINE = "bench-linux-7"
 COMMIT = "9903b4251f0e4c0c8b1f2a3d4e5f60718293a4b5"
@@ -72,6 +77,8 @@ def write_run(
     blocked: tuple = (),
     not_applicable: tuple = (),
     extra_transcript: str = "",
+    tool_files: tuple = (),
+    isolation: bool = False,
 ) -> Path:
     """One finished run directory, with everything an export has to take out.
 
@@ -116,6 +123,20 @@ def write_run(
                     "guard Ubertooth 1": {"serial": SERIAL_1},
                     "DK advertiser": {"jlink_serial": JLINK},
                 },
+                **({
+                    # What an exclusive-Ubertooth invocation records: the
+                    # boards it switched off, which it does not bind, and the
+                    # hub it switched them with (topology.py).
+                    "power_isolation": [{
+                        "resource": SPARE_ALIAS, "controller": HUB_ALIAS,
+                        "port": 3, "power_enabled": False,
+                    }],
+                    "power_cycle": {
+                        "resource": "UT_0", "controller": HUB_ALIAS,
+                        "port": 1, "driver": "acroname",
+                        "identity": HUB_SERIAL,
+                    },
+                } if isolation else {}),
             }],
             "environment": {"os": {
                 "system": "Linux", "distribution": "24.04",
@@ -145,8 +166,13 @@ def write_run(
             "output_files": [
                 {"path": "output/c1.stderr.log", "stream": "stderr",
                  "bytes": 64, "lines": 2, "sha256": "0" * 64},
-                {"path": "captures/advertising.pcapng", "stream": "",
+                {"path": "captures/advertising.pcapng", "stream": "capture",
                  "bytes": 2048, "lines": 0, "sha256": "1" * 64},
+                *[
+                    {"path": path, "stream": stream, "bytes": 16, "lines": 1,
+                     "sha256": "2" * 64}
+                    for path, stream in tool_files
+                ],
             ],
         }, 6, run_id),
         _event("test_finished", "passed", {
@@ -204,6 +230,8 @@ def write_run(
         encoding="utf-8",
     )
     (directory / "captures" / "advertising.pcapng").write_bytes(b"\xa1\xb2\xc3\xd4")
+    for path, _stream in tool_files:
+        (directory / path).write_text("a map\n", encoding="utf-8")
     return directory
 
 
@@ -336,11 +364,28 @@ class ReadRunTests(unittest.TestCase):
             [(item.name, item.value) for item in self.run.measurements],
             [("channel", "2441")])
 
-    def test_it_reads_the_files_and_knows_which_are_text(self):
+    def test_it_reads_the_files_and_knows_which_travel(self):
         self.assertEqual(
-            [(item.path, item.is_text) for item in self.run.files],
+            [(item.path, item.published) for item in self.run.files],
             [("captures/advertising.pcapng", False),
              ("output/c1.stderr.log", True)])
+
+    def test_a_text_file_a_tool_wrote_itself_does_not_travel(self):
+        # The harness labels every file a case's tools wrote `capture`,
+        # whatever its name says, and the export goes by that label.
+        maps = next(item for item in read_run(write_run(
+            self.root, run_id="20261105T141233Z-abcdef123461",
+            tool_files=(("captures/afh-maps-1.txt", "capture"),),
+        )).files if item.path.endswith("afh-maps-1.txt"))
+        self.assertFalse(maps.published)
+        self.assertIn("a tool wrote itself", maps.held_back)
+
+    def test_a_target_s_shell_traffic_travels(self):
+        serial_log = next(item for item in read_run(write_run(
+            self.root, run_id="20261105T151233Z-abcdef123462",
+            tool_files=(("captures/DK_0.serial.log", "target serial"),),
+        )).files if item.path.endswith(".serial.log"))
+        self.assertTrue(serial_log.published)
 
     def test_it_collects_the_names_the_export_has_to_remove(self):
         private = self.run.private
@@ -350,6 +395,18 @@ class ReadRunTests(unittest.TestCase):
         self.assertIn(MACHINE, private.hosts)
         self.assertIn(str(self.run.directory.resolve()), private.paths)
         self.assertIn("/Users/ada/src/ubertooth", private.paths)
+
+    def test_a_board_it_switched_off_and_the_hub_are_collected_too(self):
+        # An isolated board is not bound to the invocation, so its alias
+        # appears nowhere among the resources; the hub carries its own serial.
+        run = read_run(write_run(
+            self.root, run_id="20261105T161233Z-abcdef123463", isolation=True))
+        labels = public_labels((run,))
+        self.assertIn(SPARE_ALIAS, labels)
+        self.assertIn(HUB_ALIAS, labels)
+        self.assertEqual(labels[SPARE_ALIAS], "isolated board 1")
+        self.assertEqual(labels[HUB_ALIAS], "power controller 1")
+        self.assertIn(HUB_SERIAL, run.private.serials)
 
     def test_a_directory_with_no_records_is_refused(self):
         with self.assertRaises(EvidenceError):
@@ -614,6 +671,70 @@ class BundleTests(unittest.TestCase):
         text = summary(export)
         self.assertIn("## Missing required evidence", text)
         self.assertIn("None.", text)
+
+    def test_a_member_name_is_sanitized_and_scanned(self):
+        # A command ID carries a board serial into the name of a spill file,
+        # and the name becomes a tar header and a manifest line.
+        run = write_run(
+            self.root, run_id="20261105T171233Z-abcdef123464",
+            tool_files=((f"output/watchdog-{SERIAL_0}-1.stdout.log", "stdout"),))
+        bundle = self.build(runs=[run], output=self.root / "named")
+        names = sorted(members_of(bundle.logs))
+        self.assertIn(f"runs/{run.name}/output/watchdog-serial-1.stdout.log",
+                      names)
+        for name in names:
+            self.assertNotIn(SERIAL_0, name)
+        manifest = members_of(bundle.logs)[MANIFEST_NAME].decode()
+        self.assertNotIn(SERIAL_0, manifest)
+        # What the summary lists is what the archive holds.
+        text = bundle.summary.read_text(encoding="utf-8")
+        for name in names:
+            if name != MANIFEST_NAME:
+                self.assertIn(name, text)
+
+    def test_a_board_it_switched_off_and_the_hub_do_not_reach_run_jsonl(self):
+        run = write_run(self.root, run_id="20261105T181233Z-abcdef123465",
+                        isolation=True)
+        bundle = self.build(runs=[run], output=self.root / "isolated")
+        published = [bundle.summary.read_text(encoding="utf-8")]
+        published += [
+            body.decode("utf-8") for body in members_of(bundle.logs).values()
+        ]
+        for text in published:
+            for secret in (SPARE_ALIAS, HUB_ALIAS, HUB_SERIAL):
+                self.assertNotIn(secret, text)
+
+    def test_a_file_the_run_no_longer_has_is_listed_with_its_reason(self):
+        run = write_run(self.root, run_id="20261105T191233Z-abcdef123466")
+        (run / "output" / "c1.stderr.log").unlink()
+        bundle = self.build(runs=[run], output=self.root / "gone")
+        text = bundle.summary.read_text(encoding="utf-8")
+        self.assertIn("output/c1.stderr.log", text)
+        self.assertIn("no longer holds it", text)
+        self.assertNotIn(f"runs/{run.name}/output/c1.stderr.log",
+                         members_of(bundle.logs))
+
+    def test_a_run_named_twice_produces_one_set_of_members(self):
+        bundle = self.build(runs=[self.run, self.run], output=self.root / "twice")
+        names = [member.name for member in bundle.members]
+        self.assertEqual(sorted(set(names)), sorted(names))
+
+    def test_a_path_prefix_that_would_mangle_the_text_is_refused(self):
+        for prefix in ("/", "", "relative/path"):
+            with self.subTest(prefix=prefix):
+                with self.assertRaises(EvidenceError) as refused:
+                    self.build(strip_paths=[prefix],
+                               output=self.root / f"bad{len(prefix)}")
+                self.assertIn("--strip-path", str(refused.exception))
+
+    def test_a_refusal_leaves_no_asset_and_no_temporary_file(self):
+        run = write_run(
+            self.root, run_id="20261105T201233Z-abcdef123467",
+            extra_transcript="00:00:05.000 [M] notes in /srv/bench/notes.txt\n")
+        output = self.root / "refused"
+        with self.assertRaises(Unsafe):
+            self.build(runs=[run], output=output)
+        self.assertEqual([], sorted(path.name for path in output.iterdir()))
 
 
 if __name__ == "__main__":  # pragma: no cover

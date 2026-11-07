@@ -49,7 +49,7 @@ import datetime
 import hashlib
 import io
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import subprocess
 import tarfile
@@ -59,7 +59,12 @@ from ubertooth_harness import release as release_version
 from ubertooth_harness import sanitize
 from ubertooth_harness.events import RUN_LOG, REPORT
 from ubertooth_harness.outputfiles import (
-    OutsideRun, confined, output_records, saved_output,
+    CAPTURE_STREAM,
+    STREAMS,
+    TARGET_SERIAL_STREAM,
+    OutsideRun,
+    confined,
+    saved_output,
 )
 from ubertooth_harness.report import load_events, serials as run_serials
 from ubertooth_harness.sanitize import Private
@@ -87,14 +92,26 @@ PRIVATE_SUMS_NAME = "validation-private-SHA256SUMS"
 # bytes from the same runs: a reader who rebuilds the bundle from the
 # retained records must get the hash the release published.
 COMPRESSION_LEVEL = 10
-# What a member may be. A run saves text logs, captures (.pcap, .pcapng),
-# and binary dumps; only text travels. A capture holds whatever third-party
-# traffic was on the air, which is nobody's to publish, and a dump cannot be
-# sanitized at all: there is no line in it to rewrite.
-TEXT_SUFFIXES = (".log", ".txt", ".md", ".jsonl")
+# Rows the Measurements table carries. A soak records an observed value per
+# round, and a summary is read by a person; the rest stay in the run records
+# the bundle carries.
+MEASUREMENT_ROWS = 200
+# Which of a run's saved files travel. The classification is the run's own:
+# ``stdout`` and ``stderr`` are a command's streams and the target serial
+# stream is a device's shell traffic, all three text the harness decoded
+# itself; ``capture`` is a file a tool wrote (a PCAP, a ``-d`` dump, a tool's
+# own report), which is not published whatever its name says. A record with
+# some other stream, or none, is not published either: an export refuses what
+# it cannot classify rather than guessing.
+PUBLISHED_STREAMS = (*STREAMS, TARGET_SERIAL_STREAM)
 # Why a recorded file stays behind, for the summary's own table.
-NOT_TEXT = "binary; a capture or a dump is not published"
-MISSING = "the run no longer has it"
+NOT_PUBLISHED = (
+    "a file a tool wrote itself: a capture holds whatever traffic was on the "
+    "air, and a dump has no line to rewrite"
+)
+UNKNOWN_STREAM = "the run did not record which stream this is"
+MISSING = "the run directory no longer holds it"
+REFUSED = "the recorded path does not name a file inside the run directory"
 
 # The repository a release of the fork is published from. The bundle is
 # attached to that release, not to the harness's own.
@@ -229,8 +246,22 @@ class RecordedFile:
     test: str
 
     @property
-    def is_text(self) -> bool:
-        return PurePosixPath(self.path).suffix in TEXT_SUFFIXES
+    def published(self) -> bool:
+        """Does this file travel with the release?
+
+        Read off the stream the run recorded rather than the file's name: the
+        harness labels every file a tool wrote itself ``capture``, including
+        the ones whose names look like text, and a name is not evidence of
+        what is inside.
+        """
+        return self.stream in PUBLISHED_STREAMS
+
+    @property
+    def held_back(self) -> str:
+        """Why it does not travel, for the summary; empty when it does."""
+        if self.published:
+            return ""
+        return NOT_PUBLISHED if self.stream == CAPTURE_STREAM else UNKNOWN_STREAM
 
 
 @dataclass(frozen=True)
@@ -382,16 +413,17 @@ def _measurements(events: Sequence[Mapping]) -> tuple[Measurement, ...]:
     return tuple(found)
 
 
-def _files(run_log: Path, events: Sequence[Mapping]) -> tuple[RecordedFile, ...]:
-    """The files a run recorded, read a line at a time from its run.jsonl.
+def _files(events: Sequence[Mapping]) -> tuple[RecordedFile, ...]:
+    """The files a run recorded, from the records already read.
 
-    A soak's run.jsonl is tens of megabytes and this list is a few
-    kilobytes, so it is read through ``output_records`` rather than off the
-    events already in memory where the log is there to read.
+    One run's records are read once, as ``report.md`` is rendered from them
+    (``report.load_events``), and every fact the summary needs comes out of
+    that one list. So the whole of a run's ``run.jsonl`` is held while the
+    run is read, which bounds an export by the largest run it covers; the
+    members themselves are sanitized a line at a time and never are.
     """
-    records = output_records(run_log) if run_log.is_file() else events
     found = []
-    for item in saved_output(records):
+    for item in saved_output(events):
         file = item.file
         found.append(RecordedFile(
             path=file.path, stream=file.stream, bytes=file.bytes,
@@ -400,12 +432,29 @@ def _files(run_log: Path, events: Sequence[Mapping]) -> tuple[RecordedFile, ...]
     return tuple(sorted(found, key=lambda item: item.path))
 
 
+# Where else a manifest records a registry alias, besides the resources an
+# invocation binds. Isolation is the sharp one: it powers off the boards that
+# are *not* bound to the invocation, so those aliases appear nowhere else
+# (topology.PowerIsolationAction, PowerCycleTarget).
+_ALIAS_FIELDS = (
+    ("power_isolation", "resource", "isolated board"),
+    ("power_isolation", "controller", "power controller"),
+    ("power_cycle", "resource", "power-cycled board"),
+    ("power_cycle", "controller", "power controller"),
+)
+
+
 def _resources(manifest: Mapping) -> tuple[tuple[str, str], ...]:
-    """Every (role, alias) the manifest binds, in a fixed order.
+    """Every (role, alias) a manifest names, in a fixed order.
 
     The invocations in the order the manifest records them, and the roles of
     one invocation sorted by name, so the same runs always produce the same
     public labels and so the archive always comes out the same bytes.
+
+    The roles an invocation binds, and then the aliases recorded beside them
+    for power isolation and a power cycle: those are in the published
+    ``run.jsonl`` too, and a board the run switched off is named nowhere
+    else.
     """
     found: list[tuple[str, str]] = []
     for invocation in manifest.get("invocations") or ():
@@ -414,11 +463,34 @@ def _resources(manifest: Mapping) -> tuple[tuple[str, str], ...]:
         if invocation.get("host"):
             found.append(("host", str(invocation["host"])))
         resources = invocation.get("resources") or {}
-        if not isinstance(resources, Mapping):
-            continue
-        for role in sorted(str(name) for name in resources):
-            found.append((role, str(resources[role])))
+        if isinstance(resources, Mapping):
+            for role in sorted(str(name) for name in resources):
+                found.append((role, str(resources[role])))
+        for field_name, key, role in _ALIAS_FIELDS:
+            value = invocation.get(field_name)
+            entries = value if isinstance(value, (list, tuple)) else [value]
+            for entry in entries:
+                if isinstance(entry, Mapping) and entry.get(key):
+                    found.append((role, str(entry[key])))
     return tuple(found)
+
+
+def _controller_identities(manifest: Mapping) -> set[str]:
+    """The power controller's own serial, where a run recorded one.
+
+    ``power_cycle.identity`` is the hub's serial or its serial-device path
+    (topology.controller_identity): a device identity like any other, and in
+    the published ``run.jsonl``.
+    """
+    found: set[str] = set()
+    for invocation in manifest.get("invocations") or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        cycle = invocation.get("power_cycle")
+        identity = cycle.get("identity") if isinstance(cycle, Mapping) else None
+        if isinstance(identity, str) and identity and not identity.startswith("/"):
+            found.add(identity)
+    return found
 
 
 def _timestamp(event: Mapping | None) -> str:
@@ -485,8 +557,7 @@ def read_run(directory: Path | str) -> RunEvidence:
     for source in sources:
         if isinstance(source, Mapping) and source.get("source_path"):
             strip.add(str(source["source_path"]).rstrip("/"))
-    return RunEvidence(
-        directory=directory,
+    return RunEvidence(        directory=directory,
         run_id=str(events[0].get("run_id") or "unknown"),
         plan=plan,
         suite=suite,
@@ -510,9 +581,10 @@ def read_run(directory: Path | str) -> RunEvidence:
         bootloader_mode=str(stage.get("mode") or ""),
         failure_reason=str(summary.get("failure_reason") or ""),
         measurements=_measurements(events),
-        files=_files(run_log, events),
+        files=_files(events),
         private=Private(
-            serials=tuple(sorted(run_serials(events))),
+            serials=tuple(sorted(
+                set(run_serials(events)) | _controller_identities(manifest))),
             users=tuple(sorted(users)),
             hosts=tuple(sorted(hosts)),
             paths=tuple(sorted(strip)),
@@ -667,8 +739,9 @@ def check_attestations(attestations: Mapping[str, str]) -> None:
             )
         if not gate.by_hand:
             raise EvidenceError(
-                f"gate {key!r} is measured by a run of {' or '.join(gate.suites)}, "
-                "so it cannot be attested by hand"
+                f"gate {key!r} is measured by a run"
+                + (f" of {' or '.join(gate.suites)}" if gate.suites else "")
+                + ", so it cannot be attested by hand"
             )
 
 
@@ -741,19 +814,19 @@ def harness_commit(repository: Path | str | None = None) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-@dataclass
+@dataclass(frozen=True)
 class Export:
     """One export's inputs, as the summary and the archive both read them."""
 
     runs: tuple[RunEvidence, ...]
     release: str
     phase: str
+    private: Private = field(default_factory=Private)
     attestations: Mapping[str, str] = field(default_factory=dict)
     harness: str = ""
     private_bundle: bool = False
     allow_incomplete: bool = False
     now: datetime.datetime | None = None
-    private: Private = field(default_factory=Private)
 
     @property
     def results(self) -> tuple[GateResult, ...]:
@@ -776,13 +849,15 @@ class Export:
         return PRIVATE_SUMS_NAME if self.private_bundle else SUMS_NAME
 
 
-def summary(export: Export, members: Sequence["Member"] = ()) -> str:
+def summary(export: Export, staged: "Staged | None" = None) -> str:
     """``validation-summary.md``, composed from the runs' own records.
 
     It is sanitized and scanned like every other asset: a failure reason, a
     measurement, or a platform string comes out of a run record and may
     carry a path.
     """
+    staged = staged if staged is not None else Staged()
+    members = staged.members
     runs = export.runs
     stamp = (export.now or datetime.datetime.now(datetime.timezone.utc)).replace(
         microsecond=0, tzinfo=None).isoformat()
@@ -878,6 +953,7 @@ def summary(export: Export, members: Sequence["Member"] = ()) -> str:
         (run, reading) for run in runs for reading in run.measurements
     ]
     if readings:
+        shown = readings[:MEASUREMENT_ROWS]
         lines += [
             "Values the runs read out of the tools' own output and recorded.",
             "", "| Suite | Test | Measurement | Value |", "|---|---|---|---|",
@@ -885,8 +961,14 @@ def summary(export: Export, members: Sequence["Member"] = ()) -> str:
         lines += [
             f"| `{_cell(run.suite)}` | {_cell(reading.test)} "
             f"| {_cell(reading.name)} | {_cell(reading.value)} |"
-            for run, reading in readings
+            for run, reading in shown
         ]
+        if len(readings) > MEASUREMENT_ROWS:
+            lines += [
+                "",
+                f"{len(readings) - MEASUREMENT_ROWS} further values are in the "
+                "runs' own records, which travel with this summary.",
+            ]
     else:
         lines.append("None of these runs recorded an observed value.")
     lines += ["", "## Deviations", ""]
@@ -930,23 +1012,20 @@ def summary(export: Export, members: Sequence["Member"] = ()) -> str:
         ]
     else:
         lines.append("None.")
-    held_back = [
-        (run, file) for run in runs for file in run.files if not file.is_text
-    ]
+    held_back = staged.held_back
     lines += ["", "## Files kept on the test host", ""]
     if held_back:
         lines += [
-            "These the runs saved and the bundle does not carry: a capture "
-            "holds whatever traffic was on the air, which is not ours to "
-            "publish, and a binary dump cannot be sanitized. Each is named "
-            "with the size and SHA-256 the run recorded, so a reader can ask "
-            "for one and check they were given it.",
-            "", "| Suite | File | Bytes | SHA-256 |", "|---|---|---|---|",
+            "These the runs saved and the bundle does not carry. Each is "
+            "named with the size and SHA-256 the run recorded, so a reader "
+            "can ask for one and check they were given it.",
+            "", "| Suite | File | Bytes | SHA-256 | Why |",
+            "|---|---|---|---|---|",
         ]
         lines += [
             f"| `{_cell(run.suite)}` | `{_cell(file.path)}` | {file.bytes} "
-            f"| `{_cell(file.sha256)}` |"
-            for run, file in held_back
+            f"| `{_cell(file.sha256)}` | {_cell(reason)} |"
+            for run, file, reason in held_back
         ]
     else:
         lines.append("None: every file these runs saved is in the bundle.")
@@ -993,15 +1072,34 @@ class Member:
     sha256: str
 
 
+def _member_name(run_id: str, path: str, private: Private) -> str:
+    """The archive name for one of a run's files, sanitized.
+
+    A member's name becomes a tar header and a line of ``MANIFEST-SHA256``,
+    so it is rewritten and scanned like the file's contents: a command ID
+    carries a board's serial into the name of a spill file
+    (``watchdog-<serial>-1.stdout.log``), and a name nobody read would
+    publish it beside a summary that masked it.
+
+    The placeholders' angle brackets come off, so what the archive holds is
+    an ordinary file name.
+    """
+    clean = sanitize.sanitize(path, private)
+    for mark in sanitize.PLACEHOLDERS:
+        clean = clean.replace(mark, mark.strip("<>"))
+    return f"runs/{run_id}/{clean}"
+
+
 def _sanitize_into(source: Path, destination: Path, private: Private,
                    where: str) -> Member:
     """Sanitize one file into the staging tree, scanning as it is written.
 
-    A line at a time, so a soak's run.jsonl costs one line of memory rather
-    than its own size, and so a finding names the line it was found on. The
-    scan runs on what was written, and the first finding ends the export:
-    a half-sanitized bundle is worse than none.
+    A line at a time, so a soak's output file costs one line of memory
+    rather than its own size, and so a finding names the line it was found
+    on. The scan runs on what was written, and the first finding ends the
+    export: a half-sanitized bundle is worse than none.
     """
+    sanitize.require_safe(where, private, where=where)
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     size = 0
@@ -1026,15 +1124,30 @@ def _sanitize_into(source: Path, destination: Path, private: Private,
     return Member(where, destination, size, digest.hexdigest())
 
 
-def stage_members(export: Export, staging: Path) -> tuple[Member, ...]:
+@dataclass(frozen=True)
+class Staged:
+    """What staging produced: the members, and what stayed behind and why."""
+
+    members: tuple[Member, ...] = ()
+    held_back: tuple[tuple[RunEvidence, RecordedFile, str], ...] = ()
+
+
+def stage_members(export: Export, staging: Path) -> Staged:
     """Every member of the archive, sanitized into ``staging``.
 
-    One directory per run, named by its run ID, holding the run's report,
-    its event log, and each text output file it saved. The run ID is a UTC
-    timestamp and a random suffix, so it names the run on the test host
+    One directory per run, named by its run ID, holding the run's report, its
+    event log, and each output file it saved that travels. The run ID is a
+    UTC timestamp and a random suffix, so it names the run on the test host
     without naming the host.
+
+    A file the run recorded and this cannot carry is not dropped quietly: it
+    comes back in ``held_back`` with its reason, so the summary names it
+    whether it was a capture, a file the run directory no longer holds, or a
+    recorded path that does not name a file inside it.
     """
     members: list[Member] = []
+    held_back: list[tuple[RunEvidence, RecordedFile, str]] = []
+    taken: set[str] = set()
     for run in export.runs:
         base = run.directory if run.directory.is_dir() else run.directory.parent
         wanted = [
@@ -1042,7 +1155,8 @@ def stage_members(export: Export, staging: Path) -> tuple[Member, ...]:
             (base / RUN_LOG, f"runs/{run.run_id}/{RUN_LOG}"),
         ]
         for file in run.files:
-            if not file.is_text:
+            if not file.published:
+                held_back.append((run, file, file.held_back))
                 continue
             try:
                 # A recorded path is relative to the run directory and must
@@ -1051,14 +1165,26 @@ def stage_members(export: Export, staging: Path) -> tuple[Member, ...]:
                 # as the GUI refuses one.
                 source = confined(base, file.path)
             except (OutsideRun, OSError, ValueError):
+                held_back.append((run, file, REFUSED))
                 continue
-            wanted.append((source, f"runs/{run.run_id}/{file.path}"))
-        for source, name in wanted:
             if not source.is_file():
+                held_back.append((run, file, MISSING))
                 continue
+            wanted.append((source, _member_name(run.run_id, file.path,
+                                                export.private)))
+        for source, name in wanted:
+            if not source.is_file() or name in taken:
+                # A run directory named twice, or two files whose names came
+                # out the same once a serial in them was masked: one member
+                # per name, since the manifest is keyed by it.
+                continue
+            taken.add(name)
             members.append(_sanitize_into(
                 source, staging / name, export.private, name))
-    return tuple(sorted(members, key=lambda member: member.name))
+    return Staged(
+        tuple(sorted(members, key=lambda member: member.name)),
+        tuple(held_back),
+    )
 
 
 def manifest_text(members: Sequence[Member]) -> str:
@@ -1108,21 +1234,26 @@ def write_archive(path: Path, members: Sequence[Member]) -> str:
     manifest = manifest_text(members).encode("utf-8")
     compressor = zstandard.ZstdCompressor(level=COMPRESSION_LEVEL)
     temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("wb") as raw:
-        hashing = _Hashing(raw, digest)
-        with compressor.stream_writer(hashing, closefd=False) as stream:
-            # A stream of its own ("w|"), so nothing seeks back over what was
-            # written and the archive can be produced through a compressor.
-            with tarfile.open(fileobj=stream, mode="w|",
-                              format=tarfile.PAX_FORMAT) as archive:
-                for member in members:
-                    with member.path.open("rb") as handle:
-                        archive.addfile(_entry(member.name, member.size), handle)
-                archive.addfile(_entry(MANIFEST_NAME, len(manifest)),
-                                io.BytesIO(manifest))
-        raw.flush()
-        os.fsync(raw.fileno())
-    os.replace(temporary, path)
+    try:
+        with temporary.open("wb") as raw:
+            hashing = _Hashing(raw, digest)
+            with compressor.stream_writer(hashing, closefd=False) as stream:
+                # A stream of its own ("w|"), so nothing seeks back over what
+                # was written and the archive can be produced through a
+                # compressor.
+                with tarfile.open(fileobj=stream, mode="w|",
+                                  format=tarfile.PAX_FORMAT) as archive:
+                    for member in members:
+                        with member.path.open("rb") as handle:
+                            archive.addfile(
+                                _entry(member.name, member.size), handle)
+                    archive.addfile(_entry(MANIFEST_NAME, len(manifest)),
+                                    io.BytesIO(manifest))
+            raw.flush()
+            os.fsync(raw.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return digest.hexdigest()
 
 
@@ -1211,36 +1342,45 @@ def build_bundle(
         raise EvidenceError(f"phase must be one of {', '.join(PHASES)}")
     runs = tuple(read_run(directory) for directory in run_directories)
     runs = tuple(sorted(runs, key=lambda run: (run.started, run.run_id)))
-    export = Export(
-        runs=runs, release=release, phase=phase, attestations=attestations,
-        harness=harness if harness is not None else harness_commit(),
-        private_bundle=private_bundle, allow_incomplete=allow_incomplete, now=now,
-    )
-    export.private = private_names(runs, strip_paths)
+    for prefix in strip_paths:
+        if not sanitize.usable_prefix(prefix):
+            raise EvidenceError(
+                f"--strip-path {prefix!r} is not a path prefix: name an "
+                "absolute path with at least one component, for example "
+                "/srv/bench"
+            )
+    private = private_names(runs, strip_paths)
     if private_bundle:
         # A private bundle keeps the serials, which is the only thing it
         # keeps: the paths, the machine and operator names, and the aliases
         # go out of it too, because none of them is ever wanted. The scan
         # keeps every other rule, so a private bundle is still refused for
         # anything but a serial.
-        export.private = Private(
-            serials=(), users=export.private.users, hosts=export.private.hosts,
-            aliases=export.private.aliases, paths=export.private.paths,
-            keep_serials=True,
+        private = Private(
+            serials=(), users=private.users, hosts=private.hosts,
+            aliases=private.aliases, paths=private.paths, keep_serials=True,
         )
+    export = Export(
+        runs=runs, release=release, phase=phase, private=private,
+        attestations=attestations,
+        harness=harness if harness is not None else harness_commit(),
+        private_bundle=private_bundle, allow_incomplete=allow_incomplete, now=now,
+    )
     directory = Path(output)
     directory.mkdir(parents=True, exist_ok=True)
+    summary_path = directory / export.summary_name
+    logs_path = directory / export.logs_name
+    sums_path = directory / export.sums_name
     with tempfile.TemporaryDirectory(prefix="evidence-", dir=directory) as scratch:
-        members = stage_members(export, Path(scratch))
+        staged = stage_members(export, Path(scratch))
         text = sanitize.require_safe(
-            sanitize.sanitize(summary(export, members), export.private),
+            sanitize.sanitize(summary(export, staged), export.private),
             export.private, where=export.summary_name,
         )
-        summary_path = directory / export.summary_name
-        logs_path = directory / export.logs_name
-        sums_path = directory / export.sums_name
-        _write(summary_path, text.encode("utf-8"))
-        logs_digest = write_archive(logs_path, members)
+        # The archive first: a failure here must not leave a summary behind
+        # claiming logs nobody has.
+        logs_digest = write_archive(logs_path, staged.members)
+    _write(summary_path, text.encode("utf-8"))
     summary_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     _write(sums_path, sums_text((
         (logs_digest, export.logs_name),
@@ -1248,15 +1388,18 @@ def build_bundle(
     )).encode("utf-8"))
     return Bundle(
         directory=directory, summary=summary_path, logs=logs_path,
-        sums=sums_path, members=members, missing=export.missing,
+        sums=sums_path, members=staged.members, missing=export.missing,
         upload=upload_command(export),
     )
 
 
 def _write(path: Path, data: bytes) -> None:
     temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    try:
+        with temporary.open("wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
