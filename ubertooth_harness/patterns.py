@@ -4,75 +4,57 @@ import re
 
 
 FIRMWARE_PATTERN = r"Firmware version:\s+\S+"
-# What a board's build string says. Since the fork reported releases (#352,
-# fork #1230) it is the date the image was built and nothing else, because the
-# version beside it already names the release and who built an image says
-# nothing a reader of it needs; before that it was
-# "ubertooth git-<hash> (who@where) <date>". Either reads as a build string,
-# so a run of an older ref is checked the same way; what is not accepted is
-# the two lines libubertooth prints when it has nothing to show, which say so
-# in its own words (ubertooth_version.c).
-NO_BUILD_STRING = r"(?:read failed|not reported)"
-# A build string, as a fragment: one character of it, with the two lines above
-# ruled out. On its own it matches almost anything, which is the point -- a
-# build string has no shape to hold it to any more -- so it is only ever used
-# where a label comes before it, and the name says it is a fragment.
-_BUILD_STRING = rf"(?!{NO_BUILD_STRING}$)\S"
-# That line whole, where a caller matches it rather than the value on it.
-BUILD_STRING_LINE = rf"(?m)^Firmware build: {_BUILD_STRING}"
 
-# The other lines of the `-V` answer, which libubertooth prints for every tool
+# The lines of the `-V` answer, which libubertooth prints for every tool
 # (host/libubertooth/src/ubertooth_version.c): the host tools' own version,
-# and the board's build string under its own label. Since fork f898fe5
+# then the firmware version of each board it read. Since fork f898fe5
 # (SqueakyFloors/ubertooth#813) `-V` is the version command and ends the
 # command, so this answer is the whole of what a command line carrying it
-# prints; the build string used to come out bare, with no label.
+# prints.
 #
-# The whole of that first line, in the two layouts the fork has printed it
-# in. Since #352 (fork #1230) it names the release the build came from with
-# libbtbb's beside it; before that it named the two library ABI versions, each
-# with the commit it was built from. Exactly one of the two, to the end of the
-# line: anything else is not the line libubertooth prints.
+# Two lines for one board, and nothing else. A third line carried the image's
+# build string until fork #1233, which took it out: an image records only its
+# version now, and the `Firmware version:` line beside it already names that,
+# so the build string said nothing a reader of the answer needed. The harness
+# holds the current release to the current answer (#358), so no pattern here
+# accepts a line, or a version, that an older fork commit printed.
 #
-# Which of them a given commit must print, and which versions it must carry,
-# is preflight.host_version_patterns()'s business, where the resolved commit
-# is known. A case has only the tool in front of it, so it requires one of the
-# two -- and this is the one statement of what they are, so a case cannot hold
-# the line to a different strictness from the next case's.
-HOST_VERSION_LINE = (
-    r"(?m)^Host tools version: (?:\S+ \(libbtbb \S+\)"
-    r"|libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\))$"
-)
-# Which libbtbb was loaded, which the host version line could not say. Older
-# fork commits print it for every `-V`, with "unknown" where the path could
-# not be found; since #352 a libbtbb other than the one the tools were built
-# against is a one-line warning on standard error instead, and there is no
-# such line at all.
-LIBBTBB_PATH_LINE = r"(?m)^libbtbb loaded from: \S"
+# The libbtbb half of the host line, whatever it carries: a version, and the
+# bracket closing at the end of the line. Required wherever the line is
+# matched, even where the check is only about the tools' own half, because a
+# line missing it is not the line libubertooth prints.
+LIBBTBB_BRACKET = r"\(libbtbb[ \t]+[^)\s\n]+[ \t]*\)"
+# The whole of that first line, to the end of it: anything else is not the
+# line libubertooth prints. Which versions it must carry is
+# preflight.host_version_patterns()'s business, where the resolved commit is
+# known; a case has only the tool in front of it, and this is the one
+# statement of the line's layout, so a case cannot hold it to a different
+# strictness from the next case's.
+HOST_VERSION_LINE = rf"(?m)^Host tools version: \S+[ \t]+{LIBBTBB_BRACKET}$"
+# The label the build string stood under until fork #1233. No commit this
+# validation accepts prints one, so its presence is what says an answer is
+# not the current one: the two commits between the release names (fork
+# ce13614c6) and #1233 report a release and print the string, and nothing
+# else tells them from the release under test. Written as a requirement that
+# the whole output carries no such line, so a reader of a failed check sees
+# what was wanted.
+NO_BUILD_LINE = r"\A(?![\s\S]*(?m:^Firmware build:))"
 # The whole `-V` answer for one board, as the consecutive lines libubertooth
 # prints, in its order: a pattern per line would pass an answer whose lines
 # arrived in any order or with others between them. It is not anchored to the
 # end of the output, because a tool may put a warning or a note on standard
-# error beside it. The libbtbb path line is optional, since only older
-# commits print one, and it may not stand anywhere else.
+# error beside it; what may not be there is the build line, which
+# NO_BUILD_LINE is required alongside this.
 VERSION_ANSWER = (
-    r"(?m)^Host tools version: "
-    # Each layout with the path line that goes with it, rather than one host
-    # line and an optional path line: no build prints a release name and a
-    # path line, and a pattern that took both would pass an answer no fork
-    # commit produces.
-    # The two halves are written exactly as HOST_VERSION_LINE writes them, so
-    # the same line is not held to two strictnesses; what this adds is the
-    # path line each layout does or does not come with.
-    r"(?:libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)"
-    r"\nlibbtbb loaded from: \S[^\n]*"
-    r"|\S+ \(libbtbb \S+\))\n"
+    # Written exactly as HOST_VERSION_LINE writes it, so the same line is not
+    # held to two strictnesses; what this adds is the board's line under it.
+    rf"(?m)^Host tools version: \S+[ \t]+{LIBBTBB_BRACKET}\n"
     # Not "read failed" or "unavailable, <reason>", which is what the line
-    # carries when the board answered nothing; the build line below is not
-    # printed at all then, so this only says so in the pattern as well.
-    r"Firmware version: (?!read failed$|unavailable, )\S[^\n]*\n"
-    rf"Firmware build: {_BUILD_STRING}"
+    # carries when the board answered nothing.
+    r"Firmware version: (?!read failed$|unavailable, )\S[^\n]*$"
 )
+# That answer and nothing standing in for the line fork #1233 took out.
+VERSION_ANSWER_PATTERNS = (VERSION_ANSWER, NO_BUILD_LINE)
 
 # `ubertooth-util -v` names the image the build came from when the firmware
 # carries an info block ("Firmware version: bluetooth_rxtx git-1c7f06d6
@@ -107,9 +89,8 @@ def matched_image(match: re.Match | None) -> str | None:
     """The image name a match of FIRMWARE_VERSION_RE names, if it names one.
 
     None where the line carries no image name, which is firmware older than
-    the info block (`Firmware version: 2020-12-R1 (API:1.07)`), where there
-    was no match, and where the match came from a pattern with no image group
-    at all, as the compile-info one has none.
+    the info block (`Firmware version: 2020-12-R1 (API:1.07)`), and where
+    there was no match.
     """
     if match is None:
         return None
@@ -220,20 +201,6 @@ def image_name_pattern(image: str) -> str:
     every image other than `bluetooth_rxtx` is newer than that block.
     """
     return rf"Firmware version:\s+{re.escape(image)}\s+\S+\s+\(API:"
-
-
-def compile_info_pattern(expected: str) -> str:
-    """`ubertooth-util -V` output for firmware built from ``expected``.
-
-    Only for a commit whose build stamps a commit hash: its build string
-    carried the revision ("ubertooth git-1c7f06d6 (who@where) <date>"), and
-    the image name the firmware reports comes before it, so the pattern starts
-    at the build string itself. Since #352 the build string is the build date
-    alone and names no version, so a run of a newer ref reads the version off
-    the `Firmware version:` line of the same `-V` answer instead
-    (preflight.firmware_identity_patterns).
-    """
-    return rf"\bubertooth\s+{revision_pattern(expected)}\s+\("
 
 
 # btle-extcap's sentence for a capture filter it cannot apply (fork ba3edb15,

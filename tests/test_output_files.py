@@ -45,7 +45,7 @@ from ubertooth_harness.validate import validate_command, validate_run
 
 from tests.test_sequencer import run_contract
 
-VERSION = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+VERSION = "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n"
 # Four times the in-memory window, in 64 KiB chunks, so the run holds far
 # more output than any copy of it in memory.
 STREAM_CHARS = 4 * MEMORY_WINDOW_CHARS

@@ -22,7 +22,7 @@ from ubertooth_harness.patterns import (
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
-    VERSION_ANSWER,
+    VERSION_ANSWER_PATTERNS,
     serial_pattern,
 )
 from ubertooth_harness.outputfiles import output_of
@@ -716,10 +716,10 @@ def _device_test(name, description, argv=None, extra=None):
 
 # ubertooth_print_host_version() in libubertooth, the first line of every
 # tool's -V answer: patterns.HOST_VERSION_LINE, which is the one statement of
-# the two layouts the fork has printed it in (#352, fork #1230). Anchored to
-# its label, so a board's firmware lines under it cannot stand in for it.
-# Which layout a given commit must print is decided where the resolved commit
-# is known (preflight.py); a case has only the tool in front of it.
+# the line's layout. Anchored to its label, so the board's firmware line
+# under it cannot stand in for it. Which versions a given commit must print
+# is decided where the resolved commit is known (preflight.py); a case has
+# only the tool in front of it.
 _HOST_VERSION_PATTERN = HOST_VERSION_LINE
 # That line needs no board, but the command goes on to read every attached
 # one and exits 1 if any cannot be read -- in use by another program, or not
@@ -838,14 +838,14 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         ),
         # -V is the version command, not an identity query: since fork
         # f898fe5 (SqueakyFloors/ubertooth#813) it answers with the host
-        # tools' version and the board's firmware version and build, then
+        # tools' version and the board's firmware version, then
         # ends the command. So it is read on its own, and the composition
         # below asks for the four queries that do compose.
         CommandCase(
             "firmware-compile-info",
             "Firmware compile info",
             common + ("-V",),
-            (VERSION_ANSWER,),
+            VERSION_ANSWER_PATTERNS,
             timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(

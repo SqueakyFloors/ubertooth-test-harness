@@ -298,41 +298,33 @@ EOF
     # A copy, not a link: ubertooth_libbtbb_is_elsewhere() resolves both paths
     # (same_directory() in libbtbb_origin.c), so a link to the install's own
     # library directory is one install to it and would print nothing.
-    if grep -q "^libbtbb loaded from: " "$il_work/pc-consumer.txt"; then
-        # A fork commit from before #352 names the libbtbb it loaded, which is
-        # the positive evidence itself and needs no control. The step above
-        # required that path to be inside the prefix.
-        echo "this install names the libbtbb it loaded, so the step above \
-rests on a path and not on a warning's absence; no control is needed"
-    else
-        il_decoy=$il_work/another-libbtbb
-        rm -rf "$il_decoy"
-        mkdir -p "$il_decoy"
-        # Every file of the library, the links among them included: libbtbb's
-        # install writes those relative, so inside the copy they resolve to
-        # the copy, and the loader opens it under the name the install
-        # recorded. Both naming styles, because the files are
-        # libbtbb.so.<soname> on Linux and libbtbb.<soname>.dylib on macOS.
-        cp -R "$il_btbb_libdir"/libbtbb.* "$il_decoy/" || {
-            echo "error: no libbtbb to copy out of $il_btbb_libdir, so the" \
-                 "loader cannot be pointed at a second install" >&2
-            return 1; }
-        ls -l "$il_decoy"
-        # The copy first and the install after it, so libbtbb comes from the
-        # copy and libubertooth from the install: that one difference is the
-        # whole of the control. DYLD_LIBRARY_PATH reaches a program the job
-        # compiled itself, macOS stripping it only for system binaries.
-        DYLD_LIBRARY_PATH=$il_decoy:$il_libpath \
-            LD_LIBRARY_PATH=$il_decoy:$il_libpath \
-            "$il_work/pc-consumer" > "$il_work/another-libbtbb.txt" 2>&1 \
-            || { cat "$il_work/another-libbtbb.txt"; return 1; }
-        cat "$il_work/another-libbtbb.txt"
-        # Prints the warning it accepted, so a reader of a failed job sees
-        # which directory the program loaded libbtbb from.
-        .venv/bin/python -m ubertooth_harness.installedlib another-libbtbb \
-            "$il_work/another-libbtbb.txt" --loaded-from "$il_decoy" \
-            --built-libbtbb "$il_btbb_libdir" --version-line "$il_version"
-    fi
+    il_decoy=$il_work/another-libbtbb
+    rm -rf "$il_decoy"
+    mkdir -p "$il_decoy"
+    # Every file of the library, the links among them included: libbtbb's
+    # install writes those relative, so inside the copy they resolve to
+    # the copy, and the loader opens it under the name the install
+    # recorded. Both naming styles, because the files are
+    # libbtbb.so.<soname> on Linux and libbtbb.<soname>.dylib on macOS.
+    cp -R "$il_btbb_libdir"/libbtbb.* "$il_decoy/" || {
+        echo "error: no libbtbb to copy out of $il_btbb_libdir, so the" \
+             "loader cannot be pointed at a second install" >&2
+        return 1; }
+    ls -l "$il_decoy"
+    # The copy first and the install after it, so libbtbb comes from the
+    # copy and libubertooth from the install: that one difference is the
+    # whole of the control. DYLD_LIBRARY_PATH reaches a program the job
+    # compiled itself, macOS stripping it only for system binaries.
+    DYLD_LIBRARY_PATH=$il_decoy:$il_libpath \
+        LD_LIBRARY_PATH=$il_decoy:$il_libpath \
+        "$il_work/pc-consumer" > "$il_work/another-libbtbb.txt" 2>&1 \
+        || { cat "$il_work/another-libbtbb.txt"; return 1; }
+    cat "$il_work/another-libbtbb.txt"
+    # Prints the warning it accepted, so a reader of a failed job sees
+    # which directory the program loaded libbtbb from.
+    .venv/bin/python -m ubertooth_harness.installedlib another-libbtbb \
+        "$il_work/another-libbtbb.txt" --loaded-from "$il_decoy" \
+        --built-libbtbb "$il_btbb_libdir" --version-line "$il_version"
 
     step "a CMake project finds the installed ubertooth package"
     mkdir -p "$il_work/cmake-consumer"

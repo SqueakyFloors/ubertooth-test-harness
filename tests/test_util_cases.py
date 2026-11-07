@@ -712,13 +712,12 @@ class MultiBench:
         return self.boards[serial].run(command, timeout_s=5).stdout.splitlines()
 
     VERSION_HOST_LINES = (
-        "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)",
-        "libbtbb loaded from: /p/lib/libbtbb.so.1",
+        "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)",
     )
 
     def _versions(self):
-        """The -V answer with several boards: the host tools' lines, then the
-        firmware version and build of every board, each carrying its index."""
+        """The -V answer with several boards: the host tools' line, then the
+        firmware version of every board, each carrying its index."""
         lines = list(self.VERSION_HOST_LINES)
         for index, serial in enumerate(self.order):
             if index in self.unreadable:
@@ -729,7 +728,6 @@ class MultiBench:
             api = transitions.format_api(board.api)
             lines.append(
                 f"Firmware version ({index}): {board.firmware} (API:{api})")
-            lines.append(f"Firmware build ({index}): {board.compile_info}")
         return "".join(line + "\n" for line in lines)
 
     def _listing(self, queries):
@@ -908,77 +906,59 @@ class MultiBoardCaseTests(unittest.TestCase):
         # An unlabelled line is a regression: every query the listing can
         # show prints a label of its own.
         self.assertIn("not 'Board ID Number'", identity(block(board_id="0: 1")))
-        # -V is not one of the listed queries, so its lines are not expected
+        # -V is not one of the listed queries, so its line is not expected
         # among them: five lines per board is not four.
         self.assertIn("is not 4 per board", identity(
-            block() + "Firmware build (0): ubertooth git-x (u@h) ts\n"))
+            block() + "Firmware version (0): bluetooth_rxtx git-x (API:1.37)\n"))
 
     def test_version_listing_check(self):
         check = util_cases.version_listing_check(2)
-        HEAD = ("Host tools version: libubertooth 1.1 (git-x), libbtbb 1.3 (git-b)",
-                "libbtbb loaded from: /p/lib/libbtbb.so.1")
+        HEAD = ("Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)",)
 
         def answer(*boards, head=HEAD):
             return "".join(line + "\n" for line in (*head, *boards))
 
         boards = (
-            "Firmware version (0): bluetooth_rxtx git-x (API:1.37)",
-            "Firmware build (0): ubertooth git-x (u@h) ts",
-            "Firmware version (1): bluetooth_rxtx git-x (API:1.37)",
-            "Firmware build (1): ubertooth git-x (u@h) ts",
+            "Firmware version (0): bluetooth_rxtx 2026-11-DEV1+22 (API:1.58)",
+            "Firmware version (1): bluetooth_rxtx 2026-11-DEV1+22 (API:1.58)",
         )
         self.assertEqual("", check(answer(*boards)))
-        # The host tools' own version opens the answer. The libbtbb path line
-        # below it is only printed by fork commits before #352 (fork #1230),
-        # which report a libbtbb other than the one the tools were built
-        # against as a warning on standard error instead, so an answer
-        # without it is that answer too.
-        self.assertEqual("", check(answer(*boards, head=HEAD[:1])))
-        self.assertEqual("", check(answer(*boards, head=(
-            "Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)",))))
-        # A missing or reordered opening line is not that answer, and neither
-        # is a line that carries something other than one of the two layouts
-        # the fork prints: the label alone does not make it that line.
-        for head in ((), HEAD[::-1], ("Host tools version: 1.1", HEAD[1]),
-                     ("Host tools version: 2026-11-DEV1+22", HEAD[1]),
-                     ("Host tools version: 2026-11-DEV1+22 (libbtbb)",),
-                     ("Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1)"
-                      " and more",)):
+        # A missing opening line is not that answer, and neither is a line
+        # that carries something other than the line the fork prints: the
+        # label alone does not make it that line, and the layout a build
+        # printed before fork `ce13614c6` is no longer accepted (#358).
+        for head in (
+            (),
+            ("Host tools version: 2026-11-DEV1+22",),
+            ("Host tools version: 2026-11-DEV1+22 (libbtbb)",),
+            ("Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1)"
+             " and more",),
+            ("Host tools version: libubertooth 1.1 (git-x), libbtbb 1.3 (git-b)",
+             "libbtbb loaded from: /p/lib/libbtbb.so.1"),
+        ):
             self.assertIn("does not open with the host tools' version",
                           check(answer(*boards, head=head)), head)
         # A repeated head line lands where board 0's version should be.
-        self.assertIn("line is not", check(answer(*boards, head=HEAD + HEAD[1:])))
+        self.assertIn("line is not", check(answer(*boards, head=HEAD + HEAD)))
         self.assertIn("ends before the Firmware version of board 1",
-                      check(answer(*boards[:2])))
-        self.assertIn("ends before the Firmware build of board 1",
-                      check(answer(*boards[:3])))
+                      check(answer(*boards[:1])))
         self.assertIn("carries 1 line(s) after the last board",
-                      check(answer(*boards, boards[3])))
-        self.assertIn("expected the Firmware version of board 1 here",
-                      check(answer(*boards[:2], boards[3], boards[2])))
-        # A board that could not be opened, and a read that failed, get one
-        # line where two would be, which is what the fork prints.
+                      check(answer(*boards, boards[1])))
+        # The libbtbb path line and the image's build string are not part of
+        # the answer any more, so either one is a line after the last board.
+        self.assertIn("carries 1 line(s) after the last board", check(answer(
+            *boards, "Firmware build (1): Thu Nov  6 02:11:04 UTC 2026")))
+        # A board that could not be opened, and a read that failed, say so on
+        # that board's own line, which is what the fork prints.
         self.assertIn("board 1 could not be opened", check(answer(
-            *boards[:2],
+            boards[0],
             "Firmware version (1): unavailable, in use by another program")))
         self.assertIn("board 1 Firmware version is not a reading", check(answer(
-            *boards[:2], "Firmware version (1): read failed")))
-        self.assertIn("board 1 Firmware build is not a reading", check(answer(
-            *boards[:3], "Firmware build (1): read failed")))
-        self.assertIn("board 1 Firmware build is not a reading", check(answer(
-            *boards[:3], "Firmware build (1): not reported")))
+            boards[0], "Firmware version (1): read failed")))
         # Lines with no index name no board, which is the single-board form
         # the fork prints only when one board is attached.
         self.assertIn("line is not", check(answer(
             *(line.replace(" (0)", "").replace(" (1)", "") for line in boards))))
-        # A build string is the date the image was built since #352 (fork
-        # #1230) and was "ubertooth <revision> (who@where) <date>" before, so
-        # the line is required to carry something rather than to carry a
-        # shape; a blank one fails on its own line.
-        self.assertEqual("", check(answer(
-            *boards[:3], "Firmware build (1): Thu Nov  6 02:11:04 UTC 2026")))
-        self.assertIn("board 1 Firmware build line", check(answer(
-            *boards[:3], "Firmware build (1): ")))
 
     def test_smoke_passes_on_fork_main_and_guards_hold(self):
         bench = MultiBench((A, B))

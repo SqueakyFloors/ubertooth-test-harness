@@ -30,8 +30,8 @@ bluetooth_rxtx):
   are ``-b``, ``-v``, ``-p`` and ``-s``; ``-V`` is not one of them, because it
   is the version command and ends the command before the listing is reached
   (fork f898fe5, SqueakyFloors/ubertooth#813), and it then reports every
-  attached board itself, under labels of its own
-  (``Firmware build (0): ...``). A board that could not be
+  attached board itself, under a label of its own
+  (``Firmware version (0): ...``). A board that could not be
   opened gets ``unavailable, <reason>`` as the value of every query asked of
   it. A query that failed on a board that did open gets ``read failed``,
   unless that report has a diagnosis of its own (an unknown board ID, say),
@@ -60,11 +60,9 @@ from ubertooth_harness import ledblink
 from ubertooth_harness.outputfiles import find_lines, search_lines, text_lines
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    BUILD_STRING_LINE,
     FIRMWARE_PATTERN,
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
-    LIBBTBB_PATH_LINE,
     PART_ID_PATTERN,
     serial_pattern,
 )
@@ -850,14 +848,13 @@ _BLOCK_PATTERNS = (
     ("-s", "serial", _SERIAL_LABEL, rf"^{_SERIAL_LABEL}: {_SERIAL_RE}$"),
 )
 # The -V answer's own lines, in the order it prints them per board, after the
-# host tools' own version and, on a commit that prints one, the libbtbb path
-# line under it -- neither of which is about a board at all.
+# host tools' own version, which is not about a board at all. One line per
+# board since fork #1233 took the build string out of the answer (#358).
 _VERSION_REPORTS = (
     ("Firmware version", FIRMWARE_PATTERN),
-    ("Firmware build", BUILD_STRING_LINE),
 )
 _VERSION_LINE = re.compile(
-    r"^(?P<label>Firmware version|Firmware build) \((?P<index>\d+)\): (?P<text>.*)$"
+    r"^(?P<label>Firmware version) \((?P<index>\d+)\): (?P<text>.*)$"
 )
 # The label each identity query is listed under, in report order.
 LISTING_LABELS = tuple((query, label)
@@ -926,15 +923,15 @@ def serial_listing_check(registered):
 
 def version_listing_check(count):
     """`-V` with several boards: the host tools' version, then the firmware
-    version and build of every board, each labelled with the board's index.
+    version of every board, each labelled with the board's index.
 
     `-V` is the version command, so it is not part of the identity listing:
     since fork f898fe5 it ends the command and reports every attached board
-    itself. A board it could not open, and one whose version read failed, get
-    one line instead of two, so the lines are read board by board rather than
-    counted: that way such a board is named rather than reported as a wrong
-    line count. The answer carries no serial, so which board is which cannot
-    be checked here; the identity listing does that.
+    itself. A board it could not open, and one whose version read failed, say
+    so on that board's own line, so the lines are read board by board and
+    such a board is named rather than reported as a wrong line count. The
+    answer carries no serial, so which board is which cannot be checked here;
+    the identity listing does that.
     """
     def check(stdout):
         lines = list(text_lines(stdout))
@@ -946,13 +943,6 @@ def version_listing_check(count):
             return ("the answer does not open with the host tools' version: "
                     f"{lines[:1]!r}")
         rest = lines[1:]
-        # Older fork commits print which libbtbb was loaded on a second line
-        # of their own; since #352 a libbtbb other than the one the tools were
-        # built against is a warning on standard error instead, and there is
-        # no such line. Taken where it is there, so the boards below start at
-        # the right line either way.
-        if rest and re.search(LIBBTBB_PATH_LINE, rest[0]):
-            rest = rest[1:]
         for index in range(count):
             for label, pattern in _VERSION_REPORTS:
                 if not rest:

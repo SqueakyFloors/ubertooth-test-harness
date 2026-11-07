@@ -84,9 +84,10 @@ class FakeBoard:
         if command == ("ubertooth-util", "-V") and not self.answered_version:
             # The mandatory host-version preflight, before any case runs.
             self.answered_version = True
-            return self._result(command, 0, "Host tools version: libubertooth "
-                                            "1.1 (git-test), libbtbb 1.0 "
-                                            "(git-btbb)\n", on_output)
+            return self._result(command, 0, "Host tools version: "
+                                            "2026-11-DEV2 "
+                                            "(libbtbb 2020-12-R1+79)\n",
+                                on_output)
         if (self.cancel_on is not None and not self.canceled
                 and self.cancel_on(command)):
             # Once, as an operator stop is: the cleanup's own token is a

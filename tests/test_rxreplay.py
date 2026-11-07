@@ -131,7 +131,7 @@ class ReplayRx:
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
+            return self._result(command, 0, "Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)\n")
         if (command[0] == sys.executable and command[1].endswith("stdoutdest.py")
                 and command[2] == "run"):
             return self._stdout_destination(command)

@@ -113,15 +113,17 @@ _LIBRARY_IN_LINE = re.compile(r"^-- libbtbb: (?P<library>[^,]+),")
 _FORK_PIN = re.compile(r'^\s*set\(LIBBTBB_PINNED_REF\s+"?(?P<pin>[^"\s)]+)"?\s*\)',
                        re.M)
 # What a program built against the install prints: libubertooth's own version
-# line, the libbtbb it loaded, and, with the no-devices switch set, that there
-# is no board (ubertooth_print_versions).
+# line and, with the no-devices switch set, that there is no board
+# (ubertooth_print_versions). An install also named the libbtbb it loaded on
+# a line of its own until fork #1230; this is that line, kept so that an
+# install printing one is refused by name (#358) rather than read as the
+# current answer.
 _LOADED_FROM = "libbtbb loaded from: "
-# Since #352 (fork #1230) there is no such line: the version line names
-# libbtbb's release, and a libbtbb other than the one the tools were built
-# against is this one-line warning on standard error instead
-# (warn_about_another_libbtbb in ubertooth.c). So on an install that prints no
-# path, "the loader reached this install's libbtbb" is established by the
-# absence of the warning, with the loader pointed at the install.
+# What replaced it: the version line names libbtbb's release, and a libbtbb
+# other than the one the tools were built against is this one-line warning on
+# standard error (warn_about_another_libbtbb in ubertooth.c). So "the loader
+# reached this install's libbtbb" is established by the absence of the
+# warning, with the loader pointed at the install.
 _ANOTHER_LIBBTBB = "libbtbb was loaded from"
 # The whole of that warning, with the two directories it names: the one the
 # loader opened libbtbb from and the one the build recorded
@@ -234,7 +236,7 @@ def under_prefix(text: str, prefix: str, marker: str) -> Path:
 
 
 def consumer_identity(text: str, prefix: str, version_line: str,
-                      built_libbtbb: str | None = None) -> str:
+                      built_libbtbb: str) -> str:
     """What a program built against the install printed, or raise.
 
     ``version_line`` is the line the build's own tools print, which names the
@@ -243,13 +245,17 @@ def consumer_identity(text: str, prefix: str, version_line: str,
 
     ``built_libbtbb`` is the libbtbb the install was configured against, which
     the install records as ``BTBB_BUILD_LIBDIR`` and the configure names on
-    its own libbtbb line. It is required for an install that prints no path
-    line, and must be inside the prefix: that install reports the libbtbb it
-    loaded only when it is not the one it was built against
+    its own libbtbb line. It must be inside the prefix: an install reports
+    the libbtbb it loaded only when it is not the one it was built against
     (``ubertooth_libbtbb_is_elsewhere``), and that comparison is made against
     nothing when the recorded directory is empty. So the absence of the
     warning says the loader reached this install's libbtbb only once the
     install is known to have been built against one, which is what this pins.
+
+    An install named the libbtbb it loaded on a ``libbtbb loaded from:`` line
+    of its own until fork #1230 replaced it with that warning. No commit this
+    checks prints one, so one here is a refusal rather than a second way to
+    pass (#358), as it already is in ``another_libbtbb``.
     """
     lines = [line.rstrip() for line in text.splitlines()]
     if version_line.strip() not in lines:
@@ -258,41 +264,35 @@ def consumer_identity(text: str, prefix: str, version_line: str,
             f"print ({version_line.strip()!r}); it printed "
             + (repr(lines[0]) if lines else "nothing"))
     loaded = [line for line in lines if line.startswith(_LOADED_FROM)]
-    if len(loaded) > 1:
-        raise InstalledLibraryError(
-            f"the program printed {len(loaded)} '{_LOADED_FROM.strip()}' lines, "
-            "expected at most one")
     if loaded:
-        library = loaded[0][len(_LOADED_FROM):].strip()
-        path, root = resolved(library), resolved(prefix)
-        if root not in path.parents:
-            raise InstalledLibraryError(
-                f"the program loaded libbtbb from {path}, which is not in {root}")
-    else:
-        # No path line, so this install says which libbtbb it loaded only
-        # when that is not the one it was built against. The loader was
-        # pointed at this install, so the warning is what would say it reached
-        # another one, and it must not be there.
-        elsewhere = [line for line in lines if _ANOTHER_LIBBTBB in line]
-        if elsewhere:
-            raise InstalledLibraryError(
-                "the program says it loaded a libbtbb other than the one the "
-                f"install was built against: {elsewhere[0]!r}")
-        # And the comparison that warning comes from has to have had both
-        # sides: it is skipped silently when the install recorded no libbtbb
-        # directory, and then no warning says nothing at all.
-        if not built_libbtbb:
-            raise InstalledLibraryError(
-                "the program printed no libbtbb path, so the only thing that "
-                "would report another libbtbb is the warning it did not "
-                "print; that comparison is made against the directory the "
-                "install was built with, so --built-libbtbb must name it")
-        built, root = resolved(built_libbtbb), resolved(prefix)
-        if root not in built.parents and root != built:
-            raise InstalledLibraryError(
-                f"the install was built against a libbtbb in {built}, which "
-                f"is not in {root}, so a program loading that one would print "
-                "no warning and this would establish nothing")
+        raise InstalledLibraryError(
+            f"the program printed {loaded[0]!r}; an install has reported the "
+            "libbtbb it loaded as the warning below, and not as a path line, "
+            "since fork #1230, so this is not an install this checks")
+    # This install says which libbtbb it loaded only when that is not the one
+    # it was built against. The loader was pointed at this install, so the
+    # warning is what would say it reached another one, and it must not be
+    # there.
+    elsewhere = [line for line in lines if _ANOTHER_LIBBTBB in line]
+    if elsewhere:
+        raise InstalledLibraryError(
+            "the program says it loaded a libbtbb other than the one the "
+            f"install was built against: {elsewhere[0]!r}")
+    # And the comparison that warning comes from has to have had both sides:
+    # it is skipped silently when the install recorded no libbtbb directory,
+    # and then no warning says nothing at all.
+    if not built_libbtbb:
+        raise InstalledLibraryError(
+            "the program printed no libbtbb path, so the only thing that "
+            "would report another libbtbb is the warning it did not "
+            "print; that comparison is made against the directory the "
+            "install was built with, so --built-libbtbb must name it")
+    built, root = resolved(built_libbtbb), resolved(prefix)
+    if root not in built.parents and root != built:
+        raise InstalledLibraryError(
+            f"the install was built against a libbtbb in {built}, which "
+            f"is not in {root}, so a program loading that one would print "
+            "no warning and this would establish nothing")
     if _NO_BOARD not in lines:
         raise InstalledLibraryError(
             f"the program did not print {_NO_BOARD!r}; it was to be run with "
@@ -416,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
     consumer.add_argument("output", type=Path)
     consumer.add_argument("--prefix", required=True)
     consumer.add_argument("--version-line", required=True)
-    consumer.add_argument("--built-libbtbb", default=None)
+    consumer.add_argument("--built-libbtbb", required=True)
     control = sub.add_parser(
         "another-libbtbb",
         help="the warning a second libbtbb install must produce")

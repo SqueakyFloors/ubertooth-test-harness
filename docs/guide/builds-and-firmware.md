@@ -199,9 +199,8 @@ reproduction of a fork regression ([#294](https://github.com/SqueakyFloors/ubert
 
 So mandatory preflight holds the host tools to one libbtbb. Every tool prints
 it on its own version line, beside the tools' own version:
-`Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)`, and on a fork
-commit from before the release names, `Host tools version: libubertooth 1.07
-(git-6a917ec), libbtbb 1.3 (git-52b2afc)`. What libbtbb's half carries is
+`Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)`. What libbtbb's
+half carries is
 `btbb_get_release()`: the release its own build names since `libbtbb#139`,
 and the commit the installed library was built from before that. Either way
 the string comes from a function in libbtbb, so it describes the library the
@@ -357,13 +356,20 @@ skipped to compensate for a missing installation.
 Every version line names the release a build came from rather than the commit
 it was built at
 ([ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230),
-`ubertooth#1232`):
+`ubertooth#1232`), and the whole of `-V` is those two lines since
+[ubertooth#1233](https://github.com/SqueakyFloors/ubertooth/issues/1233) took
+the image's build string out from under them:
 
 ```text
-Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
-Firmware version: bluetooth_rxtx 2026-11-DEV1+22 (API:1.58)
-Firmware build: Thu Nov  6 02:11:04 UTC 2026
+Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)
+Firmware version: bluetooth_rxtx 2026-11-DEV2 (API:1.58)
 ```
+
+That answer is what the harness requires of the release under test, and the
+only one it accepts: current-release validation keeps no requirement that
+output carry a commit hash or a build stamp, and a run of a commit from
+before the release names is refused in preflight by name
+([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)).
 
 Preflight, the guard reads and the flash and bootloader checks all compare
 what a board or an installed tool reports against what a build of the resolved
@@ -379,15 +385,21 @@ the same thing and agree with each other on purpose,
 modified tree is never predicted: a run refuses a dirty source checkout and
 builds from a clean clone of it, so a reported `*` is a mismatch to report.
 
-**An older ref still reports a commit.** A commit from before that change
-stamps `git-<hash>`, and its version *lines* are laid out differently too, so
-the harness reads the style off the checkout at the commit it resolved rather
-than assuming one: the file that decides the string either derives a release
-name or formats a hash, and it says which in its own text. A file that does
-neither, and a tree whose firmware names releases while that file has moved,
-refuse the run rather than being guessed at -- a wrong guess would compare
-every version in the run against the wrong string. A commit with no such file
-at all is read as the hash style, which is what every such build stamped.
+**An older ref is refused rather than read its own way.** A commit from
+before that change stamps `git-<hash>`, and its version lines are laid out
+differently too. Current-release validation requires the release-name answer
+and keeps no requirement that output carry a commit hash or a build stamp
+([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)),
+so a run of such a commit is refused where its sources are resolved, before
+anything is built or written to a board, and `--dry-run` answers for it the
+same way. The style is still read off the checkout at the resolved commit,
+because that is what says which it is: the file that decides the string
+either derives a release name or formats a hash, and it says which in its own
+text. A file that does neither, and a tree whose firmware names releases
+while that file has moved, refuse the run rather than being guessed at -- a
+wrong guess would compare every version in the run against the wrong string.
+A commit with no such file at all is read as the hash style, which is what
+every such build stamped, and is refused with the rest.
 
 The version the run expects is in the manifest as each source's
 `expected_revision`, and in report.md beside the ref and the commit, so a
