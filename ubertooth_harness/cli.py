@@ -78,7 +78,11 @@ from ubertooth_harness.power import (
     snapshot_ports,
 )
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
-from ubertooth_harness.report import render_runs, write_report
+from ubertooth_harness.report import (
+    render_runs,
+    write_console_summary,
+    write_report,
+)
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import guard_boards, ubertooth_roles
@@ -248,13 +252,19 @@ def _build(
 def _finish_failed_run(
     publisher, output_dir: Path, reason: str, status: str = "failed"
 ) -> None:
-    """Close a run that stopped before its tests started, then write report.md."""
+    """Close a run that stopped before its tests started, then write report.md.
+
+    The console summary goes out here too, so a run that failed in its build,
+    its flash stage, or preflight still ends with the block that says which
+    commits and boards it was about (#342).
+    """
     try:
         publisher.emit(
             "run_finished", status, {"status": status, "failure_reason": reason}
         )
     finally:
         write_report(output_dir)
+        write_console_summary(output_dir)
 
 
 FORK_PIN = libbtbbpin.FORK_PIN
@@ -423,9 +433,11 @@ def _build_command(args: argparse.Namespace) -> int:
     output.mkdir(parents=True)
     publisher = open_run_publisher(output, generate_run_id(), _terminal_sink())
     publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
-    _record_libbtbb_pin(publisher, sources)
-    _record_dfu_part_table(publisher, sources)
     try:
+        # Inside, so a failure in either comparison closes this record and
+        # ends with the block, as _run_leased does with the same two.
+        _record_libbtbb_pin(publisher, sources)
+        _record_dfu_part_table(publisher, sources)
         result = _build(
             # No suite here to read the need off, so the alternate image is
             # built when --with-btbr asks for it and not otherwise.
@@ -433,11 +445,16 @@ def _build_command(args: argparse.Namespace) -> int:
             args.with_python, run_dir=output,
             firmware_images=_firmware_images(with_btbr=args.with_btbr),
         )
-    except BuildError as error:
-        _finish_failed_run(publisher, output, str(error))
+    except BaseException as error:
+        # Every way out: a build error, a cancellation, or an error of the
+        # harness's own closes the record it opened and ends with the block.
+        _finish_failed_run(publisher, output, str(error) or type(error).__name__)
         raise
     publisher.emit("run_finished", "passed", {"status": "passed", "failure_reason": ""})
     write_report(output)
+    # A build records a run of its own, so it ends with the same block,
+    # whether it passed or failed (#342).
+    write_console_summary(output)
     print(json.dumps({
         "sources": [source.to_dict() for source in sources],
         "build": result.to_manifest(),
@@ -1498,6 +1515,14 @@ def _run_leased(
             signal.signal(signum, handler)
         if isolation is not None:
             isolation.close()
+        # On stderr, with the live stream a reader is tailing: what was
+        # tested, on which board and firmware, and how it went (#342). In the
+        # finally, so a sequencer that raises still ends with the block; the
+        # records it is compiled from are already on disk. Once per run: the
+        # paths that close a run before this one re-raise instead of reaching
+        # it. stdout keeps the summary JSON alone, so a caller parsing it is
+        # unaffected.
+        write_console_summary(run_dir)
     try:
         print(json.dumps(asdict(summary), indent=2, sort_keys=True))
     except OSError:

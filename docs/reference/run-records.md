@@ -50,9 +50,9 @@ Each transcript line starts with the time elapsed since the run started
 (`HH:MM:SS.mmm`); the report header gives the run's UTC start time, and
 run.jsonl keeps absolute UTC times (`2026-10-24T00:18:21.535`, no offset
 suffix). Each line then carries a tag: `[C]` command sent (shell-quoted), `[O]`
-stdout, `[E]` stderr, `[R]` command result (tool, exit code, duration, timeout
-or cancellation), `[S]` state-change step, `[I]` power isolation, `[M]` harness
-record, and, for a line of a known target's serial shell, `[<alias> >]` sent
+stdout, `[E]` stderr, `[X]` the execution result (tool, exit code, duration,
+timeout or cancellation), `[S]` state-change step, `[I]` power isolation, `[M]`
+harness record, and, for a line of a known target's serial shell, `[<alias> >]` sent
 to it and `[<alias> <]` answered by it (see [Known
 targets](run-records.md#known-targets)). Section markers are indented to line up with the
 tagged text:
@@ -63,7 +63,7 @@ lines open and close the run, build, preflight, and each test:
 00:00:10.438     === PREFLIGHT ===
 00:00:10.439     +++ Host version +++
 00:00:10.439 [C] ubertooth-util -V
-00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
+00:00:10.465 [X] ubertooth-util exit 0 in 0.025s; [O] Host tools version: 2026-11-DEV1+22 (libbtbb 2020-12-R1+79)
 00:00:10.465     --- Host version EXIT: passed ---
 00:00:10.466     === PREFLIGHT EXIT: passed ===
 00:00:10.466     === TEST 002-Host CLI surface: Host CLI surface on Host_Mac ===
@@ -71,10 +71,16 @@ lines open and close the run, build, preflight, and each test:
 00:00:12.785     === RUN passed ===
 ```
 
-A command that printed one line is two lines, with the response on the `[R]`
+A command that printed one line is two lines, with the response on the `[X]`
 line. Longer output stamps each `[O]`/`[E]` line when it arrived, in arrival
-order, before the `[R]` line. The live terminal stream on stderr uses the same
-`[C]`/`[O]`/`[E]`/`[R]` command tags.
+order, before the `[X]` line. The live terminal stream on stderr uses the same
+`[C]`/`[O]`/`[E]`/`[X]` command tags, with banners and verdicts of its own
+(see [Reading a run as it goes](#reading-a-run-as-it-goes)).
+
+`[X]` is the *execution* result and never a verdict: a command the harness
+expects to exit nonzero passes, and one that exits 0 can still fail the
+checks its output is read for, so a pass or a failure is only ever stated on
+a line of its own (see [Reading a run as it goes](#reading-a-run-as-it-goes)).
 
 Every response is kept, but run.jsonl holds at most the first 200 output
 records or 64 KiB, and the last 50 records or 16 KiB, of each build,
@@ -117,7 +123,7 @@ lines between the first and last lines:
 00:07:02.940 [M] full output in output/016-Raw-receive-dump-full-receive.stderr.log; left out of run.jsonl here: 6893 stderr lines (309933 characters)
 00:07:02.940 [M]   6893 x [E] rx block timestamp N * N nanoseconds
 00:07:02.944 [E] rx block timestamp 290481 * 100 nanoseconds
-00:07:02.951 [R] ubertooth-dump exit 124 in 3.012s, stopped at its planned deadline
+00:07:02.951 [X] ubertooth-dump exit 124 in 3.012s, stopped at its planned deadline
 ```
 
 This keeps the per-block progress lines `ubertooth-dump` prints on stderr
@@ -128,6 +134,102 @@ from 15 MB to 1 MB. Through
 the runner service the `output/` files stay in the runner's run directory;
 only run.jsonl records reach the controller, which asks that runner for a
 page when the GUI opens one (`GET /api/runs/{run_id}/file` below).
+
+### Reading a run as it goes
+
+The live stream on stderr is written for somebody watching with `tail -F`, so
+what a reader looks for is never a tag among the output
+([#342](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/342)).
+Each test opens with a banner, each of its cases with a lighter one inside it,
+a verdict is stated in words of its own, and each state step says which phase
+it belongs to and lines its values up:
+
+```text
+########################################################################
+TEST: Radio setting transitions
+########################################################################
+[M] 001-Radio setting transitions on Host_Linux; Ubertooth=UT_0, guard Ubertooth 1=UT_1
+
+------------------------------------------------------------------------
+CASE: Guard Ubertooths baseline
+------------------------------------------------------------------------
+
+[C] ubertooth-util -U bbbb...bbbb -C
+[O] Current frequency: 2441 MHz (Bluetooth channel 39)
+[X] ubertooth-util exit 0 in 0.010s
+[BASELINE PASS] guard Ubertooth 1 channel
+    recorded: 2441
+...
+[STEP PASS] Verify channel after the mode stops
+    expected: 2441
+    observed: 2441
+...
+[CLEANUP PASS] Restore original channel
+[STATE PASS] guard Ubertooth 1 channel unchanged
+    expected: 2441
+    observed: 2441
+[PASS] Guard Ubertooths unchanged after channel-mode-stop-restore
+[PASS] TEST Radio setting transitions
+```
+
+- `BASELINE` is the first read of a board or setting the case must leave
+  alone, `STEP` one of the case's own actions, `CLEANUP` a restoration, and
+  `STATE` a later read that has to find the baseline unchanged. The words are
+  the labels of the stage each step is recorded under, so the record and the
+  terminal say the same thing.
+- A verdict is `PASS`, `FAIL`, `SKIP`, `CANCELED`, `N/A` (the host or the
+  bench cannot run it, see [Host
+  requirements](../guide/plans-and-resources.md#host-requirements)), or
+  `BLOCKED` (see [Hardware a step is
+  about](../guide/plans-and-resources.md#hardware-a-step-is-about-blocked-not-left-out)).
+  A failed case, step, or test says why on the same line, once, since the
+  recorded reason opens with the name that line has already said; the whole
+  reason is in its own record either way.
+- `[X]` stays the execution result and never a verdict, and output is shown
+  as it arrives, packet lines included, within the per-command cap above:
+  the captures the fast plan runs are brief, and the transcript is the
+  evidence.
+
+The run then closes with a block that identifies itself, so a tailed run says
+what was tested without opening `report.md`: when it started in UTC, the ref
+and exact commit of each source, the version line the host tools printed
+(with the libbtbb they load), each device by registry alias and serial with
+the firmware it was verified on, the totals, and the verdict.
+
+```text
+========================================================================
+RUN SUMMARY
+========================================================================
+  run                20261105T091233Z-abcdef123456
+  started (UTC)      2026-11-05T09:12:33.004 (ran 139.0s)
+  plan / suite       fast / fast
+  host               Host_Linux (Linux 24.04 6.8.0 x86_64)
+  Ubertooth          main = 9903b4251f... (git-9903b42)
+  libbtbb            fork-pin at 7e1cdf0336... (git-7e1cdf0)
+  host tools         Host tools version: libubertooth 1.07 (git-9903b42), libbtbb 1.3 (git-7e1cdf0)
+  libbtbb in tools   git-7e1cdf0, the libbtbb this run resolved (--libbtbb-ref) (verified)
+  device UT_0        Ubertooth, serial aaaa...aaaa: firmware git-9903b42 (verified)
+  preflight          6/6 checks passed
+  tests              12/12 passed
+  also               1 skipped case
+  report             runs/20261105T091233Z-abcdef123456/report.md
+========================================================================
+VERDICT: PASS
+========================================================================
+```
+
+It is compiled from the run's own records, the ones `report.md` is compiled
+from, so the two cannot disagree, and it goes to stderr with the rest of the
+live stream: stdout still holds the summary JSON alone, so a caller parsing
+that is unaffected. A run that stopped before its tests ran gets the same
+block, from whatever it had recorded by then: a run that failed in its build
+still names its sources and its verdict.
+
+`report.md`'s transcript says the same words on its own `[S]` line
+(`[S] STATE FAIL: guard Ubertooth 1 channel unchanged (expected 2441,
+observed 2426): expected channel=2441, observed 2426`), where one record is
+one timestamped line, so a reader moving between the live stream and the
+report reads one vocabulary.
 
 ### Checks read the output files
 
@@ -182,7 +284,8 @@ Run IDs look like `20261022T203045Z-a1b2c3d4e5f6`; `--run-id` supplies a
 path-safe ID. Records use event schema version 1 (pre-release; no stable
 consumers yet) and carry the run ID, UTC timestamp, sequence, status, and
 bounded JSON details. The same records feed the live terminal stream on stderr
-(stdout holds only the final summary JSON) and a future GUI; a live display
+(see [Reading a run as it goes](#reading-a-run-as-it-goes); stdout holds only
+the final summary JSON) and the web GUI; a live display
 failure never interrupts hardware work.
 
 SIGINT/SIGTERM (and SIGHUP) request cooperative cancellation. A firmware write
