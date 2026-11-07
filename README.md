@@ -72,7 +72,10 @@ it through an SSH tunnel; nothing is exposed on the network.
    ref on the target first" and "Flash the firmware to the boards first"
    ticked (the two "Build … too" boxes follow what the suite needs), and
    press Run. The Live run card ticks off
-   each test; History keeps every run with its `report.md`.
+   each test; History keeps every run with its `report.md`. Beside every
+   test name is a small *i* button: it opens what that test is for, what it
+   drives, and what a pass does not prove, with a link to its
+   [docs/tests.md](docs/tests.md) section.
 
 If it does not connect:
 

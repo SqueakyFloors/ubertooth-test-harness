@@ -54,7 +54,10 @@
             <select id="suite" name="suite" required aria-describedby="suite-tests"></select>
           </div>
         </div>
-        <p id="suite-tests" class="hint suite-tests"></p>
+        <div class="suite-tests">
+          <ul id="suite-test-list" class="test-list" aria-label="Tests in the chosen suite"></ul>
+          <p id="suite-tests" class="hint"></p>
+        </div>
         <div class="field">
           <label for="target">Target</label>
           <select id="target" name="target" required></select>
@@ -188,5 +191,20 @@
     </div>
   </section>
 </main>
+
+<!-- What a test is for, opened by the info button beside its name in Run
+     setup, the live checklist and a failure summary. A modal dialog of the
+     page itself: focus enters it, Escape and Close return focus to the
+     button that opened it, and the prose is text, never markup. -->
+<dialog id="test-info" class="info-dialog" aria-labelledby="test-info-title"
+        aria-describedby="test-info-purpose">
+  <div class="info-dialog-head">
+    <h2 id="test-info-title" tabindex="-1">Test</h2>
+    <button type="button" id="test-info-close">Close</button>
+  </div>
+  <p id="test-info-purpose" class="info-purpose"></p>
+  <div id="test-info-body" class="info-body"></div>
+  <p id="test-info-links" class="info-links"></p>
+</dialog>
 </body>
 </html>

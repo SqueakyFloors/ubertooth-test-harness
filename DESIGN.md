@@ -236,7 +236,10 @@ Details: [run records](docs/reference/run-records.md).
 The controller stores runs, fans out live updates, and serves the GUI at
 `/ui/`: targets, run setup (ref, plan, suite, target, build and flash
 options), a live checklist with a countdown where estimates exist, history
-with failure summaries, and the output files a run saved. A run on several
+with failure summaries, and the output files a run saved. Every test name
+carries a button that opens what that test is for, read from
+`ubertooth_harness/test_info.yaml` beside the catalog's own roles,
+arguments and estimate. A run on several
 hosts at once is a **run group**, carried on one stream.
 
 Two properties matter for the design:
