@@ -1038,7 +1038,7 @@ last `isolation_applied` event, and write it back.
 
 | Command | What it does |
 |---|---|
-| `nrfutil device list` | lists attached probes with their serials and virtual COM ports |
+| `nrfutil device list` | lists attached probes; `--json` is what the harness reads a probe's serial and its VCOM0 path from (`nrfdk.find_probe`, `nrfdk.probe_vcom0`) |
 | `nrfutil device program --serial-number <serial> --firmware <hex> --options chip_erase_mode=ERASE_ALL,verify=VERIFY_READ,reset=RESET_SYSTEM` | flashes a DK and verifies the write |
 | `nrfutil device reset` | reboots a DK, which is the only remote reset it has when it is not on a switchable port |
 | `JLinkExe` | J-Link Commander: updates the probe's own firmware, and `vcom enable` turns its virtual COM port on |
