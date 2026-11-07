@@ -3750,7 +3750,32 @@ of lines matching the older "capture died" wording (`libUSB Error`, `could
 not open Ubertooth device`) is reported too, which is the compatibility note
 [ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703) asks
 for: the stable signal now is the exit status plus one documented `error:`
-line, and a run says whether the old one would have fired at all.
+line, and a run says whether the old one would have fired at all. A board
+that resets itself is counted once for each reset it reports, however many
+reads follow: each read is compared with the one before it, so a run that
+reads the record after every restart of a flapping capture reports the
+resets the board had rather than one for every time it was asked.
+
+**No file in the run directory grows with the length of the run, and the
+progress file stays worth reading.** The captures have a per-file limit and
+a budget for the run, the tool's transcript has a budget, and
+`progress.jsonl` has one too. A byte budget alone is a poor answer for that
+last one, though, because of the way a long run goes wrong: a board that
+stops capturing in the first hour of a three-day run is restarted every few
+seconds for the rest of it, and each restart writes the same handful of
+records again — the attempt that died, the capture that followed, the
+watchdog read between them. A quarter of a million records all saying one
+thing answers no question the first few hundred and a count do not, and it
+would reach the budget and lose whatever came after. So past 200 unplanned
+restarts those records are collapsed: one `restart_storm` record per 100 of
+them, carrying what it stood for and the counts the run had reached, and the
+last block is written when the run reports, so the progress file and
+`summary.json` say the same thing. What the storm has not said before is
+still written whole — a read in which the board reported a reset of its own,
+and a capture that could not be read for a reason not seen yet — and the
+schedule's own records, a period and a sample, are never collapsed, since
+they are what a reader follows even a failing run by. The summary reports how
+many records were collapsed, into how many blocks, and the threshold.
 
 **The restart probe.** With `restart probe: true` the driver kills the capture
 once, at the middle of the run, with SIGKILL and no stop sent to the board —

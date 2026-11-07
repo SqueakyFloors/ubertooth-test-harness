@@ -27,7 +27,7 @@ import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from ubertooth_harness import addresssoak, nrfdk
+from ubertooth_harness import addresssoak, nrfdk, watchdog
 from tests import fake_advertiser
 from tests.executables import write_executable
 from tests.fake_dk import FakeFirmware, FakePort
@@ -193,31 +193,43 @@ class ScheduledFirmware(FakeFirmware):
         return answer
 
 
-class SoakTestCase(unittest.TestCase):
-    """One temporary bench: a PATH with the fakes on it and an output dir."""
+class SoakBench:
+    """One temporary bench: a PATH with the fakes on it and an output dir.
 
-    def setUp(self):
+    Apart from a TestCase, because one run of the driver is read by several
+    tests (`healthy_run`) as well as by the test that made it.
+    """
+
+    def __init__(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.out = self.root / "out"
         self.bin = self.root / "bin"
         self.state = self.root / "advertising"
         write_executable(self.bin / "ubertooth-btle", FAKE_BTLE)
         write_executable(self.bin / "ubertooth-util", FAKE_UTIL)
-        self.environment = dict(os.environ)
-        os.environ["PATH"] = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
-        self.addCleanup(self._restore_environment)
         self.firmware = ScheduledFirmware(self.state, address=ADDRESS)
+        self._environment = None
 
-    def _restore_environment(self):
+    def activate(self):
+        """Put the fakes on PATH, and remember the environment to put back."""
+        self._environment = dict(os.environ)
+        os.environ["PATH"] = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
+
+    def deactivate(self):
+        """Put the whole environment back, settings for the fakes included."""
+        if self._environment is None:
+            return
         os.environ.clear()
-        os.environ.update(self.environment)
+        os.environ.update(self._environment)
+        self._environment = None
+
+    def close(self):
+        self.directory.cleanup()
 
     def set_tool(self, **values):
         for key, value in values.items():
             os.environ[f"FAKE_BTLE_{key}"] = str(value)
-            self.addCleanup(os.environ.pop, f"FAKE_BTLE_{key}", None)
 
     def dk(self):
         port = FakePort(self.firmware)
@@ -267,14 +279,122 @@ class SoakTestCase(unittest.TestCase):
                 in (self.out / "progress.jsonl").read_text(encoding="utf-8").splitlines()]
 
 
-class HealthyRunTests(SoakTestCase):
+_HEALTHY = None
+
+
+def healthy_run():
+    """One healthy run of the driver, shared by the tests that read it.
+
+    Ten tests asserted on a run with exactly these arguments, each paying the
+    schedule's four seconds of real time again. This module was the slowest
+    in the suite at about 190 s, and `scripts/test.py` runs one process per
+    module, so it set the floor for the CI test job
+    ([#353](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/353)).
+    The run is made once, on first use, and read afterwards: each test still
+    asserts its own thing, and the files and the summary it reads are the
+    files and the summary of a real run of the whole loop. A test that needs
+    a bench of its own -- another tool setting, another plan figure, a
+    patched module constant -- builds one as before, and nothing that patches
+    a module constant may use this one.
+    """
+    global _HEALTHY
+    if _HEALTHY is None:
+        _HEALTHY = _SharedHealthyRun()
+    return _HEALTHY
+
+
+def tearDownModule():
+    global _HEALTHY
+    if _HEALTHY is not None:
+        _HEALTHY.close()
+        _HEALTHY = None
+
+
+class _SharedHealthyRun:
+    """The bench and the results of the one shared healthy run."""
+
+    def __init__(self):
+        self.bench = SoakBench()
+        self.bench.activate()
+        try:
+            self.code, self.stdout, self.stderr = self.bench.run_soak()
+        finally:
+            # Nothing of this run's bench is left in the environment: the
+            # test that asked for it has its own.
+            self.bench.deactivate()
+        self.out = self.bench.out
+        self.state = self.bench.state
+        self.firmware = self.bench.firmware
+
+    def summary(self):
+        return self.bench.summary()
+
+    def progress(self):
+        return self.bench.progress()
+
+    def close(self):
+        self.bench.close()
+
+
+class SoakTestCase(unittest.TestCase):
+    """One temporary bench per test, with the fakes on PATH while it runs."""
+
+    def setUp(self):
+        self.bench = SoakBench()
+        self.addCleanup(self.bench.close)
+        self.bench.activate()
+        self.addCleanup(self.bench.deactivate)
+        self.root = self.bench.root
+        self.out = self.bench.out
+        self.bin = self.bench.bin
+        self.state = self.bench.state
+
+    @property
+    def firmware(self):
+        return self.bench.firmware
+
+    @firmware.setter
+    def firmware(self, value):
+        # Some tests swap the fake DK's firmware before the run: the bench
+        # builds the shell from it, so the bench is where it has to land.
+        self.bench.firmware = value
+
+    def set_tool(self, **values):
+        # No cleanup per variable: the whole environment goes back after the
+        # test (SoakBench.deactivate).
+        self.bench.set_tool(**values)
+
+    def dk(self):
+        return self.bench.dk()
+
+    def argv(self, **overrides):
+        return self.bench.argv(**overrides)
+
+    def run_soak(self, **overrides):
+        return self.bench.run_soak(**overrides)
+
+    def summary(self):
+        return self.bench.summary()
+
+    def progress(self):
+        return self.bench.progress()
+
+
+class HealthyRunTests(unittest.TestCase):
+    """What one healthy run of the whole loop leaves behind.
+
+    Every test here reads the one shared run (`healthy_run`): the arguments
+    are the same, so making it again per test only spent its four seconds
+    again.
+    """
 
     def test_a_healthy_run_passes_and_both_readers_see_the_advertiser(self):
-        code, out, err = self.run_soak()
-        self.assertEqual(addresssoak.EXIT_PASS, code, out + err)
-        self.assertIn("SOAK VERDICT: pass", out)
-        self.assertNotIn("FAIL:", out)
-        summary = self.summary()
+        shared = healthy_run()
+        self.assertEqual(addresssoak.EXIT_PASS, shared.code,
+                         shared.stdout + shared.stderr)
+        self.assertIn("SOAK VERDICT: pass", shared.stdout)
+        self.assertNotIn("FAIL:", shared.stdout)
+        summary = shared.summary()
         self.assertGreater(summary["text"]["advertiser_packets"], 0)
         self.assertGreater(summary["structural"]["advertiser_packets"], 0)
         self.assertEqual(ADDRESS, summary["address"])
@@ -284,9 +404,7 @@ class HealthyRunTests(SoakTestCase):
                          summary["structural"]["payload_matches"])
 
     def test_detection_is_judged_per_on_period_for_both_readers(self):
-        code, out, _err = self.run_soak()
-        self.assertEqual(addresssoak.EXIT_PASS, code, out)
-        detection = self.summary()["detection"]
+        detection = healthy_run().summary()["detection"]
         self.assertEqual(sorted(detection), ["structural", "text"])
         for name, found in detection.items():
             with self.subTest(reader=name):
@@ -296,8 +414,8 @@ class HealthyRunTests(SoakTestCase):
                 self.assertIsNotNone(found["first_detection_s"])
 
     def test_the_run_is_reviewable_from_the_files_it_wrote(self):
-        self.run_soak()
-        records = self.progress()
+        shared = healthy_run()
+        records = shared.progress()
         kinds = {record["record"] for record in records}
         for kind in ("capture_started", "period_started", "period", "sample",
                      "watchdog", "attempt", "board_after"):
@@ -306,30 +424,30 @@ class HealthyRunTests(SoakTestCase):
         # is still going knows how far it has got.
         for record in records:
             self.assertIn("at_s", record)
-        self.assertTrue((self.out / "capture-0001.pcap").is_file())
-        self.assertTrue((self.out / "btle-0001.log").is_file())
+        self.assertTrue((shared.out / "capture-0001.pcap").is_file())
+        self.assertTrue((shared.out / "btle-0001.log").is_file())
         # The transcript is the tool's own output and nothing else.
-        transcript = (self.out / "btle-0001.log").read_text(encoding="utf-8")
+        transcript = (shared.out / "btle-0001.log").read_text(encoding="utf-8")
         self.assertIn("AdvA:", transcript)
         self.assertNotIn("SOAK VERDICT", transcript)
 
     def test_the_schedule_is_applied_to_the_advertiser(self):
-        self.run_soak()
-        commands = self.firmware.commands
+        shared = healthy_run()
+        commands = shared.firmware.commands
         self.assertIn("adv chmap 37", commands)
         self.assertIn("adv interval 100", commands)
         self.assertIn("adv payload c0ffee", commands)
         self.assertGreaterEqual(commands.count("adv start"), 2)
         self.assertGreaterEqual(commands.count("adv stop"), 2)
         # It is left quiet, and the counter is read at both ends.
-        self.assertEqual("off", self.state.read_text(encoding="utf-8"))
-        counter = self.summary()["advertiser_counter"]
+        self.assertEqual("off", shared.state.read_text(encoding="utf-8"))
+        counter = shared.summary()["advertiser_counter"]
         self.assertIsNotNone(counter["before"])
         self.assertIsNotNone(counter["after"])
 
     def test_memory_and_rate_are_reported(self):
-        self.run_soak()
-        summary = self.summary()
+        shared = healthy_run()
+        summary = shared.summary()
         self.assertGreaterEqual(summary["memory"]["samples"], 2)
         rate = summary["rate_per_minute"]
         self.assertGreater(rate["periods"], 0)
@@ -347,41 +465,59 @@ class HealthyRunTests(SoakTestCase):
             self.assertGreaterEqual(memory["max_kb"], memory["last_kb"])
         else:
             self.assertIsNone(memory["growth_kb"])
-        samples = [record for record in self.progress()
+        samples = [record for record in shared.progress()
                    if record["record"] == "sample"]
         self.assertTrue(samples)
         for sample in samples:
             self.assertIn("rss_kb", sample)
 
     def test_the_watchdog_record_is_read_and_reported(self):
-        self.run_soak()
-        watchdog = self.summary()["watchdog"]
+        watchdog = healthy_run().summary()["watchdog"]
         # Read before the run and after it; the fake board reports the same
         # record both times, so nothing new is counted.
         self.assertGreaterEqual(watchdog["reads"], 2)
         self.assertEqual(0, watchdog["unrequested_resets"])
 
     def test_the_final_stop_is_a_clean_one(self):
-        self.run_soak()
-        attempts = self.summary()["attempts"]
+        summary = healthy_run().summary()
+        attempts = summary["attempts"]
         self.assertEqual(1, len(attempts))
         self.assertEqual("SIGTERM", attempts[-1]["signalled"])
         self.assertFalse(attempts[-1]["forced"])
-        self.assertEqual(0, self.summary()["process"]["forced_stops"])
+        self.assertEqual(0, summary["process"]["forced_stops"])
+
+    def test_a_healthy_run_has_quiet_off_periods(self):
+        quiet = healthy_run().summary()["off_quiet"]
+        self.assertGreater(quiet["periods"], 0)
+        self.assertEqual(0, quiet["noisy"])
+
+    def test_a_healthy_run_needs_no_re_anchor(self):
+        clock = healthy_run().summary()["record_clock"]
+        self.assertEqual(0, clock["reanchors"])
+        self.assertEqual(0.0, clock["largest_drift_s"])
+
+    def test_the_transcript_is_the_tools_output_and_nothing_else(self):
+        shared = healthy_run()
+        transcript = (shared.out / "btle-0001.log").read_text(encoding="utf-8")
+        self.assertIn("AdvA:", transcript)
+        self.assertIn("Advertising / AA 8e89bed6", transcript)
+        self.assertNotIn("SOAK VERDICT", transcript)
+        kept = shared.summary()["transcript"]
+        self.assertGreater(kept["kept_bytes"], 0)
+        self.assertEqual(0, kept["dropped_lines"])
+
+    def test_nothing_was_collapsed_or_left_out_of_the_progress_file(self):
+        # The coarsening is for a run that keeps restarting; a healthy run
+        # must carry every record it wrote.
+        progress = healthy_run().summary()["progress"]
+        self.assertEqual(0, progress["records_coarsened"])
+        self.assertEqual(0, progress["restart_storm_blocks"])
+        self.assertEqual(0, progress["records_not_written"])
+        self.assertGreater(progress["kept_bytes"], 0)
 
 
 class TranscriptTests(SoakTestCase):
     """The tool's own output: kept, bounded, and still read past the bound."""
-
-    def test_the_transcript_is_the_tools_output_and_nothing_else(self):
-        self.run_soak()
-        transcript = (self.out / "btle-0001.log").read_text(encoding="utf-8")
-        self.assertIn("AdvA:", transcript)
-        self.assertIn("Advertising / AA 8e89bed6", transcript)
-        self.assertNotIn("SOAK VERDICT", transcript)
-        kept = self.summary()["transcript"]
-        self.assertGreater(kept["kept_bytes"], 0)
-        self.assertEqual(0, kept["dropped_lines"])
 
     def test_the_budget_is_the_whole_run_s_and_lines_past_it_are_still_read(self):
         # A crowded channel prints megabytes a minute, and restarts and file
@@ -483,9 +619,12 @@ class LivenessTests(SoakTestCase):
 
     def test_a_silent_capture_is_restarted_on_the_liveness_timeout(self):
         # Nothing arrives at all, which is the production rule: no packet of
-        # any address for the timeout means the capture is not working.
+        # any address for the timeout means the capture is not working. The
+        # window is the two schedule cycles the figures allow plus one
+        # timeout, which is what a restart needs and no more: this module is
+        # real seconds and it sets the CI job's floor (#353).
         self.set_tool(MODE="records", RATE="0.01")
-        code, out, _err = self.run_soak(max_restarts=5, duration=8,
+        code, out, _err = self.run_soak(max_restarts=5, duration=6,
                                         liveness_timeout=2)
         self.assertGreaterEqual(self.summary()["process"]["restarts"], 1)
         self.assertIn("no packet for", out)
@@ -627,9 +766,11 @@ class ProbeTests(SoakTestCase):
         self.assertEqual(addresssoak.EXIT_FAIL, code, out)
 
     def test_a_capture_that_keeps_dying_is_restarted_and_recorded_each_time(self):
-        self.set_tool(ONCE=str(self.root / "ran-once"), EXIT_AFTER="2",
+        # A death a second rather than one every two, so the several
+        # restarts this is about fit in a shorter window (#353).
+        self.set_tool(ONCE=str(self.root / "ran-once"), EXIT_AFTER="1",
                       EXIT_CODE="1")
-        code, out, _err = self.run_soak(duration=8, max_restarts=10)
+        code, out, _err = self.run_soak(duration=5, max_restarts=10)
         self.assertEqual(addresssoak.EXIT_FAIL, code)
         summary = self.summary()
         self.assertGreater(summary["process"]["restarts"], 1)
@@ -730,7 +871,8 @@ class BudgetTests(SoakTestCase):
         # the bytes that put the run over its budget.
         first = self.fake_attempt(1, size=0)
         second = self.fake_attempt(2, size=4096)
-        soak.attempts += [first, second]
+        soak.add_attempt(first)
+        soak.add_attempt(second)
         soak.prune_captures()
         self.assertTrue(first.files_removed)
         self.assertFalse(second.files_removed)
@@ -742,7 +884,8 @@ class BudgetTests(SoakTestCase):
     def test_an_attempt_whose_files_cannot_be_removed_is_kept(self):
         soak = self.built_soak(budget=1)
         first, second = self.fake_attempt(1), self.fake_attempt(2)
-        soak.attempts += [first, second]
+        soak.add_attempt(first)
+        soak.add_attempt(second)
         (self.out / first.capture).chmod(0o444)
         (self.out / first.log).chmod(0o444)
         self.out.chmod(0o555)
@@ -786,6 +929,36 @@ class BudgetTests(SoakTestCase):
         self.assertEqual(soak.progress_records_dropped,
                          summary["progress"]["records_not_written"])
 
+    def test_an_attempt_the_summary_has_forgotten_is_still_pruned(self):
+        """The attempt list the budget reads is not the one that is trimmed.
+
+        Past MAX_HELD_ATTEMPTS the middle of the summary's list is forgotten.
+        While the budget read that list, a forgotten attempt's capture was
+        left on disk and out of the accounting for the rest of the run --
+        unreachable in practice, since pruning to MAX_KEPT_ATTEMPTS happens
+        thousands of attempts earlier, which is why it is pinned here rather
+        than only reasoned about (#353).
+        """
+        soak = self.built_soak(budget=1)
+        addresssoak.MAX_HELD_ATTEMPTS, held = 4, addresssoak.MAX_HELD_ATTEMPTS
+        self.addCleanup(setattr, addresssoak, "MAX_HELD_ATTEMPTS", held)
+        attempts = [self.fake_attempt(index) for index in range(1, 7)]
+        for attempt in attempts:
+            soak.add_attempt(attempt)
+        self.assertEqual(2, soak.attempts_forgotten)
+        forgotten = [attempt for attempt in attempts
+                     if attempt not in soak.attempts]
+        self.assertEqual(2, len(forgotten))
+        soak.prune_captures()
+        # Newest kept, and every older one gone from the directory whether
+        # or not the summary still holds it.
+        self.assertFalse(attempts[-1].files_removed)
+        for attempt in attempts[:-1]:
+            with self.subTest(attempt=attempt.index):
+                self.assertTrue(attempt.files_removed)
+                self.assertFalse((self.out / attempt.capture).exists())
+        self.assertEqual(5, soak.captures_removed)
+
     def built_soak(self, budget):
         """A Soak with an output directory and no run behind it."""
         self.out.mkdir(parents=True, exist_ok=True)
@@ -809,6 +982,137 @@ class BudgetTests(SoakTestCase):
         self.assertEqual(0, self.summary()["captures"]["removed"])
 
 
+class ProgressStormTests(SoakTestCase):
+    """A run that keeps restarting writes a coarser record, not more of them.
+
+    A board that stops capturing in the first hour of a three-day run is
+    restarted every few seconds for the rest of it: a quarter of a million
+    records all saying the same thing, which the byte budget would then
+    truncate (#353). Past a few hundred restarts the records of a restart are
+    collapsed instead, and what the storm has not said before is not.
+    """
+
+    def built_soak(self):
+        self.out.mkdir(parents=True, exist_ok=True)
+        options = addresssoak.options_from(
+            addresssoak.build_parser().parse_args(self.argv()))
+        soak = addresssoak.Soak(options, None)
+        soak.progress = (self.out / "progress.jsonl").open("w", encoding="utf-8")
+        self.addCleanup(soak.progress.close)
+        return soak
+
+    def test_the_records_of_a_restart_are_written_whole_until_the_storm(self):
+        soak = self.built_soak()
+        soak.restarts = addresssoak.PROGRESS_FULL_RESTARTS - 1
+        for index in range(10):
+            soak.record({"record": "attempt", "index": index})
+        self.assertFalse(soak.in_restart_storm())
+        self.assertEqual(0, soak.progress_records_coarsened)
+        self.assertEqual(10, len(self.kinds(soak)["attempt"]))
+
+    def test_past_the_threshold_a_block_becomes_one_record(self):
+        soak = self.built_soak()
+        soak.restarts = addresssoak.PROGRESS_FULL_RESTARTS
+        soak.board_resets = 7
+        for index in range(addresssoak.PROGRESS_STORM_BLOCK):
+            soak.record({"record": "attempt", "index": index})
+            soak.record({"record": "capture_started", "index": index})
+        written = self.kinds(soak)
+        self.assertNotIn("attempt", written)
+        self.assertNotIn("capture_started", written)
+        blocks = written["restart_storm"]
+        self.assertEqual(2, len(blocks))
+        self.assertEqual(2 * addresssoak.PROGRESS_STORM_BLOCK,
+                         soak.progress_records_coarsened)
+        self.assertEqual(2, soak.storm_blocks)
+        # Each block says what it stood for, and where the run had got to.
+        collapsed = blocks[0]["collapsed"]
+        self.assertEqual(addresssoak.PROGRESS_STORM_BLOCK,
+                         sum(collapsed.values()))
+        self.assertEqual(sorted(collapsed), ["attempt", "capture_started"])
+        self.assertEqual(addresssoak.PROGRESS_FULL_RESTARTS, blocks[0]["restarts"])
+        self.assertEqual(7, blocks[0]["board_resets"])
+        self.assertIn("from_s", blocks[0])
+
+    def test_the_schedule_s_own_records_are_never_collapsed(self):
+        # They are what a reader follows even a failing run by, and they are
+        # bounded by the plan's figures rather than by the restarts.
+        soak = self.built_soak()
+        soak.restarts = addresssoak.PROGRESS_FULL_RESTARTS
+        for index in range(5):
+            soak.record({"record": "period", "index": index})
+            soak.record({"record": "sample", "index": index})
+        written = self.kinds(soak)
+        self.assertEqual(5, len(written["period"]))
+        self.assertEqual(5, len(written["sample"]))
+        self.assertEqual(0, soak.progress_records_coarsened)
+
+    def test_what_the_storm_has_not_said_before_is_written_whole(self):
+        soak = self.built_soak()
+        soak.restarts = addresssoak.PROGRESS_FULL_RESTARTS
+        soak.record({"record": "attempt", "index": 1})
+        soak.record({"record": "watchdog", "when": "after a restart"}, always=True)
+        written = self.kinds(soak)
+        self.assertEqual(1, len(written["watchdog"]))
+        self.assertNotIn("attempt", written)
+
+    def test_a_watchdog_read_that_found_a_reset_is_one_of_those(self):
+        soak = self.built_soak()
+        first = watchdog.parse_report(watchdog_samples.FULL)
+        again = watchdog.parse_report(
+            watchdog_samples.FULL.replace("resets since power-on: 3",
+                                          "resets since power-on: 4"))
+        self.patch_reads(soak, [(first, ""), (again, ""), (again, "")])
+        soak.read_watchdog_now("before the run")   # the baseline, before any
+        soak.restarts = addresssoak.PROGRESS_FULL_RESTARTS
+        soak.read_watchdog_now("after a restart")  # the board reset itself
+        soak.read_watchdog_now("after a restart")  # nothing new
+        # Counted once, however many reads followed it: each read reports
+        # what is new since the last one.
+        self.assertEqual(1, soak.watchdog_resets)
+        # And where the firmware said it happened, which is the one thing
+        # this read is for.
+        self.assertEqual(["in BLE follow mode, running a control request"],
+                         soak.watchdog_where)
+        written = self.kinds(soak)
+        # The baseline and the read that found the reset; the third said
+        # what the second said and was collapsed with the rest of the storm.
+        self.assertEqual(2, len(written["watchdog"]))
+        self.assertEqual(1, soak.progress_records_coarsened)
+
+    def test_the_last_block_reaches_the_file_when_the_run_reports(self):
+        soak = self.built_soak()
+        soak.board_after = {}
+        soak.restarts = addresssoak.PROGRESS_FULL_RESTARTS
+        soak.record({"record": "attempt", "index": 1})
+        self.assertNotIn("restart_storm", self.kinds(soak))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            soak.report(None)
+        self.assertEqual(1, len(self.kinds(soak)["restart_storm"]))
+        self.assertIn("collapsed into 1 block record(s)", out.getvalue())
+        progress = self.summary()["progress"]
+        self.assertEqual(1, progress["records_coarsened"])
+        self.assertEqual(1, progress["restart_storm_blocks"])
+        self.assertEqual(addresssoak.PROGRESS_FULL_RESTARTS,
+                         progress["coarsen_after_restarts"])
+
+    def patch_reads(self, soak, answers):
+        """Answer each watchdog read in turn, with no board involved."""
+        held = addresssoak.read_watchdog
+        self.addCleanup(setattr, addresssoak, "read_watchdog", held)
+        answers = list(answers)
+        addresssoak.read_watchdog = lambda *a, **k: answers.pop(0)
+
+    def kinds(self, soak):
+        """The records in the file so far, by their kind."""
+        soak.progress.flush()
+        found = {}
+        for record in self.progress():
+            found.setdefault(record["record"], []).append(record)
+        return found
+
+
 class OffPeriodTests(SoakTestCase):
     """The other half of the schedule: silence when the advertiser is off."""
 
@@ -828,18 +1132,12 @@ class OffPeriodTests(SoakTestCase):
         # Long enough for several off periods: one noisy period is inside the
         # allowance, which is there for a delayed flush rather than for an
         # advertiser that never stopped.
-        code, out, _err = self.run_soak(duration=8)
+        code, out, _err = self.run_soak(duration=6)
         self.assertEqual(addresssoak.EXIT_FAIL, code)
         self.assertIn("did not stop when it was told to", out)
         quiet = self.summary()["off_quiet"]
         self.assertGreater(quiet["noisy"], 0)
         self.assertEqual(quiet["periods"], quiet["noisy"])
-
-    def test_a_healthy_run_has_quiet_off_periods(self):
-        self.run_soak()
-        quiet = self.summary()["off_quiet"]
-        self.assertGreater(quiet["periods"], 0)
-        self.assertEqual(0, quiet["noisy"])
 
 
 class UnreadableCaptureTests(SoakTestCase):
@@ -922,13 +1220,11 @@ class CancelDuringRestartTests(SoakTestCase):
 
 
 class RecordClockTests(SoakTestCase):
-    """The capture clock is anchored to the host's, and says when it drifted."""
+    """The capture clock is anchored to the host's, and says when it drifted.
 
-    def test_a_healthy_run_needs_no_re_anchor(self):
-        self.run_soak()
-        clock = self.summary()["record_clock"]
-        self.assertEqual(0, clock["reanchors"])
-        self.assertEqual(0.0, clock["largest_drift_s"])
+    A healthy run needs no re-anchor, which HealthyRunTests reads off the
+    shared run.
+    """
 
     def test_a_record_clock_that_runs_away_is_re_anchored_and_reported(self):
         # The record clock is the board's, anchored once per attempt and
@@ -1559,6 +1855,190 @@ class MemoryTests(unittest.TestCase):
         ):
             with self.subTest(description):
                 self.assertIsNone(addresssoak.resident_kb(7, run))
+
+
+class LineSinkTests(unittest.TestCase):
+    """What the reader thread hands the main loop, and what it drops."""
+
+    def test_the_oldest_lines_are_dropped_and_counted_when_it_is_full(self):
+        # Out of reach in practice -- it holds 200 000 lines and the loop
+        # drains every poll -- but the text reader's figures rest on it, and
+        # the run reports a drop as an incomplete reading rather than as
+        # nothing at all, so the behaviour is pinned here (#353).
+        sink = addresssoak.LineSink(limit=2)
+        for item in ("first", "second", "third"):
+            sink.add(item)
+        self.assertEqual(1, sink.dropped)
+        self.assertEqual(["second", "third"], sink.drain())
+        self.assertEqual([], sink.drain())
+        self.assertEqual(1, sink.dropped)
+
+
+class TranscriptFlushTests(unittest.TestCase):
+    """The transcript reaches its file on a budget, not a line at a time."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.log = Path(self.directory.name) / "btle-0001.log"
+
+    def reader(self, lines, **options):
+        """One reader over a finished stream, run to its end."""
+        reader = addresssoak.TranscriptReader(
+            io.BytesIO(b"".join(lines)), self.log, addresssoak.LineSink(),
+            **options)
+        reader.start()
+        reader.join(timeout=30)
+        self.assertFalse(reader.is_alive())
+        return reader
+
+    def test_a_flood_of_packets_costs_one_flush_a_block(self):
+        line = b"    AdvA:  c3:11:22:33:44:55 (random)\n"
+        count = 4 * (addresssoak.LOG_FLUSH_BYTES // len(line))
+        # A clock that never moves, so the one flush interval under test is
+        # the size: a per-line flush would be one flush a packet.
+        reader = self.reader([line] * count, clock=lambda: 0.0)
+        self.assertEqual(count, reader.lines)
+        self.assertLessEqual(reader.flushes, 5)
+        # And every line is in the file all the same, because the teardown
+        # pushes what is left.
+        self.assertEqual(count, len(self.log.read_bytes().splitlines()))
+
+    def test_a_line_the_verdict_reads_reaches_the_file_at_once(self):
+        # An `error:` line is how a capture says it is dying, and a reader
+        # tailing the log while a soak misbehaves is reading for exactly
+        # that, so it is not left in a buffer.
+        reader = self.open_reader([b"    AdvA:  c3:11:22:33:44:55 (random)\n",
+                                   b"error: libusb returned -1\n"])
+        self.until(lambda: b"error:" in self.kept())
+        self.assertIn(b"error: libusb returned -1", self.kept())
+        self.assertEqual("libusb returned -1", reader.last_error)
+
+    def test_a_teardown_pushes_what_the_buffer_holds(self):
+        # What a cancellation relies on: it no longer waits for the thread,
+        # so the lines already read have to be on disk when it moves on.
+        reader = self.open_reader([b"    AdvA:  c3:11:22:33:44:55 (random)\n"])
+        self.until(lambda: reader.lines == 1)
+        self.assertEqual(b"", self.kept())
+        reader.flush_now()
+        self.assertIn(b"AdvA:", self.kept())
+
+    def open_reader(self, lines):
+        """A reader over a stream that does not end until the test does."""
+        stream = _OpenPipe(lines)
+        reader = addresssoak.TranscriptReader(
+            stream, self.log, addresssoak.LineSink(), clock=lambda: 0.0)
+        # Closed first, so the thread leaves its loop and the join returns.
+        self.addCleanup(reader.join, 30)
+        self.addCleanup(stream.close)
+        reader.start()
+        return reader
+
+    def kept(self):
+        """What is in the log file, which the thread has yet to create."""
+        try:
+            return self.log.read_bytes()
+        except FileNotFoundError:
+            return b""
+
+    def until(self, ready, seconds=10.0):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if ready():
+                return
+            time.sleep(0.01)
+        self.fail("the reader thread did not get there")
+
+    def test_the_budget_is_still_what_decides_what_is_kept(self):
+        line = b"    AdvA:  c3:11:22:33:44:55 (random)\n"
+        reader = self.reader([line] * 4, max_bytes=2 * len(line))
+        self.assertEqual(4, reader.lines)
+        self.assertEqual(2, reader.dropped_lines)
+        self.assertEqual(2 * len(line), reader.written_bytes)
+        self.assertEqual(2 * len(line), self.log.stat().st_size)
+
+
+class _OpenPipe:
+    """A stream of lines that does not end until it is closed.
+
+    A BytesIO ends at its last line, and what two of the tests above are
+    about is a file whose reader has not finished with it yet.
+    """
+
+    def __init__(self, lines):
+        self.lines = list(lines)
+        self.closed = False
+
+    def __iter__(self):
+        while True:
+            if self.lines:
+                yield self.lines.pop(0)
+                continue
+            if self.closed:
+                return
+            time.sleep(0.01)
+
+    def close(self):
+        self.closed = True
+
+
+class CancelTeardownTests(unittest.TestCase):
+    """A canceled stop waits for the tool in tenths, not in seconds.
+
+    The harness allows about two seconds between its SIGTERM and its SIGKILL
+    and the report of a three-day run has to be written inside that, so the
+    waits of the teardown are asserted rather than timed: a stub process
+    records what it was given (#353).
+    """
+
+    def setUp(self):
+        self.bench = SoakBench()
+        self.addCleanup(self.bench.close)
+
+    def capture(self):
+        """A capture whose tool is a stub, so nothing is run or signalled."""
+        options = addresssoak.options_from(
+            addresssoak.build_parser().parse_args(self.bench.argv()))
+        options.out.mkdir(parents=True, exist_ok=True)
+        capture = addresssoak.Capture(options, 1, addresssoak.LineSink())
+        capture.process = _StubProcess()
+        return capture
+
+    def test_a_stop_with_no_grace_waits_a_fraction_of_a_second(self):
+        capture = self.capture()
+        attempt = capture.stop("the run was stopped", grace_s=0.0)
+        self.assertEqual([addresssoak.CANCEL_WAIT_S], capture.process.waits)
+        self.assertEqual("SIGTERM", attempt.signalled)
+        self.assertEqual([signal.SIGTERM], capture.process.signals)
+        self.assertFalse(attempt.forced)
+        self.assertEqual(addresssoak.CANCEL_WAIT_S, capture._join_s())
+
+    def test_an_ordinary_stop_waits_as_long_as_it_takes(self):
+        capture = self.capture()
+        capture.stop("the run finished")
+        self.assertEqual([30], capture.process.waits)
+        self.assertEqual([signal.SIGTERM], capture.process.signals)
+
+
+class _StubProcess:
+    """A tool that goes when it is signalled, recording what it was given."""
+
+    pid = 4242
+    stdout = None
+
+    def __init__(self):
+        self.waits = []
+        self.signals = []
+
+    def poll(self):
+        return 0 if self.signals else None
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return 0
+
+    def send_signal(self, number):
+        self.signals.append(number)
 
 
 class SideTests(unittest.TestCase):
