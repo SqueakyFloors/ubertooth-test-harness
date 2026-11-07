@@ -95,6 +95,34 @@ The connection tests need two DKs, one registered `central` and one
 role with a default named after the role (`central:`, `peripheral:`, and the
 plain `nRF52840 DK:` for the advertiser).
 
+**Booking the advertiser for a soak.** `BLE address parity soak`
+(`testplans/address-soak.yaml`) holds one Ubertooth, the `advertiser` DK, and
+— because it guards the host's other boards, as every stateful test does —
+every other registered Ubertooth on the host, plus the host lock, for its
+whole window, which its longest suite makes three days, and it drives
+the DK on and off throughout, so nothing else can use either device
+meanwhile. Book it rather than scheduling it beside other bench work, and run
+it from the deployed target runner, which keeps the run going after whatever
+started it disconnects. Two things it costs the host: the DK's serial port
+stays open for the run, and the capture file grows for as long as the run
+lasts — on a crowded advertising channel the capture holds every advertiser in
+range, not only this one, so the plan's `capture file limit` is what keeps any
+one file manageable. **Check the host's free space before booking a long
+run**, because the total is the channel's traffic, not the advertiser's.
+Measured on this bench on 2026-11-05, channel 37, over a 30-second capture:
+1.3 MB of capture and 14 MB of the tool's own transcript, with 40116 packets
+from 6652 other addresses beside the advertiser's 225. At that rate three
+days of capture is on the order of ten gigabytes, which is why a long run has
+a disk budget as well as a per-file limit: past it the oldest complete
+capture is removed and the newest kept, each removal recorded. The transcript
+has a
+run-wide budget of 64 MiB that restarts and file rotations cannot multiply
+(`addresssoak.MAX_LOG_BYTES`); every line is still read either way, so the
+figures do not change, and the run reports how much it kept. The run also
+reports the capture process's resident memory from `ps`, which needs no
+privilege and nothing installed; a host that refuses to run `ps` costs the
+memory figures and nothing else.
+
 Registered by its J-Link serial, plus the BLE address its `status` reports.
 The serial is all 12 digits, as the `/dev/serial/by-id` name carries it and
 quoted so the leading zeros survive: that is the one spelling the registry
