@@ -72,7 +72,7 @@ the test needs, fail planning when every host the step names is here and none
 can run it (with a host this registry has not got among them, the step is
 left out instead).
 `validate-plan --hardware <registry>` refuses the absence too, since there
-the bench is named on purpose (README, "Hardware a registry has not got").
+the bench is named on purpose (guide/plans-and-resources.md, "Hardware a registry has not got").
 
 **Hardware a step is about.** Three absences are not left out quietly,
 because the missing hardware is the subject of the test: `alternate
@@ -223,9 +223,12 @@ access address (`-a`).
 **Guard Ubertooths.** A guarded test binds every other registered Ubertooth on
 the host as a `guard Ubertooth N` resource and reads each one before the test
 and after every case, with queries only and one command per read:
-`ubertooth-util -v`, `-V`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, then
-`ubertooth-btle -k` (`-V` ends the command, so it could not share one with the
-others anyway). Every read must match the baseline taken before the
+`ubertooth-util -v`, `-s`, `-B`, `-C`, `-a`, `-z`, `-d`, then
+`ubertooth-btle -k`. A ninth read asked `-V` for the image's build string,
+whose build date caught a reflash of the same revision; fork #1233 took that
+string out of the answer, so nothing reports it and the read has gone
+([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)).
+Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
 is refused, which fails the check, unless that board's firmware API is the
@@ -249,7 +252,7 @@ Either is recorded as the reading (`unsupported`) and compared with the rest,
 so a board that starts answering a read it refused before, or refuses one it
 answered, fails the check. The alternate `btbr` image, for instance, has no
 channel or squelch request and no tool will read its CRC setting, and it is
-still guarded by its identity, image and revision, build, bootloader, LEDs,
+still guarded by its identity, image and revision, bootloader, LEDs,
 and, on an Ubertooth One, its transmit power level. The LED read is the
 exception to the tolerance: `-d` asks for all three LEDs in one command, and
 every image that answers these requests at all answers those three, so a
@@ -259,7 +262,7 @@ readings themselves have to satisfy:
 a guard running `bluetooth_rxtx`, or the receive-only `bluetooth_rx` build of
 it, must answer the radio settings that build implements, since a board that
 cannot is not holding them; and any guarded test is turned away when a guard
-answered none of `-v`, `-V`, `-s`, or `-B`, because nothing about that board
+answered none of `-v`, `-s`, or `-B`, because nothing about that board
 could be compared afterwards — a wedged board would read that way too, though
 the strict LED read fails it first.
 
@@ -297,18 +300,36 @@ and every guard read matching. It stops when that is not true.
 **What it does.** Runs `ubertooth-util -V` and requires the host tools version
 line.
 
-**Theory of operation.** `ubertooth_print_host_version()` prints the
-libubertooth and libbtbb versions with their git identities as the first line
-of every tool's `-V` answer. The check is anchored to that label, so firmware
-lines printed under it cannot stand in for it. The same line is what preflight
-compares against the resolved host sources, which is how a run proves the
-tools under test are the ones the manifest names.
+**Theory of operation.** `ubertooth_print_host_version()` prints the host
+tools' own version as the first line of every tool's `-V` answer. The check is
+anchored to that label, so the firmware line printed under it cannot stand in
+for it. The same line is what preflight compares against the resolved host
+sources, which is how a run proves the tools under test are the ones the
+manifest names.
+
+A build names the release it came from, with libbtbb's beside it
+([ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230),
+`ubertooth#1232`):
+
+```text
+Host tools version: 2026-11-DEV2 (libbtbb 2020-12-R1+79)
+```
+
+That is the one layout accepted. Before that change a build named the two
+library interface versions, each with the commit it was built from, and
+printed the libbtbb it loaded on a line of its own; the harness held a run of
+such a commit to that older line until
+[#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358),
+where the maintainer decided that current-release validation requires the
+release-name answer and keeps no requirement that output carry a commit hash
+or a build stamp. A run of a commit from before the change is now refused in
+preflight, by name, rather than checked against output the release under test
+does not print.
 
 **Hardware and arguments.** No board role. `hosts:` only. The command runs
 with a 20 s timeout.
 
-**Expected outcome.** One case. The line
-`Host tools version: libubertooth <v> (<id>), libbtbb <v> (<id>)` must appear.
+**Expected outcome.** One case. The line above must appear.
 Exit 0 and exit 1 both pass: the command goes on to read every attached board
 and exits 1 if any cannot be read, which may be a board this run does not use.
 
@@ -402,9 +423,23 @@ name it.
 compile identity from one board.
 
 **Theory of operation.** Not established. `Ubertooth identity` checks the
-whole `ubertooth-util -V` answer, the compile-info pattern among it, and the
-guard readback uses the same `Firmware build:` line, whose build timestamp
-also catches a reflash of the same revision.
+whole `ubertooth-util -V` answer, which since
+[ubertooth#1233](https://github.com/SqueakyFloors/ubertooth/issues/1233) is
+the host tools' version and the board's firmware version and nothing else.
+The image's build string stood under them until that change: an image records
+only its version now, and the `Firmware version:` line already names it.
+
+So no tool prints a compile identity any more, and a test of one would need a
+tool option that does not exist. Preflight's per-board `-V` check reads the
+revision off the `Firmware version:` line of that answer, which is the same
+question the `-v` check asks through the other command, over a different pair
+of control requests.
+
+One thing went with the build string: its build date was what caught a reflash
+of the same revision, on a board under test and on a guard
+([#358](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/358)).
+Nothing reports it, so nothing catches that now; a reflash to a different
+revision is still caught by the firmware read.
 
 **Hardware and arguments.** One `Ubertooth`.
 
@@ -444,13 +479,24 @@ installs another one over a programmer on its in-system programming header.
 `ubertooth-util -B` is what reports which one that is, in one line:
 
 ```text
+Bootloader: 2.00 2026-11-DEV1+22, CRC32:0x9d2fe1b4
 Bootloader: 2.00 git-1a2b3c4, CRC32:0x9d2fe1b4
 Bootloader: no version block (factory or earlier, treated as 1.x), CRC32:0x5f0a73c1
 ```
 
-The first form comes from a 48-byte version block the fork's bootloader
-carries at a fixed offset; the second is every board as shipped. The CRC-32 is
+The first two forms come from a 48-byte version block the fork's bootloader
+carries at a fixed offset; the last is every board as shipped. The CRC-32 is
 of the whole region, worked out on the board, and is on the line either way.
+
+The build string in the block is the version the tree reported when the
+bootloader was built: the release it came from since
+[ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
+(`ubertooth#1232`), and a commit hash before that, which is the second form and is what
+a board flashed from an older commit carries. The harness works out which one
+a build at the pin reports the way the makefile works it out (`release.py`)
+and compares that: a release name for equality, since there is no shorter form
+of one to accept, and a hash as an abbreviation of the commit, since two
+checkouts need not abbreviate to the same length.
 
 Preflight reads it for every board whose firmware the run requires, after the
 firmware checks, since firmware older than the read refuses it. What the run
@@ -544,7 +590,7 @@ are checked against the shape the tools print. The composed `-vspb` case then
 requires all four reports from one command: a parser that drops a report when
 several are asked for passes the single-option cases and fails this one. `-V`
 is not in that composition. It is the version command: since fork `f898fe5`
-it prints the host tools' version and the board's firmware version and build,
+it prints the host tools' version and the board's firmware version,
 then ends the command, so its case asks for the whole of that answer on its
 own.
 
@@ -552,8 +598,8 @@ own.
 guarded (every command is read-only and selects by serial).
 
 **Expected outcome.** Six cases: firmware version, the whole `-V` answer (its
-four lines in the fork's order: host version, libbtbb path, firmware version,
-firmware build), device serial, part ID, board ID, and the four-query
+lines in the fork's order: the host version, then the firmware version),
+device serial, part ID, board ID, and the four-query
 readback composition. A case failure does not stop the others. The `-V` case
 keeps its `firmware-compile-info` id and its `Firmware compile info` name,
 although it now covers more than that line: the id is what a run's records
@@ -595,7 +641,8 @@ missing line. `-l` and `-d` both print a USR LED line, so that pair requires
 two of them. `-V` is left out of the compositions and gets two cases of its
 own that go the other way: since fork `f898fe5` it is the version command and
 ends the command, so `-V -s` and `-s -V` must each print the whole version
-answer (its four lines, in order) and no serial line. The fork sets the flags
+answer (its lines, in order, with the libbtbb path line among them on a
+commit that prints one) and no serial line. The fork sets the flags
 while it reads the command line and acts only once the whole line has parsed,
 so both orders must behave alike. Asking for `-V` beside the others would
 hide every query behind it.
@@ -843,9 +890,9 @@ the index case's step count grows with the number of boards. Smoke: `-U all
 same, and `-N` plus one `-U<index> -s` per board agree with the listing.
 Comprehensive adds the four identity queries listed per board in index
 order, both with `-U all` and with no selector; `-V` reporting every board
-itself, also both ways, as the host tools' two lines (the version and the
-libbtbb path) followed by each board's firmware version and build under its
-index; `-C` without `-U` refusing to
+itself, also both ways, as the host tools' version (followed by the libbtbb
+path on a commit that prints one) and then each board's firmware version and
+build under its index; `-C` without `-U` refusing to
 pick a board (exit 1 with `error: multiple Ubertooth devices found; select
 one with -U <index|serial>` and one `Device <index>: <serial>` line per
 board, and no channel read); and an index past the last board refused with
@@ -1446,10 +1493,11 @@ with no Ubertooth and no USB at all.
 **Theory of operation.** This is the one receive test with a known answer for
 every packet, because the harness writes the input. The fixture
 ([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) carries two LAPs, chosen
-errors, chosen channels, chosen host times, and decoy records, so the expected
-output is computed rather than pattern-matched: which packet lines appear, in
-what order, with which systime, which ones a filter drops, and how many
-packets reach a capture file. That makes it possible to check decode behavior
+errors, chosen channels, chosen host times, chosen distances from a CLKN
+edge, and decoy records, so the expected output is computed rather than
+pattern-matched: which packet lines appear, in what order, with which systime
+and which clock offset, which ones a filter drops, and how many packets
+reach a capture file. That makes it possible to check decode behavior
 that no live run can pin down, and to run the whole thing in CI.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
@@ -1460,6 +1508,19 @@ fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
 and `-s` decoding the same as without it, with `-h` listing `-s` as the
 default.
+
+Every case that reads packet lines requires each line's `clk_offset` to be
+the figure the record's own timestamp calls for, and not merely a number.
+libubertooth computes it in `cb_rx` from the record's `clk100ns` and the bit
+offset of the sync word within the record, in 100 ns ticks within one slot,
+so the fixture reproduces that arithmetic and puts each record's access code
+one step further past a CLKN edge than the last. A decoder that reported a
+constant, or the same offset for every packet, fails
+([harness#357](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/357)).
+It is not the CLK1-6 slot offset `btbb_piconet_get_clk_offset()` reports,
+which the fork reads only on a live follow
+([libbtbb#98](https://github.com/SqueakyFloors/libbtbb/pull/98) is still
+uncovered).
 
 **Which note each command line prints.** libbtbb reports a clock out of the
 address-part search as a CLK6 note only when it already held the UAP, which is
@@ -1543,8 +1604,11 @@ part-way through would be read as a record cut short and the run would exit 1
 instead of 0.
 
 **Known limits.** The fixture is synthetic, never an over-the-air capture, so
-this covers the decode path and not the receive path. There is no LE
-equivalent: no tool calls libbtbb's LE file replay. The capture-destination
+this covers the decode path and not the receive path. The low-energy
+equivalent is [BLE replay](#ble-replay), which replays a synthetic dump
+through `ubertooth-btle -R`: that tool reads its own dump, and neither
+library has a low-energy file reader for a tool to call.
+The capture-destination
 cases are `ubertooth-rx`'s; the same checks in `ubertooth-btle` and
 `ubertooth-follow` are not covered, and nor is a capture written to a
 terminal, which no run has. Five more things the fork's own code calls out go
@@ -1558,6 +1622,79 @@ a destination whose last element is a number, which is a file and not a
 descriptor unless the descriptor filesystem answers for it; and the backstop
 inside `take_stdout`, which no case reaches because the command-line check
 refuses such a pair first.
+
+## BLE replay
+
+**What it does.** Replays a synthetic low-energy dump with
+`ubertooth-btle -R`, with no Ubertooth, no USB and no connection.
+
+**Theory of operation.** `-d <file>` saves the records the board sent and
+`-R <file>` decodes them again, taking the major mode the dump was recorded
+with: a record does not say which clock stamped it, and the modes stamp their
+packets differently, so the mode is asked for rather than guessed (fork
+[ubertooth#1129](https://github.com/SqueakyFloors/ubertooth/pull/1129)). That
+makes a replay the one path on which this tool's decode has a known answer
+with no radio at all, because the harness writes the input
+([`btlereplay.py`](../ubertooth_harness/btlereplay.py)). A low-energy record
+carries the packet's own bytes rather than symbols -- the access address, the
+PDU header, the payload and the CRC -- so the dump is written field by field
+from the Bluetooth Core specification's encoding and the expected report is
+computed from the same constants.
+
+Two dumps. The first is a promiscuous capture of one connection: the five
+parameter records promiscuous mode sends as it works out which connection it
+has found, the `CONNECT_IND` that opened that connection on an advertising
+channel, and two data packets on the connection's own access address. The
+parameter records carry no packet, so they reach no capture file and a dump
+is the only way to keep them -- which is what `-d` and `-R` are for. The
+second is one `ADV_IND` whose advertising data holds three Manufacturer
+Specific Data fields, so the decode reads the company identifier table three
+ways: an identifier the Bluetooth SIG registered recently
+([libbtbb#75](https://github.com/SqueakyFloors/libbtbb/pull/75)), one it has
+had from the start, and one it has never assigned, which libbtbb reports as
+`not assigned`
+([libbtbb#128](https://github.com/SqueakyFloors/libbtbb/pull/128)). The other
+reader of that table is `ubertooth-scan -x`, which needs BlueZ, a board and a
+third idle Classic device, so the dump is the cheap way to it.
+
+**Hardware and arguments.** No board role. `hosts:` and `coverage:`.
+
+**Expected outcome.** Smoke runs two cases. The promiscuous replay
+(`-p -R <dump>`) begins by requiring `ubertooth-btle -h` to list `-R` and
+`-d`, so a build too old to have them fails saying which option is missing
+rather than on a refusal the checks cannot parse. It must then print the
+five parameter lines in the order the records hold them -- access address, CRC seed, hop interval, hop increment, and the
+algorithm 2 event counter -- then the `CONNECT_IND` decoded field by field:
+the connection's access address, CRC seed, transmit window size and offset,
+interval, peripheral latency, supervision timeout, channel map, hop increment
+and clock accuracy. Then the two data packets, each with its LLID and, for
+the control PDU, its opcode. Every packet line must carry the host time of
+its own record and the access address it belongs to, so a replay reporting
+its own clock fails. The advertising replay (`-n -R <dump>`) must name both
+registered companies and say `not assigned` for the third, in that order. A
+missing or reworded line fails the case, and the step names the first line it
+could not find.
+
+Comprehensive adds two. A replay dumping with `-d` must write the dump it
+read back byte for byte, the parameter records included, since a `-d` that
+dropped them would lose what a promiscuous capture was for. And a replay with
+no major mode must be refused with exit 1 and decode nothing:
+`error: -R needs -f, -n or -p: a dump does not record which mode wrote it,
+and the modes stamp their packets with different clocks`.
+
+**Known limits.** The dumps are synthetic, so this covers the decode and the
+dump format, not the receive path, the radio, or the firmware that fills a
+record in. Nothing here verifies a CRC: the firmware is what checks one and
+sets the record's flag, so the fixture's CRC bytes are zero and the decode
+never looks at them. The company names are the pinned libbtbb table's, so a
+regenerated table that renames a company fails the case; that is a one-line
+update in `btlereplay.py`. The rest of the fork's own `-R` and `-d` surface
+goes uncovered here -- a destination that is the dump being replayed, the
+capture files a replay writes, a dump cut short or unreadable, and the
+spellings of standard output -- which the fork's own
+`host/ubertooth-tools/tests/test_btle_replay.py` covers at build time; the
+same checks for `ubertooth-rx` are in
+[Raw receive replay](#raw-receive-replay).
 
 ## Interrupting a capture
 
@@ -3874,19 +4011,33 @@ name it.
 **What it does.** Writes firmware to a board many times in a row, alternating
 two images, and verifies every write.
 
-**Theory of operation.** Alternating the images is what makes each write
-verifiable: every flash changes the expected revision, so reading
-`ubertooth-util -v` afterward distinguishes a successful write from a board
-that simply still holds what it had. Both images are pinned by SHA-256, the
-test build against the run manifest and the known-good image against the
-plan's own hash, checked before the run and again before each write, so a
-corrupted or swapped file cannot be mistaken for a flash failure. Every other
+**Theory of operation.** What makes each write verifiable is the pair of
+images. Both are pinned by SHA-256, the test build against the run manifest
+and the known-good image against the plan's own hash, checked before the run
+and again before each write, so a corrupted or swapped file cannot be mistaken
+for a flash failure; `ubertooth-dfu -d ... -r` reads its own write back
+against the file it wrote; and `ubertooth-util -v` afterwards must report the
+revision the image just written carries.
+
+The images have to be different files, and that is the whole of what the
+sequence requires. It used to require a distinct expected revision per image
+as well, on the reasoning that every write has to change what the board
+reports. Since
+[ubertooth#1230](https://github.com/SqueakyFloors/ubertooth/issues/1230)
+(`ubertooth#1232`) a version names the release a build came from rather than the
+build, so two images can be one release and two files -- and it is the file,
+by its SHA-256, that tells them apart. The revision read after each write is
+then what it says it is: the right release is on the board. Which of two
+builds of that release it is, it does not say, and with the published
+known-good image on one side of the alternation (a different release) it does
+not have to. Every other
 registered board on the host is read before the run and after every flash, so
 a write that reached the wrong board is caught rather than inferred.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, plus
 every other registered board. Required: `platforms:`, `flashes:` (the total
-number of writes), `image sequence:` (at least two distinct image labels),
+number of writes), `image sequence:` (at least two image labels, naming
+files that differ),
 `KGV sha256:`, and `KGV revision:`. The images are supplied as artifacts named
 after the labels: the run's own build provides `test build` (`--build
 --with-firmware`, or the controller's and the GUI's `with_firmware` option),
@@ -3967,7 +4118,7 @@ whose application region is 49152 bytes`). Every run also reads the table out
 of the fork's checkout at the
 commit under test and records the comparison, so the copy is kept in step
 without waiting for such a board to reach the bench: see the `dfu_part_table`
-record in the README's "DFU images" section.
+record in guide/builds-and-firmware.md, "DFU images".
 
 All three arrived on the fork's main after the earlier releases, so the case
 expects them: the range line in `10c3381`
@@ -4065,7 +4216,7 @@ and query workflow against a known advertiser.
 
 **Theory of operation.** The intent is to reproduce the shape of a
 production-style MAC polling workload in the harness's own process: a
-persistent `ubertooth-btle -f` capture with no `-U` on an isolated board, a
+persistent `ubertooth-btle -n -U <serial>` capture, a
 set of in-memory MAC buckets rotated on a timer, lookups on a second timer,
 listener-silence detection, and the empty-bucket restart timing. Modeling it
 in-process is deliberate: the harness will not start the original workload and
@@ -4235,10 +4386,10 @@ be the last one on that board.
 
 Its guard Ubertooths matter more here than in a test that writes nothing, and
 they are read under the rules in "Guard Ubertooths" above: a guard that
-answered none of `-v`, `-V`, `-s`, or `-B` turns the run away by name before
+answered none of `-v`, `-s`, or `-B` turns the run away by name before
 any case, since nothing about that board could be compared after the write. A
 guard carrying the alternate `btbr` image is not in that position — it answers
-all four — and it is guarded by what it answers, not reflashed to make it
+all three — and it is guarded by what it answers, not reflashed to make it
 answer more.
 
 **Expected outcome.** One case. The write must reach the flash and must not
@@ -4283,7 +4434,7 @@ run killed outright (SIGKILL) leaves whatever it was in the middle of: the
 port off if it was between the switch-off and the restore, and the board in
 its DFU bootloader with the unstartable image in flash if it was anywhere
 between the write and the recovery. Both are put right by hand — switch the
-port on (README, "USB power controllers") and write an image back with
+port on (reference/power-control.md) and write an image back with
 `ubertooth-dfu -d <image> -r` — because the next run cannot do it for you:
 preflight reads the board's serial before any case runs, and a board in DFU
 reports none. What the cleanup steps do cover is the case's own command being

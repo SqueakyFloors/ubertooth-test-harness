@@ -439,16 +439,17 @@ CHECKS: tuple[Check, ...] = (
         "payload-bearing records were 11 of 2620, so the rate is no basis "
         "for a floor either way",
     ),
+    # Unblocked and measured 2026-11-04. The bench gained a second DK
+    # declaring the central and peripheral roles, and the host the role-named
+    # defaults that let the pair resolve distinctly; both entries then passed
+    # through `run-suite`. `testplans/ble.yaml` carries the figures.
     Check(
         "HEC and CRC error flags, BLE",
-        "Capture known BLE connection", "Ubertooth", 40.0,
-        "a connection to capture: only one registered DK declares central and "
-        "peripheral, so no pair can be bound on this bench",
+        "Capture known BLE connection", "Ubertooth", 40.0, "",
     ),
     Check(
         "Follow a marginal BLE connection",
-        "Follow a BLE connection across its end", "Ubertooth", 20.0,
-        "the same single DK: following a connection across its end needs two",
+        "Follow a BLE connection across its end", "Ubertooth", 20.0, "",
     ),
     Check(
         "Transmit power steps",
