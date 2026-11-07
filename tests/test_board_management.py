@@ -1196,12 +1196,12 @@ class HolderTextTests(unittest.TestCase):
 
         holder = leases.holder_info(
             run_id=None, owner="agent-1",
-            purpose="lease: /home/someone/ubertooth-lab/build/bin/ubertooth-util -v",
+            purpose="lease: /opt/example/build/bin/ubertooth-util -v",
         )
         line = _holder_line(holder, {})
         self.assertIn("agent-1", line)
-        self.assertNotIn("ubertooth-lab", line)
-        self.assertNotIn("/home", line)
+        self.assertNotIn("/opt/example", line)
+        self.assertNotIn("ubertooth-util", line)
         self.assertIn(f"pid {os.getpid()}", line)
 
     def test_a_bench_lock_is_named_beside_the_lease(self):
