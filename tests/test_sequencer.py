@@ -14,7 +14,15 @@ from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.sequencer import NamedTestSequencer
 from ubertooth_harness.stateful import ATTEMPT_KEY, StateCase, Step
 
-from tests.test_manifest_preflight import make_git_repo
+from tests.test_manifest_preflight import (
+    LIBBTBB_RELEASE,
+    RELEASE,
+    make_git_repo,
+)
+
+# The host tools' version line, as every build prints it since fork
+# `ce13614c6`: one release name with libbtbb's beside it (#358).
+VERSION_LINE = f"Host tools version: {RELEASE} (libbtbb {LIBBTBB_RELEASE})\n"
 
 
 class CollectSink:
@@ -32,7 +40,7 @@ class FakeExecutor:
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         self.commands.append(tuple(argv))
-        output = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+        output = VERSION_LINE
         if self.fail_after is not None and len(self.commands) > self.fail_after:
             output = "wrong output"
         if on_output:
@@ -55,12 +63,11 @@ class IdentityExecutor(FakeExecutor):
         outputs = {
             "-v": "Firmware version: git-test (API:1.07)\n",
             # The whole -V answer, which is what -V prints wherever it
-            # appears: it ends the command (fork f898fe5).
+            # appears: it ends the command (fork f898fe5), and since fork
+            # #1233 it is these two lines.
             "-V": (
-                "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
-                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
-                "Firmware version: git-test (API:1.07)\n"
-                "Firmware build: ubertooth git-test (builder@host) timestamp\n"
+                VERSION_LINE
+                + "Firmware version: git-test (API:1.07)\n"
             ),
             "-s": "Serial No: abc123\n",
             "-p": "missing expected part output\n",
@@ -99,6 +106,7 @@ def run_contract(directory: Path, invocation):
         "test-ref",
         make_git_repo(source_path),
         "test",
+        build_version=RELEASE,
     )
     manifest = build_run_manifest(
         run_id="named-run",
@@ -118,7 +126,7 @@ def run_contract(directory: Path, invocation):
         None,
         {},
         ("ubertooth-util", "-V"),
-        (r"libubertooth\s+\S+\s+\(git\-test\)",),
+        (rf"Host tools version: {RELEASE} \(libbtbb \S+\)",),
         "git-test",
         # As PreflightPolicy builds it: -V reads every attached board after
         # the host line and exits 1 if one cannot be read.
@@ -211,7 +219,7 @@ class SequencerTests(unittest.TestCase):
             for index in commands:
                 result = transcript[index + 1]
                 self.assertIn(" exit 0 in ", result)
-                self.assertIn("[O] Host tools version: libubertooth 1.1 (git-test)", result)
+                self.assertIn(f"[O] Host tools version: {RELEASE}", result)
 
     def test_grouped_readback_reports_case_failure_and_continues(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -264,8 +272,7 @@ class SequencerTests(unittest.TestCase):
                         on_output("stderr", message)
                     return CommandResult(command, 1, "", message, 0.01, False)
                 output = ("ubertooth-util - usage\n" if command[-1] == "-h" else
-                          "Host tools version: libubertooth 1.1 (git-test), "
-                          "libbtbb 1.0 (git-btbb)\n")
+                          VERSION_LINE)
                 if on_output:
                     on_output("stdout", output)
                 return CommandResult(command, 0, output, "", 0.01, False)
@@ -336,8 +343,7 @@ class AttemptExecutor:
         command = tuple(argv)
         self.commands.append(command)
         if command == ("ubertooth-util", "-V"):
-            output = ("Host tools version: libubertooth 1.1 (git-test), "
-                      "libbtbb 1.0 (git-btbb)\n")
+            output = VERSION_LINE
         elif command[0] == "check":
             self.checks += 1
             output = ("capture ok\n" if self.checks >= self.passing_attempt

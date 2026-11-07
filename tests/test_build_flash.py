@@ -86,13 +86,13 @@ class FakeBoards:
             # for. This is the host version check's first question; `-H` below
             # is the fallback for older fork commits.
             output = (
-                f"Host tools version: libubertooth 1.1 ({self.host_revision}), "
-                f"libbtbb 1.0 ({self.host_revision})\n"
+                f"Host tools version: {self.host_revision} "
+                f"(libbtbb {self.host_revision})\n"
             )
         elif command == ("ubertooth-util", "-H"):
             output = (
-                f"libubertooth 1.1 ({self.host_revision}), "
-                f"libbtbb 1.0 ({self.host_revision})\n"
+                f"Host tools version: {self.host_revision} "
+                f"(libbtbb {self.host_revision})\n"
             )
         elif command[0] == "ubertooth-dfu":
             serial = command[command.index("-U") + 1]
@@ -128,15 +128,14 @@ class FakeBoards:
             else:
                 output = f"Firmware version: {self.revisions[serial]} (API:1.07)\n"
         elif command[-1] == "-V":
-            # The whole answer one board gives since fork f898fe5; the
-            # compile-info check reads the build string off its last line.
+            # The whole answer one board gives: the host line and this
+            # board's firmware version, which is what the per-board check
+            # reads (fork #1233 took the build string out).
             revision = self.revisions[command[2]]
             output = (
-                f"Host tools version: libubertooth 1.1 ({revision}), "
-                "libbtbb 1.0 (git-btbb)\n"
-                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                f"Host tools version: {self.host_revision} "
+                f"(libbtbb {self.host_revision})\n"
                 f"Firmware version: {revision} (API:1.07)\n"
-                f"Firmware build: ubertooth {revision} (builder@host) timestamp\n"
             )
         elif command[-1] == "-s":
             output = f"Serial No: {command[2]}\n"
@@ -385,8 +384,8 @@ class RunSuiteFlashTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
-        self.source, short = make_source(self.root)
-        self.revision = f"git-{short}"
+        self.source, revision = make_source(self.root)
+        self.revision = revision
         self.platform = "macos" if sys.platform == "darwin" else "linux"
         self.hardware = self.write_hardware("hardware.yaml", self.platform)
         self.lease_dir = self.root / "leases"
@@ -470,7 +469,9 @@ class RunSuiteFlashTests(unittest.TestCase):
                 plan.image(image).write_bytes(b"built firmware")
         publisher.emit("build_started", "running", {})
         publisher.emit("build_finished", "passed", {"reason": ""})
-        return BuildResult(plan, {}, f"libubertooth 1.1 ({self.revision})", ())
+        return BuildResult(
+            plan, {}, f"Host tools version: {self.revision} (libbtbb {self.revision})", (),
+        )
 
     def run_suite(self, executor, *extra, plan=None, missing=(), hardware=None,
                   platform=None):

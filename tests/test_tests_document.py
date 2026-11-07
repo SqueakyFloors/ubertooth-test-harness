@@ -963,7 +963,8 @@ class DocumentedCommandTests(unittest.TestCase):
         # what is compared, so it is a failure here -- every suite that was
         # left out is named, `weak-link.yaml`'s included.
         expected = [
-            "ble.yaml:ble-weak-link", "classic.yaml:classic-weak-link",
+            "ble.yaml:ble-weak-link", "ble.yaml:connection-weak-link",
+            "classic.yaml:classic-weak-link",
             "range.yaml:range-weak-link",
         ] + [f"weak-link.yaml:{suite}" for suite in
              load_plan(PLANS / "weak-link.yaml", self.catalog).suites]

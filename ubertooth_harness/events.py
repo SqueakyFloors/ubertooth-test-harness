@@ -205,6 +205,9 @@ class TerminalEventSink:
                 )
             elif details.get("observed") is not None:
                 line += f" (recorded {details.get('observed')})"
+            if details.get("uncompared"):
+                line += (f" (nothing recorded for {details['uncompared']}, "
+                         "so it was not compared)")
             if details.get("reason"):
                 line += f": {details['reason']}"
             self.stream.write(line + "\n")

@@ -193,10 +193,12 @@ class EstimateTests(unittest.TestCase):
         # fork 7cbc191a against the same test without them (#333). Asking
         # every host tool for its version rather than four of them adds 2.6 s
         # to Host CLI surface, scaled from its own calibration at 0.24 s a
-        # case (#347).
+        # case (#347). BLE replay (comprehensive) adds 1.6 s, the cases' own
+        # commands timed on the macOS host against a build of fork 4b28aec9
+        # (#357).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(1182.2, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1183.8, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 

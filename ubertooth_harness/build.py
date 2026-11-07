@@ -279,9 +279,10 @@ def plan_build(
                  source.commit),
                 timeout_s=120.0,
             ),
-            # The fork's version stamp uses `git diff-index`, which does not
-            # refresh file stat data; a fresh checkout can then look modified
-            # and stamp the build "git-<sha>*".
+            # The fork's version stamp asks git whether the tree is modified
+            # without refreshing file stat data first; a fresh checkout can
+            # then look modified and stamp the build with the `*` a modified
+            # tree gets, which no expectation predicts.
             BuildCommand(
                 f"{name}-refresh-index",
                 f"Refresh {source.name} file index",
@@ -390,11 +391,11 @@ def _host_version_line(text: str) -> str:
     """The one line the version patterns matched.
 
     What the manifest and the report call the built tools' version, so the
-    firmware lines `-V` prints under it, which belong to whatever board
-    happened to be attached, stay out of that field.
+    firmware line `-V` prints under it, which belongs to whatever board
+    happened to be attached, stays out of that field.
     """
     for line in text.splitlines():
-        if line.startswith(HOST_VERSION_LABEL) or line.startswith("libubertooth"):
+        if line.startswith(HOST_VERSION_LABEL):
             return line
     return text
 

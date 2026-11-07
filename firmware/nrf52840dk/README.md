@@ -1,8 +1,8 @@
 # nRF52840 DK role firmware
 
 Firmware for the Nordic nRF52840 DK (PCA10056) boards the harness uses as
-Bluetooth LE test devices. The Ubertooth stays receive-only; these boards do
-the transmitting.
+Bluetooth LE test devices. In these tests the Ubertooth only receives;
+these boards transmit.
 
 One image holds three roles, and one command switches between them:
 
