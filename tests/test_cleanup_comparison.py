@@ -482,6 +482,6 @@ class CleanupComparisonRunTests(unittest.TestCase):
                            "step_finished", "passed", details))
 
         self.assertEqual(
-            f"[cleanup passed] Read it back (recorded {BOOTLOADER}) "
-            f"(nothing recorded for {UNDER_ALTERNATE}, so it was not "
-            "compared)\n", stream.getvalue())
+            f"[CLEANUP PASS] Read it back (nothing recorded for "
+            f"{UNDER_ALTERNATE}, so it was not compared)\n"
+            f"    recorded: {BOOTLOADER}\n", stream.getvalue())
