@@ -1167,6 +1167,32 @@ class PageWiringTests(unittest.TestCase):
                         self.css.index(".history-more .hint")]
         self.assertIn("flex-wrap: wrap", more)
 
+    def test_a_stale_history_answer_cannot_replace_the_page(self):
+        # Filters that change while a page is in flight, and an older page
+        # asked for before them: the answer is dropped rather than shown
+        # beside, or appended to, rows of another query.
+        self.assertIn("historyToken: 0,", self.js)
+        self.assertIn("const token = ++state.historyToken;", self.js)
+        self.assertEqual(
+            3, self.js.count("if (token !== state.historyToken) return;")
+        )
+        self.assertIn("if (token === state.historyToken) {", self.js)
+
+    def test_the_row_count_follows_the_rows_live_updates_change(self):
+        # The page's own figure, plus the rows added since and less the
+        # rows that stopped matching; a fresh page clears both.
+        self.assertIn("state.historyAdded = new Set();", self.js)
+        self.assertIn("state.historyGone = new Set();", self.js)
+        self.assertIn(
+            "state.historyMatching + state.historyAdded.size - state.historyGone.size",
+            self.js,
+        )
+        # A run fetched by ID may be any run, however old, so it reaches
+        # the cache and not the rows: only the live stream and a run this
+        # page started add a row.
+        self.assertIn("function cacheRun(run)", self.js)
+        self.assertIn("cacheRun(data.run);", self.js)
+
     def test_only_runnable_plans_are_offered_to_start(self):
         # The plan <select> is filled from plans that load and are runnable;
         # the others are only named in the status line.

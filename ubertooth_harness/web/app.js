@@ -53,13 +53,22 @@
     runs: new Map(),
     // The history: the run IDs the loaded pages hold (the rows), the
     // filters those pages were asked for, the cursor the next page starts
-    // after (null once the oldest run is on the page), and the counts the
-    // last page reported.
+    // after (null once the oldest run is on the page), the counts the last
+    // page reported, and a token so a slower answer for filters already
+    // left, or an older page asked for before them, cannot replace or be
+    // appended to a newer one.
     historyIds: new Set(),
     historyFilters: { target: "", status: "", ref: "" },
     historyCursor: null,
     historyMatching: 0,
     historyTotal: 0,
+    historyToken: 0,
+    // Rows added since that page was fetched, and rows it counted that no
+    // longer match: what the count line adds to and takes off the page's
+    // own figure. The next page's figure is current, so both are cleared
+    // whenever one arrives.
+    historyAdded: new Set(),
+    historyGone: new Set(),
     plans: [],
     // The target the plan list on display was loaded for, the one a load is
     // under way for, and a token so a slower answer for a target already
@@ -565,7 +574,7 @@
     try {
       const data = await api("GET", runPath(runId));
       if (state.selected !== runId) return;
-      upsertRun(data.run);
+      cacheRun(data.run);
       state.live.invocations = Array.isArray(data.invocations) ? data.invocations : null;
       for (const record of data.events) addEvent(runId, record, false);
       // Now that the run's plan is known, lay out its checklist and replay.
@@ -1218,27 +1227,45 @@
       ? data.matching : state.historyIds.size;
     state.historyTotal = Number.isInteger(data.total)
       ? data.total : state.historyMatching;
+    // This figure counts every stored run the filters match now, so it
+    // already counts the rows added since the last page and leaves out the
+    // ones that stopped matching.
+    state.historyAdded = new Set();
+    state.historyGone = new Set();
   }
 
+  // A run record the page fetched by ID (watching a run, a #run= link): the
+  // cache, and a row it is already in, but never a new row. It may be any
+  // run, however old, and the rows are the pages the controller served.
+  function cacheRun(run) {
+    if (!run || typeof run.run_id !== "string") return;
+    state.runs.set(run.run_id, run);
+    if (state.historyIds.has(run.run_id)) renderHistory();
+    if (state.live && state.live.run_id === run.run_id) renderLive();
+  }
+
+  // A run the live stream reports, or one this page has just started: it
+  // joins the rows when the filters match it, and leaves them when they no
+  // longer do.
   function upsertRun(run) {
     if (!run || typeof run.run_id !== "string") return;
-    const counted = state.runs.has(run.run_id);
+    const known = state.runs.has(run.run_id);
     state.runs.set(run.run_id, run);
     if (matchesFilters(run)) {
+      state.historyGone.delete(run.run_id);
       if (!state.historyIds.has(run.run_id)) {
         state.historyIds.add(run.run_id);
-        // A run this page had not seen: it has just started, so it is newer
-        // than any page and belongs at the top of the rows and in the count.
-        if (!counted) {
-          state.historyMatching += 1;
-          state.historyTotal += 1;
-        }
+        // A run no page has held: it has just started, so it is newer than
+        // any page, and it belongs at the top of the rows and in the count.
+        if (!known) state.historyAdded.add(run.run_id);
       }
-    } else {
+    } else if (state.historyIds.delete(run.run_id)) {
       // A run the filters no longer match (one that was running and has
       // finished, with "running" chosen) leaves the rows; its record stays
       // in the cache, so watching it still works.
-      state.historyIds.delete(run.run_id);
+      if (!state.historyAdded.delete(run.run_id)) {
+        state.historyGone.add(run.run_id);
+      }
     }
     renderHistory();
     if (state.live && state.live.run_id === run.run_id) renderLive();
@@ -1287,9 +1314,14 @@
   }
 
   function renderHistoryCount(shown) {
-    // The figure the last page reported, and never fewer runs than are on
-    // display: a run that starts while a page is open joins the rows.
-    const matching = Math.max(state.historyMatching, shown);
+    // The page's own figure, with the rows added since taken on and the
+    // rows that stopped matching taken off, and never fewer runs than are
+    // on display.
+    const matching = Math.max(
+      state.historyMatching + state.historyAdded.size - state.historyGone.size,
+      shown,
+    );
+    const stored = Math.max(state.historyTotal + state.historyAdded.size, matching);
     $("history-older").hidden = !state.historyCursor;
     if (!shown) {
       $("history-count").textContent = "";
@@ -1297,7 +1329,7 @@
     }
     const sentences = [
       `Showing ${shown} of ${matching} run${matching === 1 ? "" : "s"}`
-      + (filtering() ? ` that match these filters, of ${state.historyTotal} stored.` : "."),
+      + (filtering() ? ` that match these filters, of ${stored} stored.` : "."),
     ];
     if (state.historyCursor) {
       sentences.push(`Load older adds up to ${HISTORY_PAGE} more, oldest last.`);
@@ -1340,12 +1372,17 @@
   // and whenever the filters change.
   async function loadRuns() {
     state.historyFilters = chosenFilters();
+    const token = ++state.historyToken;
     try {
       const data = await api("GET", historyQuery(null));
+      // Filters have changed, or an older page has been asked for, since
+      // this was sent: that request's answer is the page now.
+      if (token !== state.historyToken) return;
       takeRunPage(data, false);
       renderHistory();
       if (state.live) rebuildChecklist();
     } catch (error) {
+      if (token !== state.historyToken) return;
       $("history-empty").hidden = false;
       $("history-empty").textContent = `Cannot list runs: ${error.message}`;
     }
@@ -1356,15 +1393,23 @@
     if (!cursor) return;
     const button = $("history-older");
     const hadFocus = document.activeElement === button;
+    const token = ++state.historyToken;
     button.disabled = true;
     $("history-count").textContent = "Loading older runs…";
     try {
-      takeRunPage(await api("GET", historyQuery(cursor)), true);
+      const data = await api("GET", historyQuery(cursor));
+      // Never appended to rows the filters have changed under: that page
+      // belongs to a query nobody is showing any more.
+      if (token !== state.historyToken) return;
+      takeRunPage(data, true);
       renderHistory();
     } catch (error) {
-      $("history-count").textContent = `Cannot load older runs: ${error.message}`;
+      if (token === state.historyToken) {
+        $("history-count").textContent = `Cannot load older runs: ${error.message}`;
+      }
+    } finally {
+      button.disabled = false;
     }
-    button.disabled = false;
     // The button goes once the oldest run is on the page, so the keyboard
     // moves to the line that says so rather than back to the document.
     if (hadFocus) (state.historyCursor ? button : $("history-count")).focus();

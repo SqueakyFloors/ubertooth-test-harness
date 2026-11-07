@@ -150,6 +150,10 @@ _STATUS_RE = re.compile(r"^[a-z][a-z ]{0,30}[a-z]$")
 # ?ref=<ref>: the ref a run named, matched exactly. A ref name can hold most
 # characters, so only the length and control characters are refused.
 MAX_REF_CHARS = 256
+# A cursor of ``before`` alone sits before every run of that instant, so a
+# page boundary between two runs stamped alike repeats one rather than losing
+# one. Every run ID is ASCII (``_ID_RE``), so this sorts after all of them.
+_AFTER_EVERY_RUN_ID = "\uffff"
 LIVE_QUEUE_LIMIT = 1000
 # File page requests outstanding to one target. A reader pages through a file
 # one request at a time, so this is generous; it bounds what any process that
@@ -611,21 +615,31 @@ class Controller:
             self.runs[run.run_id] = run
 
     def _log_bytes(self, run: Run) -> bytes:
-        """The stored run.jsonl, with a partial trailing line dropped.
+        """The stored run.jsonl as it stands; nothing is written.
 
-        An interrupted append leaves a line that is not a record; it is
-        truncated here, once, by whichever read reaches the file first. A
-        file that is there but cannot be read raises, so nothing mistakes it
-        for a run that recorded nothing.
+        A file that is there but cannot be read raises, so nothing mistakes
+        it for a run that recorded nothing.
         """
-        path = run.directory / RUN_LOG
         try:
-            data = path.read_bytes()
+            return (run.directory / RUN_LOG).read_bytes()
         except FileNotFoundError:
             return b""
+
+    def _repaired_log_bytes(self, run: Run) -> bytes:
+        """The stored run.jsonl, with a partial trailing line truncated.
+
+        An interrupted append leaves a line that is not a record. Only the
+        first read of a run's records repairs it, and only from a path where
+        this controller cannot be appending to that file at the same time:
+        startup, before any runner has connected, and the dispatch of a
+        record or an end for a run whose own appends are that same awaiting
+        task. A reader must never truncate (``read_events``): a record being
+        appended as it reads would be lost from the run's own transcript.
+        """
+        data = self._log_bytes(run)
         if data and not data.endswith(b"\n"):
             keep = data.rfind(b"\n") + 1
-            with path.open("r+b") as stream:
+            with (run.directory / RUN_LOG).open("r+b") as stream:
                 stream.truncate(keep)
             data = data[:keep]
         return data
@@ -642,7 +656,9 @@ class Controller:
         """Read this run's stored records once, if they have not been read."""
         if run.transcript_read:
             return
-        self._note_transcript(run, self._parse_events(run, self._log_bytes(run)))
+        self._note_transcript(
+            run, self._parse_events(run, self._repaired_log_bytes(run))
+        )
 
     def _parse_events(self, run: Run, data: bytes) -> list[dict]:
         """Records of a stored run.jsonl; malformed lines are skipped and counted."""
@@ -707,11 +723,15 @@ class Controller:
         controller writes, so comparing those strings compares times, and
         the run ID settles two runs stamped in the same millisecond.
 
-        ``before`` (with ``before_run_id`` for that tie) is the cursor: the
-        page holds the runs that come after it in that order. The answer
-        carries the cursor for the next page, so a client pages through
+        ``before`` is the cursor, with ``before_run_id`` for that tie: the
+        page holds the runs after that position in the order above. The
+        answer carries both for the next page, so a client pages through
         without holding a position the controller has to keep for it, and
         nothing is served twice or missed when a run starts in between.
+        ``before`` on its own means "at or older than that instant", so
+        nothing stamped there is skipped past; it is not a cursor of its
+        own, because a page that stopped in the middle of an instant would
+        serve those runs again.
 
         Only the runs' own summaries are read: no stored transcript is
         parsed to list the history.
@@ -789,10 +809,14 @@ class Controller:
             )
         if before_run_id is not None and not valid_identifier(before_run_id):
             raise ControllerError("before_run_id must be a run ID", 422)
-        # Without a run ID the cursor sits before every run of that instant,
-        # so a page boundary in the middle of two runs stamped alike repeats
-        # one rather than losing one.
-        return (before, before_run_id or "")
+        if before_run_id is None:
+            # Without a run ID the cursor takes in every run of that
+            # instant, so nothing stamped there is paged past. It is not a
+            # cursor of its own: a page that stopped in the middle of an
+            # instant would serve those runs again, which is why the answer
+            # gives the run ID to go on from.
+            return (before, _AFTER_EVERY_RUN_ID)
+        return (before, before_run_id)
 
     # ----- retention -------------------------------------------------------
 
@@ -840,6 +864,15 @@ class Controller:
 
     def _remove_run_directory(self, run: Run) -> bool:
         """Delete one stored run directory, or log why it was left alone."""
+        # Judged before the path is resolved, which would follow a link and
+        # hide what is being asked for.
+        entry = self.results_dir / run.run_id
+        if entry.is_symlink():
+            self.log(
+                f"retention: keeping run {run.run_id}: a symbolic link, not a "
+                "run directory of its own"
+            )
+            return False
         try:
             directory = self._run_directory(run.run_id)
         except _Violation as error:
@@ -850,7 +883,7 @@ class Controller:
                 raise OSError(
                     f"{run.directory} is not the run directory of {run.run_id}"
                 )
-            if directory.is_symlink() or not directory.is_dir():
+            if not directory.is_dir():
                 raise OSError("not a directory of its own")
             record = directory / RUN_RECORD
             if record.is_symlink() or not record.is_file():
@@ -1061,9 +1094,11 @@ class Controller:
     def read_events(self, run: Run) -> list[dict]:
         """Every stored record of a run, parsed.
 
-        Also what reads a finished run's transcript for the first time since
-        startup, since whatever asks for the records has paid for the read
-        anyway: its sequence numbers and last record are noted on the run.
+        Reads only: a record being appended as this reads is not this
+        reader's to truncate (``_repaired_log_bytes``). Also what notes a
+        finished run's records for the first time since startup, since
+        whatever asks for them has paid for the read anyway: their sequence
+        numbers and the last one are noted on the run.
         """
         events = self._parse_events(run, self._log_bytes(run))
         if not run.transcript_read:
@@ -2673,8 +2708,8 @@ ENDPOINTS = {
     "GET /api/runs": (
         "one page of the run history, newest first: ?limit=N (50 by "
         f"default, {MAX_RUN_PAGE} at most) and ?before=<created_at>"
-        "[&before_run_id=ID] for the next page, with ?target=HOST, "
-        "?status=STATUS and ?ref=REF filters"
+        "&before_run_id=ID, the cursor the previous page returns, with "
+        "?target=HOST, ?status=STATUS and ?ref=REF filters"
     ),
     "GET /api/runs/{run_id}": (
         "one run with its events, failure summary, planned invocations and "

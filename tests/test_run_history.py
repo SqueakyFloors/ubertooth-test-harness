@@ -169,14 +169,32 @@ class PagingTests(HistoryFixture):
         self.assertFalse(second["has_more"])
 
     def test_a_cursor_without_a_run_id_keeps_every_run_of_that_instant(self):
-        # The issue's own cursor, ?before=<created_at> alone, sits before
-        # every run stamped at that instant: one may be repeated, none lost.
-        for run_id in ("run-a", "run-b"):
+        # ?before=<created_at> alone means "at or older than that instant",
+        # so nothing stamped there is skipped past. It is not on its own a
+        # paging cursor: a page that ends in the middle of an instant would
+        # serve those runs again, which is why the answer's cursor carries
+        # the run ID and why paging uses both.
+        for run_id in ("run-a", "run-b", "run-c"):
             write_run(self.results, run_id, created_at=stamp(0))
         write_run(self.results, "run-old", created_at=stamp(-1))
         controller = self.controller()
         page = controller.run_page(before=stamp(0))
-        self.assertEqual(["run-old"], [run["run_id"] for run in page["runs"]])
+        self.assertEqual(
+            ["run-c", "run-b", "run-a", "run-old"],
+            [run["run_id"] for run in page["runs"]],
+        )
+        # With the run ID the answer gives, the page goes on from exactly
+        # where it stopped.
+        first = controller.run_page(limit=1)
+        self.assertEqual(["run-c"], [run["run_id"] for run in first["runs"]])
+        listed, page = [], first
+        while page["has_more"]:
+            page = controller.run_page(
+                limit=1, before=page["next_before"],
+                before_run_id=page["next_before_run_id"],
+            )
+            listed.extend(run["run_id"] for run in page["runs"])
+        self.assertEqual(["run-b", "run-a", "run-old"], listed)
 
     def test_filters_by_target_status_and_ref(self):
         write_run(self.results, "run-1", created_at=stamp(1), target="Host_A",
@@ -291,6 +309,36 @@ class TranscriptTests(HistoryFixture):
         controller = self.controller(cls=CountingController)
         self.assertEqual(1, controller.transcript_reads)
         self.assertEqual({1, 2}, controller.runs["run-1"].seen)
+
+    def test_reading_a_runs_records_never_truncates_its_transcript(self):
+        # A record being appended as a reader reads it is not the reader's
+        # to drop: GET /api/runs/{run_id} on a running run reads the same
+        # file the runner's records are being appended to.
+        directory = write_run(
+            self.results, "run-1", created_at=stamp(0), status="running", records=2
+        )
+        log = directory / RUN_LOG
+        with log.open("a", encoding="utf-8") as stream:
+            stream.write('{"sequence": 3, "run_id": "run-1"')  # a partial line
+        controller = self.controller()
+        before = log.read_bytes()
+        run = controller.runs["run-1"]
+        # Startup repaired it: the run was loaded before the partial line
+        # was written, so read it back as it now stands.
+        self.assertEqual([1, 2], [record["sequence"] for record in
+                                  controller.read_events(run)])
+        self.assertEqual(before, log.read_bytes())
+        # And the first read of a stored run's records does repair it.
+        finished = write_run(
+            self.results, "run-2", created_at=stamp(1), finished_at=stamp(2),
+            records=2,
+        )
+        with (finished / RUN_LOG).open("a", encoding="utf-8") as stream:
+            stream.write('{"sequence": 3')
+        controller = self.controller()
+        controller._read_transcript(controller.runs["run-2"])
+        self.assertTrue((finished / RUN_LOG).read_bytes().endswith(b"\n"))
+        self.assertEqual({1, 2}, controller.runs["run-2"].seen)
 
     def test_a_transcript_that_cannot_be_read_leaves_the_report_alone(self):
         directory = write_run(
@@ -470,6 +518,9 @@ class RetentionTests(HistoryFixture):
         self.assertEqual([], controller.prune_runs())
         self.assertTrue(target.is_dir())
         self.assertTrue((target / "run.json").is_file())
+        self.assertTrue(
+            any("a symbolic link" in line for line in self.logs), self.logs
+        )
 
     def test_a_window_outside_zero_is_refused(self):
         for days in (0, -1, float("nan"), float("inf"), "7", True):
