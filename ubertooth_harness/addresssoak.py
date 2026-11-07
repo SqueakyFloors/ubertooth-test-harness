@@ -526,14 +526,22 @@ class TranscriptReader(threading.Thread):
                     self._flush_held()
                     self._log = None
 
-    def flush_now(self) -> None:
+    def flush_now(self, *, after_s: float = 0.0) -> None:
         """Push what has been read to the file, from another thread.
 
-        The cancellation path calls this: it no longer waits for this thread
-        to finish, and the lines already read are the evidence of how the run
-        ended.
+        Two callers, with the interval the difference between them. The main
+        loop calls this every poll with LOG_FLUSH_S, because the reader's own
+        interval is only reached when the next line arrives: a capture that
+        printed a line and then went quiet -- a channel with nothing on it, a
+        tool about to die -- would otherwise leave that line in the buffer
+        for as long as the silence lasted, and the file a reader is tailing
+        would be arbitrarily far behind. The teardown calls it with no
+        interval at all, since the lines already read are the evidence of how
+        the run ended.
         """
         with self._lock:
+            if after_s and self.clock() - self._flushed_at < after_s:
+                return
             self._flush_held()
 
     def _flush_held(self) -> None:
@@ -1611,6 +1619,14 @@ class Soak:
         return None
 
     def read_text(self) -> None:
+        if self.capture is not None and self.capture.reader is not None:
+            # The transcript is written by the reader thread and pushed to
+            # the file on an interval; the interval is only reached when a
+            # line arrives, so the loop asks for it here as well. A channel
+            # that has gone quiet then leaves the file no more than
+            # LOG_FLUSH_S behind, and this costs one flush a poll at most
+            # however many lines arrived.
+            self.capture.reader.flush_now(after_s=LOG_FLUSH_S)
         for kind, at, address in self.sink.drain():
             if kind != "adva":
                 continue

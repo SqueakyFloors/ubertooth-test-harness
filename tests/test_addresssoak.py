@@ -1923,11 +1923,39 @@ class TranscriptFlushTests(unittest.TestCase):
         reader.flush_now()
         self.assertIn(b"AdvA:", self.kept())
 
-    def open_reader(self, lines):
+    def test_a_quiet_channel_does_not_hold_a_line_in_the_buffer(self):
+        # The reader's own interval is only reached when the next line
+        # arrives, so a capture that printed a line and then went quiet
+        # would leave it buffered for as long as the silence lasted. The
+        # main loop asks for the flush as well (Soak.read_text), which is
+        # what this pins (#353, review round one).
+        clock = _Clock()
+        reader = self.open_reader([b"    AdvA:  c3:11:22:33:44:55 (random)\n"],
+                                  clock=clock)
+        self.until(lambda: reader.lines == 1)
+        self.assertEqual(b"", self.kept())
+        # Not yet: the interval the loop asks for has not passed.
+        reader.flush_now(after_s=addresssoak.LOG_FLUSH_S)
+        self.assertEqual(b"", self.kept())
+        clock.at += addresssoak.LOG_FLUSH_S
+        reader.flush_now(after_s=addresssoak.LOG_FLUSH_S)
+        self.assertIn(b"AdvA:", self.kept())
+
+    def test_the_loop_asks_for_the_flush_every_poll(self):
+        # The one place it is wired in: the loop's own catch-up with the
+        # tool's output.
+        asked = []
+        soak = _soak_for(self.log.parent)
+        soak.capture = _CaptureWithReader(asked)
+        soak.read_text()
+        self.assertEqual([addresssoak.LOG_FLUSH_S], asked)
+
+    def open_reader(self, lines, clock=None):
         """A reader over a stream that does not end until the test does."""
         stream = _OpenPipe(lines)
         reader = addresssoak.TranscriptReader(
-            stream, self.log, addresssoak.LineSink(), clock=lambda: 0.0)
+            stream, self.log, addresssoak.LineSink(),
+            clock=clock or (lambda: 0.0))
         # Closed first, so the thread leaves its loop and the join returns.
         self.addCleanup(reader.join, 30)
         self.addCleanup(stream.close)
@@ -1956,6 +1984,38 @@ class TranscriptFlushTests(unittest.TestCase):
         self.assertEqual(2, reader.dropped_lines)
         self.assertEqual(2 * len(line), reader.written_bytes)
         self.assertEqual(2 * len(line), self.log.stat().st_size)
+
+
+class _Clock:
+    """A clock a test moves by hand."""
+
+    def __init__(self, at=0.0):
+        self.at = at
+
+    def __call__(self):
+        return self.at
+
+
+class _CaptureWithReader:
+    """A capture whose reader only records the flushes it was asked for."""
+
+    def __init__(self, asked):
+        self.reader = type("Reader", (), {
+            "flush_now": lambda _self, *, after_s=0.0: asked.append(after_s),
+        })()
+
+
+def _soak_for(directory):
+    """A Soak with nothing running, for the one call under test.
+
+    The bench is here only for the figures a plan carries; the run's output
+    directory is the test's own, and nothing of it is written.
+    """
+    bench = SoakBench()
+    options = addresssoak.options_from(
+        addresssoak.build_parser().parse_args(bench.argv(out=directory)))
+    bench.close()
+    return addresssoak.Soak(options, None)
 
 
 class _OpenPipe:
