@@ -35,19 +35,20 @@ set(RELEASE_TAG_MATCH
 \t--match "[0-9][0-9][0-9][0-9]-[0-9][0-9]-DEV[0-9]*")
 set(RELEASE_TAG_FORM "^[0-9][0-9][0-9][0-9]-[0-9][0-9]-(R|RC|DEV)[0-9]+$")
 """
-# libbtbb as the commit the fork pins has it: a floor, and no second look at
-# the tag name. Both differ at a later libbtbb commit, which is why neither is
-# fixed per repository (LIBBTBB_LATEST_FILE below).
-LIBBTBB_PINNED_FILE = """\
+# libbtbb as its earlier commits had it: a floor, and no second look at the
+# tag name. Both differ at the commit the fork pins, which is why neither is
+# fixed per repository (LIBBTBB_PINNED_FILE below).
+LIBBTBB_EARLIER_FILE = """\
 set(LATEST_RELEASE "2020-12-R1")
 set(BTBB_RELEASE_TAG_GLOBS
 \t"[0-9][0-9][0-9][0-9]-[0-9][0-9]-R[0-9]*"
 \t"[0-9][0-9][0-9][0-9]-[0-9][0-9]-RC[0-9]*"
 \t"[0-9][0-9][0-9][0-9]-[0-9][0-9]-DEV[0-9]*")
 """
-# libbtbb at a later commit: it looks again at the tag name, and it names no
-# floor at all, so a tree with no release tag in reach reports "unknown".
-LIBBTBB_LATEST_FILE = """\
+# libbtbb at the commit the fork pins: it looks again at the tag name, and it
+# names no floor at all, so a tree with no release tag in reach reports
+# "unknown".
+LIBBTBB_PINNED_FILE = """\
 set(BTBB_RELEASE_TAG_GLOBS
 \t"[0-9][0-9][0-9][0-9]-[0-9][0-9]-R[0-9]*"
 \t"[0-9][0-9][0-9][0-9]-[0-9][0-9]-RC[0-9]*"
@@ -208,48 +209,48 @@ class ReleaseNameTests(unittest.TestCase):
     def test_libbtbb_s_own_commits_differ_on_the_tag_name_check(self):
         """A tag a glob let through is a release to one commit and not another.
 
-        libbtbb makes no second check on the name git handed back at the
-        commit the fork pins, and does at a later one. So the rule is read off
-        the file, not fixed per repository: the pinned commit reports that tag
-        and the later one reports no release at all.
+        libbtbb's earlier commits made no second check on the name git handed
+        back, and the commit the fork pins does. So the rule is read off the
+        file, not fixed per repository: an earlier commit reports that tag and
+        the pinned one reports no release at all.
         """
+        earlier = Checkout(self.root / "libbtbb-earlier", kind="libbtbb",
+                           text=LIBBTBB_EARLIER_FILE)
+        earlier.commit("work")
+        earlier.tag("2026-11-R1-local")
+        earlier.commit("more")
+        self.assertEqual("2026-11-R1-local+1", earlier.version().value)
+
         pinned = Checkout(self.root / "libbtbb-pinned", kind="libbtbb",
                           text=LIBBTBB_PINNED_FILE)
         pinned.commit("work")
         pinned.tag("2026-11-R1-local")
         pinned.commit("more")
-        self.assertEqual("2026-11-R1-local+1", pinned.version().value)
-
-        later = Checkout(self.root / "libbtbb-later", kind="libbtbb",
-                         text=LIBBTBB_LATEST_FILE)
-        later.commit("work")
-        later.tag("2026-11-R1-local")
-        later.commit("more")
         # No floor in that file either, so the whole answer is the distance.
-        self.assertEqual("unknown", later.version().value)
+        self.assertEqual("unknown", pinned.version().value)
 
     def test_a_file_with_no_floor_reports_the_distance_alone(self):
-        """libbtbb at a later commit names no LATEST_RELEASE.
+        """libbtbb at the commit the fork pins names no LATEST_RELEASE.
 
         There is no release to stand in for one, so a checkout with no release
         tag in reach reports `unknown` rather than `<floor>+unknown`.
         """
-        later = Checkout(self.root / "libbtbb-no-floor", kind="libbtbb",
-                         text=LIBBTBB_LATEST_FILE)
-        later.commit("work")
-        self.assertEqual("unknown", later.version().value)
-
-        # And the same checkout with a release tag in reach is unaffected.
-        later.tag("2026-11-DEV1")
-        later.commit("more")
-        self.assertEqual("2026-11-DEV1+1", later.version().value)
-
-    def test_the_pinned_libbtbb_still_reports_its_floor(self):
-        pinned = Checkout(self.root / "libbtbb-floor", kind="libbtbb",
+        pinned = Checkout(self.root / "libbtbb-no-floor", kind="libbtbb",
                           text=LIBBTBB_PINNED_FILE)
         pinned.commit("work")
+        self.assertEqual("unknown", pinned.version().value)
 
-        self.assertEqual("2020-12-R1+unknown", pinned.version().value)
+        # And the same checkout with a release tag in reach is unaffected.
+        pinned.tag("2026-11-DEV1")
+        pinned.commit("more")
+        self.assertEqual("2026-11-DEV1+1", pinned.version().value)
+
+    def test_an_earlier_libbtbb_still_reports_its_floor(self):
+        earlier = Checkout(self.root / "libbtbb-floor", kind="libbtbb",
+                           text=LIBBTBB_EARLIER_FILE)
+        earlier.commit("work")
+
+        self.assertEqual("2020-12-R1+unknown", earlier.version().value)
 
     def test_the_two_fork_files_have_to_name_one_floor(self):
         """With no release tag in reach the floor is the whole answer.
@@ -387,7 +388,8 @@ class PartsTests(unittest.TestCase):
 
     def test_the_tag_form_check_is_read_off_the_file(self):
         self.assertTrue(release.tag_form_checked(RELEASE_FILE))
-        self.assertFalse(release.tag_form_checked(LIBBTBB_PINNED_FILE))
+        self.assertTrue(release.tag_form_checked(LIBBTBB_PINNED_FILE))
+        self.assertFalse(release.tag_form_checked(LIBBTBB_EARLIER_FILE))
 
     def test_a_dirty_checkout_never_reaches_the_derivation(self):
         """The `*` a modified tree gets is never predicted, and need not be.

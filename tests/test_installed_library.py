@@ -32,10 +32,10 @@ AGREED = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from commit "
 # final message does; the agreeing one puts it in them.
 DIFFERED = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from commit "
             "52b2afc; this tree is built against "
-            "7e1cdf0336857a714da1af8c7496fe32453ac6d0\n")
+            "d356e9da7fb03969371aa14d603a8aad2f0ef198\n")
 UNKNOWN = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, commit unknown "
            "(nothing in it reads as the commit it was built from); this tree "
-           "is built against 7e1cdf0336857a714da1af8c7496fe32453ac6d0\n")
+           "is built against d356e9da7fb03969371aa14d603a8aad2f0ef198\n")
 OTHER_LINES = "-- The C compiler identification is GNU 13.2.0\n-- Found USB1\n"
 
 
@@ -99,7 +99,7 @@ class ConfigureIdentityTests(unittest.TestCase):
                           PREFIX, pin))
         with self.assertRaises(InstalledLibraryError) as caught:
             configure_identity(OTHER_LINES + AGREED, PREFIX,
-                               "7e1cdf0336857a714da1af8c7496fe32453ac6d0")
+                               "d356e9da7fb03969371aa14d603a8aad2f0ef198")
         self.assertIn("where its own FindBTBB.cmake sets",
                       str(caught.exception))
 
@@ -317,14 +317,14 @@ class ForkPinTests(unittest.TestCase):
 
     def test_a_commented_out_pin_is_not_the_pin(self):
         text = ('# set(LIBBTBB_PINNED_REF "0000000")\n'
-                'set(LIBBTBB_PINNED_REF "7e1cdf0336857a714da1af8c7496fe32453ac6d0")\n')
-        self.assertEqual("7e1cdf0336857a714da1af8c7496fe32453ac6d0",
+                'set(LIBBTBB_PINNED_REF "d356e9da7fb03969371aa14d603a8aad2f0ef198")\n')
+        self.assertEqual("d356e9da7fb03969371aa14d603a8aad2f0ef198",
                          installedlib.fork_pin(text))
 
     def test_the_pin_is_read_out_of_the_module(self):
         text = ('set(LIBBTBB_PINNED_REPO "SqueakyFloors/libbtbb")\n'
-                'set(LIBBTBB_PINNED_REF "7e1cdf0336857a714da1af8c7496fe32453ac6d0")\n')
-        self.assertEqual("7e1cdf0336857a714da1af8c7496fe32453ac6d0",
+                'set(LIBBTBB_PINNED_REF "d356e9da7fb03969371aa14d603a8aad2f0ef198")\n')
+        self.assertEqual("d356e9da7fb03969371aa14d603a8aad2f0ef198",
                          installedlib.fork_pin(text))
 
     def test_a_module_that_sets_none_is_refused(self):
