@@ -3,8 +3,8 @@
 `scripts/ci.sh build` installs the fork's host tree into a prefix and then
 reads that install the way something outside the tree would: with
 `pkg-config`, with `find_package(ubertooth)`, and by configuring
-`host/ubertooth-tools` on its own against it. Two of its steps need more than
-a shell comparison, and they live here so a unit test can run them:
+`host/ubertooth-tools` on its own against it. Some of its steps need more
+than a shell comparison, and they live here so a unit test can run them:
 
     python -m ubertooth_harness.installedlib configure-identity LOG --prefix P
                                              [--expected-pin REF]
@@ -125,8 +125,8 @@ _LOADED_FROM = "libbtbb loaded from: "
 _ANOTHER_LIBBTBB = "libbtbb was loaded from"
 # The whole of that warning, with the two directories it names: the one the
 # loader opened libbtbb from and the one the build recorded
-# (BTBB_BUILD_LIBDIR). Anchored at both ends and read non-greedily, so a path
-# cannot be taken from the wrong side of a separator.
+# (BTBB_BUILD_LIBDIR). Anchored at both ends, so a line that merely holds the
+# warning's words somewhere in it is refused rather than read as the warning.
 _ANOTHER_LIBBTBB_LINE = re.compile(
     r"\Awarning: libbtbb was loaded from (?P<loaded>.+?), not the "
     r"(?P<built>.+?) these tools were built against; packets may decode "

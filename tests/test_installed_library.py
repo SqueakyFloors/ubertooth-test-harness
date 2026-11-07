@@ -1,7 +1,7 @@
 """The installed-library checks of `scripts/ci.sh build` (#333).
 
 The steps themselves need cmake, a compiler, pkg-config and an installed
-libubertooth, so they are the build job's; what is tested here is the two
+libubertooth, so they are the build job's; what is tested here is the
 judgements they rest on (`installedlib.py`) and that the build step still
 makes them.
 """
@@ -23,11 +23,6 @@ from ubertooth_harness.installedlib import (
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / "scripts" / "ci.sh"
 PREFIX = "/tmp/build/prefix"
-# The pin the fork's own FindBTBB.cmake sets, which is what the configure's
-# line has to name; the commit the library was found to be built from is
-# another commit of libbtbb, as it is whenever the harness's pin and the
-# fork's differ.
-FORK_PIN = "d356e9da7fb03969371aa14d603a8aad2f0ef198"
 # The two wordings FindBTBB.cmake's btbb_report_pin() prints, as CMake
 # prefixes them, with the pin written out in full in both.
 AGREED = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from commit "
@@ -36,10 +31,11 @@ AGREED = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from commit "
 # The mismatch wording names the pin without parentheses, as FindBTBB's
 # final message does; the agreeing one puts it in them.
 DIFFERED = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, built from commit "
-            f"52b2afc; this tree is built against {FORK_PIN}\n")
+            "52b2afc; this tree is built against "
+            "7e1cdf0336857a714da1af8c7496fe32453ac6d0\n")
 UNKNOWN = ("-- libbtbb: /tmp/build/prefix/lib/libbtbb.so, commit unknown "
            "(nothing in it reads as the commit it was built from); this tree "
-           f"is built against {FORK_PIN}\n")
+           "is built against 7e1cdf0336857a714da1af8c7496fe32453ac6d0\n")
 OTHER_LINES = "-- The C compiler identification is GNU 13.2.0\n-- Found USB1\n"
 
 
@@ -383,6 +379,20 @@ class AnotherLibbtbbTests(unittest.TestCase):
         with self.assertRaises(InstalledLibraryError) as caught:
             self.control(text)
         self.assertIn("names both directories", str(caught.exception))
+
+    def test_a_line_that_merely_holds_the_warning_s_words_is_refused(self):
+        # The warning is read as the whole of a line, so neither a line that
+        # carries it inside something else nor one that goes on after it is
+        # the warning: both would leave a reader of a failed job guessing
+        # which directories were compared.
+        warning = WARNING.format(loaded=self.decoy, built=self.built)
+        for line in (f"note: {warning}",
+                     f"{warning}, or so it says"):
+            with self.subTest(line[:30]):
+                text = f"{VERSION_LINE}\n{line}\n{BOARD_LINE}\n"
+                with self.assertRaises(InstalledLibraryError) as caught:
+                    self.control(text)
+                self.assertIn("names both directories", str(caught.exception))
 
     def test_an_install_that_names_the_path_it_loaded_is_refused(self):
         # Such an install is the positive evidence itself, so the step is not
