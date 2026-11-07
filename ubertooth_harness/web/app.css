@@ -316,7 +316,7 @@ button.primary:disabled:hover { background: var(--primary); }
    the row it sits in, and never the only way to reach the information:
    the dialog it opens links the full documentation too. */
 .info-button {
-  flex: none; min-height: 1.45rem; width: 1.45rem; height: 1.45rem;
+  flex: none; min-height: 1.6rem; width: 1.6rem; height: 1.6rem;
   padding: 0; border-radius: 50%;
   border: 1px solid var(--line-strong); background: var(--button-bg);
   color: var(--link); font-size: 0.8rem; font-weight: 700; font-style: italic;
@@ -325,6 +325,9 @@ button.primary:disabled:hover { background: var(--primary); }
 /* Beside a name that is part of a line of text rather than a row of its own. */
 .failure .info-button { margin-left: 0.4rem; }
 
+/* Hidden while closed even where <dialog> is unknown, which is the only
+   browser the open-attribute fallback in app.js is for. */
+.info-dialog:not([open]) { display: none; }
 .info-dialog {
   width: min(44rem, calc(100vw - 1.5rem));
   max-height: min(85vh, 48rem); overflow: auto;
@@ -349,9 +352,12 @@ button.primary:disabled:hover { background: var(--primary); }
   list-style: none; margin: 0; padding: 0;
   display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem;
 }
-/* The full-documentation link stays in view while a long entry scrolls. */
+/* The full-documentation link stays in view while a long entry scrolls,
+   with a shadow where there is more above it, so a section cut off at the
+   footer reads as more to scroll rather than as an empty section. */
 .info-links {
   position: sticky; bottom: 0; background: var(--surface);
+  box-shadow: 0 -0.6rem 0.6rem -0.6rem rgba(0, 0, 0, 0.22);
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem;
   margin: 1.1rem 0 0; padding: 0.8rem 0 1.15rem;
   border-top: 1px solid var(--line);

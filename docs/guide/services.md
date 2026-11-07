@@ -324,8 +324,10 @@ word and symbol (colour only reinforces it).
   button that opens a dialog in the page: the test's purpose, theory of
   operation, hardware and traffic, expected outcome, what a pass does not
   prove, what the catalog binds and accepts, its catalog estimate and
-  profile, the plans that list it (so a longer or soak form of it is
-  visible), the issues behind it, and a link to its full
+  profile as the listing it was opened from gives them (a test two plans
+  list at different coverages has an estimate per listing, and the line
+  names the one it read), the plans that list it (so a longer or soak form
+  of it is visible), the issues behind it, and a link to its
   [docs/tests.md](../tests.md) section in a separate tab. It is a real
   button: Tab reaches it, Enter or Space opens it, focus enters the dialog
   at its heading, and Escape or Close returns focus to the button. The

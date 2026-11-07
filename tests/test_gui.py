@@ -1341,45 +1341,50 @@ class PageWiringTests(unittest.TestCase):
         # real button beside the name, and nothing is behind a right-click
         # (#315).
         self.assertRegex(
-            self.html, r'<ul id="suite-test-list" class="test-list" aria-label="[^"]+">')
+            self.html,
+            r'<ul id="suite-test-list" class="test-list" role="list" aria-label="[^"]+">')
         setup = self.js[self.js.index("function renderSuiteTests()"):
                         self.js.index("function syncRunButton()")]
         self.assertIn("infoButton(test.name)", setup)
         self.assertIn('className: "test-name", text: test.name', setup)
         live = self.js[self.js.index("function renderLive()"):
                        self.js.index("function renderClock()")]
-        self.assertIn("infoButton(item.name)", live)
+        self.assertIn("infoButton(item.name, { plan: run.plan, suite: run.suite })",
+                      live)
         failures = self.js[self.js.index("async function showFailures(runId)"):
                            self.js.index("// ----- live socket")]
-        self.assertIn(
-            "state.testInfo[failure.step] ? infoButton(failure.step) : null",
-            failures,
-        )
-        button = self.js[self.js.index("function infoButton(name)"):
-                         self.js.index("function openTestInfo(name, invoker)")]
+        self.assertIn("infoButton(failure.step, { plan: run.plan, suite: run.suite })",
+                      failures)
+        self.assertIn("state.testInfo[failure.step]", failures)
+        button = self.js[self.js.index("function infoButton(name, context)"):
+                         self.js.index("function openTestInfo(name, invoker, context)")]
         self.assertIn('type: "button", className: "info-button"', button)
         # Named for a screen reader and for a pointer, and the glyph itself
         # is hidden, so the name is not read as the letter i.
         self.assertIn('"aria-label": label, title: label', button)
         self.assertIn('"aria-hidden": "true", text: "i"', button)
-        self.assertIn("openTestInfo(name, event.currentTarget)", button)
+        self.assertIn("openTestInfo(name, event.currentTarget, context)", button)
         # No right-click path anywhere: the issue rules it out.
         self.assertNotIn("contextmenu", self.js)
 
     def test_the_info_dialog_is_keyboard_accessible(self):
         # A dialog of the page itself, named and described by its own
-        # heading and purpose; focus enters it at the heading, and Close,
-        # Escape and the backdrop all put focus back on the button.
+        # heading and purpose; focus enters it at the heading, and Close and
+        # Escape both put focus back on the button.
         self.assertRegex(
             self.html, r'<dialog id="test-info"[^>]*aria-labelledby="test-info-title"')
         self.assertRegex(
             self.html, r'<dialog id="test-info"[^>]*aria-describedby="test-info-purpose"')
         self.assertIn('<h2 id="test-info-title" tabindex="-1">', self.html)
         self.assertIn('<button type="button" id="test-info-close">', self.html)
-        body = self.js[self.js.index("function openTestInfo(name, invoker)"):
+        body = self.js[self.js.index("function openTestInfo(name, invoker, context)"):
                        self.js.index("function closeTestInfo()")]
-        self.assertIn("dialog.showModal();", body)
-        self.assertIn('$("test-info-title").focus();', body)
+        # Focus is moved after the dialog is shown: before it, the
+        # browser's own initial focus would win.
+        self.assertRegex(
+            body,
+            r'(?s)dialog\.showModal\(\);.*\$\("test-info-title"\)\.focus\(\);',
+        )
         self.assertIn("state.infoInvoker = invoker || null;", body)
         start = self.js[self.js.index("function start()"):]
         self.assertIn('$("test-info-close").addEventListener("click", closeTestInfo);',
@@ -1398,7 +1403,7 @@ class PageWiringTests(unittest.TestCase):
         # rows carry: no request of its own, and no path from the client.
         self.assertIn("state.testInfo = data.test_information || {};", self.js)
         self.assertNotIn("/api/test-info", self.js)
-        body = self.js[self.js.index("function openTestInfo(name, invoker)"):
+        body = self.js[self.js.index("function openTestInfo(name, invoker, context)"):
                        self.js.index("function closeTestInfo()")]
         for heading in ("Theory of operation", "Hardware and traffic",
                         "Expected outcome", "What a pass does not prove",
@@ -1413,7 +1418,7 @@ class PageWiringTests(unittest.TestCase):
                            self.js.index("function relatedSection(info)")]
         self.assertIn("row.hardware_roles", hardware)
         self.assertIn("row.arguments", hardware)
-        runtime = self.js[self.js.index("function runtimeText(row)"):
+        runtime = self.js[self.js.index("function runtimeText(found)"):
                           self.js.index("function safeHref(url)")]
         self.assertIn("row.catalog_estimated_s", runtime)
         self.assertIn("row.estimate_profile", runtime)
@@ -1422,32 +1427,66 @@ class PageWiringTests(unittest.TestCase):
         # A longer or soak form of the test is visible as the plans that
         # list it, with the plans that cannot be started marked.
         appearances = self.js[self.js.index("function testAppearances(name)"):
-                              self.js.index("function runtimeText(row)")]
+                              self.js.index("function runtimeText(found)")]
         self.assertIn("plan.runnable === true", appearances)
         self.assertIn("(planned, not runnable)", appearances)
         # Related issues as links, and the full document as one more.
         related = self.js[self.js.index("function relatedSection(info)"):
-                          self.js.index("function infoButton(name)")]
+                          self.js.index("function infoButton(name, context)")]
         self.assertIn("info.related", related)
         self.assertIn("Related issues", related)
+
+    def test_the_runtime_figure_comes_from_the_listing_it_is_asked_about(self):
+        # `fast` lists Argument validation at smoke coverage and `release`
+        # at comprehensive, so the catalog estimate and profile differ per
+        # listing: the dialog reads the run's own listing when it is opened
+        # beside a run's step, and names whichever it read.
+        catalog = builtin_catalog()
+        plans = {
+            path.stem: load_plan(path, catalog)
+            for path in sorted((REPOSITORY / "testplans").glob("*.yaml"))
+        }
+        coverages = {}
+        for name, plan in plans.items():
+            for suite, steps in plan.suites.items():
+                for step in steps:
+                    coverages.setdefault(step.test_name, set()).add(
+                        step.arguments.get("coverage"))
+        self.assertTrue(
+            [test for test, seen in coverages.items() if len(seen) > 1],
+            "no test is listed at two coverages, so this would not matter",
+        )
+        body = self.js[self.js.index("function catalogRow(name, context)"):
+                       self.js.index("function testAppearances(name)")]
+        # The listing asked about first, then Run setup's own choice, then
+        # any listing that holds the test, and which one it was is returned.
+        self.assertIn("if (context && context.plan) wanted.push([context.plan, context.suite]);",
+                      body)
+        self.assertIn('wanted.push([$("plan").value, $("suite").value]);', body)
+        self.assertIn("return { row, plan, suite };", body)
+        runtime = self.js[self.js.index("function runtimeText(found)"):
+                          self.js.index("function safeHref(url)")]
+        self.assertIn("const listing = `as ${found.plan} / ${found.suite} lists it`;",
+                      runtime)
+        self.assertIn("${listing}", runtime)
 
     def test_information_the_page_has_not_got_is_said_and_stops_nothing(self):
         # A test with no entry, a file the controller could not read, a
         # listing that failed, and a name no plan holds: each ends at a
         # dialog that says why, and none of them is read by Run.
         missing = self.js[self.js.index("function testInfoFor(name)"):
-                          self.js.index("function catalogRow(name)")]
+                          self.js.index("function catalogRow(name, context)")]
         self.assertIn("available: false", missing)
         self.assertIn("No plan the controller lists holds this test", missing)
         self.assertIn("The plan listing has not loaded", missing)
-        body = self.js[self.js.index("function openTestInfo(name, invoker)"):
+        body = self.js[self.js.index("function openTestInfo(name, invoker, context)"):
                        self.js.index("function closeTestInfo()")]
         # The server's own reason (a missing or malformed file) is shown as
         # the dialog's description, with the catalog facts still under it.
         self.assertIn("info.unavailable_reason", body)
         self.assertIn("info.available ? infoSection(", body)
         self.assertIn("What the catalog itself says about it is below.", body)
-        runtime = self.js[self.js.index("function runtimeText(row)"):
+        runtime = self.js[self.js.index("function runtimeText(found)"):
                           self.js.index("function safeHref(url)")]
         self.assertIn("if (!row) {", runtime)
         # Run holds for what the controller would refuse, never for this.
@@ -1470,9 +1509,17 @@ class PageWiringTests(unittest.TestCase):
         safe = self.js[self.js.index("function safeHref(url)"):
                        self.js.index("function infoSection(")]
         self.assertIn('text.startsWith("https://") ? text : ""', safe)
-        self.assertEqual(3, self.js.count("safeHref("))  # defined, plus two uses
-        self.assertNotIn("href: item.url", self.js)
-        self.assertNotIn("documentation.url,", self.js)
+        # Every href the dialog builds comes from safeHref and nothing
+        # else: one for a related issue, one for the full documentation,
+        # each passed as the shorthand of the checked local.
+        dialog = self.js[self.js.index("function relatedSection(info)"):
+                         self.js.index("function closeTestInfo()")]
+        self.assertEqual(2, dialog.count("const href = "), dialog)
+        self.assertEqual(2, dialog.count(" href,"), dialog)
+        self.assertNotRegex(dialog, r"href:")  # never set from an expression
+        self.assertIn("const href = safeHref(item && item.url);", dialog)
+        self.assertIn('const href = documentation ? safeHref(documentation.url) : "";',
+                      dialog)
         self.assertIn('rel: "noreferrer noopener"', self.js)
 
     def test_script_has_no_html_injection_sinks(self):

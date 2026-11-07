@@ -572,21 +572,34 @@
     };
   }
 
-  // The catalog's own facts for this test: the row of the chosen suite
-  // where that suite holds it, and otherwise the first listing that does.
-  // Everything on the row is the catalog's and the same in every plan,
-  // except the estimate, which belongs to the chosen target.
-  function catalogRow(name) {
-    const chosen = findSuite($("plan").value, $("suite").value);
-    const here = chosen && chosen.tests.find((test) => test.name === name);
-    if (here) return here;
+  // The catalog's own facts for this test, and the listing they were read
+  // from. The roles the catalog binds and the arguments it accepts are the
+  // same wherever a test is listed, but its estimate and the coverage
+  // profile that estimate was read at are the *step's*: `fast` lists
+  // Argument validation at smoke coverage and `release` at comprehensive,
+  // so a figure from the wrong listing would be the wrong figure.
+  //
+  // So the caller says which listing it is asking about: the run's plan and
+  // suite in the live checklist and in a failure summary, and Run setup's
+  // own choice there. The chosen suite is the fallback, and then any
+  // listing that holds the test, which is all there is for a run whose plan
+  // the controller does not have; the Runtime line names whichever it used.
+  function catalogRow(name, context) {
+    const wanted = [];
+    if (context && context.plan) wanted.push([context.plan, context.suite]);
+    wanted.push([$("plan").value, $("suite").value]);
+    for (const [plan, suite] of wanted) {
+      const listing = findSuite(plan, suite);
+      const row = listing && listing.tests.find((test) => test.name === name);
+      if (row) return { row, plan, suite };
+    }
     for (const plan of state.plans) {
       for (const suite of plan.suites || []) {
         const row = suite.tests.find((test) => test.name === name);
-        if (row) return row;
+        if (row) return { row, plan: plan.name, suite: suite.name };
       }
     }
-    return null;
+    return { row: null, plan: "", suite: "" };
   }
 
   // Every plan and suite that lists this test, so a longer or soak form of
@@ -608,22 +621,26 @@
   // What the catalog times this test at, and what this target has measured.
   // The catalog estimate and its profile are what the issue asks for; a
   // learned figure is said beside it rather than instead of it, so the two
-  // are never confused.
-  function runtimeText(row) {
+  // are never confused. Both belong to one listing of the test, which the
+  // line names, because another plan may list the same test at another
+  // coverage and so another estimate (see `catalogRow`).
+  function runtimeText(found) {
+    const row = found.row;
     if (!row) {
       return "No plan the controller lists holds this test, so its estimate"
         + " and profile are not known here.";
     }
+    const listing = `as ${found.plan} / ${found.suite} lists it`;
     const parts = [];
     const catalogSeconds = row.catalog_estimated_s;
     const profile = row.estimate_profile
-      ? ` (profile "${row.estimate_profile}")` : "";
+      ? `, profile "${row.estimate_profile}"` : "";
     if (catalogSeconds === null || catalogSeconds === undefined) {
-      parts.push("The catalog gives it no duration estimate, so a run of it"
-        + " shows elapsed time only.");
+      parts.push(`The catalog gives it no duration estimate (${listing}), so`
+        + " a run of it shows elapsed time only.");
     } else {
       parts.push(`Catalog estimate about ${formatSeconds(catalogSeconds)} per`
-        + ` invocation${profile}.`);
+        + ` invocation (${listing}${profile}).`);
     }
     if (row.estimate_source === "learned"
         && row.estimated_s !== null && row.estimated_s !== undefined) {
@@ -695,19 +712,26 @@
 
   // The button that opens it. A real button, so it is reachable by Tab and
   // works with a touch or a click; nothing here is behind a right-click.
-  function infoButton(name) {
+  // `context` is the plan and suite whose listing of the test the dialog
+  // should read its estimate from (`catalogRow`): the run's, where the
+  // button sits beside a run's own step.
+  function infoButton(name, context) {
     const label = `What the test ${name} is for`;
     return el("button", {
       type: "button", className: "info-button",
       "aria-label": label, title: label,
-      onclick: (event) => openTestInfo(name, event.currentTarget),
+      onclick: (event) => openTestInfo(name, event.currentTarget, context),
     }, el("span", { "aria-hidden": "true", text: "i" }));
   }
 
-  function openTestInfo(name, invoker) {
+  function openTestInfo(name, invoker, context) {
     const info = testInfoFor(name);
-    const row = catalogRow(name);
+    const found = catalogRow(name, context);
+    const row = found.row;
     const dialog = $("test-info");
+    // Only a script can ask for a second one (a modal dialog blocks the
+    // page), and showModal() on an open dialog throws.
+    if (dialog.open) dialog.close();
     state.infoInvoker = invoker || null;
     $("test-info-title").textContent = name;
     // The dialog's description: the purpose when there is one, and
@@ -721,6 +745,7 @@
       : String(info.unavailable_reason || "No information for this test")
         .replace(/[.\s]*$/, ".")
         + " What the catalog itself says about it is below.";
+    const places = testAppearances(name);
     $("test-info-body").replaceChildren(...[
       info.available ? infoSection("Theory of operation",
         el("p", { text: info.theory })) : null,
@@ -729,10 +754,10 @@
         el("p", { text: info.expected })) : null,
       info.available ? infoSection("What a pass does not prove",
         el("p", { text: info.limitations })) : null,
-      infoSection("Runtime", el("p", { text: runtimeText(row) })),
-      testAppearances(name).length
+      infoSection("Runtime", el("p", { text: runtimeText(found) })),
+      places.length
         ? infoSection("Plans that list it",
-            el("p", { text: testAppearances(name).join(", ") + "." }))
+            el("p", { text: places.join(", ") + "." }))
         : null,
       relatedSection(info),
     ].filter(Boolean));
@@ -767,10 +792,10 @@
     }
   }
 
-  // Focus back to the button the dialog was opened from, for Escape, Close
-  // and a click on the backdrop alike. A button that is no longer on the
-  // page (the checklist was redrawn while the dialog was open) leaves focus
-  // where the browser puts it rather than moving it somewhere unrelated.
+  // Focus back to the button the dialog was opened from, for Escape and
+  // Close alike. A button that is no longer on the page (the checklist was
+  // redrawn while the dialog was open) leaves focus where the browser puts
+  // it rather than moving it somewhere unrelated.
   function restoreInfoFocus() {
     const invoker = state.infoInvoker;
     state.infoInvoker = null;
@@ -1328,9 +1353,11 @@
         statusBadge(shown), " ",
         // The name and its info button together, so the button stays beside
         // the name rather than drifting to the estimate at the far right.
+        // The dialog reads this run's own listing of the test, which is the
+        // one whose coverage and estimate the run is using.
         el("span", { className: "check-name" },
           el("span", { className: "check-name-text", text: item.name }),
-          infoButton(item.name)),
+          infoButton(item.name, { plan: run.plan, suite: run.suite })),
         item.estimated_s !== null && item.estimated_s !== undefined
           ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
         item.target ? el("span", { className: "reason check-target", text: item.target }) : null,
@@ -1479,9 +1506,12 @@
       } else {
         list.replaceChildren(...data.failures.map((failure) => el("li", { className: "failure" },
           statusBadge(failure.status), " ", el("strong", { text: failure.step }),
-          // A test gets its information button here too; a build, flash or
-          // preflight step is not a test and has none to show.
-          state.testInfo[failure.step] ? infoButton(failure.step) : null,
+          // A test gets its information button here too, reading this run's
+          // own listing of it; a build, flash or preflight step is not a
+          // test and has none to show.
+          state.testInfo[failure.step]
+            ? infoButton(failure.step, { plan: run.plan, suite: run.suite })
+            : null,
           failure.reason ? el("span", { text: `: ${failure.reason}` }) : null,
           failure.log && failure.log.length
             ? el("pre", { className: "log", text: failure.log.join("\n") }) : null)));
@@ -1640,8 +1670,7 @@
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelRun);
     // The information dialog: Close and Escape both close it, and focus
-    // goes back to the button it was opened from however it closed
-    // (`close` fires for Escape and for the backdrop as well).
+    // goes back to the button it was opened from however it closed.
     $("test-info-close").addEventListener("click", closeTestInfo);
     $("test-info").addEventListener("close", restoreInfoFocus);
     $("test-info").addEventListener("keydown", (event) => {
