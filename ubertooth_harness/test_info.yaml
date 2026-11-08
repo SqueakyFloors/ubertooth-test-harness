@@ -2005,7 +2005,13 @@ Classic capture record fields:
     figure is inside the radio's range and agrees with its own flag, and says
     nothing about any packet but the one it came from. So each capture must
     carry at least four different signal figures and four different noise
-    figures among the records that carry a measured one. No record may carry
+    figures among the records that carry a measured one. Both are counts over
+    whatever sample a capture collected, so neither is asked of a capture that
+    fell short of its own records floor: such a capture fails on the count,
+    which is the reason a reader needs, rather than on three distinct noise
+    figures among four noise-bearing records. The audio capture has a floor of
+    its own, higher than the shared one, because it is the one whose measured
+    size is known to be in the hundreds. No record may carry
     more payload than one capture bank holds either -- 34 bytes, the 400
     symbols of a bank less the 122 the access code and header take -- which
     is arithmetic rather than a measurement.
@@ -2039,7 +2045,8 @@ Classic capture record fields:
     the reference UAP, with the PCAPNG naming the central's LAP and UAP as the
     address followed; then the same with the roles swapped, where every record
     must carry the other board's LAP. Comprehensive runs 4, adding the EV3
-    audio link, whose records must include at least one HV3/EV3/3-EV3 packet
+    audio link, whose records must number at least fifty and include at least
+    one HV3/EV3/3-EV3 packet
     and whose session must report one unbroken link with both applications'
     and both controllers' counters, and a survey, whose records must include
     at least one carrying a UAP the survey recovered for itself. Every case,
@@ -2052,7 +2059,10 @@ Classic capture record fields:
     capture bank.
   limitations: >-
     The packet floors are floors, for the same reason as the other Classic
-    tests. The payload length and CRC checks do not fire on the bench's own
+    tests; the audio capture's own floor of fifty is a sixth of the thinnest
+    audio capture measured on this bench, so it says that a capture at a
+    thirtieth of the measured size failed, not what made it thin. The payload
+    length and CRC checks do not fire on the bench's own
     traffic: measured over four 25-second captures, no record carried a
     payload at all, because ubertooth-rx kept re-seeding its clock candidates
     and never entered follow mode, so they are exercised deterministically by
@@ -2105,6 +2115,7 @@ Classic capture record fields:
     - ubertooth-test-harness#264
     - ubertooth-test-harness#168
     - ubertooth-test-harness#363
+    - ubertooth-test-harness#399
 
 Classic btbr console:
   purpose: >-
