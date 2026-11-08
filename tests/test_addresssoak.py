@@ -1097,6 +1097,42 @@ class ProgressStormTests(SoakTestCase):
         self.assertEqual(addresssoak.PROGRESS_FULL_RESTARTS,
                          progress["coarsen_after_restarts"])
 
+    def test_a_block_the_file_had_no_room_for_is_not_claimed(self):
+        # The one disagreement between the progress file and the summary
+        # this is here to prevent: a block counted as written when the
+        # file's own byte budget had no room for it (review round one).
+        soak = self.built_soak()
+        soak.restarts = addresssoak.PROGRESS_FULL_RESTARTS
+        soak.record({"record": "attempt", "index": 1})
+        addresssoak.MAX_PROGRESS_BYTES, held = 1, addresssoak.MAX_PROGRESS_BYTES
+        self.addCleanup(setattr, addresssoak, "MAX_PROGRESS_BYTES", held)
+        soak.flush_storm()
+        self.assertEqual(0, soak.storm_blocks)
+        self.assertEqual(1, soak.progress_records_dropped)
+        self.assertNotIn("restart_storm", self.kinds(soak))
+        # And nothing is held over to be written twice later.
+        soak.flush_storm()
+        self.assertEqual(1, soak.progress_records_dropped)
+
+    def test_the_same_capture_fault_on_every_attempt_is_collapsed(self):
+        # Each reason names the attempt's own capture file and the bytes it
+        # stopped at, so judging novelty on the whole message made the same
+        # fault read as a new one at every restart and bypassed the
+        # coarsening entirely (review round one).
+        soak = self.built_soak()
+        soak.restarts = addresssoak.PROGRESS_FULL_RESTARTS
+        reasons = [f"capture-{index:04d}.pcap ends in {index * 7} bytes of an "
+                   "incomplete record" for index in range(1, 4)]
+        new = [soak._note_capture_error(reason) for reason in reasons]
+        self.assertEqual([True, False, False], new)
+        # Counted for every attempt all the same, and the first few reasons
+        # are the exact ones.
+        self.assertEqual(3, soak.capture_error_count)
+        self.assertEqual(reasons, soak.capture_errors)
+        # A different fault is still news.
+        self.assertTrue(soak._note_capture_error(
+            "capture-0004.pcap is not a Bluetooth LE capture"))
+
     def patch_reads(self, soak, answers):
         """Answer each watchdog read in turn, with no board involved."""
         held = addresssoak.read_watchdog

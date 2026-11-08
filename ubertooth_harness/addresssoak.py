@@ -142,6 +142,10 @@ LEGACY_DEATH_LINE = re.compile(r"libUSB Error|could not open Ubertooth device")
 # killed capture left it in (fork e657807): evidence that the restart path
 # met that state and cleared it.
 MODE_WARNING = "is still in mode"
+# The numbers in a capture-read failure: the attempt's own capture file and
+# the bytes it stopped at. Taken out when deciding whether a restart storm
+# has already reported that failure (Soak._note_capture_error).
+ERROR_NUMBERS = re.compile(r"\d+")
 
 POLL_S = 0.1
 # A board read is two control transfers; a board that has gone takes the
@@ -1361,6 +1365,9 @@ class Soak:
         self.capture_errors: list = []
         self.capture_error_count = 0
         self._seen_capture_errors: set = set()
+        # The same reasons with their numbers taken out, which is what says
+        # whether a restart storm has reported this failure before.
+        self._seen_error_wordings: set = set()
         self.attempts_forgotten = 0
         # Finished attempts whose files are still on disk, oldest first. The
         # budget reads these rather than `attempts`, so it never rescans the
@@ -1482,13 +1489,15 @@ class Soak:
 
         Called at the end of a block and once more at the end of the run, so
         what was collapsed is always in the file rather than only in the
-        summary.
+        summary. Counted only when it was really written: the file's byte
+        budget can be spent, and a summary claiming a block the file has not
+        got would be the one disagreement between them this is here to
+        prevent (the dropped record is in ``records_not_written``).
         """
         if not self.storm_collapsed:
             return
         collapsed, self.storm_collapsed = self.storm_collapsed, {}
-        self.storm_blocks += 1
-        self.write_record({
+        written = self.write_record({
             "record": "restart_storm",
             "collapsed": dict(sorted(collapsed.items())),
             "from_s": round(self.storm_from, 3),
@@ -1496,11 +1505,17 @@ class Soak:
             "attempts": len(self.attempts) + self.attempts_forgotten,
             "board_resets": self.board_resets,
         })
+        if written:
+            self.storm_blocks += 1
 
-    def write_record(self, entry: dict) -> None:
-        """Put one record in the file, inside the file's own budget."""
+    def write_record(self, entry: dict) -> bool:
+        """Put one record in the file, inside the file's own budget.
+
+        True when it reached the file, which is what the storm's own
+        bookkeeping rests on.
+        """
         if self.progress is None:
-            return
+            return False
         entry = {"at_s": round(self.clock() - self.start_mono, 3), **entry}
         line = json.dumps(entry, sort_keys=True) + "\n"
         # Bounded like the transcript, and for the same reason: a plan may
@@ -1510,7 +1525,7 @@ class Soak:
         # reports what it kept; summary.json carries the figures either way.
         if self.progress_bytes + len(line) > MAX_PROGRESS_BYTES:
             self.progress_records_dropped += 1
-            return
+            return False
         self.progress_bytes += len(line)
         self.progress.write(line)
         self.progress.flush()
@@ -1518,6 +1533,7 @@ class Soak:
             os.fsync(self.progress.fileno())
         except OSError:
             pass
+        return True
 
     @property
     def elapsed(self) -> float:
@@ -1822,13 +1838,21 @@ class Soak:
         attempt and copy all of them into the summary; what a reader needs is
         that it happened, how often, and the first few reasons. True when
         this reason is one the run has not had before, which is what makes
-        it worth a record of its own inside a restart storm.
+        it worth a record of its own inside a restart storm -- and that is
+        judged with the numbers taken out, because a reason names the
+        attempt's own capture file and the bytes it stopped at: the same
+        fault on every attempt of a storm would otherwise read as a new one
+        each time and be written whole, which is the one thing the
+        coarsening is for. The count and the first few reasons are the exact
+        ones, so a run still says how many attempts it happened to.
         """
         self.capture_error_count += 1
-        new = reason not in self._seen_capture_errors
         self._seen_capture_errors.add(reason)
         if len(self.capture_errors) < MAX_CAPTURE_ERRORS:
             self.capture_errors.append(reason)
+        wording = ERROR_NUMBERS.sub("N", reason)
+        new = wording not in self._seen_error_wordings
+        self._seen_error_wordings.add(wording)
         return new
 
     def add_attempt(self, attempt: Attempt) -> None:

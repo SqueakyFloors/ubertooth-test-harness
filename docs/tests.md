@@ -3770,10 +3770,14 @@ would reach the budget and lose whatever came after. So past 200 unplanned
 restarts those records are collapsed: one `restart_storm` record per 100 of
 them, carrying what it stood for and the counts the run had reached, and the
 last block is written when the run reports, so the progress file and
-`summary.json` say the same thing. What the storm has not said before is
+`summary.json` say the same thing — bar a progress file whose byte budget is
+spent, which the summary says as well, since a block it had no room for is
+not counted as written. What the storm has not said before is
 still written whole — a read in which the board reported a reset of its own,
-and a capture that could not be read for a reason not seen yet — and the
-schedule's own records, a period and a sample, are never collapsed, since
+and a capture that could not be read for a reason not seen yet, judged with
+the attempt's own file name and byte count taken out of it, so the same fault
+at every restart is one fault — and the schedule's own records, a period and
+a sample, are never collapsed, since
 they are what a reader follows even a failing run by. The summary reports how
 many records were collapsed, into how many blocks, and the threshold.
 
