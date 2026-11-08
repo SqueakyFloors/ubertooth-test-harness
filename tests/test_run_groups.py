@@ -11,7 +11,9 @@ from records alone, because that is what a per-host pill is drawn from.
 
 import asyncio
 import json
+import re
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from websockets.exceptions import ConnectionClosed, InvalidStatus
@@ -31,6 +33,8 @@ from ubertooth_harness.rungroups import (
     MAX_TEST_STEPS,
     NOT_REACHED,
     PREFLIGHT_STEP,
+    RANK_ORDER,
+    STARTING,
     TEST_STEP,
     combine,
     group_from_record,
@@ -1634,6 +1638,137 @@ class GroupLiveTests(RunGroupTestCase):
             with self.subTest(query), self.assertRaises(InvalidStatus) as raised:
                 await self.live(query)
             self.assertEqual(403, raised.exception.response.status_code)
+
+
+class GuiContractTests(RunGroupTestCase):
+    """What the browser draws a per-host pill from, end to end (#154).
+
+    The GUI never works a status out: every row, cell and member it draws
+    comes from this one answer, so this names the fields it reads and checks
+    a real group's answer carries each of them. A field renamed on either
+    side fails here rather than leaving the page blank.
+    """
+
+    WEB = Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
+
+    # Field -> how app.js reads it, so a rename on either side is caught.
+    CELL_FIELDS = {
+        "host": "cell.host", "status": "cell.status",
+        "started_at": "cell.started_at", "elapsed_s": "cell.elapsed_s",
+        "estimated_s": "cell.estimated_s", "reason": "cell.reason",
+        "items": "cell.items",
+    }
+    ROW_FIELDS = {"name": "step.name", "status": "step.status", "hosts": "step.hosts"}
+    MEMBER_FIELDS = {
+        "host": "member.host", "run_id": "member.run_id",
+        "status": "member.status", "error": "member.error",
+        "failures": "member.failures",
+    }
+    GROUP_FIELDS = {
+        "group_id": "group.group_id", "status": "group.status",
+        "created_at": "group.created_at", "finished_at": "group.finished_at",
+        "plan": "group.plan", "suite": "group.suite",
+        "hosts_asked": "group.hosts_asked", "hosts_started": "group.hosts_started",
+        "implicit": "group.implicit", "members": "group.members",
+        "cancel_requested": "group.cancel_requested",
+    }
+    PROGRESS_FIELDS = {
+        "completed": "progress.completed", "planned": "progress.planned",
+    }
+
+    async def test_the_answer_carries_every_field_the_page_reads(self):
+        script = (self.WEB / "app.js").read_text(encoding="utf-8")
+        linux, mac = await self.runners()
+        group, _requests, _ids = await self.accepted_group([linux, mac], build=True)
+        await self.feed(linux, "run-1", [
+            record("run-1", 1, "run_started"),
+            record("run-1", 2, "build_started", with_firmware=True, with_python=False),
+            record("run-1", 3, "build_finished", "passed"),
+            record("run-1", 4, "build_flash_started"),
+            record("run-1", 5, "build_flash_finished", "passed"),
+            manifest("run-1", 6, LINUX, [
+                (SHARED_TEST, {"hosts": "each"}),
+                (LINUX_ONLY_TEST, {"platforms": ["linux"]}),
+            ]),
+            record("run-1", 7, "preflight_started"),
+            record("run-1", 8, "preflight_finished", "passed"),
+            *test_records("run-1", LINUX, [(SHARED_TEST, "passed")]),
+        ])
+        await self.feed(mac, "run-2", [
+            record("run-2", 1, "run_started"),
+            manifest("run-2", 2, MAC, [(SHARED_TEST, {"hosts": "each"})]),
+            record("run-2", 3, "preflight_started"),
+        ])
+        detail = await self.group(group["group_id"])
+
+        for field, read in self.GROUP_FIELDS.items():
+            with self.subTest(group=field):
+                self.assertIn(field, detail["group"])
+                self.assertIn(read, script)
+        for field, read in self.PROGRESS_FIELDS.items():
+            with self.subTest(progress=field):
+                self.assertIn(field, detail["progress"])
+                self.assertIn(read, script)
+        for member in detail["members"]:
+            for field, read in self.MEMBER_FIELDS.items():
+                with self.subTest(member=field):
+                    self.assertIn(field, member)
+                    self.assertIn(read, script)
+        for row in detail["steps"]:
+            for field, read in self.ROW_FIELDS.items():
+                with self.subTest(row=field):
+                    self.assertIn(field, row)
+                    self.assertIn(read, script)
+            for cell in row["hosts"].values():
+                for field, read in self.CELL_FIELDS.items():
+                    with self.subTest(cell=field):
+                        self.assertIn(field, cell)
+                        self.assertIn(read, script)
+                for item in cell["items"]:
+                    # A cell's parts are what the output files of a test are
+                    # listed under (fileList(runId, item.id)).
+                    self.assertIn("id", item)
+                    self.assertIn("item.id", script)
+
+    async def test_a_pill_can_be_drawn_for_every_status_a_cell_reaches(self):
+        """Every status the model can put in a cell has a word and a symbol.
+
+        A status the page has no entry for would be drawn as a bullet and
+        the raw word, which is how a Linux-only test would come to read
+        `not_reached` at an operator.
+        """
+        script = (self.WEB / "app.js").read_text(encoding="utf-8")
+        # STATUS_TEXT's own keys, bare and quoted, and STATUS_WORDS' mapping
+        # of the two statuses the API writes with an underscore.
+        known = set(re.findall(r'^\s{4}(\w+): \["', script, re.M))
+        known |= set(re.findall(r'^\s{4}"([a-z ]+)": \["', script, re.M))
+        underscored = dict(re.findall(r'^\s{4}(\w+): "([a-z ]+)",$', script, re.M))
+        for status in RANK_ORDER + (STARTING,):
+            with self.subTest(status=status):
+                shown = underscored.get(status, status)
+                self.assertIn(shown, known)
+
+    async def test_the_group_of_one_a_lone_run_is_shown_as_draws_the_same_way(self):
+        (linux,) = await self.runners([LINUX])
+        await self.accepted_run(linux, "run-1", LINUX)
+        await self.feed(linux, "run-1", [
+            record("run-1", 1, "run_started"),
+            manifest("run-1", 2, LINUX, [(SHARED_TEST, {"hosts": "each"})]),
+            record("run-1", 3, "preflight_started"),
+            record("run-1", 4, "preflight_finished", "passed"),
+            *test_records("run-1", LINUX, [(SHARED_TEST, "passed")]),
+        ])
+        # The run belongs to no stored group, and its own group ID is its run
+        # ID, which is how the page follows a /ui/#run= link (groupIdOf).
+        self.assertIsNone(self.controller.runs["run-1"].view()["group_id"])
+        detail = await self.group("run-1")
+        self.assertTrue(detail["group"]["implicit"])
+        self.assertEqual([LINUX], detail["group"]["hosts"])
+        self.assertEqual(
+            [PREFLIGHT_STEP, SHARED_TEST], [row["key"] for row in detail["steps"]]
+        )
+        for row in detail["steps"]:
+            self.assertEqual([LINUX], list(row["hosts"]))
 
 
 class GroupEndpointTests(ControllerTestCase):

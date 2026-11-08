@@ -705,25 +705,28 @@ class RunRecordTests(unittest.TestCase):
 class GuiTests(unittest.TestCase):
     """The live run view shows a blocked test with the failures."""
 
-    def test_the_live_view_leaves_a_test_the_run_also_runs_alone(self):
-        """A JS-free check: a partly blocked test keeps its own row, since a
-        row cannot say both that the test ran and that it was blocked, and
-        taking the row would also leave `test_started` without one."""
+    def test_the_live_view_shows_a_blocked_test_from_the_group_s_own_rows(self):
+        """A JS-free check: the view draws a blocked step the way it draws
+        every other one, from the group's per-host rows (#154), and the
+        record itself is in that host's transcript."""
         from ubertooth_harness.gui import WEB_DIR
 
         script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('kind === "blocked"', script)
-        self.assertIn(
-            "live.invocations.some((invocation) => invocation.test_name === name)",
-            script,
-        )
-        self.assertIn('item.status = "blocked";', script)
+        self.assertIn("[blocked on ${details.host ?? \"\"}]", script)
+        # A blocked record moves a step, so the rows are fetched again
+        # rather than a status being decided here.
+        self.assertIn('"test_started", "test_finished", "not_applicable", "blocked",',
+                      script)
+        self.assertIn("if (STEP_RECORDS.has(kind)) scheduleRefresh();", script)
         self.assertIn("blocked: [\"✗\", \"blocked\"],", script)
-        # And the row carries the same red edge as every other failing row.
+        # And the row and its pill carry the same red edge as every other
+        # failing row.
         css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
         self.assertIn(".check-blocked", css)
         self.assertIn(".status-blocked", css)
+        self.assertIn(".pill-blocked", css)
 
     def test_a_blocked_test_is_listed_as_a_failure(self):
         from ubertooth_harness.gui import failure_summary
