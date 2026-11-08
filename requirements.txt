@@ -4,3 +4,4 @@ websockets==17.3  # target runner <-> controller WebSocket transport
 fastapi==0.162.0  # controller REST/WebSocket app
 uvicorn==0.54.0  # controller ASGI server (WebSockets via the websockets package)
 pyflakes==3.4.0  # tests: no module may use a global name it never imported
+zstandard==0.25.0  # release evidence: validation-logs.tar.zst

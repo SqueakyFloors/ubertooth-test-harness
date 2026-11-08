@@ -50,6 +50,7 @@ from ubertooth_harness.flash import (
 )
 from ubertooth_harness import leases as board_leases
 from ubertooth_harness import dfuparts, libbtbbpin
+from ubertooth_harness import evidence as release_evidence
 from ubertooth_harness.manifest import (
     FileIdentity,
     GitRevisionResolver,
@@ -463,6 +464,66 @@ def _build_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _attestations(values: Sequence[str]) -> dict[str, str]:
+    """``--attest GATE=NOTE`` entries, for a gate no suite can measure."""
+    found: dict[str, str] = {}
+    for value in values:
+        name, separator, note = value.partition("=")
+        if not separator or not name.strip() or not note.strip():
+            raise HarnessError(
+                f"--attest takes GATE=NOTE, not {value!r}; for example "
+                "--attest \"installer=install.sh on a clean prefix, "
+                "ubertooth-util -V reported 2026-11-R1\""
+            )
+        found[name.strip()] = note.strip()
+    return found
+
+
+def _release_evidence(args: argparse.Namespace) -> int:
+    """Build one release's evidence bundle and say what is still to decide.
+
+    Writes three files and nothing else: no hardware, no network, and no
+    upload. The ``gh release upload`` line is printed for a person to run
+    after reading the summary, and is withheld for a bundle that is
+    incomplete or private.
+    """
+    bundle = release_evidence.build_bundle(
+        args.runs, args.output,
+        release=args.release,
+        phase=args.phase,
+        attestations=_attestations(args.attest),
+        strip_paths=args.strip_path,
+        harness=args.harness_commit,
+        private_bundle=args.private,
+        allow_incomplete=args.allow_incomplete,
+    )
+    for path in (bundle.summary, bundle.logs, bundle.sums):
+        print(f"wrote {path}")
+    print(f"{len(bundle.members)} sanitized log file(s) in {bundle.logs.name}")
+    if bundle.upload:
+        print("\nTo publish it, read the summary, then run:\n")
+        print(f"cd {bundle.directory}")
+        print(bundle.upload)
+        print()
+    elif args.private:
+        print(
+            "\nThis bundle keeps device serials, so there is no upload "
+            "command: it is not for a public release."
+        )
+    sys.stdout.flush()
+    if bundle.missing:
+        print("missing required evidence:", file=sys.stderr)
+        for result in bundle.missing:
+            print(f"  {result.gate.title}: {result.describe()}", file=sys.stderr)
+        print(
+            "\nThe summary lists these under Missing required evidence. Run "
+            "the gate, attest it with --attest, or pass --allow-incomplete to "
+            "publish the bundle as it stands.",
+            file=sys.stderr,
+        )
+    return 0 if bundle.complete or args.allow_incomplete else 1
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ubertooth-harness")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -599,6 +660,53 @@ def _parser() -> argparse.ArgumentParser:
         "--redact-serials", action="store_true",
         help="replace device serial numbers with <serial>, and include each "
         "run's transcript, masked the same way",
+    )
+
+    evidence = subparsers.add_parser(
+        "release-evidence",
+        help="build the public-safe validation summary, sanitized logs "
+        "archive and SHA-256 sums for one release; uploads nothing",
+    )
+    evidence.add_argument(
+        "runs", type=Path, nargs="+",
+        help="finished run directories this release was qualified on",
+    )
+    evidence.add_argument(
+        "--release", required=True, metavar="NAME",
+        help="the release or tag this evidence is for, for example 2026-11-R1",
+    )
+    evidence.add_argument("--output", type=Path, required=True,
+                          help="directory to write the three assets into")
+    evidence.add_argument(
+        "--phase", choices=release_evidence.PHASES,
+        help="which gates are required (default: read from the release name, "
+        "DEV a snapshot, RC a release candidate, R a final release)",
+    )
+    evidence.add_argument(
+        "--attest", action="append", default=[], metavar="GATE=NOTE",
+        help="evidence for a gate run by hand (installer, bootloader); the "
+        "note is quoted in the summary and marked attested, not measured. "
+        "Repeatable",
+    )
+    evidence.add_argument(
+        "--strip-path", action="append", default=[], metavar="PREFIX",
+        help="an absolute path prefix to replace before publication, for a "
+        "bench directory the sanitizer does not recognize; repeatable",
+    )
+    evidence.add_argument(
+        "--harness-commit", metavar="COMMIT",
+        help="the harness commit to record (default: the checkout this "
+        "export is made from)",
+    )
+    evidence.add_argument(
+        "--private", action="store_true",
+        help="keep device serial numbers, write the bundle under its private "
+        "names, and print no upload command: not for a public release",
+    )
+    evidence.add_argument(
+        "--allow-incomplete", action="store_true",
+        help="print the upload command even though a required gate has no "
+        "evidence; the missing gates are listed in the summary either way",
     )
 
     runner = subparsers.add_parser(
@@ -1881,6 +1989,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 sys.stdout.write(text)
             return 0
+        if args.command == "release-evidence":
+            return _release_evidence(args)
         raise HarnessError(f"unknown command {args.command}")
     except (
         BuildError,
