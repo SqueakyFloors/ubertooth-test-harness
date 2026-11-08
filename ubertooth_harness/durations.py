@@ -24,7 +24,7 @@ import math
 # written.
 PLACES = 3
 
-_MS = 1000
+_MS = 10 ** PLACES
 _SECOND_MS = _MS
 _MINUTE_MS = 60 * _SECOND_MS
 _HOUR_MS = 60 * _MINUTE_MS

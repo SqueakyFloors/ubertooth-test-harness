@@ -2,17 +2,19 @@
 
 A measured duration stays a number for machines; the text beside it comes
 from :mod:`ubertooth_harness.durations` and from nowhere else, so the
-terminal summary, report.md, the GUI, the completion email and a release's
+terminal summary, report.md, the GUI, the completion email, and a release's
 evidence cannot drift into four different ways of saying an hour.
 """
 
 import dataclasses
 import math
 import unittest
+from pathlib import Path
 
+from ubertooth_harness.controller import Run
 from ubertooth_harness.durations import human_duration, human_duration_or_none
 from ubertooth_harness.notify import duration_text
-from ubertooth_harness.rungroups import wall_seconds
+from ubertooth_harness.rungroups import RunGroup, group_view, host_steps, wall_seconds
 from ubertooth_harness.sequencer import SequencerSummary
 
 
@@ -130,6 +132,73 @@ class SurfaceTests(unittest.TestCase):
 
     def test_the_email_still_says_when_it_was_not_recorded(self):
         self.assertEqual(duration_text(None, "2026-01-01T12:00:00Z"), "not recorded")
+
+    def test_a_step_says_its_own_span_in_the_same_words(self):
+        """Every step cell the GUI draws carries both figures."""
+        (preflight,) = host_steps([
+            _record(1, "preflight_started", "running", "09:12:33.004"),
+            _record(2, "preflight_finished", "passed", "09:13:07.540"),
+        ], run_status="passed")
+        self.assertEqual(preflight["elapsed_s"], 34.536)
+        self.assertEqual(preflight["elapsed_hms"], "34.536s")
+        self.assertEqual(
+            preflight["elapsed_hms"], human_duration(preflight["elapsed_s"])
+        )
+
+    def test_a_finished_group_says_how_long_it_took(self):
+        view = group_view(_group(), {"run-1": {
+            "run_id": "run-1", "status": "passed",
+            "finished_at": "2026-11-05T10:23:07.540",
+        }})
+        self.assertEqual(view["duration_s"], 4234.536)
+        self.assertEqual(view["duration_hms"], "1h 10m 34.536s")
+
+    def test_a_group_that_started_no_run_has_no_duration(self):
+        """Not 0.000s, which would read as a group that ran instantly."""
+        group = _group()
+        group.members = [{"host": "Host_Linux", "run_id": None,
+                          "error": "that target is busy"}]
+        view = group_view(group, {})
+        self.assertIsNone(view["duration_s"])
+        self.assertIsNone(view["duration_hms"])
+
+    def test_a_finished_run_says_how_long_it_took_and_a_running_one_does_not(self):
+        finished = Run(
+            run_id="20260101T120000Z-0123456789ab", target="Host_Linux",
+            directory=Path("."), status="passed",
+            created_at="2026-01-01T12:00:00.000",
+            finished_at="2026-01-01T13:12:05.000",
+        ).view()
+        self.assertEqual(finished["duration_s"], 4325.0)
+        self.assertEqual(finished["duration_hms"], "1h 12m 05.000s")
+        running = Run(
+            run_id="20260101T140000Z-0123456789ab", target="Host_Linux",
+            directory=Path("."), created_at="2026-01-01T14:00:00.000",
+        ).view()
+        self.assertIsNone(running["duration_s"])
+        self.assertIsNone(running["duration_hms"])
+
+
+def _record(sequence: int, kind: str, status: str, clock: str) -> dict:
+    """One run.jsonl record at a time of day, as a run writes them."""
+    return {
+        "schema_version": 1, "run_id": "run-1", "sequence": sequence,
+        "timestamp": f"2026-11-05T{clock}", "event_type": kind,
+        "status": status, "details": {},
+    }
+
+
+def _group() -> RunGroup:
+    """One group of one host, asked for at a known instant."""
+    return RunGroup(
+        group_id="grp-" + "a" * 32,
+        hosts=["Host_Linux"],
+        plan="release",
+        suite="release",
+        created_at="2026-11-05T09:12:33.004",
+        dispatched_at="2026-11-05T09:12:33.004",
+        members=[{"host": "Host_Linux", "run_id": "run-1", "error": None}],
+    )
 
 
 def _parse(text: str) -> float:

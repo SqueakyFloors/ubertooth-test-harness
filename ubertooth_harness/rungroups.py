@@ -450,9 +450,15 @@ def group_view(
     started = [member for member in members if member["run"] is not None]
     finished_at = None if status == RUNNING else _finished_at(group, members)
     # How long the group took, once it has ended: from when it was asked for
-    # to when its last child finished. Running groups have none, since the
-    # live card counts their elapsed time against the estimate instead.
-    duration_s = wall_seconds(group.created_at, finished_at) if finished_at else None
+    # to when its last child finished. A running group has none, since the
+    # live card counts its elapsed time against the estimate instead, and so
+    # has one that started no run at all: `finished_at` is then when the
+    # group gave up asking, and 0.000s would read as a group that ran
+    # instantly rather than one that never ran.
+    duration_s = (
+        wall_seconds(group.created_at, finished_at)
+        if finished_at and started else None
+    )
     return {
         **{
             name: getattr(group, name) for name in _GROUP_FIELDS

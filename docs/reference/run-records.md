@@ -205,7 +205,7 @@ the firmware it was verified on, the totals, and the verdict.
 RUN SUMMARY
 ========================================================================
   run                20261105T091233Z-abcdef123456
-  started (UTC)      2026-11-05T09:12:33.004 (ran 2m 19.000s)
+  started (UTC)      2026-11-05T09:12:33.004 (ran 2m 18.996s)
   plan / suite       fast / fast
   host               Host_Linux (Linux 24.04 6.8.0 x86_64)
   Ubertooth          main = 9903b4251f... (git-9903b42)
@@ -237,11 +237,22 @@ millisecond — `0.004s`, `34.536s`, `10m 34.536s`, `1h 10m 34.536s`,
 `2d 03h 10m 34.536s`. One formatter
 ([`ubertooth_harness/durations.py`](../../ubertooth_harness/durations.py))
 produces all of them, so the terminal summary above, `report.md`, the GUI and
-its history, the [completion email](../guide/notifications.md) and a
+its history, the [completion email](../guide/notifications.md), and a
 [release's evidence](release-evidence.md) cannot drift apart. The measured
 number is kept beside the words wherever one is reported — `duration_s` with
 `duration_hms`, `elapsed_s` with `elapsed_hms` — so a machine reads the
 seconds and nothing it reads was rounded for a reader.
+
+Two durations of the same run are measured on different spans, so read the
+one you mean. `run_finished.duration_s` is the suite's own: from the moment
+the sequencer began, which is after a `--build` run has already built its
+sources, to the moment it wrote that record. The controller's `duration_s`
+for a run or group ([`GET /api/runs/{run_id}`, `GET
+/api/run-groups`](../guide/services.md#controller)) is the wall clock of the
+whole job, from when the run was asked for to when it finished, so it
+includes resolving the ref, the clone and build, flashing, and compiling the
+report. A run that builds therefore reads longer in the GUI than in its own
+record, by the length of its build.
 
 `report.md`'s transcript says the same words on its own `[S]` line
 (`[S] STATE FAIL: guard Ubertooth 1 channel unchanged (expected 2441,

@@ -207,7 +207,7 @@
   }
 
   // How long a finished run or group took, in the words the controller gives
-  // it (durations.human_duration), so the page, report.md, the email and a
+  // it (durations.human_duration), so the page, report.md, the email, and a
   // release's evidence all say the same thing. A running one has none: its
   // clock is live, and renderClock counts it against the estimate instead.
   function durationElement(record) {
@@ -223,13 +223,18 @@
     return `Finished after ${(group && group.duration_hms) || formatSeconds(elapsed)}`;
   }
 
+  // An estimate or a live clock, rounded to the second: a figure that is a
+  // guess, or one that moves while you read it, has no business claiming
+  // milliseconds. A measured duration that has ended says them, in the
+  // controller's own words (durationElement).
   function formatSeconds(total) {
     const seconds = Math.max(0, Math.round(total));
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
     const pad = (n) => String(n).padStart(2, "0");
-    return h ? `${h}h ${pad(m)}m ${pad(s)}s` : `${m}m ${pad(s)}s`;
+    if (h) return `${h}h ${pad(m)}m ${pad(s)}s`;
+    return m ? `${m}m ${pad(s)}s` : `${s}s`;
   }
 
   async function api(method, path, body) {
