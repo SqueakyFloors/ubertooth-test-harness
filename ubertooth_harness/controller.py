@@ -81,6 +81,7 @@ from ubertooth_harness.boardstatus import (
     with_status as board_views,
 )
 from ubertooth_harness.catalog import builtin_catalog
+from ubertooth_harness.durations import human_duration_or_none
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.gui import (
     DEFAULT_PLANS_DIR,
@@ -137,6 +138,7 @@ from ubertooth_harness.rungroups import (
     implicit_group,
     merge_steps,
     new_group,
+    wall_seconds,
 )
 
 
@@ -431,6 +433,16 @@ class Run:
 
     def view(self) -> dict:
         data = self.record()
+        # How long the run took, once it has ended, and the same length of
+        # time in words (durations.human_duration): derived from the two
+        # stamps in the record rather than stored, so a run stored by an
+        # older controller reports it too. Null while the run is going.
+        duration_s = (
+            wall_seconds(self.created_at, self.finished_at)
+            if self.finished_at else None
+        )
+        data["duration_s"] = duration_s
+        data["duration_hms"] = human_duration_or_none(duration_s)
         # The four record counts are what the stored run.jsonl holds, so
         # they are null for a finished run whose records have not been read
         # since this controller started: listing the history does not read

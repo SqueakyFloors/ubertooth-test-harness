@@ -1654,7 +1654,7 @@ class GuiContractTests(RunGroupTestCase):
     # Field -> how app.js reads it, so a rename on either side is caught.
     CELL_FIELDS = {
         "host": "cell.host", "status": "cell.status",
-        "started_at": "cell.started_at", "elapsed_s": "cell.elapsed_s",
+        "started_at": "cell.started_at", "elapsed_hms": "cell.elapsed_hms",
         "estimated_s": "cell.estimated_s", "reason": "cell.reason",
         "items": "cell.items",
     }
@@ -1667,6 +1667,7 @@ class GuiContractTests(RunGroupTestCase):
     GROUP_FIELDS = {
         "group_id": "group.group_id", "status": "group.status",
         "created_at": "group.created_at", "finished_at": "group.finished_at",
+        "duration_hms": "group.duration_hms",
         "plan": "group.plan", "suite": "group.suite",
         "hosts_asked": "group.hosts_asked", "hosts_started": "group.hosts_started",
         "implicit": "group.implicit", "members": "group.members",

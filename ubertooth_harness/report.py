@@ -16,6 +16,7 @@ import sys
 from typing import Iterable, Mapping, Sequence
 
 from ubertooth_harness import targets
+from ubertooth_harness.durations import human_duration
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.leases import (
@@ -252,7 +253,7 @@ def _duration(first: Mapping | None, last: Mapping | None) -> str:
     if not first or not last:
         return ""
     seconds = (_time(last) - _time(first)).total_seconds()
-    return f"{seconds:.1f}s"
+    return human_duration(seconds)
 
 
 def _cell(value) -> str:

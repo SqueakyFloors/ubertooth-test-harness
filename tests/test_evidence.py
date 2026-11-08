@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 from ubertooth_harness import evidence
+from ubertooth_harness.durations import human_duration
 from ubertooth_harness.evidence import (
     EvidenceError,
     LOGS_NAME,
@@ -581,6 +582,11 @@ class BundleTests(unittest.TestCase):
                      "Linux (24.04, x86_64)", "2026-11-05T09:12:33.000",
                      "f" * 40, "channel", "2441"):
             self.assertIn(kept, text)
+
+    def test_a_run_s_duration_is_in_the_words_every_surface_uses(self):
+        """The Runs table says a length of time as the harness always does."""
+        text = self.build().summary.read_text(encoding="utf-8")
+        self.assertIn(human_duration(read_run(self.run).duration_s), text)
 
     def test_a_missing_gate_is_listed_and_the_upload_withheld(self):
         bundle = self.build(phase="release")

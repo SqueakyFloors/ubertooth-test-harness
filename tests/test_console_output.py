@@ -384,7 +384,7 @@ class ConsoleSummaryTests(unittest.TestCase):
 
     def test_it_names_when_the_run_started_in_utc_and_how_long_it_took(self):
         text = self.summary()
-        self.assertIn("started (UTC)      2026-11-05T09:12:33.004 (ran 139.0s)",
+        self.assertIn("started (UTC)      2026-11-05T09:12:33.004 (ran 2m 18.996s)",
                       text)
 
     def test_it_names_each_source_by_ref_and_exact_commit(self):

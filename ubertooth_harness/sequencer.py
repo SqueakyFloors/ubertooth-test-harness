@@ -1,7 +1,7 @@
 """Execute resource-bound named tests using catalog-owned behavior."""
 
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import datetime
 from pathlib import Path
 import time
@@ -15,6 +15,7 @@ from ubertooth_harness.catalog import (
     TestCatalog,
     builtin_catalog,
 )
+from ubertooth_harness.durations import human_duration
 from ubertooth_harness.events import (
     MANIFEST_MAX_BYTES,
     OUTPUT_CHECKS_MAX_BYTES,
@@ -133,6 +134,11 @@ class SequencerSummary:
     completed_tests: int
     failure_reason: str
     duration_s: float
+    # The same length of time as duration_s, in the words a person reads
+    # (durations.human_duration). Derived here rather than passed in, so the
+    # number and the text can never disagree; automation reads duration_s,
+    # which is unrounded and unchanged.
+    duration_hms: str = field(init=False, default="")
     skipped_cases: int = 0
     # Left out before the run, because the host named cannot run them or this
     # bench has not got the hardware (hostneeds.py, planner.py); neither
@@ -146,6 +152,9 @@ class SequencerSummary:
     # Times a board reset itself during the run, as the firmware counts them
     # (watchdog.py). Reported, not failed.
     watchdog_resets: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "duration_hms", human_duration(self.duration_s))
 
 
 _MAX_REASON_CHARS = 4096

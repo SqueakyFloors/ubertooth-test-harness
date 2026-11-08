@@ -429,7 +429,7 @@ class MessageTests(unittest.TestCase):
             "Plan / suite: release / release",
             "2026-01-01T12:00:00Z",
             "2026-01-01T13:12:05Z",
-            "Duration: 1 h 12 m 05 s",
+            "Duration: 1h 12m 05.000s",
             "2 passed, 1 failed, 1 skipped",
             "(4 of 5 planned tests reached)",
             "Reason: Raw receive: no packets",
@@ -534,7 +534,7 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(duration_text(None, None), "not recorded")
         self.assertEqual(duration_text("2026-01-01T00:00:00Z", "nonsense"), "not recorded")
         self.assertEqual(duration_text("2026-01-01T00:00:00Z", "2026-01-01T00:00:03Z"),
-                         "3.0 s")
+                         "3.000s")
 
     def test_a_group_notice_lists_every_host(self):
         group = {
@@ -1106,7 +1106,7 @@ class ControllerNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Host_Mac: failed", message)
         self.assertIn("Verdict: failed", message)
         self.assertIn("Hosts: 2 of 2 host(s) ran", message)
-        self.assertIn("Duration: 1 h 12 m 05 s", message)
+        self.assertIn("Duration: 1h 12m 05.000s", message)
         # One notice for the group, and none of its own for either child.
         self.assertFalse((controller.results_dir / LEDGER_DIR
                           / f"run-{first.run_id}.json").exists())

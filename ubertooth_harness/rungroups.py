@@ -28,6 +28,7 @@ import uuid
 # The run records' timestamps are read the way the estimate store reads them,
 # so a duration shown here and a duration learned from the same pair of
 # records cannot disagree.
+from ubertooth_harness.durations import human_duration_or_none
 from ubertooth_harness.learned import _elapsed, _timestamp
 from ubertooth_harness.protocol import _identifier
 
@@ -147,7 +148,7 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _seconds(started_at, finished_at) -> float | None:
+def wall_seconds(started_at, finished_at) -> float | None:
     """Wall seconds between two run-record timestamps, or None."""
     begin, end = _timestamp(started_at), _timestamp(finished_at)
     if begin is None:
@@ -447,6 +448,11 @@ def group_view(
     members = member_views(group, runs, pending)
     status = group_status(members)
     started = [member for member in members if member["run"] is not None]
+    finished_at = None if status == RUNNING else _finished_at(group, members)
+    # How long the group took, once it has ended: from when it was asked for
+    # to when its last child finished. Running groups have none, since the
+    # live card counts their elapsed time against the estimate instead.
+    duration_s = wall_seconds(group.created_at, finished_at) if finished_at else None
     return {
         **{
             name: getattr(group, name) for name in _GROUP_FIELDS
@@ -454,7 +460,9 @@ def group_view(
         },
         "implicit": group.implicit,
         "status": status,
-        "finished_at": None if status == RUNNING else _finished_at(group, members),
+        "finished_at": finished_at,
+        "duration_s": duration_s,
+        "duration_hms": human_duration_or_none(duration_s),
         "hosts_asked": len(group.members),
         "hosts_started": len(started),
         # True when every host the group asked for got a run: a group that
@@ -484,7 +492,8 @@ def _part(identifier: str, name: str) -> dict:
     """One part of a step on one host: a test invocation, or a flashed board."""
     return {
         "id": identifier, "name": name, "status": PENDING, "started_at": None,
-        "finished_at": None, "elapsed_s": None, "reason": "", "estimated_s": None,
+        "finished_at": None, "elapsed_s": None, "elapsed_hms": None,
+        "reason": "", "estimated_s": None,
     }
 
 
@@ -495,6 +504,7 @@ def _open(part: dict, timestamp) -> None:
     # is running, and nothing about it has finished.
     part["finished_at"] = None
     part["elapsed_s"] = None
+    part["elapsed_hms"] = None
     part["reason"] = ""
 
 
@@ -502,7 +512,8 @@ def _close(part: dict, status: str, timestamp, reason: str = "") -> None:
     part["status"] = status
     part["finished_at"] = timestamp if isinstance(timestamp, str) else None
     part["reason"] = reason
-    part["elapsed_s"] = _seconds(part["started_at"], part["finished_at"])
+    part["elapsed_s"] = wall_seconds(part["started_at"], part["finished_at"])
+    part["elapsed_hms"] = human_duration_or_none(part["elapsed_s"])
 
 
 def _planned_tests(invocations: Sequence[Mapping] | None) -> dict[str, list[dict]]:
@@ -666,6 +677,7 @@ def host_steps(
             "kind": step, "key": step, "name": STEP_NAMES[step],
             "status": part["status"], "started_at": part["started_at"],
             "finished_at": part["finished_at"], "elapsed_s": part["elapsed_s"],
+            "elapsed_hms": part["elapsed_hms"],
             "reason": part["reason"],
             "estimated_s": _stage_estimate(stages, step),
             "items": list(boards.values()) if step == FLASH_STEP else [],
@@ -675,12 +687,14 @@ def host_steps(
         started = [part["started_at"] for part in parts if part["started_at"]]
         ended = [part["finished_at"] for part in parts if part["finished_at"]]
         finished_at = max(ended) if ended and len(ended) == len(parts) else None
+        elapsed_s = wall_seconds(min(started), finished_at) if started else None
         steps.append({
             "kind": TEST_STEP, "key": name, "name": name,
             "status": combine([part["status"] for part in parts]),
             "started_at": min(started) if started else None,
             "finished_at": finished_at,
-            "elapsed_s": _seconds(min(started), finished_at) if started else None,
+            "elapsed_s": elapsed_s,
+            "elapsed_hms": human_duration_or_none(elapsed_s),
             "reason": next((part["reason"] for part in parts if part["reason"]), ""),
             "estimated_s": (
                 round(sum(seconds), 1) if seconds and None not in seconds else None
@@ -724,7 +738,7 @@ def _settle(steps: Sequence[dict], run_status: str) -> None:
 
 
 _CELL_FIELDS = (
-    "status", "started_at", "finished_at", "elapsed_s", "reason",
+    "status", "started_at", "finished_at", "elapsed_s", "elapsed_hms", "reason",
     "estimated_s", "items",
 )
 
