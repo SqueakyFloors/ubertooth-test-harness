@@ -1685,9 +1685,19 @@ BLE address parity soak:
     long run has a disk budget as well as a per-file limit: past it the oldest
     complete capture is removed, newest kept, and the removal is recorded.
     The tool's own transcript is bounded for the whole run the same way, so
-    the figures hold but the per-packet text past the budget is not kept.
+    the figures hold but the per-packet text past the budget is not kept; it
+    reaches its file on a size and time budget rather than a line at a time,
+    with the lines a verdict reads pushed at once, so a reader tailing it
+    sees a file a moment behind. The progress file is bounded as well, and
+    past a few hundred unplanned restarts the records a restart repeats are
+    collapsed into one block record each, so what a run that kept restarting
+    leaves is a readable record and a count rather than a quarter of a
+    million records saying one thing. What such a storm has not said before
+    is still written whole, and the schedule's own records are never
+    collapsed.
   related:
     - ubertooth-test-harness#350
+    - ubertooth-test-harness#353
     - ubertooth#703
     - ubertooth#239
 
