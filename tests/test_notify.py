@@ -7,9 +7,11 @@ which is also how "argv and stdin, never a shell" is checked.
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import email
 import email.policy
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,12 @@ import tempfile
 import textwrap
 import unittest
 
+from ubertooth_harness.cli import (
+    HarnessError,
+    _notifier,
+    _notify_config_path,
+    main,
+)
 from ubertooth_harness.controller import Controller
 from ubertooth_harness.notify import (
     LEDGER_DIR,
@@ -33,6 +41,7 @@ from ubertooth_harness.notify import (
     SmtpTransport,
     build_message,
     default_config_path,
+    digest_events,
     duration_text,
     group_notice,
     header_text,
@@ -318,6 +327,8 @@ class ConfigTests(unittest.TestCase):
         for bad in (
             "http://lab-host.example:8765", "https://127.0.0.1:8765",
             "http://127.0.0.1:8765/ui/", "127.0.0.1:8765",
+            # A name is resolved when it is used, so it is not an address.
+            "http://localhost:8765",
         ):
             with self.subTest(url=bad):
                 with self.assertRaisesRegex(NotifyConfigError, "gui_base_url"):
@@ -326,6 +337,18 @@ class ConfigTests(unittest.TestCase):
             parse_config({"gui_base_url": "http://127.0.0.1:9000"}).gui_base_url,
             "http://127.0.0.1:9000",
         )
+
+    def test_cleartext_needs_a_literal_loopback_address(self):
+        # `localhost` resolves when the connection is made, so it is not the
+        # "relay on this machine" that `tls: none` is allowed for.
+        for host in ("localhost", "relay.example.invalid", "127.0.0.1.nip.io"):
+            with self.subTest(host=host):
+                with self.assertRaisesRegex(NotifyConfigError, "only allowed"):
+                    parse_config({
+                        "enabled": True, "sender": SENDER,
+                        "recipients": [RECIPIENT],
+                        "smtp": {"host": host, "tls": "none"},
+                    })
 
     def test_sendmail_must_be_an_absolute_executable_path(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -515,7 +538,10 @@ class MessageTests(unittest.TestCase):
         }
         notice = group_notice(
             group,
-            {RUN["run_id"]: EVENTS, "20260101T120001Z-0123456789ac": EVENTS},
+            {
+                RUN["run_id"]: digest_events(EVENTS),
+                "20260101T120001Z-0123456789ac": digest_events(EVENTS),
+            },
             gui_base="http://127.0.0.1:8765", results_dir="/controller/runs",
             subject_prefix="[harness]",
         )
@@ -528,6 +554,34 @@ class MessageTests(unittest.TestCase):
         self.assertIn("Host_Spare: no run (target Host_Spare is offline)", body)
         self.assertIn("http://127.0.0.1:8765/ui/#run=20260101T120001Z-0123456789ac", body)
         self.assertIn("a" * 40, body)
+
+    def test_a_group_digest_keeps_only_what_a_notice_needs(self):
+        digest = digest_events(EVENTS)
+        self.assertEqual(sorted(digest), ["sources", "totals"])
+        self.assertEqual(digest["totals"]["counts"],
+                         {"passed": 2, "failed": 1, "skipped": 1})
+        self.assertEqual(len(digest["sources"]), 2)
+        # Small enough that one per host of a sixteen-host group is nothing,
+        # which is the point of reducing each run's records as they are read.
+        self.assertLess(len(json.dumps(digest)), 2000)
+
+    def test_a_report_that_was_not_written_is_named(self):
+        notice = run_notice(
+            {**RUN, "report": False,
+             "report_error": "could not write report.md: No space left on device"},
+            events=EVENTS,
+        )
+        self.assertIn(
+            "Report: report.md was not written (could not write report.md: "
+            "No space left on device)",
+            notice.body,
+        )
+        short = run_notice(
+            {**RUN, "report": True, "report_error": "could not compile report.md"},
+            events=EVENTS,
+        )
+        self.assertIn("Report: report.md is short: could not compile", short.body)
+        self.assertNotIn("Report:", run_notice({**RUN, "report": True}).body)
 
     def test_a_notice_with_no_gui_port_has_no_link(self):
         self.assertNotIn("/ui/#run=", run_notice(RUN, events=EVENTS).body)
@@ -1042,6 +1096,61 @@ class ControllerNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Host_Mac: no run (target Host_Mac is offline)", message)
         self.assertIn("Verdict: error", message)
 
+    async def test_a_group_settled_by_a_hosts_reason_is_still_reported(self):
+        """The group's last word is a host that never answered, not a child.
+
+        Its only child has already ended, so nothing else would ever reach
+        this group's notice.
+        """
+        controller = self.controller()
+        group = self.group(controller)
+        only = self.finished_run(
+            controller, "20260101T120000Z-0123456789ab", group_id=group.group_id
+        )
+        group.set_member_run("Host_Linux", only.run_id)
+        controller._persist_group(group)
+        # A start request to the other host is still outstanding, so the
+        # group reads as running and the child's end says nothing.
+        pending = self.pending(controller, group, "Host_Mac")
+        controller.notify_finished(only)
+        await self.drain(controller)
+        self.assertEqual(self.sent, [])
+        # Now that request comes to nothing: the runner rejected it, its
+        # connection went, or it expired.
+        controller._pending_runs.clear()
+        controller._note_group_failure(
+            pending, "the runner did not answer the start request"
+        )
+        await self.drain(controller)
+        self.assertEqual(len(self.sent), 1)
+        message = self.content(self.sent[0])
+        self.assertIn("Host_Linux: passed", message)
+        self.assertIn(
+            "Host_Mac: no run (the runner did not answer the start request)",
+            message,
+        )
+
+    async def test_a_group_that_started_nowhere_is_not_reported(self):
+        controller = self.controller()
+        group = self.group(controller)
+        pending = self.pending(controller, group, "Host_Mac")
+        controller._pending_runs.clear()
+        controller._note_group_failure(pending, "target Host_Mac is offline")
+        await self.drain(controller)
+        self.assertEqual(self.sent, [])
+
+    def pending(self, controller, group, host):
+        """One outstanding start request for a host of this group."""
+        from ubertooth_harness.controller import _Pending
+
+        entry = _Pending(
+            host, asyncio.get_running_loop().create_future(),
+            group_id=group.group_id,
+        )
+        entry.waiters = 1
+        controller._pending_runs["request-" + host] = entry
+        return entry
+
     async def test_a_notice_failure_never_reaches_the_run(self):
         controller = self.controller()
         run = self.finished_run(controller, "20260101T120000Z-0123456789ab")
@@ -1102,6 +1211,136 @@ class ControllerNoticeTests(unittest.IsolatedAsyncioTestCase):
     def content(message: str) -> str:
         """The body of one recorded message."""
         return parsed(message).get_content()
+
+
+class CommandLineTests(unittest.TestCase):
+    """The controller's option, the environment variable, and notify-test."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.addCleanup(self.directory.cleanup)
+
+    def write(self, text: str, name: str = "notify.yaml") -> Path:
+        path = self.root / name
+        path.write_text(textwrap.dedent(text), encoding="utf-8")
+        os.chmod(path, 0o600)
+        return path
+
+    def enabled(self) -> Path:
+        return self.write(f"""\
+            enabled: true
+            sender: {SENDER}
+            recipients: [{RECIPIENT}]
+            smtp:
+              host: 127.0.0.1
+              tls: none
+            """)
+
+    def test_the_option_wins_then_the_variable_then_the_default(self):
+        chosen, named = self.enabled(), self.write("enabled: false\n", "named.yaml")
+        environment = {
+            "UBERTOOTH_HARNESS_NOTIFY_CONFIG": str(named),
+            "XDG_CONFIG_HOME": str(self.root / "config"),
+        }
+        self.assertEqual(_notify_config_path(chosen, environment), chosen)
+        self.assertEqual(_notify_config_path(None, environment), named)
+        # Nothing named and nothing at the default path: notices stay off.
+        self.assertIsNone(_notify_config_path(None, {"XDG_CONFIG_HOME": str(self.root)}))
+        default = self.root / "ubertooth-harness" / "notify.yaml"
+        default.parent.mkdir(parents=True)
+        default.write_text("enabled: false\n", encoding="utf-8")
+        self.assertEqual(
+            _notify_config_path(None, {"XDG_CONFIG_HOME": str(self.root)}), default
+        )
+
+    def test_the_controller_refuses_to_start_on_a_bad_configuration(self):
+        bad = self.write("enabled: true\nrecipients: [not-an-address]\n")
+        with self.assertRaisesRegex(HarnessError, "completion notices"):
+            _notifier(bad, self.root)
+
+    def test_a_disabled_configuration_gives_the_controller_no_notifier(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertIsNone(_notifier(self.write("enabled: false\n"), self.root))
+        self.assertIn("no notice will be sent", stderr.getvalue())
+
+    def test_an_enabled_configuration_gives_one_with_a_ledger(self):
+        notifier = _notifier(self.enabled(), self.root)
+        self.assertTrue(notifier.enabled)
+        self.assertEqual(notifier.ledger_dir, self.root / LEDGER_DIR)
+
+    def test_notify_test_dry_run_prints_the_message_and_no_credential(self):
+        secret = self.write("hunter2\n", "smtp-password")
+        path = self.write(f"""\
+            enabled: true
+            sender: {SENDER}
+            recipients: [{RECIPIENT}]
+            smtp:
+              host: relay.example.invalid
+              tls: starttls
+              username: {SENDER}
+              password_file: {secret}
+            """)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(
+                main(["notify-test", "--notify-config", str(path), "--dry-run"]), 0
+            )
+        text = out.getvalue()
+        self.assertIn("dry run: nothing was sent", text)
+        self.assertIn("TEST:", text)
+        self.assertIn(f"To: {RECIPIENT}", text)
+        self.assertIn(str(secret), text)  # which source, not what is in it
+        self.assertNotIn("hunter2", text)
+
+    def test_notify_test_reports_a_configuration_that_is_not_there(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(
+                main(["notify-test", "--notify-config", str(self.root / "absent.yaml")]),
+                2,
+            )
+        self.assertIn("absent.yaml", stderr.getvalue())
+
+    def test_notify_test_refuses_a_disabled_configuration(self):
+        path = self.write("enabled: false\n")
+        out, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(stderr):
+            self.assertEqual(
+                main(["notify-test", "--notify-config", str(path)]), 2
+            )
+        self.assertIn("enabled: false", stderr.getvalue())
+        self.assertIn("notices: disabled", out.getvalue())
+
+    def test_notify_test_sends_one_notice_through_the_relay(self):
+        with FakeSmtpServer() as server:
+            path = self.write(f"""\
+                enabled: true
+                sender: {SENDER}
+                recipients: [{RECIPIENT}]
+                smtp:
+                  host: {server.host}
+                  port: {server.port}
+                  tls: none
+                attempts: 1
+                retry_delay_s: 0
+                """)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(
+                    main(["notify-test", "--notify-config", str(path)]), 0
+                )
+        self.assertEqual(len(server.messages), 1)
+        self.assertIn("is not a real run", parsed(server.messages[0]["data"]).get_content())
+        # No ledger: a test notice may be sent as often as somebody likes.
+        self.assertFalse((self.root / LEDGER_DIR).exists())
+
+    def test_the_controller_option_is_not_a_bind_option(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            main(["controller", "--notify-host", "relay.example.invalid"])
+        self.assertIn("unrecognized arguments", stderr.getvalue())
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -74,9 +74,10 @@ TLS_IMPLICIT = "tls"
 TLS_NONE = "none"
 TLS_MODES = (TLS_STARTTLS, TLS_IMPLICIT, TLS_NONE)
 # Encryption may be left off only for a relay on this machine's loopback
-# address, where there is no network to listen on. Authenticated SMTP always
-# requires TLS, whatever the host.
-LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+# address, where there is no network to listen on. A name is not an address
+# (it is resolved when the connection is made), so only the literals count.
+# Authenticated SMTP always requires TLS, whatever the host.
+LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 
 # A credential is read from a variable named for this purpose, so a notice
 # cannot pick up whatever a generic PASSWORD in the service environment
@@ -248,11 +249,12 @@ def check_loopback_url(value: str, what: str) -> str:
 
     The GUI is loopback only, so a link in a notice is too: a URL naming
     another host would invite a reader to open something this harness does
-    not serve.
+    not serve. A literal address, not a name, for the same reason the
+    cleartext relay must be one.
     """
     if len(value) > MAX_URL_CHARS:
         raise NotifyConfigError(f"{what} is too long")
-    match = re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\])(?::(\d{1,5}))?", value)
+    match = re.fullmatch(r"http://(127\.0\.0\.1|\[::1\])(?::(\d{1,5}))?", value)
     if match is None:
         raise NotifyConfigError(
             f"{what} must be http://127.0.0.1[:PORT] (the GUI listens on "
@@ -631,6 +633,17 @@ def source_lines(events: Sequence[Mapping]) -> list[str]:
     return lines
 
 
+def digest_events(events: Sequence[Mapping]) -> dict:
+    """All one run's records contribute to a notice, in a few hundred bytes.
+
+    A group notice needs each host's totals and the source identity, nothing
+    else, so the controller reduces one host's records to this and lets them
+    go before reading the next. A group of sixteen hosts therefore holds one
+    parsed run log at a time, not sixteen.
+    """
+    return {"totals": test_totals(events), "sources": source_lines(events)}
+
+
 def read_publication(
     results_dir: Path | str, identifier: str, log: Callable[[str], None] = print
 ) -> str | None:
@@ -698,6 +711,22 @@ _CLOSING = (
 )
 
 
+def _report_problem(run: Mapping) -> str:
+    """Why report.md is short or missing for this run, if it is.
+
+    The controller writes the report before it ends a run, and a notice goes
+    out after that; but the write itself can fail, and then the notice must
+    not send a reader to a file that is not there.
+    """
+    detail = header_text(run.get("report_error") or "", MAX_REASON_CHARS)
+    if "report" in run and not run["report"]:
+        return (
+            f"report.md was not written ({detail})" if detail
+            else "report.md was not written"
+        )
+    return f"report.md is short: {detail}" if detail else ""
+
+
 def run_notice(
     run: Mapping,
     *,
@@ -710,8 +739,8 @@ def run_notice(
     """The notice for one run that has finished (a run of its own, #392)."""
     run_id = header_text(run.get("run_id"), 64)
     status = header_text(run.get("status"), 32) or "unknown"
-    plan = header_text(run.get("plan") or "–", 120)
-    suite = header_text(run.get("suite") or "–", 120)
+    plan = header_text(run.get("plan") or "-", 120)
+    suite = header_text(run.get("suite") or "-", 120)
     totals = test_totals(events)
     rows = [
         ("Verdict", status),
@@ -727,6 +756,9 @@ def run_notice(
                          MAX_REASON_CHARS)
     if reason:
         rows.append(("Reason", reason))
+    problem = _report_problem(run)
+    if problem:
+        rows.append(("Report", problem))
     body = _render(
         f"Ubertooth harness run {run_id}: {status}",
         rows,
@@ -742,7 +774,7 @@ def run_notice(
 
 def group_notice(
     group: Mapping,
-    member_events: Mapping[str, Sequence[Mapping]],
+    digests: Mapping[str, Mapping],
     *,
     gui_base: str = "",
     results_dir: Path | str | None = None,
@@ -752,12 +784,14 @@ def group_notice(
     """The notice for a run group whose every host has finished.
 
     One message for the group, with a block per host: its verdict, totals,
-    duration and GUI link, or why that host never ran.
+    duration and GUI link, or why that host never ran. ``digests`` maps a
+    member's run ID to that run's ``digest_events``, so nothing here holds a
+    run log.
     """
     group_id = header_text(group.get("group_id"), 80)
     status = header_text(group.get("status"), 32) or "unknown"
-    plan = header_text(group.get("plan") or "–", 120)
-    suite = header_text(group.get("suite") or "–", 120)
+    plan = header_text(group.get("plan") or "-", 120)
+    suite = header_text(group.get("suite") or "-", 120)
     members = [
         member for member in (group.get("members") or ()) if isinstance(member, Mapping)
     ]
@@ -787,12 +821,12 @@ def group_notice(
             )
             continue
         run_id = header_text(run.get("run_id"), 64)
-        events = member_events.get(run_id) or ()
+        digest = digests.get(run_id) or {}
         if not sources:
             # One identity for the whole group: every child was sent the same
             # commit (Controller._run_fields resolves the ref once).
-            sources = source_lines(events)
-        totals = test_totals(events)
+            sources = list(digest.get("sources") or ())
+        totals = digest.get("totals") or {}
         text = (
             f"  {host}: {header_text(run.get('status'), 32)} - {_totals_line(totals)}\n"
             f"    run {run_id}, "
@@ -802,6 +836,9 @@ def group_notice(
                              MAX_REASON_CHARS)
         if reason:
             text += f"\n    reason: {reason}"
+        problem = _report_problem(run)
+        if problem:
+            text += f"\n    {problem}"
         link = _gui_link(gui_base, run_id)
         if link:
             text += f"\n    {link}"

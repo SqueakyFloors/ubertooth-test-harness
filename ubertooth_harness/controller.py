@@ -90,6 +90,7 @@ from ubertooth_harness.notify import (
     PUBLICATIONS_DIR,
     Notice,
     Notifier,
+    digest_events,
     group_notice,
     read_publication,
     run_notice,
@@ -492,6 +493,9 @@ class Controller:
         # a run's verdict.
         self.notifier = notifier
         if notifier is not None and notifier.enabled:
+            # One stream for everything this service says: the notifier's
+            # own warnings go to the controller's log, not to stdout.
+            notifier.log = log
             log(f"completion notices: {notifier.config.describe()}")
         # Durations learned from the runs stored here, kept beside them.
         self.estimates = EstimateStore.load(self.results_dir / STORE_FILE, log=log)
@@ -1125,6 +1129,9 @@ class Controller:
             self.log(f"could not record {pending.host}'s reason on {group.group_id}: {error}")
             return
         self._publish_group(group)
+        # This may be the group's last word: the hosts that did run have
+        # already ended, and nothing else would reach its notice (#392).
+        self.notify_group_settled(group)
 
     def _run_for(self, target: Target, run_id: str) -> Run:
         run = self.runs.get(run_id)
@@ -1433,20 +1440,51 @@ class Controller:
         group gets one when its last host finishes. A run of its own is a
         group of one and gets a run notice.
         """
+        self._start_notice(self._notice_for_run(run), f"run {run.run_id}")
+
+    def notify_group_settled(self, group: RunGroup) -> None:
+        """Start a group's notice if that group has just become terminal.
+
+        A group's last word is not always a child ending: a host whose runner
+        rejected the run, went away, or never answered has its reason written
+        on the group instead (``_note_group_failure``). When that is what
+        finishes the group, the children have already come and gone, so
+        nothing else would ever send its notice.
+
+        Harmless to call whenever a group record changes: a group still
+        running builds nothing, and a notice already sent is claimed in the
+        ledger, so one group is reported once however many times both paths
+        reach it.
+        """
+        self._start_notice(
+            self._notice_for_group(group), f"group {group.group_id}"
+        )
+
+    def _start_notice(self, build: Callable, what: str) -> None:
         if self.notifier is None or not self.notifier.enabled:
             return
-        task = asyncio.ensure_future(self._send_notice(run))
+        try:
+            task = asyncio.ensure_future(self._send_notice(build, what))
+        except RuntimeError as error:
+            # Called from a path with no running loop. Nothing here may
+            # raise: this runs inside a registration, a runner session and
+            # the watchdog, none of which may fall over for a courtesy.
+            self.log(
+                f"warning: no event loop to send the completion notice for "
+                f"{what}: {error}"
+            )
+            return
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _send_notice(self, run: Run) -> None:
+    async def _send_notice(self, build: Callable, what: str) -> None:
         """Build one notice and hand it to the notifier. Never raises.
 
         Every failure ends here, in the log: a notice is a courtesy, and the
         run's status, record and report are already written.
         """
         try:
-            notice = await self._notice_for(run)
+            notice = await build()
             if notice is None:
                 return
             await self.notifier.deliver(notice)
@@ -1454,44 +1492,63 @@ class Controller:
             raise
         except Exception as error:  # noqa: BLE001 - the run result stands
             self.log(
-                f"warning: the completion notice for run {run.run_id} could "
-                f"not be sent: {type(error).__name__}: {error}"
+                f"warning: the completion notice for {what} could not be "
+                f"sent: {type(error).__name__}: {error}"
             )
 
-    async def _notice_for(self, run: Run) -> Notice | None:
-        """The notice this run's end calls for, or None if there is none yet.
+    def _notice_for_run(self, run: Run) -> Callable:
+        async def build() -> Notice | None:
+            """The notice this run's end calls for, or None if there is none.
 
-        None while the group this run is one host of has a host that is still
-        running or still starting: the group's own notice goes out when the
-        last of them is in.
-        """
-        group = self.group_of(run)
-        view = self.view_group(group)
-        if view["status"] == GROUP_RUNNING:
-            return None
-        gui = self.gui_base()
-        prefix = self.notifier.config.subject_prefix
-        if group.implicit:
+            None while the group this run is one host of has a host that is
+            still running or still starting: the group's own notice goes out
+            when the last of them is in.
+            """
+            group = self.group_of(run)
+            if not group.implicit:
+                return await self._group_notice(group)
+            if self.view_group(group)["status"] == GROUP_RUNNING:
+                return None
             events = await asyncio.to_thread(self.read_events, run)
             return run_notice(
-                run.view(), events=events, gui_base=gui,
+                run.view(), events=events, gui_base=self.gui_base(),
                 results_dir=run.directory,
                 public_url=self._public_url(run.run_id),
-                subject_prefix=prefix,
+                subject_prefix=self.notifier.config.subject_prefix,
             )
-        member_events = {}
+
+        return build
+
+    def _notice_for_group(self, group: RunGroup) -> Callable:
+        async def build() -> Notice | None:
+            return await self._group_notice(group)
+
+        return build
+
+    async def _group_notice(self, group: RunGroup) -> Notice | None:
+        """One group's notice, or None while any of its hosts is not in.
+
+        A group that started nowhere is not reported: it has nothing to say
+        about a run, and such a group is forgotten rather than stored.
+        """
+        view = self.view_group(group)
+        if view["status"] == GROUP_RUNNING or not view["hosts_started"]:
+            return None
+        digests = {}
         for member in view["members"]:
             member_run = self.runs.get(member["run_id"]) if member["run_id"] else None
             if member_run is None:
                 continue
-            # One host at a time, as group_detail reads them: a group of
-            # sixteen must not hold sixteen parsed run logs at once.
-            member_events[member_run.run_id] = await asyncio.to_thread(
-                self.read_events, member_run
+            # One host at a time, and only a few hundred bytes kept of each:
+            # a group of sixteen holds one parsed run log, not sixteen.
+            digests[member_run.run_id] = digest_events(
+                await asyncio.to_thread(self.read_events, member_run)
             )
         return group_notice(
-            view, member_events, gui_base=gui, results_dir=self.results_dir,
-            public_url=self._public_url(group.group_id), subject_prefix=prefix,
+            view, digests, gui_base=self.gui_base(),
+            results_dir=self.results_dir,
+            public_url=self._public_url(group.group_id),
+            subject_prefix=self.notifier.config.subject_prefix,
         )
 
     def _public_url(self, identifier: str) -> str | None:

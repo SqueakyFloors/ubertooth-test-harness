@@ -157,11 +157,17 @@ why it did not.
   `sending` means the controller died mid-send; nobody can tell from here
   whether that message went out, so it is logged and left. A duplicate flood
   is worse than one missing notice.
-- **A run that ended while the controller was down** gets no notice: on
-  startup the controller does not go back over stored runs, or enabling
-  notices would mail out the whole history. A run still in flight across a
-  restart does get one, because its runner reports the end to the controller
-  that comes back.
+- **A run that ended while the controller was down** is not gone back over on
+  startup: enabling notices would otherwise mail out the whole history. Such
+  a run does get one notice, as `lost`, when its target's runner next
+  registers without it, which is when the controller learns the run can no
+  longer finish. A run still in flight across a restart gets its real verdict,
+  because its runner reports the end to the controller that comes back.
+- **A group settles on its last word, whichever that is.** Usually that is
+  its last host ending. It can also be a host whose runner rejected the run,
+  went away, or never answered, which is written on the group instead; the
+  notice goes out then, naming each host that did run and the reason the
+  others did not.
 - **Bounded retries.** `attempts` (default 3, at most 5) deliveries,
   `retry_delay_s` apart, each with `timeout_s`. Then the notice is recorded
   as failed, with a warning naming the last error. The run's own result is
@@ -223,7 +229,8 @@ would have turned encryption on cannot pass as a default.
 
 | What the log says | What it means |
 |---|---|
-| `completion notices: disabled` or nothing at startup | no configuration was found, or it has `enabled: false` |
+| nothing about notices at startup | no configuration was found, so notices are off |
+| `<path> has enabled: false; no notice will be sent` | the file was read and says not to |
 | `warning: notice … attempt 1 of 3 failed: SMTPNotSupportedError` | the relay does not offer STARTTLS; use `tls: tls`, or the right port |
 | `… SMTPAuthenticationError` | the relay rejected the user name or password; check the named source |
 | `… was not sent after 3 attempt(s)` | every attempt failed; the run's result stands |
