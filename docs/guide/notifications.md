@@ -201,6 +201,10 @@ why it did not.
   input, never through a shell.
 - **The configuration file is yours.** It says where notices go, so a file
   that is group- or world-writable is refused.
+- **Nothing asks this host its own name.** The EHLO name is the sender's
+  domain, or `smtp.ehlo_name`. Looking it up would depend on whatever DNS the
+  host has (it stalled for a minute on a CI runner, long enough for the relay
+  to give up), and would put the lab host's own name into the conversation.
 
 ## Settings
 
@@ -215,6 +219,7 @@ why it did not.
 | `smtp.username` | set it to authenticate; then TLS and one password source are required |
 | `smtp.password_env` | an environment variable named `UBERTOOTH_HARNESS_…` |
 | `smtp.password_file` | an absolute path to a file only you can read |
+| `smtp.ehlo_name` | what the client calls itself in EHLO; by default the sender's domain |
 | `sendmail.path` | absolute path to a sendmail-compatible binary |
 | `attempts` | deliveries per notice, 1 to 5 (default 3) |
 | `retry_delay_s` | seconds between attempts (default 5, at most 60) |

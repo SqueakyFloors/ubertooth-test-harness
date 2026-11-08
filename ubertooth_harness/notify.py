@@ -147,6 +147,13 @@ class NotifyConfig:
     password_env: str = ""
     password_file: str = ""
     sendmail_path: str = ""
+    # What the client calls itself in EHLO. Named rather than looked up:
+    # ``smtplib`` otherwise calls ``socket.getfqdn()``, which depends on
+    # whatever DNS the host has and can stall for a minute on a machine whose
+    # own name does not resolve (it did on a CI runner, long enough for the
+    # relay to time the session out). Naming it also keeps the lab host's own
+    # name out of the conversation. Empty means the sender's domain.
+    ehlo_name: str = ""
     attempts: int = 3
     retry_delay_s: float = 5.0
     timeout_s: float = 20.0
@@ -158,6 +165,12 @@ class NotifyConfig:
     @property
     def authenticated(self) -> bool:
         return bool(self.username)
+
+    @property
+    def client_name(self) -> str:
+        """What to send as the EHLO name: the configured one, or the sender's
+        domain, so nothing has to ask the host what it is called."""
+        return self.ehlo_name or self.sender.rsplit("@", 1)[-1]
 
     def describe(self) -> str:
         """One line for the log: where notices go, and never a credential."""
@@ -180,7 +193,10 @@ _TOP_KEYS = {
     "enabled", "sender", "recipients", "transport", "smtp", "sendmail",
     "attempts", "retry_delay_s", "timeout_s", "subject_prefix", "gui_base_url",
 }
-_SMTP_KEYS = {"host", "port", "tls", "username", "password_env", "password_file"}
+_SMTP_KEYS = {
+    "host", "port", "tls", "username", "password_env", "password_file",
+    "ehlo_name",
+}
 _SENDMAIL_KEYS = {"path"}
 
 
@@ -361,6 +377,7 @@ def parse_config(data) -> NotifyConfig:
         password_env=password_env,
         password_file=password_file,
         sendmail_path=_text(sendmail, "path"),
+        ehlo_name=_text(smtp, "ehlo_name"),
         attempts=int(_number(data, "attempts", 3, 1, MAX_ATTEMPTS)),
         retry_delay_s=_number(data, "retry_delay_s", 5.0, 0.0, MAX_RETRY_DELAY_S),
         timeout_s=_number(data, "timeout_s", 20.0, 1.0, MAX_TIMEOUT_S),
@@ -371,6 +388,11 @@ def parse_config(data) -> NotifyConfig:
         # Nothing else is required of a configuration that sends nothing, so
         # a half-written one can sit there with enabled: false.
         return config
+    if config.ehlo_name and not re.fullmatch(r"[A-Za-z0-9.-]{1,255}", config.ehlo_name):
+        raise NotifyConfigError(
+            "smtp.ehlo_name must be a host name (letters, digits, dots and "
+            "hyphens); it is what the client calls itself in EHLO"
+        )
     if not config.recipients:
         raise NotifyConfigError("recipients must name at least one address")
     if config.transport == TRANSPORT_SENDMAIL:
@@ -972,11 +994,14 @@ class SmtpTransport:
             if config.tls == TLS_IMPLICIT:
                 client = smtplib.SMTP_SSL(
                     config.smtp_host, config.smtp_port,
+                    local_hostname=config.client_name,
                     timeout=config.timeout_s, context=context,
                 )
             else:
                 client = smtplib.SMTP(
-                    config.smtp_host, config.smtp_port, timeout=config.timeout_s
+                    config.smtp_host, config.smtp_port,
+                    local_hostname=config.client_name,
+                    timeout=config.timeout_s,
                 )
             with client:
                 client.ehlo()

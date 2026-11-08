@@ -49,6 +49,9 @@ class FakeSmtpServer:
         self.greeting = greeting
         self.messages: list[dict] = []
         self.auth_attempts: list[str] = []
+        # What each client called itself in EHLO, so a test can check the
+        # harness names itself rather than asking DNS what this host is.
+        self.client_names: list[str] = []
         self.errors: list[str] = []
         self.deliveries = 0
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -58,11 +61,41 @@ class FakeSmtpServer:
         self._socket.listen(8)
         self.host, self.port = self._socket.getsockname()
         self._stop = threading.Event()
+        self._sessions: list[threading.Thread] = []
         self._thread = threading.Thread(target=self._serve, daemon=True)
 
     def __enter__(self) -> "FakeSmtpServer":
         self._thread.start()
+        self._probe()
         return self
+
+    def _probe(self) -> None:
+        """Make sure the relay is really serving before a test relies on it.
+
+        A listening socket completes a connection in the kernel's backlog
+        whether or not anything ever calls ``accept``, so a session thread
+        that died leaves a client waiting for a greeting until its own
+        timeout, with nothing to say why. One greeting read here turns that
+        into an error naming the cause.
+        """
+        try:
+            with socket.create_connection((self.host, self.port), timeout=20) as probe:
+                probe.settimeout(20)
+                reader = probe.makefile("rb")
+                greeting = reader.readline()
+                probe.sendall(b"QUIT\r\n")
+                reader.readline()
+                reader.close()
+        except OSError as error:
+            raise RuntimeError(
+                f"the fake relay on {self.host}:{self.port} did not answer "
+                f"({type(error).__name__}: {error}); thread alive: "
+                f"{self._thread.is_alive()}; errors: {self.errors}"
+            ) from None
+        if not greeting.startswith(b"220"):
+            raise RuntimeError(
+                f"the fake relay greeted with {greeting!r}; errors: {self.errors}"
+            )
 
     def __exit__(self, *exc) -> None:
         self.close()
@@ -74,23 +107,43 @@ class FakeSmtpServer:
         except OSError:
             pass
         self._thread.join(timeout=10)
+        for session in list(self._sessions):
+            session.join(timeout=10)
 
     def _serve(self) -> None:
+        # A timeout on the accept rather than a blocking one, as the fake SSH
+        # in tests/test_deploy_scripts.py does: the loop then notices close()
+        # by itself, and a transient error cannot end the service silently.
+        self._socket.settimeout(0.2)
         while not self._stop.is_set():
             try:
                 connection, _ = self._socket.accept()
-            except OSError:
-                return
-            try:
-                self._session(connection)
-            except Exception as error:  # noqa: BLE001 - kept for the test
+            except socket.timeout:
+                continue
+            except OSError as error:
                 if not self._stop.is_set():
-                    self.errors.append(f"{type(error).__name__}: {error}")
-            finally:
-                try:
-                    connection.close()
-                except OSError:
-                    pass
+                    self.errors.append(f"accept: {type(error).__name__}: {error}")
+                return
+            # One thread per connection: a session that is slow to finish
+            # must not hold up the next delivery (a retry opens another
+            # connection at once).
+            session = threading.Thread(
+                target=self._serve_one, args=(connection,), daemon=True
+            )
+            self._sessions.append(session)
+            session.start()
+
+    def _serve_one(self, connection: socket.socket) -> None:
+        try:
+            self._session(connection)
+        except Exception as error:  # noqa: BLE001 - kept for the test
+            if not self._stop.is_set():
+                self.errors.append(f"{type(error).__name__}: {error}")
+        finally:
+            try:
+                connection.close()
+            except OSError:
+                pass
 
     def _session(self, connection: socket.socket) -> None:
         connection.settimeout(30)
@@ -120,6 +173,7 @@ class FakeSmtpServer:
             word = text.split(" ", 1)[0].upper()
             rest = text[len(word):].strip()
             if word in ("EHLO", "HELO"):
+                self.client_names.append(rest)
                 replies = ["250-fake-relay"]
                 if self.username:
                     replies.append("250-AUTH LOGIN PLAIN")

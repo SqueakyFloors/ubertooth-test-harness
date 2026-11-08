@@ -45,6 +45,10 @@ smtp:
   # Or an absolute path to a file holding only the password, owned by you
   # with mode 600. Name one source, not both.
   # password_file: /private/path/to/smtp-password
+  # What the client calls itself in EHLO. By default the sender's domain,
+  # because asking this host its own name depends on the DNS it happens to
+  # have and puts the lab host's name in the conversation.
+  # ehlo_name: bench.example.com
 
 # Only with transport: sendmail. An absolute path to a regular executable
 # file no one else can write; it is run with the addresses as arguments and

@@ -18,6 +18,7 @@ from pathlib import Path
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 from ubertooth_harness.cli import (
     HarnessError,
@@ -384,6 +385,25 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(NotifyConfigError):
                     parse_config(data)
 
+    def test_the_ehlo_name_must_be_a_host_name(self):
+        def build(name):
+            return {
+                "enabled": True, "sender": SENDER, "recipients": [RECIPIENT],
+                "smtp": {"host": "relay.example.invalid", "ehlo_name": name},
+            }
+
+        for bad in ("bench example com", "bench\nEHLO evil", "bench;rm -rf /"):
+            with self.subTest(name=bad):
+                with self.assertRaises(NotifyConfigError):
+                    parse_config(build(bad))
+        self.assertEqual(
+            parse_config(build("bench.example.com")).client_name,
+            "bench.example.com",
+        )
+        # With none configured, the sender's own domain: nothing asks this
+        # host what it is called.
+        self.assertEqual(parse_config(build("")).client_name, "example.invalid")
+
 
 # ----- the message ---------------------------------------------------------
 
@@ -694,6 +714,31 @@ class SmtpDeliveryTests(unittest.TestCase):
         self.assertIsNone(message.get("Bcc"))
         self.assertIn("Bcc: someone@example.invalid", message.get_content())
         self.assertEqual(server.messages[0]["recipients"], [RECIPIENT])
+
+    def test_the_client_names_itself_without_asking_this_host(self):
+        # smtplib would call socket.getfqdn() for the EHLO name, which
+        # depends on the host's DNS and stalled for a minute on a CI runner,
+        # long enough for the relay to time the session out.
+        with FakeSmtpServer() as server:
+            config = smtp_config(server)
+            with patch("socket.getfqdn", side_effect=AssertionError("asked DNS")):
+                self.assertTrue(
+                    self.notifier(config).send(run_notice(RUN, events=EVENTS))
+                )
+        self.assertEqual(server.client_names, ["example.invalid"])
+        self.assertEqual(server.errors, [])
+
+    def test_a_configured_ehlo_name_is_what_the_relay_sees(self):
+        with FakeSmtpServer() as server:
+            config = smtp_config(
+                server,
+                smtp={"host": server.host, "port": server.port, "tls": "none",
+                      "ehlo_name": "bench.example.com"},
+            )
+            self.assertTrue(
+                self.notifier(config).send(run_notice(RUN, events=EVENTS))
+            )
+        self.assertEqual(server.client_names, ["bench.example.com"])
 
     def test_a_refused_recipient_is_a_warning_not_a_verdict(self):
         with FakeSmtpServer(reject_recipients=True) as server:
