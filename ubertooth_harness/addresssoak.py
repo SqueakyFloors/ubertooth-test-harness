@@ -1899,7 +1899,7 @@ class Soak:
         # of a failed run wants, and "newest kept" is what this promises.
         while len(kept) > 1:
             total = sum(attempt.bytes_kept for attempt in kept)
-            total += sum(attempt.bytes_kept for attempt in skipped)
+            total += sum(attempt.bytes_kept for attempt, _ in skipped)
             over_budget = (options.capture_budget_bytes > 0
                            and total > options.capture_budget_bytes)
             if not over_budget and len(kept) <= MAX_KEPT_ATTEMPTS:
@@ -1919,7 +1919,16 @@ class Soak:
                 except OSError:
                     left.append(name)
             if left:
-                skipped.append(oldest)
+                skipped.append((oldest, left))
+                # Whatever did go is gone: its bytes leave this attempt's
+                # total and are counted as freed, so the budget stops
+                # charging the run for a file that is no longer on disk and
+                # cannot call itself stuck over bytes nobody holds. The
+                # attempt is not marked removed -- some of its files are
+                # still there, and a later stop tries them again.
+                if removed:
+                    oldest.bytes_kept = max(0, oldest.bytes_kept - removed)
+                    self.capture_bytes_removed += removed
                 # A file that is still there has not been given back to the
                 # filesystem, so this attempt stays in the accounting and
                 # the run says nothing it did not do. Earlier versions put
@@ -1927,7 +1936,8 @@ class Soak:
                 # re-targeted the same attempt for ever, leaving the budget
                 # disabled for the rest of the run.
                 self.record({"record": "capture_not_removed",
-                              "index": oldest.index, "files": left})
+                              "index": oldest.index, "files": left,
+                              "bytes": removed})
                 continue
             # Marked whether or not there were bytes to free: an attempt
             # whose files were empty, or never written, is still one fewer
@@ -1941,7 +1951,7 @@ class Soak:
                           "reason": ("the run's capture budget"
                                      if over_budget else
                                      f"more than {MAX_KEPT_ATTEMPTS} attempts")})
-        kept.extendleft(reversed(skipped))
+        kept.extendleft(reversed([attempt for attempt, _ in skipped]))
         # Over the budget with nothing left that can be removed. Recording it
         # and carrying on would leave the run writing captures past the
         # budget for however long it had left, which is the one thing the
@@ -1950,9 +1960,11 @@ class Soak:
         if (options.capture_budget_bytes > 0
                 and total > options.capture_budget_bytes
                 and skipped and not self.capture_budget_stuck):
+            # The files that are really still there, which is not always
+            # both of an attempt's: one of the two can go while the other
+            # will not.
             self.capture_budget_stuck = sorted(
-                name for attempt in skipped
-                for name in (attempt.capture, attempt.log))
+                name for _, left in skipped for name in left)
             self.record({"record": "capture_budget_stuck",
                           "bytes_kept": total,
                           "budget": options.capture_budget_bytes,
@@ -2805,12 +2817,7 @@ class Soak:
                           "file_limit_bytes": self.options.capture_limit_bytes,
                           "kept_attempts": MAX_KEPT_ATTEMPTS,
                           "budget_stuck_files": list(self.capture_budget_stuck)},
-            "progress": {"kept_bytes": self.progress_bytes,
-                          "budget_bytes": MAX_PROGRESS_BYTES,
-                          "records_not_written": self.progress_records_dropped,
-                          "records_coarsened": self.progress_records_coarsened,
-                          "restart_storm_blocks": self.storm_blocks,
-                          "coarsen_after_restarts": PROGRESS_FULL_RESTARTS},
+            "progress": self.progress_figures(),
             "transcript": {"kept_bytes": self.transcript_bytes,
                             "budget_bytes": MAX_LOG_BYTES,
                             "dropped_lines": self.transcript_dropped_lines,
@@ -2853,6 +2860,22 @@ class Soak:
             "attempt_count": len(self.attempts),
             "canceled": self.canceled,
         }
+
+    def progress_figures(self) -> dict:
+        """What the progress file took, and what it had no room for.
+
+        Its own method because the summary reads it twice: once while it is
+        built, and once just before it is written, after the record that says
+        how the run came out. Otherwise a file whose budget was spent would
+        leave the summary understating by that last record exactly the
+        disagreement between the two that the end-of-run flush is for.
+        """
+        return {"kept_bytes": self.progress_bytes,
+                "budget_bytes": MAX_PROGRESS_BYTES,
+                "records_not_written": self.progress_records_dropped,
+                "records_coarsened": self.progress_records_coarsened,
+                "restart_storm_blocks": self.storm_blocks,
+                "coarsen_after_restarts": PROGRESS_FULL_RESTARTS}
 
     def attempt_summaries(self) -> list:
         """Every attempt, or the first and last of them when there are many."""
@@ -2984,6 +3007,13 @@ class Soak:
         # artifact of a run of days has to say how it came out.
         summary["verdict"] = verdict
         summary["problems"] = list(self.problems)
+        # The record that says how the run came out goes in the progress file
+        # first, so the figures the summary carries about that file count it
+        # too: a reader of a run whose progress budget was spent can then
+        # reconcile the file with the summary exactly.
+        self.record({"record": "finished", "verdict": verdict,
+                      "problems": list(self.problems)})
+        summary["progress"] = self.progress_figures()
         # Written beside and renamed into place: a canceled run has about
         # two seconds before the harness kills it, and a truncate-then-write
         # interrupted in the middle would leave an empty file where the one
@@ -2993,8 +3023,6 @@ class Soak:
         beside.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
                           encoding="utf-8")
         os.replace(beside, final_path)
-        self.record({"record": "finished", "verdict": verdict,
-                      "problems": list(self.problems)})
         for problem in self.problems:
             say(f"FAIL: {problem}")
         say(f"SOAK VERDICT: {verdict}")

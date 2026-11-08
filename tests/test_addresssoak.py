@@ -881,6 +881,44 @@ class BudgetTests(SoakTestCase):
         self.assertFalse((self.out / first.capture).exists())
         self.assertTrue((self.out / second.capture).is_file())
 
+    def test_only_one_file_of_an_attempt_going_is_accounted_for(self):
+        """Half a removal frees half the bytes, and says so.
+
+        The budget charged the whole attempt while one of its two files was
+        already gone, so a run could call its budget stuck over bytes
+        nothing held (review round one). The log is put in a directory
+        nothing may write to, which is how one unlink fails while the
+        other succeeds.
+        """
+        soak = self.built_soak(budget=1)
+        soak.progress = (self.out / "progress.jsonl").open("w", encoding="utf-8")
+        self.addCleanup(soak.progress.close)
+        locked = self.out / "locked"
+        locked.mkdir(parents=True)
+        first, second = self.fake_attempt(1), self.fake_attempt(2)
+        moved = locked / Path(first.log).name
+        (self.out / first.log).rename(moved)
+        first.log = str(moved.relative_to(self.out))
+        locked.chmod(0o555)
+        self.addCleanup(locked.chmod, 0o755)
+        soak.add_attempt(first)
+        soak.add_attempt(second)
+        soak.prune_captures()
+        # The capture went, the transcript did not, so the attempt is not
+        # removed -- and the bytes that went are off its total and counted.
+        self.assertFalse(first.files_removed)
+        self.assertEqual(0, soak.captures_removed)
+        self.assertEqual(16, soak.capture_bytes_removed)
+        self.assertEqual(16, first.bytes_kept)
+        self.assertFalse((self.out / first.capture).exists())
+        self.assertTrue(moved.is_file())
+        # And what the run says is stuck is the file that is really there.
+        self.assertEqual([first.log], soak.capture_budget_stuck)
+        record = [entry for entry in self.progress()
+                  if entry["record"] == "capture_not_removed"]
+        self.assertEqual([first.log], record[0]["files"])
+        self.assertEqual(16, record[0]["bytes"])
+
     def test_an_attempt_whose_files_cannot_be_removed_is_kept(self):
         soak = self.built_soak(budget=1)
         first, second = self.fake_attempt(1), self.fake_attempt(2)
