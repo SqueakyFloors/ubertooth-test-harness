@@ -190,9 +190,19 @@ class ToolTests(unittest.TestCase):
         with self.assertRaisesRegex(nrfdk.NrfDkError, "not found"):
             nrfdk.check_nrfutil(run)
 
-    def test_find_probe_matches_the_padded_serial(self):
-        device = nrfdk.find_probe(1050000001, nrfutil_runner())
-        self.assertEqual("/dev/fake-001050000001-0", nrfdk.probe_vcom0(device))
+    def test_find_probe_matches_the_serial_in_either_spelling(self):
+        """The match is on the number, so the printed spelling does not matter.
+
+        A DK's serial is written two ways, padded to 12 digits and short
+        (harness #324), and which one `nrfutil device list` prints is not
+        recorded anywhere in this repository (harness #361). Nothing has to
+        know: `find_probe` compares the number it reports, so a probe is
+        found whichever spelling the output carries.
+        """
+        for printed in ("001050000001", "1050000001"):
+            with self.subTest(printed=printed):
+                device = nrfdk.find_probe(1050000001, nrfutil_runner(serials=(printed,)))
+                self.assertEqual(f"/dev/fake-{printed}-0", nrfdk.probe_vcom0(device))
         with self.assertRaisesRegex(nrfdk.NrfDkError, "no J-Link probe with serial 42"):
             nrfdk.find_probe(42, nrfutil_runner())
 

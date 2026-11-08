@@ -268,6 +268,139 @@ class PagingTests(HistoryFixture):
         self.assertIsNone(page["next_before"])
 
 
+class GroupPagingTests(HistoryFixture):
+    """The history the GUI lists is run groups, so that is what it pages.
+
+    A run that belongs to no stored group is listed as a group of one under
+    its own run ID (``rungroups.implicit_group``), which is what these
+    fixtures make: the paging, the cursor and the filters are the run page's,
+    over groups.
+    """
+
+    def many_groups(self, count: int) -> list[str]:
+        """``count`` groups of one, newest first, one minute apart."""
+        for index in range(count):
+            write_run(
+                self.results, f"run-{index:03d}", created_at=stamp(index),
+                finished_at=stamp(index + 0.5),
+            )
+        return [f"run-{index:03d}" for index in reversed(range(count))]
+
+    def test_a_page_holds_the_newest_fifty_groups_with_a_cursor_for_the_rest(self):
+        newest_first = self.many_groups(120)
+        controller = self.controller()
+        page = controller.group_page()
+        self.assertEqual(DEFAULT_RUN_PAGE, page["limit"])
+        self.assertEqual(50, page["returned"])
+        self.assertEqual(120, page["total"])
+        self.assertEqual(120, page["matching"])
+        self.assertTrue(page["has_more"])
+        self.assertEqual(
+            newest_first[:50], [group["group_id"] for group in page["groups"]]
+        )
+        last = page["groups"][-1]
+        self.assertEqual(last["created_at"], page["next_before"])
+        self.assertEqual(last["group_id"], page["next_before_group_id"])
+
+    def test_paging_through_the_history_lists_every_group_once(self):
+        newest_first = self.many_groups(120)
+        controller = self.controller()
+        listed, page, pages = [], controller.group_page(limit=25), 1
+        while True:
+            listed.extend(group["group_id"] for group in page["groups"])
+            if not page["has_more"]:
+                break
+            page = controller.group_page(
+                limit=25, before=page["next_before"],
+                before_group_id=page["next_before_group_id"],
+            )
+            pages += 1
+        self.assertEqual(5, pages)
+        self.assertEqual(newest_first, listed)
+        self.assertEqual(len(set(listed)), len(listed))
+
+    def test_groups_stamped_alike_are_ordered_by_group_id_and_not_lost(self):
+        for run_id in ("run-a", "run-b", "run-c"):
+            write_run(self.results, run_id, created_at=stamp(0))
+        controller = self.controller()
+        first = controller.group_page(limit=2)
+        second = controller.group_page(
+            limit=2, before=first["next_before"],
+            before_group_id=first["next_before_group_id"],
+        )
+        self.assertEqual(
+            ["run-c", "run-b"], [group["group_id"] for group in first["groups"]]
+        )
+        self.assertEqual(["run-a"], [group["group_id"] for group in second["groups"]])
+        self.assertFalse(second["has_more"])
+
+    def test_filters_by_target_status_and_ref(self):
+        # A group matches a target when it asked that host to run, which is
+        # the host its row draws a pill for.
+        write_run(self.results, "run-1", created_at=stamp(1), target="Host_A",
+                  status="passed", ref="main")
+        write_run(self.results, "run-2", created_at=stamp(2), target="Host_B",
+                  status="failed", ref="main")
+        write_run(self.results, "run-3", created_at=stamp(3), target="Host_A",
+                  status="failed", ref="v1.2")
+        controller = self.controller()
+        for filters, expected in (
+            ({"target": "Host_A"}, ["run-3", "run-1"]),
+            ({"status": "failed"}, ["run-3", "run-2"]),
+            ({"ref": "main"}, ["run-2", "run-1"]),
+            ({"target": "Host_A", "status": "failed"}, ["run-3"]),
+            ({"target": "Host_B", "ref": "v1.2"}, []),
+        ):
+            with self.subTest(**filters):
+                page = controller.group_page(**filters)
+                self.assertEqual(
+                    expected, [group["group_id"] for group in page["groups"]]
+                )
+                self.assertEqual(len(expected), page["matching"])
+                self.assertEqual(3, page["total"])
+                self.assertEqual(filters.get("target"), page["filters"]["target"])
+
+    def test_filters_and_paging_work_together(self):
+        for index in range(10):
+            write_run(
+                self.results, f"run-{index:02d}", created_at=stamp(index),
+                target="Host_A" if index % 2 else "Host_B",
+            )
+        controller = self.controller()
+        first = controller.group_page(limit=2, target="Host_A")
+        self.assertEqual(
+            ["run-09", "run-07"], [g["group_id"] for g in first["groups"]]
+        )
+        self.assertEqual(5, first["matching"])
+        second = controller.group_page(
+            limit=2, target="Host_A", before=first["next_before"],
+            before_group_id=first["next_before_group_id"],
+        )
+        self.assertEqual(
+            ["run-05", "run-03"], [g["group_id"] for g in second["groups"]]
+        )
+
+    def test_a_request_the_controller_cannot_answer_is_refused(self):
+        self.many_groups(2)
+        controller = self.controller()
+        for kwargs in (
+            {"limit": 0}, {"limit": MAX_RUN_PAGE + 1}, {"limit": "many"},
+            {"before": "yesterday"}, {"before_group_id": "run-000"},
+            {"status": "PASSED"}, {"target": "not a host"},
+        ):
+            with self.subTest(**kwargs):
+                with self.assertRaises(ControllerError) as refused:
+                    controller.group_page(**kwargs)
+                self.assertEqual(422, refused.exception.status)
+
+    def test_an_empty_history_is_an_empty_page(self):
+        page = self.controller().group_page()
+        self.assertEqual([], page["groups"])
+        self.assertEqual(0, page["total"])
+        self.assertFalse(page["has_more"])
+        self.assertIsNone(page["next_before"])
+
+
 class TranscriptTests(HistoryFixture):
     """Listing the history reads summaries, never stored transcripts."""
 
@@ -630,6 +763,45 @@ class HistoryApiTests(ControllerTestCase):
         self.assertIn(
             "GET /api/runs", (await self.http("GET", "/"))[1]["endpoints"]
         )
+        # The group history is paged and filtered the same way: this run is
+        # listed as a group of one under its own ID.
+        status, payload, _ = await self.http("GET", "/api/run-groups")
+        self.assertEqual(200, status, payload)
+        self.assertEqual(
+            ["run-1"], [group["group_id"] for group in payload["groups"]]
+        )
+        self.assertEqual(50, payload["limit"])
+        self.assertEqual(1, payload["total"])
+        self.assertFalse(payload["has_more"])
+        created = payload["groups"][0]["created_at"]
+        cursor = urlencode({"before": created, "before_group_id": "run-1"})
+        status, payload, _ = await self.http("GET", f"/api/run-groups?{cursor}")
+        self.assertEqual([], payload["groups"])
+        for query, expected in (
+            ("target=Host_A", ["run-1"]),
+            ("target=Host_B", []),
+            ("status=running", ["run-1"]),
+            ("ref=main", ["run-1"]),
+            ("ref=v1.2", []),
+        ):
+            with self.subTest(query):
+                status, payload, _ = await self.http(
+                    "GET", f"/api/run-groups?{query}"
+                )
+                self.assertEqual(200, status, payload)
+                self.assertEqual(
+                    expected, [group["group_id"] for group in payload["groups"]]
+                )
+        for query in (
+            "limit=0", f"limit={MAX_RUN_PAGE + 1}", "limit=many",
+            "before=yesterday", "before_group_id=run-1", "status=PASSED",
+            "target=not%20a%20host",
+        ):
+            with self.subTest(query):
+                status, payload, _ = await self.http(
+                    "GET", f"/api/run-groups?{query}"
+                )
+                self.assertEqual(422, status, payload)
 
     async def test_a_restarted_controller_still_recognizes_a_replay(self):
         # The run is stored as finished, so its transcript is not read at

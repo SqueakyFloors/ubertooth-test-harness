@@ -737,20 +737,7 @@ class Controller:
         parsed to list the history.
         """
         limit = self._page_limit(limit)
-        if target is not None and not valid_identifier(target):
-            raise ControllerError("target must be a registry host name", 422)
-        if status is not None and not _STATUS_RE.fullmatch(status):
-            raise ControllerError(
-                "status must be a run status such as running, passed, failed, "
-                "canceled, error or lost",
-                422,
-            )
-        if ref is not None and (
-            len(ref) > MAX_REF_CHARS or any(character < " " for character in ref)
-        ):
-            raise ControllerError(
-                f"ref must be a ref name of at most {MAX_REF_CHARS} characters", 422
-            )
+        self._check_page_filters(target, status, ref)
         cursor = self._page_cursor(before, before_run_id)
         matching = [
             run for run in self.runs.values()
@@ -779,44 +766,117 @@ class Controller:
             "filters": {"target": target, "status": status, "ref": ref},
         }
 
-    def _page_limit(self, limit: int | None) -> int:
+    def group_page(
+        self,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+        before_group_id: str | None = None,
+        target: str | None = None,
+        status: str | None = None,
+        ref: str | None = None,
+    ) -> dict:
+        """One page of the run-group history, newest first.
+
+        The history the GUI lists is groups, a run of one host being a group
+        of one, so this is what it pages: the same ordering, cursor and
+        filters as ``run_page``, by ``(created_at, group_id)``. A group
+        matches a ``target`` when it asked that host to run, which is what
+        the row's pill for that host is drawn from, and its ``status`` is the
+        group's own, combined from its members.
+        """
+        limit = self._page_limit(limit, kind="run group")
+        self._check_page_filters(target, status, ref)
+        cursor = self._page_cursor(before, before_group_id, kind="group")
+        # Newest first already, and with the groups of one a run that belongs
+        # to no stored group is listed as.
+        views = self.group_views()
+        matching = [
+            view for view in views
+            if (target is None or target in (view.get("hosts") or []))
+            and (status is None or view.get("status") == status)
+            and (ref is None or view.get("ref") == ref)
+        ]
+        older = matching if cursor is None else [
+            view for view in matching
+            if (view["created_at"], view["group_id"]) < cursor
+        ]
+        page = older[:limit]
+        more = len(older) > len(page)
+        last = page[-1] if page else None
+        return {
+            "groups": page,
+            "limit": limit,
+            # Every group the history holds, every one the filters match, and
+            # the page's own length: what "50 of 1234 run groups" is read
+            # from.
+            "total": len(views),
+            "matching": len(matching),
+            "returned": len(page),
+            "has_more": more,
+            "next_before": last["created_at"] if more and last else None,
+            "next_before_group_id": last["group_id"] if more and last else None,
+            "filters": {"target": target, "status": status, "ref": ref},
+        }
+
+    def _check_page_filters(
+        self, target: str | None, status: str | None, ref: str | None
+    ) -> None:
+        """The three history filters, which both pages take alike."""
+        if target is not None and not valid_identifier(target):
+            raise ControllerError("target must be a registry host name", 422)
+        if status is not None and not _STATUS_RE.fullmatch(status):
+            raise ControllerError(
+                "status must be a run status such as running, passed, failed, "
+                "canceled, error or lost",
+                422,
+            )
+        if ref is not None and (
+            len(ref) > MAX_REF_CHARS or any(character < " " for character in ref)
+        ):
+            raise ControllerError(
+                f"ref must be a ref name of at most {MAX_REF_CHARS} characters", 422
+            )
+
+    def _page_limit(self, limit: int | None, kind: str = "run") -> int:
         if limit is None:
             return DEFAULT_RUN_PAGE
         if isinstance(limit, bool) or not isinstance(limit, int):
-            raise ControllerError("limit must be a whole number of runs", 422)
+            raise ControllerError(f"limit must be a whole number of {kind}s", 422)
         if not 1 <= limit <= MAX_RUN_PAGE:
             raise ControllerError(
-                f"limit must be between 1 and {MAX_RUN_PAGE} runs", 422
+                f"limit must be between 1 and {MAX_RUN_PAGE} {kind}s", 422
             )
         return limit
 
     def _page_cursor(
-        self, before: str | None, before_run_id: str | None
+        self, before: str | None, before_id: str | None, kind: str = "run"
     ) -> tuple[str, str] | None:
         """The ordering position a page starts after, or None for the newest."""
+        name = f"before_{kind}_id"
         if before is None:
-            if before_run_id is not None:
+            if before_id is not None:
                 raise ControllerError(
-                    "before_run_id names the run of a before cursor; it needs before",
+                    f"{name} names the {kind} of a before cursor; it needs before",
                     422,
                 )
             return None
         if not _TIMESTAMP_RE.fullmatch(before) or _timestamp(before) is None:
             raise ControllerError(
-                "before must be the created_at stamp of a run, as this API "
+                f"before must be the created_at stamp of a {kind}, as this API "
                 "reports it (for example 2026-01-02T03:04:05.678+00:00)",
                 422,
             )
-        if before_run_id is not None and not valid_identifier(before_run_id):
-            raise ControllerError("before_run_id must be a run ID", 422)
-        if before_run_id is None:
-            # Without a run ID the cursor takes in every run of that
+        if before_id is not None and not valid_identifier(before_id):
+            raise ControllerError(f"{name} must be a {kind} ID", 422)
+        if before_id is None:
+            # Without an ID the cursor takes in every record of that
             # instant, so nothing stamped there is paged past. It is not a
             # cursor of its own: a page that stopped in the middle of an
-            # instant would serve those runs again, which is why the answer
-            # gives the run ID to go on from.
+            # instant would serve those records again, which is why the
+            # answer gives the ID to go on from.
             return (before, _AFTER_EVERY_RUN_ID)
-        return (before, before_run_id)
+        return (before, before_id)
 
     # ----- retention -------------------------------------------------------
 
@@ -2695,8 +2755,11 @@ ENDPOINTS = {
         "its run or why it did not start"
     ),
     "GET /api/run-groups": (
-        "run groups, newest first (?target=HOST); a run of its own is listed "
-        "as a group of one"
+        "one page of the run-group history, newest first: ?limit=N (50 by "
+        f"default, {MAX_RUN_PAGE} at most) and ?before=<created_at>"
+        "&before_group_id=ID, the cursor the previous page returns, with "
+        "?target=HOST, ?status=STATUS and ?ref=REF filters; a run of its own "
+        "is listed as a group of one"
     ),
     "GET /api/run-groups/{group_id}": (
         "one group with each host's run and one step row per build, flash, "
@@ -2877,10 +2940,18 @@ def create_app(controller: Controller):
         return {"group": controller.view_group(group)}
 
     @app.get("/api/run-groups")
-    async def list_groups(target: str | None = None):
-        if target is not None and not valid_identifier(target):
-            raise ControllerError("target must be a registry host name", 422)
-        return {"groups": controller.group_views(target)}
+    async def list_groups(
+        target: str | None = None,
+        status: str | None = None,
+        ref: str | None = None,
+        limit: int | None = None,
+        before: str | None = None,
+        before_group_id: str | None = None,
+    ):
+        return controller.group_page(
+            limit=limit, before=before, before_group_id=before_group_id,
+            target=target, status=status, ref=ref,
+        )
 
     @app.get("/api/run-groups/{group_id}")
     async def get_group(group_id: str):

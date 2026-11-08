@@ -95,8 +95,44 @@ The connection tests need two DKs, one registered `central` and one
 role with a default named after the role (`central:`, `peripheral:`, and the
 plain `nRF52840 DK:` for the advertiser).
 
-Registered by its J-Link serial, quoted so leading zeros survive, plus the
-BLE address its `status` reports. That address is a static random address
+**Booking the advertiser for a soak.** `BLE address parity soak`
+(`testplans/address-soak.yaml`) holds one Ubertooth, the `advertiser` DK, and
+— because it guards the host's other boards, as every stateful test does —
+every other registered Ubertooth on the host, plus the host lock, for its
+whole window, which its longest suite makes three days, and it drives
+the DK on and off throughout, so nothing else can use either device
+meanwhile. Book it rather than scheduling it beside other bench work, and run
+it from the deployed target runner, which keeps the run going after whatever
+started it disconnects. Two things it costs the host: the DK's serial port
+stays open for the run, and the capture file grows for as long as the run
+lasts — on a crowded advertising channel the capture holds every advertiser in
+range, not only this one, so the plan's `capture file limit` is what keeps any
+one file manageable. **Check the host's free space before booking a long
+run**, because the total is the channel's traffic, not the advertiser's.
+Measured on this bench on 2026-11-05, channel 37, over a 30-second capture:
+1.3 MB of capture and 14 MB of the tool's own transcript, with 40116 packets
+from 6652 other addresses beside the advertiser's 225. At that rate three
+days of capture is on the order of ten gigabytes, which is why a long run has
+a disk budget as well as a per-file limit: past it the oldest complete
+capture is removed and the newest kept, each removal recorded. The transcript
+has a
+run-wide budget of 64 MiB that restarts and file rotations cannot multiply
+(`addresssoak.MAX_LOG_BYTES`); every line is still read either way, so the
+figures do not change, and the run reports how much it kept. The run also
+reports the capture process's resident memory from `ps`, which needs no
+privilege and nothing installed; a host that refuses to run `ps` costs the
+memory figures and nothing else.
+
+Registered by its J-Link serial, plus the BLE address its `status` reports.
+The serial is all 12 digits, as the `/dev/serial/by-id` name carries it and
+quoted so the leading zeros survive: that is the one spelling the registry
+takes, because the DK's external lock file is named after the serial and the
+zero-stripped spelling of the same number would name a second file
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
+A shorter all-digit serial is refused with the padded form to write instead.
+Either spelling still *names* the board to `scripts/lab/hold`, and the lease
+key is `nrf52840dk-<serial without its leading zeros>` either way. That
+address is a static random address
 derived from the chip's FICR, so it is the same on every boot of the same
 board, which is what makes it worth registering:
 
@@ -723,6 +759,24 @@ of the commit it is against, and fails when either pair differs with
 `UTDK_FW_VERSION` unchanged
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)).
 
+CI compiles both peer firmwares, each in its vendor's own toolchain image for
+the version its sources pin, on a change under that firmware's directory,
+once a week, and on request: `scripts/ci.sh firmware-dk` for the DK
+([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147))
+and `scripts/ci.sh firmware-esp32` for the ESP32 peer
+([#326](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/326)).
+Neither is a required check, because each image is gigabytes. The peer step
+builds once and compares nothing: nothing in the harness flashes an ESP32
+peer, so a missing version bump fails a run on the bench rather than leaving
+the old image in place with nothing to say so. It does check that the image
+carries `UTESP_FW_VERSION`; that each setting `sdkconfig.defaults` asks for
+by value came back out of Kconfig verbatim and each one it asks to stay off
+did not come back on; and that neither configuring nor building warned about
+the firmware's own files, which is also what catches a withdrawn option that
+now disables nothing. The
+[firmware README](../firmware/esp32-classic-peer/README.md#without-installing-the-sdk)
+has the whole rule, and what it does not reach.
+
 ### Which Ubertooth firmware, and why
 
 The harness never tests host tools against firmware from another commit:
@@ -815,10 +869,15 @@ flashes an ESP32 peer, so a run fails instead when one reports a version
 older than the test needs. The hashes above let a bench confirm it holds the
 same image this repository's sources produce. Each was built as its firmware
 README says; a reproducible build is not claimed, so compare the version
-first and the hash second. The same sources do build the same peer image
-twice, but the ESP32 image holds the line numbers its error checks report,
-so even a comment added above one of them gives a different hash for the
-same version.
+first and the hash second. For the ESP32 image, that is not a caution but a
+measurement: CI built identical peer sources on two runs and got two hashes
+(`6741480e…` and `f47da7bc…`, 2026-11-06). ESP-IDF's
+`CONFIG_APP_REPRODUCIBLE_BUILD` is off by default and this firmware does not
+ask for it, so the image carries a compile date and time; the sources also
+hold the line numbers their error checks report, so even a comment added
+above one of them moves the hash for the same version. A bench whose copy
+hashes differently from the table has to be judged on the version it
+reports.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
@@ -979,7 +1038,7 @@ last `isolation_applied` event, and write it back.
 
 | Command | What it does |
 |---|---|
-| `nrfutil device list` | lists attached probes with their serials, padded to 12 digits |
+| `nrfutil device list` | lists attached probes; `--json` is what the harness reads a probe's serial and its VCOM0 path from (`nrfdk.find_probe`, `nrfdk.probe_vcom0`) |
 | `nrfutil device program --serial-number <serial> --firmware <hex> --options chip_erase_mode=ERASE_ALL,verify=VERIFY_READ,reset=RESET_SYSTEM` | flashes a DK and verifies the write |
 | `nrfutil device reset` | reboots a DK, which is the only remote reset it has when it is not on a switchable port |
 | `JLinkExe` | J-Link Commander: updates the probe's own firmware, and `vcom enable` turns its virtual COM port on |
@@ -987,6 +1046,14 @@ last `isolation_applied` event, and write it back.
 The harness checks the pinned `nrfutil` (8.2.1) and `nrfutil device` (2.23.0)
 versions before it flashes, and every command fails closed with an `error:`
 line. SEGGER J-Link 9.88 is the validated host software.
+
+A probe's serial is one number, and the harness puts it on an `nrfutil`
+command line with its leading zeros gone (`preflight.py`, `nrfdk.py`), which
+is also how it matches the serial `nrfutil device list` reports: as a number,
+so neither spelling of the digits matters there. The registry is the one
+place that insists on a spelling: register the 12 digits the
+`/dev/serial/by-id` name carries, padding a reading that arrives without its
+leading zeros (see "Registered by its J-Link serial" above).
 
 ### esptool
 
@@ -1107,10 +1174,12 @@ tools); `tshark` from the distribution (no GUI) for
 Add `--with-acroname` to `bootstrap.py` on a host with an Acroname hub.
 Install the peer SDKs only on the host that builds the peer
 images: nRF Connect SDK v3.4.1 with `nrfutil sdk-manager` (about 6 GB), and
-ESP-IDF v5.5.6 (about 3 GB). A host with docker can build the DK image
-without that install, with `scripts/ci.sh firmware-dk` (see the
-[firmware README](../firmware/nrf52840dk/README.md)); flashing still needs
-`nrfutil`.
+ESP-IDF v5.5.6 (about 3 GB). A host with docker can build either peer image
+without that install, with `scripts/ci.sh firmware-dk` and
+`scripts/ci.sh firmware-esp32` (see the
+[DK](../firmware/nrf52840dk/README.md) and
+[ESP32 peer](../firmware/esp32-classic-peer/README.md) firmware READMEs);
+flashing still needs `nrfutil` for a DK and `esptool` for a peer.
 
 ### macOS
 

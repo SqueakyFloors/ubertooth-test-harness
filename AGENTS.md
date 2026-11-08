@@ -63,10 +63,22 @@
   commit and SHA-256). Reviewers check for it.
 - Keep `docs/tests.md` current: a PR that adds a catalog test, removes one, or
   changes what a test checks updates that test's section in the same PR.
-  Section headings are the catalog names exactly, so a missing section is easy
-  to spot. The one exception is the trailing `Out of scope: ...` section, which
-  records what the harness has decided not to test so that a missing catalog
-  entry is not mistaken for an oversight; the file's own intro says so.
+  Section headings are the catalog names exactly, in catalog order, so a
+  missing or misplaced section is easy to spot. Each section carries the same
+  six fields, one of which is **Commands**: every command form the test
+  sends, naming the executable, with a named placeholder for anything a run
+  substitutes. `tests/test_tests_document.py` checks the headings, their
+  order, the fields, and that every executable a test's cases really run is
+  named in that test's **Commands** block, unless that command is one the
+  shared transition block of "What every test shares" states, which is
+  decided per command rather than per test; it builds
+  the cases from the catalog, so there is no second list of commands to
+  maintain. It compares options both ways too: an option a case passes must
+  be named in its block, and an option a block names must be one that case
+  passes. The one exception to the headings is the trailing
+  `Out of scope: ...` section, which records what the harness has decided
+  not to test so that a missing catalog entry is not mistaken for an
+  oversight; the file's own intro says so.
   Reviewers check for it.
 - Keep `ubertooth_harness/test_info.yaml` current: it holds one entry per
   catalog test, keyed by the exact catalog name, and it is what the GUI shows

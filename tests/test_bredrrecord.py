@@ -45,10 +45,14 @@ def dh1_payload(body=b"harness", uap=UAP):
 
 
 def record(payload=b"", *, channel=39, signal=-50, noise=-80, offenses=0,
-           transport_rate=0, corrected_header=0, corrected_payload=0,
+           transport_rate=None, corrected_header=0, corrected_payload=0,
            lap=LAP, ref_lap=LAP, ref_uap=UAP, header=None, flags=None):
     if header is None:
         header = bt_header(DH1 if payload else POLL)
+    if transport_rate is None:
+        # What the library writes: the transport of the payload it produced,
+        # and none where it produced none.
+        transport_rate = (bredrrecord.TRANSPORT_ACL << 4) if payload else 0
     if flags is None:
         flags = GOOD_FLAGS | (bredrrecord.PAYLOAD_PRESENT if payload else 0)
     return bredrrecord._HEADER.pack(
@@ -146,7 +150,10 @@ class Decoding(unittest.TestCase):
                          (found.lt_addr, found.packet_type, found.type_name))
         # flags 0b101: FLOW set, ARQN clear, SEQN set.
         self.assertEqual((1, 0, 1), (found.flow, found.arqn, found.seqn))
-        self.assertEqual((0, 0), (found.transport, found.rate))
+        # The transport of the payload the decoder produced, and the basic
+        # rate, which is what a ubertooth-rx capture records.
+        self.assertEqual((bredrrecord.TRANSPORT_ACL, bredrrecord.MOD_GFSK),
+                         (found.transport, found.rate))
         self.assertEqual(len(payload), len(found.payload))
         self.assertEqual(len(payload), found.payload_header_length)
         self.assertEqual(1_000_000_000, found.timestamp_ns)
@@ -306,6 +313,163 @@ class RecordTimes(unittest.TestCase):
                       " ".join(bredrrecord.summary(found, "x.pcap")))
 
 
+def parsed(data):
+    """One Record from packed bytes, as ``records()`` would read it."""
+    return bredrrecord.Record(0, 0, *bredrrecord._HEADER.unpack(data[:22]),
+                              data[22:])
+
+
+class SettlingRecord(unittest.TestCase):
+    """The record that settled the piconet's address part, as itself.
+
+    Three fixes are each about that one record and nothing else: it carries
+    the part the capture has just worked out (SqueakyFloors/ubertooth#770),
+    its own header (SqueakyFloors/libbtbb#99), and the payload the part was
+    settled from (SqueakyFloors/libbtbb#85). Every floor elsewhere is met by
+    the records around it, so each of the three is reverted here and has to
+    fail.
+    """
+
+    def found(self, *records):
+        return [bredrrecord.Record(index, 0,
+                                   *bredrrecord._HEADER.unpack(data[:22]),
+                                   data[22:])
+                for index, data in enumerate(records)]
+
+    def problems(self, *records):
+        return bredrrecord.problems(self.found(*records), settling_record=True)
+
+    def searching(self):
+        """A record from before anything settled a part: no reference UAP,
+        and eighteen zero bits where the header goes."""
+        return record(ref_uap=bredrrecord.UAP_ANY, header=0,
+                      flags=bredrrecord.DEWHITENED
+                      | bredrrecord.SIGPOWER_VALID
+                      | bredrrecord.NOISEPOWER_VALID
+                      | bredrrecord.REFLAP_VALID)
+
+    def settled(self, **changes):
+        """The record of the packet whose payload CRC settled the part."""
+        payload = dh1_payload()
+        flags = (GOOD_FLAGS | bredrrecord.PAYLOAD_PRESENT
+                 | bredrrecord.CRC_CHECKED | bredrrecord.CRC_VALID)
+        options = {"header": bt_header(DH1), "flags": flags}
+        options.update(changes)
+        return record(payload, **options)
+
+    def test_the_settling_record_carrying_all_three_passes(self):
+        self.assertEqual([], self.problems(self.searching(), self.settled(),
+                                           record()))
+
+    def test_a_part_read_before_the_decoder_leaves_the_settling_record_without_it(self):
+        """#770: the record of the packet that settled the part carried
+        UAP_ANY, and the next record carried the part. The floors pass -- a
+        later record has it -- so the first record to carry one is what
+        says otherwise."""
+        late = self.settled(ref_uap=bredrrecord.UAP_ANY,
+                            flags=(bredrrecord.DEWHITENED
+                                   | bredrrecord.SIGPOWER_VALID
+                                   | bredrrecord.NOISEPOWER_VALID
+                                   | bredrrecord.REFLAP_VALID
+                                   | bredrrecord.PAYLOAD_PRESENT))
+        problems = self.problems(self.searching(), late, record())
+        self.assertTrue(problems)
+        self.assertIn("it carries no payload", " ".join(problems))
+        # And the floors a capture like that still meets.
+        self.assertEqual([], bredrrecord.problems(
+            self.found(self.searching(), late, record()),
+            min_reference_uap=1, min_hec_valid=1, min_with_payload=1))
+
+    def test_a_stale_header_in_the_settling_record_is_named(self):
+        """libbtbb#99: the record carried the header read at the observer's
+        clock rather than its own, decoded at the piconet's."""
+        problems = self.problems(
+            self.searching(),
+            self.settled(header=0,
+                         flags=(bredrrecord.DEWHITENED
+                                | bredrrecord.SIGPOWER_VALID
+                                | bredrrecord.NOISEPOWER_VALID
+                                | bredrrecord.REFLAP_VALID
+                                | bredrrecord.REFUAP_VALID
+                                | bredrrecord.PAYLOAD_PRESENT
+                                | bredrrecord.CRC_CHECKED
+                                | bredrrecord.CRC_VALID)),
+            record())
+        self.assertIn("its header's HEC is not reported as checked and "
+                      "passing", " ".join(problems))
+
+    def test_a_dropped_payload_in_the_settling_record_is_named(self):
+        """libbtbb#85: the packet that settled the part had its payload
+        dropped with the trial clock's."""
+        problems = self.problems(self.searching(),
+                                 record(header=bt_header(POLL)), record())
+        self.assertIn("it carries no payload", " ".join(problems))
+
+    def test_a_payload_whose_crc_was_not_checked_is_named(self):
+        problems = self.problems(
+            self.searching(),
+            self.settled(flags=(GOOD_FLAGS | bredrrecord.PAYLOAD_PRESENT)),
+            record())
+        self.assertIn("is not reported as passing a CRC", " ".join(problems))
+
+    def test_a_capture_that_settled_nothing_is_named(self):
+        """A survey that recovered no part, or a capture whose records lost
+        the field: asked about the settling record and given none, this says
+        so rather than passing."""
+        self.assertIn("no record carries a reference UAP",
+                      " ".join(self.problems(self.searching(),
+                                             self.searching())))
+
+    def test_nothing_is_asked_without_the_option(self):
+        self.assertEqual([], bredrrecord.problems(
+            self.found(self.searching(), self.searching())))
+
+
+class Levels(unittest.TestCase):
+    """The level figures, held to what a capture with a known answer has.
+
+    Neither of the module's two standing rules can fail on a level that
+    stopped being the packet's own: the range is -120..0 dBm, which a figure
+    worked out from the wrong packet is inside, and the noise flag is how
+    libbtbb's writer computes it from the two figures, so it restates the
+    writer. These two are for a capture whose own answer is known
+    (SqueakyFloors/ubertooth#754 and #909).
+    """
+
+    def check(self, data, **options):
+        return bredrrecord.problems([parsed(data)], **options)
+
+    def test_the_level_every_record_must_carry(self):
+        self.assertEqual(
+            [], self.check(record(signal=-91, noise=-100), signal_dbm=-91))
+        problems = self.check(record(signal=-55), signal_dbm=-91)
+        self.assertIn("records carry another signal level, the first -55 dBm "
+                      "in record 0, expected -91 dBm", " ".join(problems))
+
+    def test_a_capture_with_no_background_estimate_claims_no_noise(self):
+        """#909: an unmeasured background arrives as a figure no receiver
+        reports, above the signal, so the writer leaves the flag clear. The
+        figure it replaced was in range and below the signal, which set the
+        flag and passed both standing rules."""
+        absent = record(noise=127, flags=GOOD_FLAGS
+                        & ~bredrrecord.NOISEPOWER_VALID)
+        self.assertEqual([], self.check(absent, no_measured_noise=True))
+        problems = self.check(record(signal=-50, noise=-55),
+                              no_measured_noise=True)
+        self.assertIn("records claim a measured noise power, the first -55 dBm",
+                      " ".join(problems))
+
+    def test_neither_is_asked_without_its_option(self):
+        self.assertEqual([], self.check(record(signal=-55, noise=-80)))
+
+    def test_a_level_outside_the_radios_range_is_refused_on_the_command_line(self):
+        for value in ("1", "-121", "x"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit):
+                    with redirect_stderr(io.StringIO()):
+                        bredrrecord.main(["x.pcap", "--signal-dbm", value])
+
+
 class Consistency(unittest.TestCase):
     """Each check names the record and what is out of step in it."""
 
@@ -430,12 +594,26 @@ class Consistency(unittest.TestCase):
             "SCO or eSCO",
             record(voice, transport_rate=0x30, header=bt_header(HV3)))
 
-    def test_a_payload_that_names_no_transport_is_accepted(self):
-        """What a libbtbb from before SqueakyFloors/libbtbb#133 recorded for
-        every packet, so a run against an older --libbtbb-ref is not failed
-        for a field that library never filled in."""
-        self.assertEqual([], self.check(
-            record(dh1_payload(), transport_rate=0x00, header=bt_header(DH1))))
+    def test_a_payload_that_names_no_transport_is_refused(self):
+        """The library names a transport for every payload it produces, so a
+        payload-bearing record naming none is a field that was not filled in
+        (SqueakyFloors/ubertooth-test-harness#339). It used to be accepted,
+        for a run naming a libbtbb from before libbtbb#133; such a run turns
+        the rule off outright now."""
+        empty = record(dh1_payload(), transport_rate=0x00,
+                       header=bt_header(DH1))
+        self.assertProblem(
+            "no transport named on a DH1/2-DH1 record carrying 10 payload "
+            "bytes, whose transport is ACL", empty)
+        self.assertEqual([], self.check(empty, transport_checks=False))
+
+    def test_payload_bytes_under_a_type_that_carries_none_are_refused(self):
+        """A type the library decodes no payload for, with payload bytes
+        beside it: one packet's header and another's payload, whatever the
+        nibble says."""
+        self.assertProblem(
+            "7 payload bytes in a POLL record, which carries no payload",
+            record(b"harness", transport_rate=0x00, header=bt_header(POLL)))
 
     def test_any_transport_leaves_the_nibble_alone_and_keeps_the_rate(self):
         """The type the nibble is checked against comes from the header, so a

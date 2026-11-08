@@ -68,12 +68,18 @@ it through an SSH tunnel; nothing is exposed on the network.
    your laptop can log in to the lab host directly with its own key.
 
 4. **Run something:** in Run setup pick a git ref (for example `main`), a plan
-   (`host` needs no board and is a safe first run), the target, keep "Build the
+   (`host` needs no board and is a safe first run), tick the host or hosts to
+   run it on (every ticked host gets its own run, started together as one run
+   group), keep "Build the
    ref on the target first" and "Flash the firmware to the boards first"
    ticked (the two "Build … too" boxes follow what the suite needs), and
-   press Run. The Live run card ticks off
-   each test; History keeps every run with its `report.md`, newest 50 first,
-   with Target, Status and Ref filters and Load older behind them.
+   press Run. The Live run group card ticks off each test with one pill per
+   host it is tested on; History keeps every group with each host's
+   `report.md`, newest 50 first, with Target, Status and Ref filters and
+   Load older behind them. Beside every
+   test name is a small *i* button: it opens what that test is for, what it
+   drives, and what a pass does not prove, with a link to its
+   [docs/tests.md](docs/tests.md) section.
 
 If it does not connect:
 

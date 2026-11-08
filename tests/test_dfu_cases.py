@@ -488,7 +488,7 @@ class DfuCaseShapeTests(unittest.TestCase):
 
         policy = PreflightPolicy(Registry())
         dfu = TestInvocation("001", "DFU images", "H", {}, {"Ubertooth": "U"}, {})
-        after = TestInvocation("002", "Firmware version", "H", {}, {"Ubertooth": "U"}, {})
+        after = TestInvocation("002", "Ubertooth identity", "H", {}, {"Ubertooth": "U"}, {})
         flash = TestInvocation("002", "Flash reliability", "H", {}, {"Ubertooth": "U"}, {})
         with self.assertRaises(PreflightError):
             policy.check_order((dfu, after))
