@@ -669,14 +669,19 @@ IDENTITY_LETTERS = {query[1] for query in IDENTITY}
 class MultiBench:
     """Boards in enumeration order, routed like libubertooth (fork main).
 
-    - ``past_end``: what -U<index> past the last board opens: None (refused
-      with "no Ubertooth at index", fork main since 0c7e9c0) or "first"
-      (#188, earlier builds: the first USB device, here board 0).
+    - ``past_end``: what -U<index> past the last board opens, once something
+      beside the selector asks for a reading: None (refused with "no
+      Ubertooth at index", fork main since 0c7e9c0) or "first"
+      (#188, earlier builds: the first USB device, here board 0). A selector
+      with no option beside it is refused as "nothing to do" either way,
+      before the index is looked up.
     - ``unregistered``: extra serials on the bus that the registry lacks.
     - ``index_map``: board opened for each -U<index> (default identity).
     - ``listing_drops_last``: the listing omits the last board.
     - ``unreadable``: indices the listing cannot open, which get
       ``unavailable, <reason>`` where each query's value would be.
+    - ``drop_index_hint``: the index refusal without the hint line under it,
+      as it read before 0c7e9c0 printed one.
     - ``old_multi_wording``: the refusal for several boards with no -U as it
       read before fork 753269b.
     """
@@ -684,7 +689,8 @@ class MultiBench:
     UNAVAILABLE = "unavailable, in use by another program"
 
     def __init__(self, serials, *, past_end=None, unregistered=(), index_map=None,
-                 listing_drops_last=False, unreadable=(), old_multi_wording=False):
+                 listing_drops_last=False, unreadable=(), old_multi_wording=False,
+                 drop_index_hint=False):
         self.old_multi_wording = old_multi_wording
         self.order = list(serials) + list(unregistered)
         self.boards = {s: FakeUbertooth(serial=s, crc="1") for s in self.order}
@@ -692,6 +698,7 @@ class MultiBench:
         self.index_map = index_map
         self.listing_drops_last = listing_drops_last
         self.unreadable = set(unreadable)
+        self.drop_index_hint = drop_index_hint
         self.commands = []
 
     @staticmethod
@@ -777,19 +784,27 @@ class MultiBench:
             return self._result(command, 0, self._listing(queries))
         if options and re.fullmatch(r"-U\d+", options[0]):
             index = int(options[0][2:])
+            rest = tuple(options[1:])
+            # A selector with nothing beside it asks nothing of the board it
+            # names, so it is refused before any lookup: the index is never
+            # judged, however far past the end it is (fork 5b1b39e,
+            # SqueakyFloors/ubertooth#392).
+            if not rest:
+                return self._result(
+                    command, 1, "",
+                    f"error: nothing to do: -U '{index}' selects a device but "
+                    "no option asks anything of it\n")
             if self.index_map is not None:
                 index = self.index_map[index]
             if index >= len(self.order):
                 if self.past_end is None:
+                    hint = "" if self.drop_index_hint else INDEX_SHIFT_HINT
                     return self._result(
                         command, 1, "",
                         f"error: no Ubertooth at index {index} "
-                        f"({len(self.order)} attached)\n" + INDEX_SHIFT_HINT)
+                        f"({len(self.order)} attached)\n" + hint)
                 index = 0
             serial = self.order[index]
-            rest = tuple(options[1:])
-            if not rest:
-                return self._result(command, 0, "")
             return self.boards[serial].run(("ubertooth-util", "-U", serial) + rest,
                                            timeout_s=timeout_s)
         if "-U" in options:
@@ -858,8 +873,11 @@ class MultiBoardCaseTests(unittest.TestCase):
                                         full_invocation.resource_identities)
         self.assertEqual(9, len(full))
         past = next(c for c in full if c.case_id == "index-past-end-refused")
-        # No option: a buggy open must not send a request to another device.
-        self.assertEqual(("ubertooth-util", "-U2"), past.steps[0].resolve_argv({}))
+        # The selector carries the read it is for: a bare -U<index> is
+        # refused as "nothing to do" before the index is looked up, so it
+        # would never reach the refusal this case is about.
+        self.assertEqual(("ubertooth-util", "-U2", "-s"),
+                         past.steps[0].resolve_argv({}))
 
     def test_listing_checks(self):
         def listed(*serials):
@@ -996,6 +1014,35 @@ class MultiBoardCaseTests(unittest.TestCase):
         self.assertEqual(1, len(failed), failed)
         self.assertTrue(failed[0].endswith("index-past-end-refused"))
         self.assertIn("command exited 0", summary.failure_reason)
+
+    def test_a_bare_selector_never_reaches_the_index_refusal(self):
+        # What the DEV2 release run found (harness #394): the command this
+        # case sends has to ask the selected board for something, or the fork
+        # refuses it for having nothing to do and the index is never judged.
+        bench = MultiBench((A, B))
+        bare = bench.run(("ubertooth-util", "-U7"), timeout_s=5)
+        self.assertEqual(1, bare.returncode)
+        self.assertEqual(
+            "error: nothing to do: -U '7' selects a device but no option asks "
+            "anything of it\n", bare.stderr)
+        self.assertNotIn("no Ubertooth at index", bare.stderr)
+
+        read = bench.run(("ubertooth-util", "-U7", "-s"), timeout_s=5)
+        self.assertEqual(1, read.returncode)
+        self.assertEqual("error: no Ubertooth at index 7 (2 attached)\n"
+                         + INDEX_SHIFT_HINT, read.stderr)
+
+    def test_the_index_refusal_without_its_hint_fails_the_case(self):
+        # Both lines are required, so dropping the hint is a regression the
+        # case catches rather than a wording the pattern happens to allow.
+        summary, events, _report = multi_run(
+            MultiBench((A, B), drop_index_hint=True), "comprehensive")
+        self.assertFalse(summary.passed)
+        failed = failed_cases(events)
+        self.assertEqual(1, len(failed), failed)
+        self.assertTrue(failed[0].endswith("index-past-end-refused"))
+        self.assertIn("indexes", summary.failure_reason)
+        self.assertIn("was not found", summary.failure_reason)
 
     def assert_smoke_fails(self, bench, cases, reason):
         summary, events, _report = multi_run(bench)

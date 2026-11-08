@@ -40,7 +40,11 @@ bluetooth_rxtx):
   is 1. ``-U<index>`` opens the board at that
   index of the same order, and an index with no board is refused with
   "no Ubertooth at index"
-  (fork 0c7e9c0, SqueakyFloors/ubertooth#188). Any other option without
+  (fork 0c7e9c0, SqueakyFloors/ubertooth#188). The index is only looked up
+  once something asks the selected board for a reading: a selector with no
+  option beside it is refused earlier, as "nothing to do", so an out-of-range
+  index has to be paired with a query such as ``-s`` to be judged at all
+  (fork 5b1b39e, SqueakyFloors/ubertooth#392). Any other option without
   ``-U`` refuses to pick a board.
 
 LED reads (``-d``) can stall while LED specan runs
@@ -826,6 +830,16 @@ MULTIPLE_BOARDS = r"(?m)^" + re.escape(
 # One board of that refusal's list, as a whole line, indented by the two
 # spaces libubertooth prints ("  Device %d: %s\n").
 LISTED_BOARD = r"(?m)^ {2}Device %s: %s$"
+# libubertooth's refusal when -U names an index no board is at: the error
+# line, then the hint under it (INDEX_SHIFT_HINT in the fork's ubertooth.c),
+# both printed since fork 0c7e9c0 (#188).
+NO_BOARD_AT_INDEX = r"(?m)^" + re.escape(
+    "error: no Ubertooth at index %d (%d attached)"
+) + r"$"
+INDEX_SHIFT_HINT = r"(?m)^" + re.escape(
+    "indexes change when boards are added or removed; select a board by "
+    "serial with -U<serial>"
+) + r"$"
 
 
 def listed_board(index: str, serial: str) -> str:
@@ -1149,22 +1163,31 @@ def multi_board_cases(arguments, _resources, resource_identities):
                 ),),
                 "exit 1 listing every board; no channel read from any board",
             ),
-            # No option is given, so a regression that opens whatever USB
-            # device is first on the bus only claims an interface and sends
-            # no request (SqueakyFloors/ubertooth#188, fixed in 0c7e9c0).
+            # -s is the read the selector is for: a bare -U<index> asks
+            # nothing of the board it names, so the fork refuses it as
+            # "nothing to do" before any lookup happens (ubertooth-util.c;
+            # fork 5b1b39e, SqueakyFloors/ubertooth#392) and the index is
+            # never judged. With -s beside it the lookup really runs, and a
+            # regression that opens whatever USB device is first on the bus
+            # (SqueakyFloors/ubertooth#188, fixed in 0c7e9c0) reads a serial
+            # from it, which the forbidden patterns catch: no board's serial
+            # may appear, under either the single-board or the listing label.
             _multi_case(
                 serial, "index-past-end-refused",
-                f"-U{count} (past the last board) is refused",
+                f"-U{count} -s (past the last board) is refused",
                 (Step(
-                    "refuse", f"-U{count} with {count} boards",
-                    ("ubertooth-util", f"-U{count}"),
+                    "refuse", f"-U{count} -s with {count} boards",
+                    ("ubertooth-util", f"-U{count}", "-s"),
                     expected_returncodes=(1,),
                     output_patterns=(
-                        rf"error: no Ubertooth at index {count} \({count} attached\)",
+                        NO_BOARD_AT_INDEX % (count, count),
+                        INDEX_SHIFT_HINT,
                     ),
+                    forbidden_patterns=(rf"(?m)^{_SERIAL_LABEL}\b",)
+                    + tuple(re.escape(s) for s in registered),
                 ),),
-                "an index with no board opens nothing and exits 1 saying how "
-                "many boards are attached",
+                "an index with no board reads nothing from any board and "
+                "exits 1 saying how many boards are attached",
             ),
         ]
     return tuple(cases)
