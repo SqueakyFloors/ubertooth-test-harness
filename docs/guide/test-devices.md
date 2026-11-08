@@ -87,11 +87,16 @@ lease directory). A lab that also guards boards with its own per-board lock
 files can hand the harness their path with `--external-board-lock`, and every
 lease then takes the DK's file too (see [External board
 locks](leases.md#external-board-locks)); the DK's file is the one named after its
-J-Link serial exactly as the registry carries it,
-`board-<J-Link serial>.lock` for the template
+J-Link serial, `board-<J-Link serial>.lock` for the template
 `<lab lock dir>/board-{serial}.lock`, which is the file a lab's own scripts
-already lock. The lease key strips the leading zeros and the lock file does
-not, so a registry carrying the padded form means a padded file name. Hold
+already lock. One spelling of that serial, because one device has one file:
+the registry takes the 12 digits the by-id name carries, zeros and all, and
+refuses the zero-stripped spelling of the same number with the padded form
+to write instead
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
+The lease key strips the leading zeros and the lock file keeps them, so a
+wrapper written against either spelling resolves the board through the
+registry or `scripts/lab/hold` and takes the padded file. Hold
 such a lock only for the run, so other users of the DK get their turn.
 
 ## Classic test devices (ESP32 Classic peers)

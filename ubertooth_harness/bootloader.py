@@ -67,6 +67,7 @@ from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.flash import HarnessError
 from ubertooth_harness.patterns import (
+    FIRMWARE_UNSUPPORTED_PATTERN,
     FIRMWARE_VERSION_RE,
     GIT_SHORT_HASH_MIN,
     same_revision,
@@ -174,6 +175,13 @@ IDENTITY_TIMEOUT_S = 5.0
 
 def identity_argv(serial: str) -> tuple[str, ...]:
     return ("ubertooth-util", "-U", serial, "-B")
+
+
+def application_argv(serial: str) -> tuple[str, ...]:
+    """The application read after a bootloader write: it is above the region
+    the write touches, so saying it still runs is cheap and is what an
+    operator wants to read before the tests start."""
+    return ("ubertooth-util", "-U", serial, "-v")
 
 
 @dataclass(frozen=True)
@@ -1520,13 +1528,10 @@ class BootloaderUpdater:
                 f"write, not the {expected.describe()} that was written",
                 written=True, previous=installed,
             )
-        # The application the run requires is above the bootloader region and
-        # the write does not touch it, so saying it still runs is cheap and is
-        # what an operator wants to read before the tests start.
         application = self._run(
             publisher, f"bootloader-application-{board.alias}",
             "application_version_after_bootloader",
-            ("ubertooth-util", "-U", board.serial, "-v"),
+            application_argv(board.serial),
             IDENTITY_TIMEOUT_S, token, owner={"resource": board.alias},
         )
         reported = FIRMWARE_VERSION_RE.search(application.stdout)
@@ -1555,6 +1560,24 @@ class BootloaderUpdater:
 # ----- what preflight asks of each board ----------------------------------
 
 
+#: The verdict for a board that was read and whose firmware has not got the
+#: request. It is neither `current` nor `unreadable`: nothing was compared,
+#: and nothing about the board is wrong.
+NOT_READ = "not read"
+#: What such a board printed instead of the line, so the read can tell it from
+#: a board that answered nothing for a reason of its own.
+REFUSED_PATTERN = FIRMWARE_UNSUPPORTED_PATTERN
+
+_MULTILINE_FLAG = "(?m)"
+
+
+def _without_multiline(pattern: str) -> str:
+    """``pattern`` with a leading ``(?m)`` taken off, to combine patterns."""
+    if pattern.startswith(_MULTILINE_FLAG):
+        return pattern[len(_MULTILINE_FLAG):]
+    return pattern
+
+
 @dataclass(frozen=True)
 class BootloaderExpectation:
     """What a run requires of its boards' bootloaders, for preflight.
@@ -1562,20 +1585,60 @@ class BootloaderExpectation:
     ``expected`` is None in ``record`` mode, where the check only asks that
     the board answered. ``boards`` is the selected board for each alias, so a
     refusal can name the programmer the bench has not got.
+
+    ``established`` are the aliases whose application image a test in the
+    suite writes itself. The read is made of them too -- the bootloader is
+    what that test is about, in the case of `Reset into invalid application`
+    (#327) -- but the firmware they are carrying when preflight runs is
+    whatever the last run left, and firmware older than the request refuses
+    it. So for those aliases a refusal is recorded as the reading and the
+    check passes; an answer is compared like any other.
     """
 
     mode: str
     expected: BootloaderIdentity | None
     boards: Mapping[str, BootloaderBoard]
+    established: frozenset[str] = frozenset()
 
     @property
     def compares(self) -> bool:
         return self.expected is not None and self.mode in COMPARING_MODES
 
-    def patterns(self) -> tuple[str, ...]:
-        if self.compares:
-            return (identity_pattern(self.expected),)
-        return (IDENTITY_LINE_PATTERN,)
+    def tolerates_refusal(self, alias: str | None) -> bool:
+        """May this board say it has not got the request and still pass?"""
+        return (alias or "") in self.established
+
+    def patterns(self, alias: str | None = None) -> tuple[str, ...]:
+        """What this board's `-B` output must carry, as one pattern.
+
+        For an ``established`` board the refusal counts, so the recorded
+        expectation says both answers are accepted rather than naming one the
+        board may legitimately not be able to give.
+        """
+        wanted = (
+            identity_pattern(self.expected) if self.compares
+            else IDENTITY_LINE_PATTERN
+        )
+        if self.tolerates_refusal(alias):
+            # Python takes an inline flag only at the start of an expression,
+            # and the line patterns carry `(?m)`, so it moves to the front of
+            # the alternation; it means the same there.
+            return (
+                rf"(?m)(?:{_without_multiline(wanted)})"
+                rf"|(?:{_without_multiline(REFUSED_PATTERN)})",
+            )
+        return (wanted,)
+
+    def not_read_note(self, alias: str | None) -> str:
+        """Why this board's bootloader was not read, for the record."""
+        where = alias or "the selected board"
+        return (
+            f"{where} says its firmware has not got the bootloader read, and "
+            "a test in this suite writes that board's own application image, "
+            "so the run does not require it: nothing was compared. This run "
+            "does not flash that board either, so to read its bootloader run "
+            "a suite that requires its firmware and read it there"
+        )
 
     def failure(self, alias: str | None, installed: BootloaderIdentity | None) -> str:
         """Why this board's `-B` answer is not what the run requires."""
@@ -1596,6 +1659,36 @@ class BootloaderExpectation:
             return ""
         if installed.matches(self.expected):
             return ""
+        if self.tolerates_refusal(alias):
+            # The read covers it, the write never does: `update` installs on
+            # the boards whose firmware preflight requires, and this board's
+            # is written by a test of the suite instead. So the reason sends
+            # the operator to the programmer rather than to an option that
+            # would not reach this board -- unless there is no programmer, in
+            # which case naming one would name a recovery path the registry
+            # has not got, and the shared wording for that says what to wire
+            # up instead.
+            if board is not None and not board.can_be_programmed:
+                return no_programmer_reason(board, installed, self.expected)
+            if board is None:
+                # No board record to name a programmer from, so the reason
+                # says what is wrong and stops there.
+                return (
+                    f"{where} has bootloader {installed.describe()}, and this "
+                    f"run expects {self.expected.describe()}; a test in this "
+                    "suite writes that board's own application image, so "
+                    f"--bootloader {MODE_UPDATE} does not install one there: "
+                    "install it over its programmer by hand, or run a suite "
+                    "that requires this board's firmware first"
+                )
+            return (
+                f"{where} has bootloader {installed.describe()}, and this run "
+                f"expects {self.expected.describe()}; a test in this suite "
+                "writes that board's own application image, so --bootloader "
+                f"{MODE_UPDATE} does not install one there: install it over "
+                f"{board.programmer_alias} by hand, or run a suite that "
+                "requires this board's firmware first"
+            )
         if self.mode == MODE_UPDATE and board is not None and not board.can_be_programmed:
             return no_programmer_reason(board, installed, self.expected)
         tail = ""

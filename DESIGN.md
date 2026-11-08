@@ -343,4 +343,5 @@ Open:
 | [docs/reference/run-records.md](docs/reference/run-records.md) | `run.jsonl`, `report.md`, output files, re-checking a run |
 | [docs/reference/power-control.md](docs/reference/power-control.md) | power drivers, armed changes, isolation, manual recovery |
 | [docs/reference/soak-workload.md](docs/reference/soak-workload.md) | the modeled MAC polling workload |
+| [docs/reference/address-parity-soak.md](docs/reference/address-parity-soak.md) | the BLE address parity soak and its plan |
 | [COVERAGE.md](COVERAGE.md) | every host CLI option and which test covers it |
