@@ -18,7 +18,12 @@ from unittest.mock import patch
 
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from ubertooth_harness.controller import UNKNOWN_GROUP, UNKNOWN_RUN, Controller
+from ubertooth_harness.controller import (
+    MISSED_HEARTBEATS,
+    UNKNOWN_GROUP,
+    UNKNOWN_RUN,
+    Controller,
+)
 from ubertooth_harness.rungroups import (
     BUILD_STEP,
     FLASH_STEP,
@@ -61,6 +66,10 @@ except ImportError:  # run as tests.test_run_groups
 
 LINUX = "Host_Linux"
 MAC = "Host_Mac"
+# A heartbeat interval long enough that moving the controller's clock on past
+# a grace period cannot also make a target look overdue: a test that advances
+# the clock is asking one thing of it (#383).
+PATIENT_HEARTBEAT_S = 60
 OPERATING_SYSTEMS = {
     "linux": {"system": "Linux", "release": "6.8", "distribution": "Ubuntu 24.04"},
     "macos": {"system": "Darwin", "release": "24.1.0", "macos": "15.1"},
@@ -540,7 +549,7 @@ class GroupRecordTests(unittest.TestCase):
 class RunGroupTestCase(ControllerTestCase):
     """A controller with a scripted Linux runner and a scripted Mac runner."""
 
-    async def runners(self, hosts=(LINUX, MAC)):
+    async def runners(self, hosts=(LINUX, MAC), interval=0.2):
         """Both scripted runners, registered, closed when the test ends."""
         made = []
         for host in hosts:
@@ -551,7 +560,7 @@ class RunGroupTestCase(ControllerTestCase):
             )
             await runner.__aenter__()
             self.addAsyncCleanup(runner.__aexit__)
-            await self.registered(runner, host)
+            await self.registered(runner, host, interval=interval)
             made.append(runner)
         return made
 
@@ -741,7 +750,12 @@ class GroupStartTests(RunGroupTestCase):
     async def test_a_group_whose_requests_time_out_keeps_a_late_child(self):
         """A request that timed out may still be accepted, so the group stays."""
         linux, mac = await self.runners()
-        self.controller.reply_timeout_s = 0.3
+        self.manual_clock()
+        # The caller gives up at once, and the grace period after it has gone
+        # passes only when the clock is moved, which this test never does: the
+        # whole window below is the test's to read (#383).
+        self.controller.reply_timeout_s = 0
+        self.controller.late_reply_grace_s = 5
         post = await self.start_group([LINUX, MAC])
         requests = {runner.host: await runner.recv() for runner in (linux, mac)}
         status, payload, _ = await post
@@ -786,18 +800,23 @@ class GroupStartTests(RunGroupTestCase):
 
     async def test_a_group_no_child_can_join_any_more_is_forgotten(self):
         """A group kept for a pending request goes when that request does."""
-        linux, mac = await self.runners()
-        self.controller.reply_timeout_s = 0.3
-        self.controller.late_reply_grace_s = 0.1
+        linux, mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
+        clock = self.manual_clock()
+        self.controller.reply_timeout_s = 0
+        self.controller.late_reply_grace_s = 5
         post = await self.start_group([LINUX, MAC])
         for runner in (linux, mac):
             await runner.recv()
         self.assertEqual(504, (await post)[0])
+        # Kept, and it stays kept however long these checks take: no request
+        # can expire while the clock stands still (#383).
         (group_id,) = list(self.controller.groups)
         path = self.results / GROUPS_DIR / f"{group_id}.json"
         self.assertTrue(path.is_file())
+        self.assertEqual({LINUX, MAC}, self.controller._pending_hosts(group_id))
         # Once the last request has expired, no child can arrive: a group
         # with none is not a group.
+        clock.advance(self.controller.late_reply_grace_s)
         await wait_until(lambda: not self.controller.groups)
         self.assertFalse(path.exists())
         status, payload, _ = await self.http("GET", "/api/run-groups")
@@ -806,25 +825,76 @@ class GroupStartTests(RunGroupTestCase):
             any("started no run; forgotten" in line for line in self.logs), self.logs
         )
 
+    async def test_a_kept_group_stands_until_its_grace_period_has_passed(self):
+        """The same lifecycle many times over, with the clock in hand (#383).
+
+        Each round starts a group neither runner answers, reads what the
+        controller keeps while a late child may still arrive, and then moves
+        the clock past the grace period. Nothing here waits on the wall
+        clock, so a loaded host cannot forget the group between the answer
+        and the assertions, which is how this once failed on CI.
+        """
+        linux, mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
+        clock = self.manual_clock()
+        self.controller.reply_timeout_s = 0
+        # One grace period per round, so the whole test moves the clock on by
+        # far less than the heartbeat allowance above.
+        self.controller.late_reply_grace_s = 1
+        for round_number in range(20):
+            with self.subTest(round=round_number):
+                post = await self.start_group([LINUX, MAC])
+                for runner in (linux, mac):
+                    await runner.recv()
+                self.assertEqual(504, (await post)[0])
+                (group_id,) = list(self.controller.groups)
+                path = self.results / GROUPS_DIR / f"{group_id}.json"
+                self.assertTrue(path.is_file())
+                self.assertEqual(
+                    {LINUX, MAC}, self.controller._pending_hosts(group_id)
+                )
+                # The watchdog's own work, run here rather than waited for:
+                # with the clock held half a grace period on, it has nothing
+                # to expire and the group stays whole.
+                clock.advance(self.controller.late_reply_grace_s / 2)
+                for _ in range(3):
+                    self.controller.expire_pending()
+                self.assertEqual([group_id], list(self.controller.groups))
+                self.assertEqual(
+                    {LINUX, MAC}, self.controller._pending_hosts(group_id)
+                )
+                # Past the grace period, the last request goes and the group
+                # with it, record and all.
+                clock.advance(self.controller.late_reply_grace_s / 2)
+                await wait_until(lambda: not self.controller.groups)
+                self.assertFalse(path.exists())
+
     async def test_a_request_that_expires_says_so_on_the_group(self):
         """The last word on a host whose runner never answered."""
-        linux, mac = await self.runners()
-        self.controller.reply_timeout_s = 0.3
-        self.controller.late_reply_grace_s = 0.2
+        linux, mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
+        clock = self.manual_clock()
+        # The caller gives up on both hosts at once, which is the only part
+        # of this a wall clock decided before (#383); the Linux host then
+        # accepts within the grace period, as a late child may.
+        self.controller.reply_timeout_s = 0
+        self.controller.late_reply_grace_s = 5
         post = await self.start_group([LINUX, MAC])
         requests = {runner.host: await runner.recv() for runner in (linux, mac)}
+        self.assertEqual(504, (await post)[0])
+        (group_id,) = list(self.controller.groups)
         await linux.send(
             "run_accepted", request_id=requests[LINUX]["request_id"], run_id="run-1"
         )
-        self.assertEqual(201, (await post)[0])
-        group_id = self.controller.runs["run-1"].group_id
-        # The Mac's request is still outstanding, so that host is starting.
+        await wait_until(lambda: "run-1" in self.controller.runs)
+        self.assertEqual(group_id, self.controller.runs["run-1"].group_id)
+        # The Mac's request is still outstanding, so that host is starting,
+        # and stays starting for as long as it may still be accepted.
         self.assertEqual(
             "starting",
             self.controller.view_group(
                 self.controller.groups[group_id]
             )["members"][1]["status"],
         )
+        clock.advance(self.controller.late_reply_grace_s)
         await wait_until(
             lambda: self.controller.groups[group_id].member(MAC)["error"]
         )
@@ -1154,9 +1224,10 @@ class GroupStartTests(RunGroupTestCase):
                          [member["status"] for member in view["members"]])
 
     async def test_the_watchdog_outlives_a_results_directory_it_cannot_write(self):
-        linux, _mac = await self.runners()
-        self.controller.reply_timeout_s = 0.3
-        self.controller.late_reply_grace_s = 0.1
+        linux, _mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
+        clock = self.manual_clock()
+        self.controller.reply_timeout_s = 0
+        self.controller.late_reply_grace_s = 5
         post = await self.start_group([LINUX])
         await linux.recv()
         self.assertEqual(504, (await post)[0])
@@ -1166,11 +1237,21 @@ class GroupStartTests(RunGroupTestCase):
             # The request expires in the watchdog, which writes the reason on
             # the group: the write fails, the log says so, and the watchdog
             # carries on.
+            clock.advance(self.controller.late_reply_grace_s)
             await wait_until(lambda: any(
                 "could not record" in line for line in self.logs
             ))
             self.assertFalse(self.server._monitor_task.done())
+            # The target has not gone overdue on the way here, so what it does
+            # next is the work of a later round of the watchdog's and not of
+            # the round the write failed in.
+            self.assertTrue(self.controller.targets[LINUX].online)
             # Still watching: the target goes offline when its heartbeats stop.
+            allowance = (
+                MISSED_HEARTBEATS
+                * self.controller.targets[LINUX].heartbeat_interval_s
+            )
+            clock.advance(allowance + 1)
             await wait_until(lambda: not self.controller.targets[LINUX].online)
 
     async def test_an_unreadable_group_record_is_logged_and_left(self):
@@ -1477,9 +1558,10 @@ class GroupLiveTests(RunGroupTestCase):
 
     async def test_a_group_that_is_forgotten_says_so_on_the_stream(self):
         """A browser must not keep a group the history no longer lists."""
-        linux, mac = await self.runners()
-        self.controller.reply_timeout_s = 0.3
-        self.controller.late_reply_grace_s = 0.1
+        linux, mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
+        clock = self.manual_clock()
+        self.controller.reply_timeout_s = 0
+        self.controller.late_reply_grace_s = 5
         ws = await self.live()
         await asyncio.wait_for(ws.recv(), TIMEOUT_S)  # the snapshot
         post = await self.start_group([LINUX, MAC])
@@ -1491,6 +1573,13 @@ class GroupLiveTests(RunGroupTestCase):
         )
         message = await self.received(ws, {"group"})
         group_id = message["group"]["group_id"]
+        # The Mac has refused, so the Linux host's request is the only reason
+        # the group is kept; it goes when that expires and not before.
+        await wait_until(
+            lambda: self.controller._pending_hosts(group_id) == {LINUX}
+        )
+        self.assertIn(group_id, self.controller.groups)
+        clock.advance(self.controller.late_reply_grace_s)
         while True:
             message = await self.received(ws, {"group"}, limit=200)
             if message.get("removed"):

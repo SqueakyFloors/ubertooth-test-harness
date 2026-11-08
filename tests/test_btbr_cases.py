@@ -173,12 +173,12 @@ class CaseTests(unittest.TestCase):
         self.assertEqual("btbr-console", case.case_id)
         self.assertEqual(
             ["option-values", "read-original-image", "flash-btbr",
-             "verify-btbr-image", "verify-btbr-build", "reset-peer-before",
-             "console-session"],
+             "verify-btbr-image", "read-btbr-bootloader", "verify-btbr-build",
+             "reset-peer-before", "console-session"],
             [step.step_id for step in case.steps])
         self.assertEqual(
             ["restore-application", "verify-restored-image",
-             "reset-peer-after"],
+             "read-restored-bootloader", "reset-peer-after"],
             [step.step_id for step in case.cleanup])
         # Both images, so a run without either refuses the case instead of
         # flashing a board it cannot put back.
@@ -219,6 +219,96 @@ class CaseTests(unittest.TestCase):
         self.assertEqual((image_name_pattern(APPLICATION_IMAGE),),
                          verify.output_patterns)
         self.assertEqual("git-aaaaaaa", verify.observe.expected_value(context))
+
+    def test_the_bootloader_is_recorded_under_each_of_the_two_images(self):
+        """`ubertooth-dfu` writes the application region only (#327/#329).
+
+        One read with the run's `btbr` image on the board, one with the
+        application image back. Recorded under keys of their own, and
+        compared with nothing: see `_bootloader_step` for why the equality is
+        not asserted here.
+        """
+        (case,) = cases()
+        under_btbr = next(step for step in case.steps
+                          if step.step_id == "read-btbr-bootloader")
+        restored = next(step for step in case.cleanup
+                        if step.step_id == "read-restored-bootloader")
+        for step in (under_btbr, restored):
+            self.assertEqual(("ubertooth-util", "-U", SERIAL, "-B"),
+                             step.resolve_argv({}))
+            self.assertFalse(step.mutates)
+            self.assertIsNone(step.observe.expected)
+            self.assertEqual((0, 1), step.expected_returncodes)
+        self.assertNotEqual(under_btbr.observe.key, restored.observe.key)
+        line = "Bootloader: 2.00 git-abc1234, CRC32:0x11112222"
+        self.assertEqual(line, under_btbr.observe.extract(line + "\n"))
+
+    def test_a_read_its_firmware_has_not_got_is_the_reading(self):
+        """A commit with the btbr image but no `-B`, and a board that arrives
+        on firmware older than the request, both answer this way; neither is
+        this test's business to fail on."""
+        from ubertooth_harness.transitions import GUARD_UNSUPPORTED
+
+        (case,) = cases()
+        read = next(step for step in case.steps
+                    if step.step_id == "read-btbr-bootloader")
+        refusal = ("error: could not read the bootloader information: the "
+                   "board's firmware does not support it (stalled, libusb "
+                   "-9)\n")
+        self.assertEqual(GUARD_UNSUPPORTED, read.observe.extract(refusal))
+        # Nothing else is read that way: a board that left the bus, or any
+        # other failed read, matches nothing and fails the step.
+        self.assertIsNone(read.observe.extract(
+            "error: bootloader information read failed\n"))
+
+    def test_the_read_is_after_the_write_so_it_is_of_the_runs_own_image(self):
+        """A board can arrive on firmware older than the bootloader read."""
+        (case,) = cases()
+        order = [step.step_id for step in case.steps]
+        self.assertLess(order.index("flash-btbr"),
+                        order.index("read-btbr-bootloader"))
+        cleanup = [step.step_id for step in case.cleanup]
+        self.assertLess(cleanup.index("restore-application"),
+                        cleanup.index("read-restored-bootloader"))
+
+    def test_no_cleanup_step_depends_on_a_value_the_steps_may_not_record(self):
+        """A cleanup step that cannot run stops the test, whether it is
+        skipped or failed (sequencer, `cleanup_unverified`), so none of them
+        may want a value a failed case never got as far as recording."""
+        (case,) = cases()
+        context = {"artifact btbr_build": "/tmp/btbr.dfu",
+                   "artifact test_build": "/tmp/app.dfu",
+                   "expected firmware revision": "git-aaaaaaa"}
+        for step in case.cleanup:
+            with self.subTest(step.step_id):
+                # Only the run's own values: the two images and the revision.
+                step.resolve_argv(context)
+                if step.observe is not None and step.observe.expected is not None:
+                    self.assertTrue(step.observe.expected_value(context))
+
+    def test_the_read_is_given_the_same_deadline_as_the_preflight_one(self):
+        from ubertooth_harness import bootloader
+
+        (case,) = cases()
+        read = next(step for step in case.steps
+                    if step.step_id == "read-btbr-bootloader")
+        self.assertEqual(bootloader.IDENTITY_TIMEOUT_S, read.timeout_s)
+        self.assertEqual(bootloader.IDENTITY_TIMEOUT_S,
+                         btbr_cases.BOOTLOADER_TIMEOUT_S)
+
+    def test_the_read_matches_the_line_the_harness_renders(self):
+        """The case's pattern and bootloader.py's own must stay in step."""
+        from ubertooth_harness import bootloader
+
+        identity = bootloader.BootloaderIdentity(
+            region_crc32=0x11112222, detail="2.00 git-abc1234",
+            version="2.00", build="git-abc1234",
+        )
+        (case,) = cases()
+        read = next(step for step in case.steps
+                    if step.step_id == "read-btbr-bootloader")
+        self.assertEqual(identity.line(),
+                         read.observe.extract(identity.line() + "\n"))
 
     def test_the_btbr_image_is_verified_by_name_at_the_runs_revision(self):
         (case,) = cases()

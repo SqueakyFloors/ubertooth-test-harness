@@ -314,6 +314,71 @@ button.primary:disabled:hover { background: var(--primary); }
   background: var(--surface-2); border: 1px solid var(--line);
 }
 
+/* ----- test names and their information button -------------------------- */
+
+/* The suite's tests, each name with its own button, wrapped across the
+   card as the plain sentence of names used to be: a list of 40 rows would
+   push everything under it off the screen. */
+.test-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 0.2rem 0.85rem; font-size: 0.9rem;
+}
+.test-list li { display: flex; align-items: center; gap: 0.3rem; min-width: 0; }
+.test-list .test-name { overflow-wrap: anywhere; }
+.test-list + .hint { margin-top: 0.55rem; }
+
+/* A small round i. Sized to stay a comfortable target without stretching
+   the row it sits in, and never the only way to reach the information:
+   the dialog it opens links the full documentation too. */
+.info-button {
+  flex: none; min-height: 1.6rem; width: 1.6rem; height: 1.6rem;
+  padding: 0; border-radius: 50%;
+  border: 1px solid var(--line-strong); background: var(--button-bg);
+  color: var(--link); font-size: 0.8rem; font-weight: 700; font-style: italic;
+  line-height: 1;
+}
+/* Beside a name that is part of a line of text rather than a row of its own. */
+.failure .info-button { margin-left: 0.4rem; }
+
+/* Hidden while closed even where <dialog> is unknown, which is the only
+   browser the open-attribute fallback in app.js is for. */
+.info-dialog:not([open]) { display: none; }
+.info-dialog {
+  width: min(44rem, calc(100vw - 1.5rem));
+  max-height: min(85vh, 48rem); overflow: auto;
+  margin: auto; padding: 1rem 1.15rem 0;
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line-strong); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.info-dialog::backdrop { background: rgba(10, 13, 17, 0.6); }
+.info-dialog-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 0.75rem;
+}
+.info-dialog h2 { margin: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+.info-dialog h2:focus-visible { outline-offset: 4px; }
+.info-purpose { margin: 0.6rem 0 0; }
+.info-body { display: grid; gap: 0.85rem; margin-top: 0.9rem; }
+.info-section p { margin: 0; }
+.info-section h3 { margin: 0 0 0.25rem; }
+.info-section .info-facts { margin-top: 0.3rem; color: var(--muted); font-size: 0.9rem; }
+.info-links-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem;
+}
+/* The full-documentation link stays in view while a long entry scrolls,
+   with a shadow where there is more above it, so a section cut off at the
+   footer reads as more to scroll rather than as an empty section. */
+.info-links {
+  position: sticky; bottom: 0; background: var(--surface);
+  box-shadow: 0 -0.6rem 0.6rem -0.6rem rgba(0, 0, 0, 0.22);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem;
+  margin: 1.1rem 0 0; padding: 0.8rem 0 1.15rem;
+  border-top: 1px solid var(--line);
+}
+.info-links .hint { margin: 0; overflow-wrap: anywhere; }
+
 .field-check { display: flex; align-items: center; gap: 0.5rem; }
 .field-check input { width: 1.05rem; height: 1.05rem; margin: 0; accent-color: var(--primary); }
 .field-check label { font-weight: normal; }
@@ -501,7 +566,12 @@ fieldset.hosts legend { font-weight: 600; font-size: 0.9rem; padding: 0 0.3rem; 
   color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums;
 }
 .check .status { min-width: 6.5rem; }
-.check-name { flex: 1 1 8rem; min-width: 0; overflow-wrap: anywhere; }
+.check-name {
+  flex: 1 1 8rem; min-width: 0;
+  display: flex; align-items: center; gap: 0.4rem;
+}
+.check-name-text { min-width: 0; overflow-wrap: anywhere; }
+.check-estimate { flex: none; margin: 0; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .check .reason { flex-basis: 100%; padding-left: 2.1rem; font-size: 0.85rem; }
 .check-target { overflow-wrap: anywhere; }
 .check-running {

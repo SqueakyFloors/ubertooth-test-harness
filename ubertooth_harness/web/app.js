@@ -69,6 +69,12 @@
     // The plan list fetched for no target at all: what the plan and suite
     // selects are filled from, so they work before a runner registers.
     plans: [],
+    // What each listed test is for, keyed by catalog name, as /api/plans
+    // sends it once per response (#315). Empty until the plans load.
+    testInfo: {},
+    // The info button the open dialog was opened from, so Escape and Close
+    // put focus back where it was.
+    infoInvoker: null,
     // host -> that host's own plan list. The estimates are what that host's
     // finished runs measured, and `runs_on_target` says which steps it runs
     // at all, which is what makes a host eligible for the chosen suite.
@@ -448,9 +454,13 @@
     const [any, ...perHost] = lists;
     if (any.error) {
       state.plans = [];
+      state.testInfo = {};
       problems.push(`Cannot list plans: ${any.error.message}`);
     } else {
       state.plans = any.plans;
+      // The prose comes down with the plans, keyed by the catalog name the
+      // rows carry, so the info dialog needs no request of its own.
+      state.testInfo = any.test_information || {};
     }
     state.plansByHost = new Map();
     state.plansErrors = new Map();
@@ -537,9 +547,16 @@
 
   function renderSuiteTests() {
     const suite = findSuite($("plan").value, $("suite").value);
+    // One row per test, each with its own info button. The names used to be
+    // one sentence of text, which left nowhere to put one (#315); the
+    // estimate and the artifact note stay in the hint below them, which is
+    // what the suite select describes itself by.
+    $("suite-test-list").replaceChildren(...(suite ? suite.tests : []).map(
+      (test) => el("li", {},
+        el("span", { className: "test-name", text: test.name }),
+        infoButton(test.name))));
     $("suite-tests").textContent = suite
-      ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
-        + artifactWarning(suite)
+      ? estimateText(suite) + artifactWarning(suite)
       : "";
     // This suite may need build options the last one did not, and some
     // ticked host may not be able to run it at all.
@@ -765,6 +782,269 @@
       return `${String(identity.version ?? "")} ${String(identity.build ?? "")}, CRC32:${crc}`;
     }
     return `${String(identity.detail ?? identity.generation ?? "")}, CRC32:${crc}`;
+  }
+
+  // ----- test information --------------------------------------------------
+  //
+  // Why a test exists, how it produces a known answer, what it drives, and
+  // what a pass does not prove, beside the test's name wherever the page
+  // lists one: Run setup, the live checklist, and a failure summary
+  // (#315). The prose is ubertooth_harness/test_info.yaml, which
+  // /api/plans sends once per response keyed by the catalog name the rows
+  // carry; the facts the catalog owns -- the hardware roles, the arguments,
+  // the estimate and the profile it was read at -- stay on the test row, so
+  // the dialog shows both and neither has two sources.
+  //
+  // Nothing here can stop a run. A file the controller could not read, a
+  // test with no entry, a plan listing that failed to load, and a name no
+  // listing has all end at a dialog that says so; the Run button never
+  // reads any of it.
+
+  // The entry for a test, or one that says why there is none. The server
+  // sends `available` false with its own reason for a missing or malformed
+  // file; this adds the two cases only the page can be in.
+  function testInfoFor(name) {
+    const entry = state.testInfo[name];
+    if (entry) return entry;
+    return {
+      available: false,
+      unavailable_reason: state.plans.length
+        ? "No plan the controller lists holds this test, so there is no"
+          + " information for it here."
+        : "The plan listing has not loaded, so no test information is"
+          + " available yet.",
+      purpose: "", theory: "", hardware: "", expected: "", limitations: "",
+      related: [], documentation: null,
+    };
+  }
+
+  // The catalog's own facts for this test, and the listing they were read
+  // from. The roles the catalog binds and the arguments it accepts are the
+  // same wherever a test is listed, but its estimate and the coverage
+  // profile that estimate was read at are the *step's*: `fast` lists
+  // Argument validation at smoke coverage and `release` at comprehensive,
+  // so a figure from the wrong listing would be the wrong figure.
+  //
+  // So the caller says which listing it is asking about: the run's plan and
+  // suite in the live checklist and in a failure summary, and Run setup's
+  // own choice there. The chosen suite is the fallback, and then any
+  // listing that holds the test, which is all there is for a run whose plan
+  // the controller does not have; the Runtime line names whichever it used.
+  function catalogRow(name, context) {
+    const wanted = [];
+    if (context && context.plan) wanted.push([context.plan, context.suite]);
+    wanted.push([$("plan").value, $("suite").value]);
+    for (const [plan, suite] of wanted) {
+      const listing = findSuite(plan, suite);
+      const row = listing && listing.tests.find((test) => test.name === name);
+      if (row) return { row, plan, suite };
+    }
+    for (const plan of state.plans) {
+      for (const suite of plan.suites || []) {
+        const row = suite.tests.find((test) => test.name === name);
+        if (row) return { row, plan: plan.name, suite: suite.name };
+      }
+    }
+    return { row: null, plan: "", suite: "" };
+  }
+
+  // Every plan and suite that lists this test, so a longer or soak form of
+  // it is visible from the dialog rather than only from the plan files. A
+  // plan the GUI cannot start (runnable false, such as backlog) is marked,
+  // because listing it there is not the same as being able to run it.
+  function testAppearances(name) {
+    const places = [];
+    for (const plan of state.plans) {
+      for (const suite of plan.suites || []) {
+        if (!suite.tests.some((test) => test.name === name)) continue;
+        places.push(`${plan.name} / ${suite.name}`
+          + (plan.runnable === true ? "" : " (planned, not runnable)"));
+      }
+    }
+    return places;
+  }
+
+  // What the catalog times this test at, and what this target has measured.
+  // The catalog estimate and its profile are what the issue asks for; a
+  // learned figure is said beside it rather than instead of it, so the two
+  // are never confused. Both belong to one listing of the test, which the
+  // line names, because another plan may list the same test at another
+  // coverage and so another estimate (see `catalogRow`).
+  function runtimeText(found) {
+    const row = found.row;
+    if (!row) {
+      return "No plan the controller lists holds this test, so its estimate"
+        + " and profile are not known here.";
+    }
+    const listing = `as ${found.plan} / ${found.suite} lists it`;
+    const parts = [];
+    const catalogSeconds = row.catalog_estimated_s;
+    const profile = row.estimate_profile
+      ? `, profile "${row.estimate_profile}"` : "";
+    if (catalogSeconds === null || catalogSeconds === undefined) {
+      parts.push(`The catalog gives it no duration estimate (${listing}), so`
+        + " a run of it shows elapsed time only.");
+    } else {
+      parts.push(`Catalog estimate about ${formatSeconds(catalogSeconds)} per`
+        + ` invocation (${listing}${profile}).`);
+    }
+    if (row.estimate_source === "learned"
+        && row.estimated_s !== null && row.estimated_s !== undefined) {
+      const samples = row.estimate_samples;
+      parts.push(`Finished runs measure ${formatSeconds(row.estimated_s)}`
+        + (typeof samples === "number" ? ` (${samples} sample(s)` : " (")
+        + (row.estimate_scaled ? ", from its per-unit rate" : "")
+        + "), which is what this page counts.");
+    }
+    if (row.per_board) {
+      parts.push("It runs once for every Ubertooth the run selects, and the"
+        + " estimate above is one of those invocations.");
+    }
+    return parts.join(" ");
+  }
+
+  // A link only where the server gave an https URL. The entries and the
+  // documentation link are built by the controller from fixed text, so this
+  // can only ever refuse something that is not what it says it is -- and
+  // then the reference is still shown, as text.
+  function safeHref(url) {
+    const text = String(url || "");
+    return text.startsWith("https://") ? text : "";
+  }
+
+  function infoSection(heading, ...children) {
+    return el("section", { className: "info-section" },
+      el("h3", { text: heading }), ...children);
+  }
+
+  // The hardware prose with the roles the catalog binds and the arguments
+  // it accepts under it, named rather than described: what each role does
+  // is the prose's job.
+  function hardwareSection(info, row) {
+    const roles = row && Array.isArray(row.hardware_roles) ? row.hardware_roles : [];
+    const args = row && Array.isArray(row.arguments) ? row.arguments : [];
+    return infoSection("Hardware and traffic",
+      info.hardware ? el("p", { text: info.hardware }) : null,
+      roles.length
+        ? el("p", {
+            className: "info-facts",
+            text: "Catalog roles: " + roles
+              .map((item) => `${item.role} (${item.device})`).join(", ") + ".",
+          })
+        : el("p", { className: "info-facts", text: "The catalog binds it no device." }),
+      args.length
+        ? el("p", {
+            className: "info-facts",
+            text: "Arguments a plan may set: " + args
+              .map((item) => item.name + (item.required ? " (required)" : ""))
+              .join(", ") + ".",
+          })
+        : null);
+  }
+
+  function relatedSection(info) {
+    const related = Array.isArray(info.related) ? info.related : [];
+    if (!related.length) return null;
+    return infoSection("Related issues", el("ul", { className: "info-links-list" },
+      ...related.map((item) => {
+        const href = safeHref(item && item.url);
+        const reference = String((item && item.reference) || "");
+        return el("li", {}, href
+          ? el("a", { href, target: "_blank", rel: "noreferrer noopener", text: reference })
+          : el("span", { text: reference }));
+      })));
+  }
+
+  // The button that opens it. A real button, so it is reachable by Tab and
+  // works with a touch or a click; nothing here is behind a right-click.
+  // `context` is the plan and suite whose listing of the test the dialog
+  // should read its estimate from (`catalogRow`): the run's, where the
+  // button sits beside a run's own step.
+  function infoButton(name, context) {
+    const label = `What the test ${name} is for`;
+    return el("button", {
+      type: "button", className: "info-button",
+      "aria-label": label, title: label,
+      onclick: (event) => openTestInfo(name, event.currentTarget, context),
+    }, el("span", { "aria-hidden": "true", text: "i" }));
+  }
+
+  function openTestInfo(name, invoker, context) {
+    const info = testInfoFor(name);
+    const found = catalogRow(name, context);
+    const row = found.row;
+    const dialog = $("test-info");
+    // Only a script can ask for a second one (a modal dialog blocks the
+    // page), and showModal() on an open dialog throws.
+    if (dialog.open) dialog.close();
+    state.infoInvoker = invoker || null;
+    $("test-info-title").textContent = name;
+    // The dialog's description: the purpose when there is one, and
+    // otherwise why there is none, which is a reason to read and not an
+    // empty dialog.
+    const purpose = $("test-info-purpose");
+    purpose.className = info.available ? "info-purpose" : "info-purpose hint warn";
+    purpose.textContent = info.available
+      ? String(info.purpose || "")
+      // One sentence, whether or not the reason came with a full stop.
+      : String(info.unavailable_reason || "No information for this test")
+        .replace(/[.\s]*$/, ".")
+        + " What the catalog itself says about it is below.";
+    const places = testAppearances(name);
+    $("test-info-body").replaceChildren(...[
+      info.available ? infoSection("Theory of operation",
+        el("p", { text: info.theory })) : null,
+      hardwareSection(info, row),
+      info.available ? infoSection("Expected outcome",
+        el("p", { text: info.expected })) : null,
+      info.available ? infoSection("What a pass does not prove",
+        el("p", { text: info.limitations })) : null,
+      infoSection("Runtime", el("p", { text: runtimeText(found) })),
+      places.length
+        ? infoSection("Plans that list it",
+            el("p", { text: places.join(", ") + "." }))
+        : null,
+      relatedSection(info),
+    ].filter(Boolean));
+    const documentation = info.documentation || null;
+    const href = documentation ? safeHref(documentation.url) : "";
+    const where = documentation
+      ? `${String(documentation.path)}#${String(documentation.anchor || "")}`
+      : "docs/tests.md";
+    $("test-info-links").replaceChildren(
+      href
+        ? el("a", {
+            className: "button-link", href,
+            target: "_blank", rel: "noreferrer noopener",
+            text: "Open full documentation",
+          })
+        : null,
+      el("span", { className: "hint", text: href ? where : `The full account is ${where}.` }),
+    );
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");  // no <dialog> support: shown in place
+    // The heading, so what was opened is announced with the dialog's own
+    // description; the page's failure summary heading is focused the same way.
+    $("test-info-title").focus();
+  }
+
+  function closeTestInfo() {
+    const dialog = $("test-info");
+    if (typeof dialog.close === "function") dialog.close();  // fires `close`
+    else {
+      dialog.removeAttribute("open");
+      restoreInfoFocus();
+    }
+  }
+
+  // Focus back to the button the dialog was opened from, for Escape and
+  // Close alike. A button that is no longer on the page (the checklist was
+  // redrawn while the dialog was open) leaves focus where the browser puts
+  // it rather than moving it somewhere unrelated.
+  function restoreInfoFocus() {
+    const invoker = state.infoInvoker;
+    state.infoInvoker = null;
+    if (invoker && invoker.isConnected) invoker.focus();
   }
 
   // ----- the live run group ------------------------------------------------
@@ -1374,7 +1654,19 @@
         className: `check check-${shown.replace(/ /g, "-")}`,
         "aria-current": shown === "running" ? "step" : null,
       },
-        el("span", { className: "check-name", text: step.name }),
+        // The name and its info button together, so the button stays beside
+        // the name rather than drifting to the pills at the far right. Only
+        // a test has information to show; build, flash and preflight are
+        // stages, not tests. The dialog reads this group's own listing of
+        // the test, which is the one whose coverage and estimate it uses.
+        el("span", { className: "check-name" },
+          el("span", { className: "check-name-text", text: step.name }),
+          step.kind === "test"
+            ? infoButton(step.name, {
+                plan: view.group && view.group.plan,
+                suite: view.group && view.group.suite,
+              })
+            : null),
         el("span", { className: "pills" },
           ...cells.map((cell) => stepPill(step, cell))),
         ...cells.filter((cell) => cell.reason).map((cell) => el("span", {
@@ -1878,6 +2170,12 @@
           items.push(el("li", { className: "failure" },
             statusBadge(failure.status), " ",
             el("strong", { text: `${member.host} · ${failure.step}` }),
+            // A test gets its information button here too, reading this
+            // group's own listing of it; a build, flash or preflight step
+            // is not a test and has none to show.
+            state.testInfo[failure.step]
+              ? infoButton(failure.step, { plan: group.plan, suite: group.suite })
+              : null,
             failure.reason ? el("span", { text: `: ${failure.reason}` }) : null,
             failure.log && failure.log.length
               ? el("pre", { className: "log", text: failure.log.join("\n") }) : null));
@@ -2056,6 +2354,16 @@
     $("plan").addEventListener("change", () => renderSuites());
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelGroup);
+    // The information dialog: Close and Escape both close it, and focus
+    // goes back to the button it was opened from however it closed.
+    $("test-info-close").addEventListener("click", closeTestInfo);
+    $("test-info").addEventListener("close", restoreInfoFocus);
+    $("test-info").addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeTestInfo();
+      }
+    });
     $("file-previous").addEventListener("click", () => pageOutputFile(-1));
     $("file-next").addEventListener("click", () => pageOutputFile(1));
     $("file-close").addEventListener("click", () => {

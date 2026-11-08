@@ -261,8 +261,8 @@ class PairRegistry(PairTestCase):
         for serial, fragment in (
             (TARGET, "UT_Debug (Ubertooth)"),
             ("000123456789", "DK_Pair (nRF52840 DK)"),
-            # nrfutil prints a J-Link serial without its leading zeros, and
-            # a bench script may name the lock either way.
+            # A DK command line carries a J-Link serial without its leading
+            # zeros, and a bench script may name the lock either way.
             ("123456789", "DK_Pair (nRF52840 DK)"),
             ("a1b2c3d400000000a1b2c3d400000000", "ESP_Pair (ESP32 Classic peer)"),
             ("host-power", "this host's power/firmware lock"),

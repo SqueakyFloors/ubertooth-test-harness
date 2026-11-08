@@ -189,18 +189,21 @@ board's in-system programming header. On a board whose bootloader came from
 this tree the test is a test; on a board with the factory bootloader it is a
 way to brick that board, which then needs its P4 entry pin bridged. So the
 plan names the board the registry pairs with a `Debug programmer` — the board
-that has a recovery path — and the run holds the programmer with it. Read the
-bootloader before and after with `ubertooth-util -U <serial> -B` yourself.
-`--bootloader check` does not cover this board: preflight reads the bootloader
-of a board whose firmware the run requires, and this test establishes its own,
-so the read is skipped for it
-([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
-[#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
-Passing the option costs nothing, and covers no board of this suite: the read
-leaves out a guard-only board too. `--bootloader update` installs over a
-programmer for the same boards, so it does not reach this board either; a
-board that needs a bootloader gets one before this plan runs, from a run that
-does require its firmware or by hand over the programmer.
+that has a recovery path — and the run holds the programmer with it.
+`--bootloader check` does cover this board, so run it with that option: the
+read now reaches every Ubertooth a test of the suite selects, this one
+included
+([#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+Because the board's application image is written by the test rather than
+required by the run, it may be carrying firmware older than the request when
+preflight reads it; that answer is recorded as `not read` with the reason and
+the run goes on, where any other board that will not answer fails. A board
+that does answer is compared like the rest, and `check` fails the run on a
+stale bootloader there. `--bootloader update` still does not reach it — the
+write covers the boards whose firmware preflight requires, which this one is
+not — so the reason sends you to the programmer, and the stage says it had no
+board to install on. Reading `-B` before and after by hand is still worth
+doing, since preflight reads it before the test and nothing reads it after.
 
 **Run it by hand, with someone who can reach the bench.** It is destructive:
 if the bootloader does start the unstartable image, the board faults on every

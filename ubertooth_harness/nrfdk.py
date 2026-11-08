@@ -185,7 +185,7 @@ def run_tool(argv: Sequence[str], timeout: float) -> subprocess.CompletedProcess
 
 
 def jlink_serial(value: str) -> int:
-    """A J-Link serial as registered (digits; nrfutil pads it to 12)."""
+    """A J-Link serial as a number, from either spelling of its digits."""
     text = str(value).strip()
     if not text.isdigit() or not 6 <= len(text.lstrip("0") or "0") <= 12:
         raise NrfDkError(f"J-Link serial must be 6-12 digits, got {value!r}")

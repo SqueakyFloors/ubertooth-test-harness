@@ -237,7 +237,10 @@ The controller stores runs, fans out live updates, and serves the GUI at
 `/ui/`: targets, run setup (ref, plan, suite, the hosts to run on, build and
 flash options), a live checklist with one pill per host on every row and a
 countdown where estimates exist, history
-with failure summaries, and the output files a run saved. A run on several
+with failure summaries, and the output files a run saved. Every test name
+carries a button that opens what that test is for, read from
+`ubertooth_harness/test_info.yaml` beside the catalog's own roles,
+arguments and estimate. A run on several
 hosts at once is a **run group**, carried on one stream, and a run of one
 host is a group of one, so the GUI has one thing to draw.
 
@@ -342,4 +345,5 @@ Open:
 | [docs/reference/run-records.md](docs/reference/run-records.md) | `run.jsonl`, `report.md`, output files, re-checking a run |
 | [docs/reference/power-control.md](docs/reference/power-control.md) | power drivers, armed changes, isolation, manual recovery |
 | [docs/reference/soak-workload.md](docs/reference/soak-workload.md) | the modeled MAC polling workload |
+| [docs/reference/address-parity-soak.md](docs/reference/address-parity-soak.md) | the BLE address parity soak and its plan |
 | [COVERAGE.md](COVERAGE.md) | every host CLI option and which test covers it |

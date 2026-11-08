@@ -206,7 +206,8 @@ word and symbol (colour only reinforces it).
   while it runs), last seen, and
   the active run with a Watch button.
 - **Run setup:** git ref (default branch, branches and tags from
-  `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
+  `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests,
+  each with an info button that says what it is for;
   only runnable plans are offered, and plans of planned tests such as
   `backlog` are named as not runnable), the **hosts** to run it on (one tick
   per registered host, each ticked host getting its own child run of the
@@ -253,7 +254,7 @@ word and symbol (colour only reinforces it).
   one a host's own platform does not run (`Exclusive Ubertooth topology`
   on a macOS target), is left out of that host's figure and then named, with
   the time it takes on the host that does run it: the release suite is about
-  654.5 s on a host that step does not name, and 1174.5 s counting it.
+  669.7 s on a host that step does not name, and 1189.7 s counting it.
   Ticking another host reloads its list and keeps the plan and suite you
   had chosen. A suite no step of which runs on a host says that
   instead of a time. Estimates learned on a host are used wherever it
@@ -358,6 +359,24 @@ word and symbol (colour only reinforces it).
   with its reason and last output lines, then each run's own reason, and a
   host that got no run at all with the reason it did not). A run of one host
   is listed as a group of one, by its own run ID.
+- **What a test is for:** beside every test name — in Run setup's suite
+  list, the live checklist, and a failure summary — is a small round *i*
+  button that opens a dialog in the page: the test's purpose, theory of
+  operation, hardware and traffic, expected outcome, what a pass does not
+  prove, what the catalog binds and accepts, its catalog estimate and
+  profile as the listing it was opened from gives them (a test two plans
+  list at different coverages has an estimate per listing, and the line
+  names the one it read), the plans that list it (so a longer or soak form
+  of it is visible), the issues behind it, and a link to its
+  [docs/tests.md](../tests.md) section in a separate tab. It is a real
+  button: Tab reaches it, Enter or Space opens it, focus enters the dialog
+  at its heading, and Escape or Close returns focus to the button. The
+  prose is [`ubertooth_harness/test_info.yaml`](../../ubertooth_harness/test_info.yaml),
+  which `/api/plans` sends once per response keyed by the catalog name; the
+  roles, arguments, profile and estimate come from the catalog on the test
+  row, so neither has two sources. A test with no entry, and a file the
+  controller could not read, leave the dialog saying so with the catalog's
+  own facts still under it; none of it can hold up a run.
 
 Every HTTP response carries `Content-Security-Policy: default-src 'self';
 script-src 'self'; style-src 'self'; connect-src 'self' ws://<host>;
