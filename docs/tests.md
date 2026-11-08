@@ -1247,7 +1247,7 @@ ubertooth-util -U<index> -s       # each board at the index the listing gave
 ubertooth-util -U all -bvps       # and -bvps with no selector: four lines a board
 ubertooth-util -U all -V          # and -V with no selector: every board, indexed
 ubertooth-util -C                 # refused with several boards and no -U
-ubertooth-util -U<past the last>  # refused: no Ubertooth at index
+ubertooth-util -U<past the last> -s  # refused: no Ubertooth at index
 ```
 
 **Expected outcome.** With two boards, smoke runs 3 cases and comprehensive 9;
@@ -1262,7 +1262,11 @@ build under its index; `-C` without `-U` refusing to
 pick a board (exit 1 with `error: multiple Ubertooth devices found; select
 one with -U <index|serial>` and one `Device <index>: <serial>` line per
 board, and no channel read); and an index past the last board refused with
-`error: no Ubertooth at index N (N attached)`.
+`error: no Ubertooth at index N (N attached)` and the hint under it, with no
+board's serial read. That last one carries `-s`: a selector with nothing
+beside it asks the board for nothing, so the fork refuses it as "nothing to
+do" before the index is looked up, and the refusal this case is about would
+never be reached.
 
 **Known limits.** Every command is read-only, so this says nothing about
 selection for a command that writes. The listing order is the USB index order,
