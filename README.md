@@ -24,6 +24,7 @@ document that answers your question. The architecture is in
 | be emailed when a long run finishes | [docs/guide/notifications.md](docs/guide/notifications.md) |
 | deploy them | [docs/guide/deploy.md](docs/guide/deploy.md) |
 | read a run's records | [docs/reference/run-records.md](docs/reference/run-records.md) |
+| publish a release's evidence | [docs/reference/release-evidence.md](docs/reference/release-evidence.md) |
 | switch USB power | [docs/reference/power-control.md](docs/reference/power-control.md) |
 | know which CLI option is covered | [COVERAGE.md](COVERAGE.md) |
 
@@ -69,11 +70,18 @@ it through an SSH tunnel; nothing is exposed on the network.
    your laptop can log in to the lab host directly with its own key.
 
 4. **Run something:** in Run setup pick a git ref (for example `main`), a plan
-   (`host` needs no board and is a safe first run), the target, keep "Build the
+   (`host` needs no board and is a safe first run), tick the host or hosts to
+   run it on (every ticked host gets its own run, started together as one run
+   group), keep "Build the
    ref on the target first" and "Flash the firmware to the boards first"
    ticked (the two "Build … too" boxes follow what the suite needs), and
-   press Run. The Live run card ticks off
-   each test; History keeps every run with its `report.md`.
+   press Run. The Live run group card ticks off each test with one pill per
+   host it is tested on; History keeps every group with each host's
+   `report.md`, newest 50 first, with Target, Status and Ref filters and
+   Load older behind them. Beside every
+   test name is a small *i* button: it opens what that test is for, what it
+   drives, and what a pass does not prove, with a link to its
+   [docs/tests.md](docs/tests.md) section.
 
 If it does not connect:
 
@@ -181,6 +189,7 @@ board behind an attenuator asks for it with `weak link:`
 | `build` | build and install the resolved commits into a prefix |
 | `validate <run dir>` | re-run a finished run's recorded output checks |
 | `report <run dir>...` | render one Markdown report from one or more runs |
+| `release-evidence <run dir>...` | build one release's public-safe summary, sanitized logs, and sums ([release-evidence.md](docs/reference/release-evidence.md)); uploads nothing |
 | `runner`, `controller` | the persistent services ([services.md](docs/guide/services.md)) |
 | `notify-test` | send one test completion notice, to check that setup ([notifications.md](docs/guide/notifications.md)) |
 

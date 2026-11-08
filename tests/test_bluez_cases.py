@@ -600,19 +600,41 @@ class OutputCheckTests(unittest.TestCase):
             fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))))
 
     def test_one_peer_name_is_enough_and_none_is_not(self):
-        """A name can land on the wrong line when another device's read
-        fails, which the bench showed once: see inquiry_found()."""
+        """One name read is the floor; see inquiry_found()."""
         check = inquiry_found({ACCEPTOR_ADDRESS: ACCEPTOR_NAME,
                                INITIATOR_ADDRESS: INITIATOR_NAME})
-        # What the bench printed: the acceptor under a television's name,
-        # the initiator under its own.
+        # One peer's read went unanswered and the other's worked, which is
+        # what two of the bench's nineteen runs looked like.
         self.assertEqual("", check(fake_bluez.scan_inquiry(
             (fake_bluez.OTHER_ADDRESS, "[unknown]"),
-            (ACCEPTOR_ADDRESS, "[TV] Someone's television"),
+            (ACCEPTOR_ADDRESS, "[unknown]"),
             (INITIATOR_ADDRESS, INITIATOR_NAME))))
         self.assertIn("no peer came back under its own name", check(
             fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, "[unknown]"),
                                     (INITIATOR_ADDRESS, "[unknown]"))))
+
+    def test_a_name_on_another_peers_line_fails(self):
+        """What the bench printed once: a neighbor's name against a peer's
+        address, while the neighbor's own read had just failed. That passed
+        the one-name floor, because the other peer was under its own name
+        (fork #1175)."""
+        check = inquiry_found({ACCEPTOR_ADDRESS: ACCEPTOR_NAME,
+                               INITIATOR_ADDRESS: INITIATOR_NAME})
+        problem = check(fake_bluez.scan_inquiry(
+            (fake_bluez.OTHER_ADDRESS, "[unknown]"),
+            (ACCEPTOR_ADDRESS, "[TV] Someone's television"),
+            (INITIATOR_ADDRESS, INITIATOR_NAME)))
+        self.assertIn("came back as", problem)
+        self.assertIn(ACCEPTOR_ADDRESS, problem)
+        self.assertIn("came from somewhere else", problem)
+        # Both peers swapped onto each other's lines is the same fault, and
+        # the floor alone would miss it too.
+        both = check(fake_bluez.scan_inquiry(
+            (ACCEPTOR_ADDRESS, INITIATOR_NAME),
+            (INITIATOR_ADDRESS, ACCEPTOR_NAME)))
+        self.assertIn(ACCEPTOR_ADDRESS, both)
+        self.assertIn(INITIATOR_ADDRESS, both)
+        self.assertIn("no peer came back under its own name", both)
 
     def test_the_peer_name_is_derived_from_its_address(self):
         self.assertEqual(ACCEPTOR_NAME, esp32peer.device_name(ACCEPTOR_ADDRESS))

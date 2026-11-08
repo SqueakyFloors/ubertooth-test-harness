@@ -240,10 +240,15 @@ Details: [run records](docs/reference/run-records.md).
 ## 9. Services and the GUI
 
 The controller stores runs, fans out live updates, and serves the GUI at
-`/ui/`: targets, run setup (ref, plan, suite, target, build and flash
-options), a live checklist with a countdown where estimates exist, history
-with failure summaries, and the output files a run saved. A run on several
-hosts at once is a **run group**, carried on one stream.
+`/ui/`: targets, run setup (ref, plan, suite, the hosts to run on, build and
+flash options), a live checklist with one pill per host on every row and a
+countdown where estimates exist, history
+with failure summaries, and the output files a run saved. Every test name
+carries a button that opens what that test is for, read from
+`ubertooth_harness/test_info.yaml` beside the catalog's own roles,
+arguments and estimate. A run on several
+hosts at once is a **run group**, carried on one stream, and a run of one
+host is a group of one, so the GUI has one thing to draw.
 
 Two properties matter for the design:
 
@@ -348,9 +353,11 @@ Open:
 | [docs/guide/test-devices.md](docs/guide/test-devices.md) | how the harness drives the DKs, the ESP32 peers, and a host adapter |
 | [docs/guide/services.md](docs/guide/services.md) | controller, runner service, web GUI, run groups |
 | [docs/guide/deploy.md](docs/guide/deploy.md) | deploying the services on the lab host and a Mac |
-| [docs/reference/runner-protocol.md](docs/reference/runner-protocol.md) | the controller↔runner wire protocol, version 7 |
+| [docs/reference/runner-protocol.md](docs/reference/runner-protocol.md) | the controller↔runner wire protocol, version 8 |
 | [docs/reference/run-records.md](docs/reference/run-records.md) | `run.jsonl`, `report.md`, output files, re-checking a run |
+| [docs/reference/release-evidence.md](docs/reference/release-evidence.md) | the public-safe release export: assets, gates, sanitization, publishing |
 | [docs/reference/power-control.md](docs/reference/power-control.md) | power drivers, armed changes, isolation, manual recovery |
 | [docs/reference/soak-workload.md](docs/reference/soak-workload.md) | the modeled MAC polling workload |
 | [docs/reference/address-parity-soak.md](docs/reference/address-parity-soak.md) | the BLE address parity soak and its plan |
+| [docs/reference/intermittent-follow-soak.md](docs/reference/intermittent-follow-soak.md) | the intermittent follow soak, its checkpoints and its plan |
 | [COVERAGE.md](COVERAGE.md) | every host CLI option and which test covers it |

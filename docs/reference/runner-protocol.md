@@ -1,4 +1,4 @@
-# Target runner protocol (controller <-> runner), version 7
+# Target runner protocol (controller <-> runner), version 8
 
 Wire reference. Architecture: [DESIGN.md](../../DESIGN.md).
 
@@ -10,16 +10,18 @@ the runner refuses any controller URL whose host is not loopback (`127.0.0.1`,
 connects to the checked address itself, ignores proxies, and follows no HTTP
 redirects.
 
-Implemented protocol, version 7 (`ubertooth_harness/protocol.py`; version 2
+Implemented protocol, version 8 (`ubertooth_harness/protocol.py`; version 2
 added the run's `commit`, version 3 its `flash_build`, version 4 the
 `run_file` request and its answers, version 5 the run's `with_firmware` and
-`with_python`, version 6 its `bootloader`, and version 7 its `with_btbr`).
-Every message is one
-JSON text frame `{"version": 7, "type": ..., ...fields}`. Each
+`with_python`, version 6 its `bootloader`, version 7 its `with_btbr`, and
+version 8 per-board status in `register` and `heartbeat` with the two board
+management requests). Every message is one
+JSON text frame `{"version": 8, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, wrongly typed value, or combination of fields
 it could not act on (`with_firmware`, `with_btbr` or `with_python` without
-`build`), and does not act on it
+`build`; an `update_registry` whose fields do not describe one change), and
+does not act on it
 (the runner answers `protocol_error {reason}`). Inbound messages to the runner
 are limited to 64 KiB; the controller accepts runner messages up to 4 MiB,
 since one `event` carries one run.jsonl record and the manifest record alone
@@ -32,13 +34,15 @@ Controller → target runner:
 | `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then), `with_firmware`, `with_btbr` and `with_python` (bool: the run's build also builds and records the application firmware image, the alternate btbr image, and the Python tools, passing `--with-firmware`, `--with-btbr` and `--with-python`; `run-suite` takes none of them without `--build`, so any one true without `build` is rejected as a message the receiver could not act on. The btbr image is its own field because a firmware build makes the application image without it, so a test that needs the alternate one has to say so directly), `bootloader` (`record`, `check` or `update`: what the run does about its boards' bootloaders, passed as `--bootloader`; `check` and `update` compare against a bootloader built from the run's own source, which `run-suite` refuses without `--build`, so either one without `build` is rejected the same way) |
 | `cancel` | `run_id`, `reason` |
 | `run_file` | `request_id`, `run_id`, `path` (a path that run's own run.jsonl records), `offset` and `limit` in bytes (`limit` at most 256 KiB, since the page travels in one message) |
+| `list_devices` | `request_id` |
+| `update_registry` | `request_id`, `action` (`add` or `remove`), `alias` (the registry alias), `serial` (`add` only: the serial the board reports), `power_controller` and `power_port` (`add` only, both or neither: the switchable port the board sits on). `add` without a serial, `remove` with any field but the alias, and half a power mapping are rejected as a message the receiver could not act on |
 
 Target runner → controller:
 
 | Type | Fields |
 |------|--------|
-| `register` | `host` (registry alias), `hostname`, `os` (system, release, architecture, distribution or macOS version), `python`, `ubertooth_serials` (list, or `null` when enumeration is unavailable), `enumeration_error`, `heartbeat_interval_s`, `active_run_id` |
-| `heartbeat` | `active_run_id`, `elapsed_s`, `last_event_sequence`, `last_event_type` |
+| `register` | `host` (registry alias), `hostname`, `os` (system, release, architecture, distribution or macOS version), `python`, `ubertooth_serials` (list, or `null` when enumeration is unavailable), `enumeration_error`, `boards` (one entry per registered Ubertooth of that host, see below), `heartbeat_interval_s`, `active_run_id` |
+| `heartbeat` | `active_run_id`, `elapsed_s`, `last_event_sequence`, `last_event_type`, `boards` (the same list, refreshed) |
 | `run_accepted` | `request_id`, `run_id` |
 | `run_rejected` | `request_id`, `reason` (busy, cannot build: the runner has no libbtbb and `build` is set, unknown plan, cannot start) |
 | `event` | `run_id`, `event` (one run.jsonl record, unchanged, with its own `schema_version`) |
@@ -48,6 +52,9 @@ Target runner → controller:
 | `cancel_rejected` | `run_id`, `reason` |
 | `run_file_page` | `request_id`, `run_id`, `page`: what the run recorded about the file (`path`, `stream`, `bytes`, `lines`, `sha256`) and where this page sits in it (`file_bytes`, `offset`, `length`, `eof`, `page_bytes`, `text`) |
 | `run_file_refused` | `request_id`, `run_id`, `status` (400, 404 or 503, which the controller's route answers with), `reason` (names the run ID or the path only) |
+| `devices` | `request_id`, `devices` (each `serial`, `vendor`, `product`, `path`, and the `alias` it is registered as or `null` for one the registry has not got), `error` (why the scan found nothing, else `null`), `power_controllers` (each `alias`, `driver`, and the `ports` no board is mapped to yet), `suggested_alias`, `boards` |
+| `registry_updated` | `request_id`, `action`, `alias`, `boards` (what the target has now), `ubertooth_serials` |
+| `registry_refused` | `request_id`, `status` (400, 404, 409 or 503, which the controller's route answers with), `reason` (names aliases, serials and what the registry already holds, never a path on the target) |
 | `protocol_error` | `reason` |
 
 Semantics:
@@ -56,6 +63,39 @@ Semantics:
   and `ioreg -p IOUSB -l -w0 -a` on macOS. Neither opens a device, so
   registration cannot stop a running board. Power isolation itself stays
   Linux-only, since it is the switchable hubs that are validated there.
+- `boards` carries one entry per registered Ubertooth of that host, with only
+  what the runner can establish without opening a device: `alias`, `serial`,
+  `present` (whether that serial is on USB; `null` when the target cannot
+  enumerate at all, which is unknown rather than offline), `held` and
+  `holder` from a lease listing that takes no lease, the
+  `firmware_revision` the last run that flashed the board reported, and the
+  `power_controller` and `power_port` the registry maps it to. What those
+  facts add up to is derived on the controller
+  (`ubertooth_harness/boardstatus.py`: ready, busy, unknown, offline, each
+  with the sentence saying why) and is not sent, so one answer cannot
+  disagree with another. A registry or lease directory the runner cannot
+  read costs the board list, never the registration: the target registers
+  with an empty list and logs why.
+- `list_devices` lists every Ubertooth attached to the target from the same
+  read-only scan, each marked with the alias it is registered as or `null`,
+  beside the hubs a new board could be mapped to and the alias the runner
+  suggests (`UT_<host>N`). It opens no device and sends no command, so a
+  board in the middle of a capture is undisturbed. A board sitting in its
+  DFU bootloader reports no serial, so it is listed and cannot be
+  registered.
+- `update_registry` is the only way the registry changes from outside the
+  target: the runner owns the file. It refuses the change while a run is
+  active (a run reads the registry when it starts) and when a lease holds the
+  board being unregistered, both 409. Otherwise the edit goes through
+  `ubertooth_harness/registryedit.py`, which touches only that board's own
+  lines so comments and every other resource are left byte for byte as they
+  were, reads the result back and compares it with the mapping the change
+  intended, validates it with the real registry loader, keeps the previous
+  contents as `<name>.backup`, replaces the file atomically, and restores the
+  backup if what is now in place does not load. Nothing is written for a
+  refused change. Only Ubertooths are managed this way; hubs, DKs, ESP32
+  peers, adapters and programmers stay file-edited, because each needs
+  identity fields nothing can detect read-only.
 - One run at a time. The runner executes `run-suite` as a child process in
   its harness environment, with a runner-assigned run ID and the runner's own
   hardware registry, host, source checkouts, output root, and

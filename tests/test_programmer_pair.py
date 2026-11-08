@@ -821,7 +821,7 @@ class PairRunRecords(PairTestCase):
         web = Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
         js = (web / "app.js").read_text(encoding="utf-8")
         self.assertIn('kind === "lease_pairing"', js)
-        self.assertIn('$("live-pairings").hidden = live.pairings.length === 0;', js)
+        self.assertIn('$("live-pairings").hidden = pairings.length === 0;', js)
         html = (web / "index.html").read_text(encoding="utf-8")
         self.assertIn("Leases from a wired pair", html)
         # The elements the view writes into: without them every render

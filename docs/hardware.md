@@ -123,6 +123,29 @@ reports the capture process's resident memory from `ps`, which needs no
 privilege and nothing installed; a host that refuses to run `ps` costs the
 memory figures and nothing else.
 
+**Booking the DK pair for a follow soak.** `Intermittent follow soak`
+(`testplans/follow-soak.yaml`) holds one Ubertooth and *both* DKs — the
+`central` and the `peripheral` — for its whole window, which its longest
+suite makes three days, and it drives both of them on and off throughout, so
+nothing else can use any of the three meanwhile. Book the pair rather than
+scheduling it beside other DK work. What it does **not** hold is the rest of
+the host: it writes no firmware and guards no other Ubertooth, so the run
+takes no host lock and another hardware run on other devices, or host-only
+work, can go on beside it. The price of that is a precondition: both DKs must
+already run the pinned role firmware, because the soak checks and refuses
+rather than flashing. Bring them to it first with any other DK test
+(`--artifact "nRF52840 advertiser=PATH/utdk.hex"`, below) or by hand, and
+confirm with `nrfdk.py status`.
+
+Its disk cost is the same kind as the address soak's and larger per second: a
+`-f` capture records the advertising channel's traffic *and* every connection
+the board follows, so check the host's free space before booking a long run
+and keep the plan's `capture file limit` and `capture budget` set. **No
+figure has been measured for it on this bench yet** — the rate above is the
+address soak's, taken with `-n` on channel 37 — so treat the budget as the
+bound it is rather than as a prediction, and record a measured rate here once
+a long run has produced one. Both DKs' serial ports stay open for the run.
+
 Registered by its J-Link serial, plus the BLE address its `status` reports.
 The serial is all 12 digits, as the `/dev/serial/by-id` name carries it and
 quoted so the leading zeros survive: that is the one spelling the registry
@@ -1284,6 +1307,26 @@ Three protocol facts that look like harness or tool faults and are not:
   a voice link, so a follow-mode capture of one is not something to count on
   yet; the packet type, the timing, and the count are read from the records a
   capture writes without it.
+
+What the bench's own level figures look like, measured 2026-11-07 at
+`2026-11-DEV2` over twenty 25-second captures of the peer pair (seven
+windows, the follow, role-swapped, audio and survey captures of each, taken
+on a clear receiver, not an attenuated one):
+
+| | Measured |
+|---|---|
+| records a capture | 122 to 373 |
+| distinct signal figures | 21 to 36 |
+| records carrying a measured noise figure | 90 to 326 |
+| distinct noise figures among those | 28 to 53 |
+| longest payload a record carried | 30 bytes |
+
+`Classic capture record fields` puts floors of four distinct signal figures
+and four distinct noise figures on a capture, which is a fifth and a seventh
+of those lowest counts: the point is to fail a receiver that latched one
+reading rather than to measure this room. `docs/tests.md` carries the
+reasoning. A weak-link receiver is unmeasured for this test; the figures
+above are the clear board's.
 
 ## A worked bench layout
 

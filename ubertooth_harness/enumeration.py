@@ -60,6 +60,40 @@ class EnumerationAborted(RuntimeError):
     """An enumeration wait was aborted (for example, the run was canceled)."""
 
 
+@dataclass(frozen=True)
+class UsbDevice:
+    """One attached Ubertooth, as the kernel already describes it.
+
+    ``serial`` is lowercase, and "" for a device that reports none (the DFU
+    bootloader). ``vendor`` and ``product`` are four lowercase hex digits.
+    ``path`` is where the device sits on the bus: the sysfs bus name on Linux
+    (``3-2.1``), the IO registry location on macOS. Nothing here is read by
+    opening the device.
+    """
+
+    serial: str
+    vendor: str
+    product: str
+    path: str
+
+    @property
+    def entry(self) -> str:
+        """How ``serials()`` names this device.
+
+        Its serial, or ``unidentified:<path>:<product>`` when it reports
+        none, so an isolation check that cannot name a board fails closed on
+        it rather than matching a registered serial.
+        """
+        return self.serial or f"{UNIDENTIFIED_PREFIX}{self.path}:{self.product}"
+
+    def view(self) -> dict:
+        """The device as the runner reports it over the protocol."""
+        return {
+            "serial": self.serial, "vendor": self.vendor,
+            "product": self.product, "path": self.path,
+        }
+
+
 class UbertoothEnumerator(Protocol):
     def serials(self) -> frozenset[str]:
         """Return lowercase serials of attached Ubertooths.
@@ -67,9 +101,22 @@ class UbertoothEnumerator(Protocol):
         Devices without a serial are returned as UNIDENTIFIED_PREFIX + name.
         """
 
+    def devices(self) -> tuple[UsbDevice, ...]:
+        """The same devices, each with where it is and what ids it reports.
+
+        For a person choosing a board to register, which a serial alone does
+        not let them do: two unlabelled boards are told apart by the port
+        they are plugged into.
+        """
+
 
 def is_unidentified(entry: str) -> bool:
     return entry.startswith(UNIDENTIFIED_PREFIX)
+
+
+def _ordered(devices) -> tuple[UsbDevice, ...]:
+    """Devices in a stable order: by bus path, then serial."""
+    return tuple(sorted(devices, key=lambda device: (device.path, device.serial)))
 
 
 class SysfsUbertoothEnumerator:
@@ -79,7 +126,10 @@ class SysfsUbertoothEnumerator:
         self.root = Path(root)
 
     def serials(self) -> frozenset[str]:
-        found = set()
+        return frozenset(device.entry for device in self.devices())
+
+    def devices(self) -> tuple[UsbDevice, ...]:
+        found = []
         try:
             entries = list(self.root.iterdir())
         except OSError as error:
@@ -101,8 +151,8 @@ class SysfsUbertoothEnumerator:
                 if not device.exists():
                     continue  # removed mid-scan, not a serial-less device
                 serial = ""
-            found.add(serial or f"{UNIDENTIFIED_PREFIX}{device.name}:{product}")
-        return frozenset(found)
+            found.append(UsbDevice(serial, vendor, product, device.name))
+        return _ordered(found)
 
 
 def _usb_id(value) -> str | None:
@@ -139,13 +189,13 @@ def _ioreg_name(node: dict) -> str:
     return name.strip() if isinstance(name, str) and name.strip() else "unknown"
 
 
-def ubertooth_serials_from_ioreg(output: bytes) -> frozenset[str]:
-    """Parse `ioreg -p IOUSB -l -w0 -a` output into enumerated serials."""
+def ubertooth_devices_from_ioreg(output: bytes) -> tuple[UsbDevice, ...]:
+    """Parse `ioreg -p IOUSB -l -w0 -a` output into attached Ubertooths."""
     try:
         tree = plistlib.loads(output)
     except Exception as error:
         raise EnumerationError(f"cannot parse ioreg output: {error}") from error
-    found = set()
+    found = []
     pending = [tree]
     while pending:
         node = pending.pop()
@@ -169,11 +219,17 @@ def ubertooth_serials_from_ioreg(output: bytes) -> frozenset[str]:
         product = _usb_id(node.get("idProduct"))
         if vendor != UBERTOOTH_VENDOR or product not in UBERTOOTH_PRODUCTS:
             continue
-        serial = _ioreg_serial(node)
-        found.add(
-            serial or f"{UNIDENTIFIED_PREFIX}{_ioreg_name(node)}:{product}"
+        found.append(
+            UsbDevice(_ioreg_serial(node), vendor, product, _ioreg_name(node))
         )
-    return frozenset(found)
+    return _ordered(found)
+
+
+def ubertooth_serials_from_ioreg(output: bytes) -> frozenset[str]:
+    """Parse `ioreg -p IOUSB -l -w0 -a` output into enumerated serials."""
+    return frozenset(
+        device.entry for device in ubertooth_devices_from_ioreg(output)
+    )
 
 
 class IoregUbertoothEnumerator:
@@ -192,6 +248,12 @@ class IoregUbertoothEnumerator:
         self._run = run
 
     def serials(self) -> frozenset[str]:
+        return ubertooth_serials_from_ioreg(self._read())
+
+    def devices(self) -> tuple[UsbDevice, ...]:
+        return ubertooth_devices_from_ioreg(self._read())
+
+    def _read(self) -> bytes:
         try:
             finished = self._run(
                 list(self.argv),
@@ -210,7 +272,7 @@ class IoregUbertoothEnumerator:
                 f"{self.name} exited {finished.returncode}"
                 + (f": {detail.splitlines()[0][:200]}" if detail else "")
             )
-        return ubertooth_serials_from_ioreg(finished.stdout or b"")
+        return finished.stdout or b""
 
 
 def local_enumerator(platform: str | None = None) -> UbertoothEnumerator:

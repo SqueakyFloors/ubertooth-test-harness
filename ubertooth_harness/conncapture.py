@@ -87,6 +87,9 @@ from ubertooth_harness.advcapture import (  # noqa: E402
     _PCAPNG_SHB,
     crc24,
     format_address,
+    level_problems,
+    level_summary,
+    levels,
     read_timed_records,
 )
 
@@ -234,6 +237,39 @@ def timed_data_packets(records, access_address: int, crc_init: int) -> list[tupl
     return found
 
 
+def connect_ind_in(record: bytes, central: str | None = None,
+                   peripheral: str | None = None) -> ConnectInd | None:
+    """The CONNECT_IND one record carries between these two, or None.
+
+    For a reader that has one record in its hand rather than a whole file:
+    a soak tails the capture as it grows and decides what each record is as
+    it arrives (followsoak.py). The checks are `timed_connect_inds`'s, so a
+    record read this way is read the same way.
+    """
+    body = _connect_ind_body(record, central, peripheral)
+    if body is None:
+        return None
+    return ConnectInd.parse(body[6:6 + CONNECT_IND_LEN])
+
+
+def data_packet_in(record: bytes, access_address: int, crc_init: int):
+    """(payload length, CRC is right) if one record is on this connection."""
+    return _data_packet(record, access_address, crc_init)
+
+
+def record_access_address(record: bytes) -> int | None:
+    """The access address the board synchronized on for this record, or None.
+
+    None when the record is too short to hold one. The advertising access
+    address is returned like any other: a caller that wants connections only
+    compares it with `ADV_ACCESS_ADDRESS` itself, which is what
+    `connection_addresses` does for a whole file.
+    """
+    if len(record) < LE_PHDR_LEN + 4:
+        return None
+    return struct.unpack("<I", record[LE_PHDR_LEN:LE_PHDR_LEN + 4])[0]
+
+
 def connection_addresses(records) -> list[int]:
     """The access address of every record that is not an advertising packet.
 
@@ -335,6 +371,7 @@ class Result:
     quiet_ms: int | None = None
     connection_info: str = "not looked for"
     connection_info_options: int = 0
+    levels: list = field(default_factory=list)
     problems: list = field(default_factory=list)
 
 
@@ -361,6 +398,13 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
             f"link type {link_type}, not {LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR}")
         return header, result
     result.records = len(timed)
+    # The power fields of every record, judged by the rules libbtbb's writers
+    # hold to whatever was on the air. A followed connection is where the
+    # reference access address is 0 and its flag clear, which those rules
+    # cover: the field is the address configured into the tool, and a
+    # connection's own packets were not caught by one.
+    result.levels = levels([record.data for record in timed])
+    result.problems.extend(level_problems(result.levels))
     times = [record.micros for record in timed if record.micros is not None]
     result.start_micros = min(times) if times else None
     result.span_ms = (max(times) - min(times)) // 1000 if times else None
@@ -655,6 +699,8 @@ def main(argv=None) -> int:
           f"correct CRC, {result.long_packets} of {args.min_data_length} bytes or "
           f"more, longest {result.longest})")
     print(f"connection info option: {result.connection_info}")
+    for line in level_summary(result.levels):
+        print(line)
     for problem in result.problems:
         print(f"FAIL: {problem}")
     if result.problems:

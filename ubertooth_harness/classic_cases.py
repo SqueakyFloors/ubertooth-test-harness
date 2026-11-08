@@ -183,6 +183,24 @@ MAX_BACKWARD_STEP_US = 2000.0
 # 285, 26 of 109, and 112 of 394; its survey, which is not held to this,
 # gave 1 of 235.
 MIN_HEC_VALID_RECORDS = 5
+# How many different level figures a capture's records must carry between
+# them. A receiver that latched one reading and reported it for every packet
+# passes every other rule here, and says nothing about any packet but the
+# one it latched on: the figure is inside the radio's range and agrees with
+# its own flag (fork SqueakyFloors/ubertooth#711, where rssi_reset() left
+# rssi_iir standing, and SqueakyFloors/ubertooth#754, whose table of recent
+# maxima reported the loudest of ten packets as the level of each).
+#
+# Measured on the bench at 2026-11-DEV2, over twenty 25-second captures of
+# this piconet (seven windows, the follow, swapped, audio, and survey
+# captures of each): 122 to 373 records, 21 to 36 distinct signal figures,
+# and 28 to 53 distinct noise figures among the 90 to 326 records that
+# carried a measured one. These floors are a fifth of the lowest signal
+# count and a seventh of the lowest noise count, so a working receiver
+# clears them on a far thinner capture than any of those; what they fail is
+# a capture whose figures do not vary at all.
+MIN_DISTINCT_SIGNAL = 4
+MIN_DISTINCT_NOISE = 4
 
 # A clock is accepted on how well it explains the hops it was scored against,
 # and only while no other candidate explains them nearly as well; where the
@@ -673,7 +691,7 @@ def _record_step(step_id, name, file_name, checks) -> Step:
 
 def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
                    hec_valid=MIN_HEC_VALID_RECORDS, run_seconds=None,
-                   extra=()) -> tuple[str, ...]:  # noqa: C901
+                   levels=True, extra=()) -> tuple[str, ...]:  # noqa: C901
     """What the records of a capture must hold.
 
     With a ``central``, this is a capture that was given one piconet to
@@ -690,14 +708,24 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
     bounds on the record times. A caller that does not know how long its
     capture ran leaves it out and the times are reported without being
     held to anything.
+
+    ``levels`` off leaves out the two floors on how much the level figures
+    vary. They were measured on captures of this piconet, and a caller whose
+    capture is of something else has no measurement to stand on.
     """
     if following and central is None:
         raise StateCaseError("the address a capture was following is the "
                              "central's, so a check of it needs the central")
     # No case passes -e, so the tool allows its default of two bit errors in
-    # an access code, and no record may report more.
+    # an access code, and no record may report more. No payload may be longer
+    # than the one 400-symbol bank it arrived in either, which is arithmetic
+    # rather than a measurement and so holds for any capture.
     checks = ("--min-packets", str(minimum),
-              "--max-access-code-errors", str(DEFAULT_MAX_AC_ERRORS))
+              "--max-access-code-errors", str(DEFAULT_MAX_AC_ERRORS),
+              "--max-payload-bytes", str(bredrrecord.MAX_BANK_PAYLOAD))
+    if levels:
+        checks += ("--min-distinct-signal", str(MIN_DISTINCT_SIGNAL),
+                   "--min-distinct-noise", str(MIN_DISTINCT_NOISE))
     if run_seconds is not None:
         # The records measure the run that captured them. The ceiling is the
         # capture's own -t plus the slack the harness already allows a tool

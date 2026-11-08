@@ -248,17 +248,20 @@ measurements, every failure and its disposition, every rerun, and any case not
 run.
 
 The public export is the one defined by
-[#370](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/370),
-attached to the matching fork release:
+[#370](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/370)
+and built by `ubertooth-harness release-evidence`
+([release-evidence.md](reference/release-evidence.md)), attached to the
+matching fork release:
 
 - `validation-summary.md`;
 - `validation-logs.tar.zst`, sanitized reports and command logs;
 - `validation-SHA256SUMS`.
 
 The export removes machine names, local paths, private aliases, operator data,
-hardware serials, and unrelated captured traffic. Unredacted records stay on
-the test host. The release owner uploads the reviewed bundle; a harness run
-never publishes it.
+hardware serials, and unrelated captured traffic, and refuses to write
+anything that still carries one. Unredacted records stay on the test host. It
+lists a required gate it has no evidence for rather than leaving it out. The
+release owner uploads the reviewed bundle; a harness run never publishes it.
 
 ## 11. Optional endurance work
 

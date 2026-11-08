@@ -7,6 +7,10 @@ __pycache__/
 .runs/
 runs/
 hardware.yaml
+# The registry's own backup and the scratch files an edit writes beside it
+# (ubertooth_harness/registryedit.py).
+hardware.yaml.backup
+.hardware.yaml.*
 harness-open.conf
 notify.yaml
 

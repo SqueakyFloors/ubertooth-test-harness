@@ -1929,6 +1929,25 @@ def _redact(text: str, serials: Iterable[str]) -> str:
     return _mask_cut_serials(text, serials)
 
 
+def serials(events: Sequence[Mapping]) -> set[str]:
+    """Every device serial a run's records name, in every width.
+
+    What ``--redact-serials`` masks, for a caller that masks text of its own
+    rather than a rendered report: the release evidence export
+    (``sanitize.py``) sanitizes each file of a run and needs the same set.
+    """
+    return _Run(list(events)).serials()
+
+
+def redact_serials(text: str, found: Iterable[str]) -> str:
+    """``text`` with every one of those serials masked, in every width.
+
+    The public name of the rules the report is masked with, so another module
+    masks serials exactly as a report does rather than writing its own.
+    """
+    return _redact(text, found)
+
+
 # A heading of a run's own page, to move down a level when the page becomes
 # a section of a report covering several runs. Every heading at once, so a
 # section keeps its subsections under it.
