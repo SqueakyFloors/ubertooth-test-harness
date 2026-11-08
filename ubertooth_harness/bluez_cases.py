@@ -176,7 +176,8 @@ _FOLLOW_NEEDS = Needs(platforms=("linux",), bluez_tools=("ubertooth-follow",),
 # One device of a BlueZ inquiry, as ubertooth-scan prints it: the address the
 # inquiry reported and the name read back from the device, separated by a tab
 # (print_name_and_class() in ubertooth-scan.c). A device that would not answer
-# the name read is printed as "[unknown]".
+# the name read is printed as "[unknown]", the reason going to standard error.
+UNREAD_NAME = "[unknown]"
 INQUIRY_LINE = re.compile(
     r"^(?P<address>[0-9A-F]{2}(?::[0-9A-F]{2}){5})\t(?P<name>.*)$")
 # One piconet of the Ubertooth half's survey. Ordinary piconet traffic carries
@@ -336,6 +337,22 @@ def inquiry_found(names: Mapping[str, str]) -> Check:
     peer under its own name proves the adapter paged a device the harness
     owns and got its name back; both peers wrong fails.
 
+    What is also checked, and what the "at least one" floor on its own let
+    through, is a peer reported under a name that is not its own. A failed
+    read prints ``[unknown]``, so a peer's line carries either its own name
+    or that word; anything else is a name that came from somewhere -- which
+    is what the one swapped run showed, and what fork
+    [#1175](https://github.com/SqueakyFloors/ubertooth/pull/1175) fixed. That
+    run passed the floor, because the other peer was under its own name. This
+    rule fails it while leaving the two ``[unknown]`` runs alone, so it costs
+    no reliability: of the 19 runs, it fails the one that carried the fault.
+
+    Requiring *both* peers under their own names is a separate question and a
+    maintainer's: it would have failed 3 of those 19 runs, and the two
+    ``[unknown]`` ones are a page that went unanswered rather than a
+    misattribution
+    ([harness#384](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/384)).
+
     Retrying the case to hold on to the stronger check (``attempts``, as
     `Recover AFH map` uses for what the air gives it) was considered and
     rejected: a retry costs another whole inquiry and name sweep -- 78 s of
@@ -355,15 +372,28 @@ def inquiry_found(names: Mapping[str, str]) -> Check:
             return (f"the inquiry reported {listed}, and not "
                     f"{', '.join(missing)}: the peers are discoverable from "
                     "boot, so an inquiry that missed one did not work")
+        problems = []
+        wrong = [(address, found[address]) for address, name in names.items()
+                 if found[address] not in (name, UNREAD_NAME)]
+        if wrong:
+            problems.append(
+                "; ".join(
+                    f"{address} came back as {reported!r}, and the peer "
+                    f"firmware names it {names[address]!r}"
+                    for address, reported in wrong)
+                + f": a peer's own name read either works or prints "
+                  f"{UNREAD_NAME!r}, so another name on its line is one that "
+                  "came from somewhere else")
         if not any(found[address] == name for address, name in names.items()):
             reported = ", ".join(f"{address} as {found[address]!r}"
                                  for address in names)
             wanted = ", ".join(f"{address} is {name!r}"
                                for address, name in names.items())
-            return (f"the inquiry reported {reported}, and the peer firmware "
-                    f"names them {wanted}: no peer came back under its own "
-                    "name, so no name read worked")
-        return ""
+            problems.append(
+                f"the inquiry reported {reported}, and the peer firmware "
+                f"names them {wanted}: no peer came back under its own "
+                "name, so no name read worked")
+        return "; ".join(problems)
     return check
 
 
@@ -726,11 +756,16 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
                 # header fields of a capture whose headers do decode are
                 # `Classic capture record fields`' business. docs/tests.md
                 # carries the figures.
+                #
+                # The level floors are left out for the same reason the HEC
+                # floor is: they were measured on captures of the ESP32
+                # piconet, and how much a level varies across a capture of a
+                # page train is **not established**.
                 _record_step(
                     "verify-records",
                     "Every record of the -q file belongs to this piconet",
                     "follow.pcap",
-                    _record_checks(initiator, hec_valid=0,
+                    _record_checks(initiator, hec_valid=0, levels=False,
                                    extra=("--any-transport",))),
             )))
     return tuple(cases)

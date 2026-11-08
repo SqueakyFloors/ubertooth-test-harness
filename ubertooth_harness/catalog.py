@@ -1131,20 +1131,38 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # both profiles, and one more command on the comprehensive filtered-PCAP
     # case: 3.1 + 0.5 = 3.6 and 9.0 + 0.6 = 9.6, reasoned the same way
     # because the host it would be measured on was carrying other work.
-    # 13 cases and 58 commands in smoke, 31 and 136 comprehensive (12 and 53,
-    # and 30 and 131, where there is no /proc and the one case about it is not
+    # 15 cases and 65 commands in smoke, 33 and 143 comprehensive (14 and 60,
+    # and 32 and 138, where there is no /proc and the one case about it is not
     # applicable); the smoke figure carries that case, so a macOS run comes
     # in a little under it. Each pair of command-time figures was taken back
     # to back, because a busy host takes two to six times longer, which is
     # why an estimate is a countdown and never a timeout.
-    "Raw receive replay": _profiles(Estimate(3.6), Estimate(9.6)),
+    #
+    # Harness #363 added two cases, both in smoke and so in both profiles:
+    # the payload types read out of a capture and -u 00. Their own commands,
+    # timed back to back on the idle Linux bench host against a build of fork
+    # 2026-11-DEV2 over three passes of five rounds, cost 0.318 s and 0.128 s
+    # a round, against 0.130 s for a case of the same shape already here, so
+    # 0.45 s of command time; a macOS run of the same test measured 0.5 s
+    # more in smoke and 0.6 s more comprehensive. Those are the same two
+    # figures the record-fields case above measured, and the two cases are
+    # separate work, so both increases stand: 3.1 + 0.5 + 0.5 = 4.1 and
+    # 9.0 + 0.6 + 0.6 = 10.2.
+    "Raw receive replay": _profiles(Estimate(4.1), Estimate(10.2)),
     # Two replays of a handful of records in smoke, four in comprehensive,
     # each with the fixture writer and the directory listing beside it.
     # The cases' own commands, timed back to back on the macOS host against
     # a build of fork 4b28aec9: 0.89-0.95 s in smoke and 1.58-1.66 s
     # comprehensive, most of it starting the processes rather than replaying
     # eight records.
-    "BLE replay": _profiles(Estimate(0.9), Estimate(1.6)),
+    #
+    # Harness #363 added the levels case, in smoke and so in both profiles.
+    # Its own commands cost 0.123 s a round on the idle Linux bench host
+    # against a build of fork 2026-11-DEV2, over three passes of five rounds,
+    # against 0.079 s for a case of the same shape already here; 0.2 s is
+    # that plus the harness's own per-case cost on the macOS host, where the
+    # four comprehensive cases came to 0.6 s between them.
+    "BLE replay": _profiles(Estimate(1.1), Estimate(1.8)),
     # Two cases and 35 commands in smoke, three and 52 comprehensive.
     # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
     # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three

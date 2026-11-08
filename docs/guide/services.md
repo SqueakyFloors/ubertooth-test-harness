@@ -93,10 +93,12 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 7` and a `type` (version 2 added
+Messages are JSON objects with `"version": 8` and a `type` (version 2 added
 the run's `commit`, version 3 its `flash_build`, version 4 the `run_file`
 request and its answers, version 5 the run's `with_firmware` and
-`with_python`, version 6 its `bootloader`, version 7 its `with_btbr`; a
+`with_python`, version 6 its `bootloader`, version 7 its `with_btbr`, and
+version 8 per-board status in `register` and `heartbeat` with the
+`list_devices` and `update_registry` requests; a
 runner or controller of
 another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
@@ -135,7 +137,8 @@ applied to the target.
 python -m ubertooth_harness controller --port 8765 \
   [--results-dir ~/.local/share/ubertooth-harness/controller/runs] \
   [--ubertooth-repo https://github.com/SqueakyFloors/ubertooth.git] \
-  [--plans-dir testplans]
+  [--plans-dir testplans] \
+  [--keep-runs DAYS]
 ```
 
 `--ubertooth-repo` is the repository whose branches and tags the GUI offers
@@ -194,21 +197,25 @@ controller is on another machine; a browser that asks `GET /` for HTML is
 sent there). It is three static files in `ubertooth_harness/web/` (vanilla
 JavaScript, no build step, nothing loaded from another site) and uses only the
 REST and `/ws/live` endpoints below. Each section is a card: Targets and
-Run setup side by side on a wide window, Live run and History full width
+Run setup side by side on a wide window, Live run group and History full width
 below, one column on a narrow one. It follows the system light or dark
 setting, uses the system font, and shows every status as a pill with its
 word and symbol (colour only reinforces it).
 
-![The web GUI with one target, a live run and its history](../gui.png)
+![The web GUI with two targets, a live run group with a pill per host on every row, and its history](../gui.png)
 
 - **Targets:** one card per registered target: host, host name, OS, Python,
   Ubertooth serials (or why they are unknown), online/offline (plus busy
   while it runs), last seen, and
   the active run with a Watch button.
 - **Run setup:** git ref (default branch, branches and tags from
-  `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
+  `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests,
+  each with an info button that says what it is for;
   only runnable plans are offered, and plans of planned tests such as
-  `backlog` are named as not runnable), target, whether to build the ref first,
+  `backlog` are named as not runnable), the **hosts** to run it on (one tick
+  per registered host, each ticked host getting its own child run of the
+  plan, started together as one [run group](#run-groups-one-plan-on-several-hosts)),
+  whether to build the ref first,
   "Flash the firmware to the boards first" (ticked by default; disabled,
   with a note, while Build is unticked; see [Flashing the boards with the
   run's build](builds-and-firmware.md#flashing-the-boards-with-the-runs-build)), and the three
@@ -239,24 +246,31 @@ word and symbol (colour only reinforces it).
   the suite list, with the `--artifact` line to run it with, because a run
   started from the GUI cannot carry one and would be refused before its
   tests.
-  Everything under the selectors is what the **chosen target** would do with
-  the suite: the plan list is fetched for that target, so the estimate adds
-  up only the steps it runs, and so do the build options the suite asks for.
+  Everything under the selectors is what **each host you tick** would do with
+  the suite: one plan list is fetched per registered host, so each host's row
+  says how many of the suite's tests run there and what they are estimated to
+  take, and the estimate line has one sentence per host of the group. The
+  build options are the union of what those hosts need, since a step one host
+  runs has to be built.
   A step whose plan entry names other hosts (`Recover AFH map` in the
   release suite, which names the host its ESP32 Classic peers are on), or
-  one the target's own platform does not run (`Exclusive Ubertooth topology`
-  on a macOS target), is left out of the figure and then named, with the
-  time it takes on the host that does run it: the release suite is about
-  669.7 s on a target that step does not name, and 1189.7 s counting it.
-  Choosing another target reloads the list and keeps the plan and suite you
-  had chosen. A suite no step of which runs on the chosen target says that
-  instead of a time. Estimates learned on the target are used wherever it
+  one a host's own platform does not run (`Exclusive Ubertooth topology`
+  on a macOS target), is left out of that host's figure and then named, with
+  the time it takes on the host that does run it: the release suite is about
+  670.5 s on a host that step does not name, and 1190.5 s counting it.
+  Ticking another host reloads its list and keeps the plan and suite you
+  had chosen. A suite no step of which runs on a host says that
+  instead of a time. Estimates learned on a host are used wherever it
   has them (see [Learned durations](#learned-durations)), and the line says
   how many of them are its own measurements. Hardware the bench has not got
-  is not part of this: the controller has no copy of the target's registry,
-  so the run itself is what reports a step whose device is missing.
-  **Run is held** for a suite this target could not measure, with the reason
-  above the button: a suite no step of which runs there, and one holding a
+  is not part of this: the controller has no copy of a target's registry,
+  so the run itself is what reports a step whose device is missing — and
+  the same goes for a step whose own cases are what a platform cannot run,
+  which the planner leaves out on that host while this count still includes
+  it.
+  **A host is held out of the group** when it could not measure the chosen
+  suite, with its own row saying why and its box disabled: a suite no step of
+  which runs there, and one holding a
   step whose own hardware is what it measures
   ([`required hardware:`](plans-and-resources.md#hardware-a-step-is-about-blocked-not-left-out))
   whose `hosts:` names no host of the run — a release gate that run could
@@ -266,20 +280,46 @@ word and symbol (colour only reinforces it).
   Classic peer (acceptor), ESP32 Classic peer (initiator) there". Starting
   it anyway through the API is refused the same way (422), and a run group
   is judged by its hosts together, so the release plan across the bench
-  starts and measures the gate once. Everything else about the bench is the
+  starts and measures the gate once: ticking both hosts is what makes that
+  suite runnable, and **Run is held** only while no ticked host can run it.
+  Everything else about the bench is the
   run's to report: hardware a host of the run has not got blocks that step
   and fails the run, and the unrelated tests still run.
-- **Live run:** the suite's tests as a checklist that ticks from the run's
+- **Live run group:** one row per step of the group — Build, Flash the
+  boards, Preflight, then one row per test — each carrying **one pill per
+  host that runs that step, and only those**: a Linux-only test shows a
+  Linux pill alone, a test both hosts run shows one each, side by side, with
+  its own status (`LINUX ✓ PASSED`, `MAC ✗ FAILED`, `LINUX ○ PENDING`;
+  always the host, text and a symbol). A host that does not run a step has no
+  pill in that row, which is how a test the planner left out there is read;
+  a test the run ended before reaching says `not reached`. The rows and every
+  pill's status come from `GET /api/run-groups/{group_id}`, so nothing the
+  page shows is worked out from records twice over. While a step runs on a
+  host, its pill fills from the time it has taken against what that step is
+  estimated to take there, and keeps pulsing once it is past it; the fill is
+  decorative (the pill's own text still says the status) and carries
+  `role=progressbar` with its value for a screen reader. The card's title bar
+  is the same thing for the whole group: the steps its hosts have finished
+  against the steps they are planned to take.
+  The summary, the clock and Cancel are the group's: its status (passed only
+  when every host it asked for ran and passed), the hosts and how many
+  started, elapsed time against the **longest** host's estimate rather than
+  the sum, because the hosts run at the same time, and one Cancel that stops
+  every child.
+  The transcript below has **one tab per host**, each streaming that host's
+  own runner: its log tail (the last 200 log lines in a scrolling console
+  panel), its Boards list, and its lease lines. Every pill is a button that
+  opens the tab of the host it names.
+  A checklist row ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
-  plus symbol), under each test the [known target](../reference/run-records.md#known-targets) it ran
-  against or a line saying it had none, the current stage (building,
-  preflight, tests), elapsed time,
-  a Cancel button, a "Queued behind another command" line for each device the
+  plus symbol), with the [known target](../reference/run-records.md#known-targets) each invocation ran
+  against or a line saying it had none, and a "Queued behind another command"
+  line for each device the
   run waited behind before it started (see
   [Why a board can be free and still nobody's](leases.md#why-a-board-can-be-free-and-still-nobodys),
-  shown only when it waited behind somebody), and the last 200 log lines in a
-  scrolling console panel. A countdown is shown only when
-  every test in the suite has an estimate. Every implemented test has a
+  shown only when it waited behind somebody). A countdown is shown only when
+  every step of every host has an estimate, which a group that flashes its
+  boards has not got. Every implemented test has a
   catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each
   coverage profile: fixed seconds, plus a multiple of its `duration` argument
   for tests that capture (for example comprehensive `Raw receive` is 9 s plus
@@ -295,15 +335,15 @@ word and symbol (colour only reinforces it).
   board's firmware watchdog record: each board with the times it has reset
   itself during this run and the last warning if there was one (see
   [Firmware watchdog](transitions-guards-watchdog.md#firmware-watchdog)). An estimate is per invocation: `Ubertooth: each` runs the test
-  once per board the target selects. Run setup counts such a test once and
-  says so; once the run's manifest arrives (before preflight) the live
-  checklist lists every planned invocation on the target with its estimate,
-  so the countdown counts every board, and each invocation's estimate is the
+  once per board a host selects. Run setup counts such a test once and
+  says so; once a host's manifest arrives (before preflight) its cells in
+  the checklist carry every planned invocation on that host, with its
+  estimate, so the countdown counts every board, and each invocation's
+  estimate is the
   one [learned on that target](#learned-durations) once its own runs have
-  measured it. Build and preflight time are not included: the countdown
-  starts with the first test. Otherwise the view shows elapsed time and says
-  why. Under each test is a line of links, one per file that test saved (the
-  build's and preflight's are listed under the checklist), with the stream,
+  measured it. Under each cell is a line of links, one per file that
+  invocation saved, named with the host it was saved on (the
+  build's and preflight's are listed under the checklist, per host), with the stream,
   the size and the number of checks that read it in the link's tooltip and
   the failure color on a file a check came out against; opening one shows a
   bounded page of it in a panel beside the log tail, black on white in a
@@ -313,11 +353,45 @@ word and symbol (colour only reinforces it).
   that runner's own run directory, so the controller asks the runner for the
   page; while the runner is not connected the file is listed as `name (on
   the target)` and is not a link. The view is linkable as
-  `/ui/#run=<run_id>`, and `/ui/#run=<run_id>&file=<path>` opens that file.
-- **History:** every run, newest first, with started/finished times, ref,
-  plan/suite, target and status, a link to its `report.md`, and for a run
-  that did not pass a failure summary (each failed phase or test with its
-  reason and last output lines, then the run's own reason).
+  `/ui/#group=<group_id>`; `/ui/#run=<run_id>` opens the group that run is a
+  host of, with that host's transcript, and `&file=<path>` opens that file.
+- **History:** every run group, newest first, with started/finished times,
+  ref, plan/suite, one pill per host with that host's own result, the
+  group's status, a link to each host's `report.md`, and for a group that
+  did not pass a failure summary host by host (each failed phase or test
+  with its reason and last output lines, then each run's own reason, and a
+  host that got no run at all with the reason it did not). A run of one host
+  is listed as a group of one, by its own run ID.
+  **Load older** adds the next 50, oldest last, and goes once the oldest
+  group is on the page; the line beside it counts the rows against the whole
+  history. Above the table, **Target**, **Status** and **Ref** filter the
+  list; a group matches a target when it asked that host to run. Each change
+  fetches the newest page for those filters, and a group that starts or
+  finishes while a page is open joins or leaves the rows by the same
+  comparisons. The filters offer every registered target and every target or
+  ref the loaded rows name, beside the refs `GET /api/refs` lists; the ref
+  box takes any name. On a narrow window the filters stack and the table
+  scrolls sideways. A keyboard reaches each control in turn, and when Load
+  older runs out the focus moves to the line that says so rather than back
+  to the document.
+- **What a test is for:** beside every test name — in Run setup's suite
+  list, the live checklist, and a failure summary — is a small round *i*
+  button that opens a dialog in the page: the test's purpose, theory of
+  operation, hardware and traffic, expected outcome, what a pass does not
+  prove, what the catalog binds and accepts, its catalog estimate and
+  profile as the listing it was opened from gives them (a test two plans
+  list at different coverages has an estimate per listing, and the line
+  names the one it read), the plans that list it (so a longer or soak form
+  of it is visible), the issues behind it, and a link to its
+  [docs/tests.md](../tests.md) section in a separate tab. It is a real
+  button: Tab reaches it, Enter or Space opens it, focus enters the dialog
+  at its heading, and Escape or Close returns focus to the button. The
+  prose is [`ubertooth_harness/test_info.yaml`](../../ubertooth_harness/test_info.yaml),
+  which `/api/plans` sends once per response keyed by the catalog name; the
+  roles, arguments, profile and estimate come from the catalog on the test
+  row, so neither has two sources. A test with no entry, and a file the
+  controller could not read, leave the dialog saying so with the catalog's
+  own facts still under it; none of it can hold up a run.
 
 Every HTTP response carries `Content-Security-Policy: default-src 'self';
 script-src 'self'; style-src 'self'; connect-src 'self' ws://<host>;
@@ -334,9 +408,10 @@ same run request with a `hosts` list and starts **one child run per host**,
 together. Each child is an ordinary run of its own host, with its own runner,
 boards, leases and run directory, and records the group it belongs to as
 `group_id` in its `run.json`; the runner protocol is unchanged, so a target
-needs nothing new. The GUI side of this (choosing several hosts, a pill per
-host on every row, a transcript tab per host) is the next step and is not
-built yet, so for now a group is started through the API.
+needs nothing new. In the GUI, the hosts are ticked in Run setup, every row
+of the live checklist carries one pill per host that runs that step and only
+those, and the transcript has one tab per host (see **Live run group**
+above).
 
 The ref is resolved once and every child is sent that commit, so a branch
 that moves while the runs are starting cannot leave one host on another
@@ -405,20 +480,22 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
 | `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all) and `needs_artifacts` (image labels the step names that no build produces, so only `run-suite --artifact` can pass them), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` also decides which steps the suite's own fields count: a step whose `hosts:` names other hosts is compiled for those hosts and not for this target, and, when that target has registered, a step its `platform` could not run (the response names the platform too) is left out as the planner leaves it out. Each test therefore carries `runs_on_target` (and `omitted_reason` when false), and the suite total, `unestimated_tests`, `per_board_tests`, the four build-option flags and `needs_artifacts` cover only the steps that target runs. The steps left out are listed in `omitted_tests` (`name`, `reason`, `estimated_s`) with their time together in `omitted_estimated_s` when every one of them has an estimate, so a smaller total is accounted for; a suite with no step for the target has a null total. An omitted step that names exactly one host is timed on that host, so its whole estimate group in `tests[]` (`estimated_s`, `estimate_source`, `estimate_samples`, `estimate_scaled`) is what that host learned rather than the target's; one that names several, or none, carries the catalog estimate. Hardware this bench has not got is not answered here: the controller has no copy of the target's resource registry, so those steps are counted and the run itself reports them. A suite a run on that target could not measure also carries `runnable_on_target: false` with `not_runnable_reason` (the one sentence `POST .../runs` refuses with) and `blocked_tests`: the required steps such a run would not run, each with `name`, the `hosts` it is required on, the `hardware` it binds there, and the `reason` it is not run here. Without a `target` nothing is left out, nothing is refused, and the fields are the whole suite's, whichever host runs a part of it. A `target` whose name is not a host name is refused with 422; a name no target has registered is answered with whatever has been learned under it, which is normally nothing, with no platform, and with every step its `hosts:` names it |
-| `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, `platform` (the registry platform its OS is, `linux` or `macos`, else null), Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
+| `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, `platform` (the registry platform its OS is, `linux` or `macos`, else null), Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run, and `boards`: one entry per registered Ubertooth of that host with its `alias`, `serial`, `power_controller` and `power_port`, whether USB has it (`present`), whether a lease holds it (`held`, `holder`), the `firmware_revision` the last run that flashed it reported, and the `status` those add up to (`ready`, `busy`, `unknown` or `offline`) with the `status_detail` sentence saying why and the `level` a page colors it by (`ready`, `attention`, `offline`); `boards_summary` counts them |
+| `GET /api/targets/{host}/devices` | every Ubertooth attached to that target from a read-only USB scan: each `serial`, `vendor`, `product`, bus `path`, and the `alias` it is registered as or null for one the registry has not got, with `power_controllers` (each hub and the ports no board is mapped to yet), a `suggested_alias`, the target's `boards`, and `error` when the scan found nothing. No device is opened and nothing is sent to one, so a board in the middle of a capture is undisturbed. 404 an unknown target, 503 a runner away, 504 no answer in time, 409 while another board request to that target is waiting |
+| `POST /api/targets/{host}/boards` | register or unregister one Ubertooth in that target's own registry: `{"action": "add"\|"remove", "alias", "serial", "power_controller", "power_port"}`. `add` needs the serial; a power mapping is both halves or neither; `remove` takes the alias only. 200 with the action, the alias and the target as it now is; 422 a request that describes no one change; 409 while that target has an active run, while a lease holds the board, or when the registry already says otherwise (the alias or serial is taken, the port is another board's, something else names the board); 404 a name the registry has not got; 503 a runner away or a registry that could not be read or written; 504 no answer in time. The runner owns the file: it validates the change, writes it atomically keeping a backup, reloads it, and reports the boards it then has. A refused change writes nothing. Only Ubertooths are managed here; other resources stay file-edited |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_btbr": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware`, `with_btbr` and `with_python` add `--with-firmware`, `--with-btbr` and `--with-python` to the run's build, and any of them without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer. A run the plan says this target could not measure is refused with 422 before the ref is resolved: a suite no step of which runs there, and a step whose own hardware is what it measures (`required hardware:`) whose `hosts:` names no host of the run (see [Hardware a step is about](plans-and-resources.md#hardware-a-step-is-about-blocked-not-left-out)); the detail names the step, where it is required and the hardware it needs there. The order is the request's own faults before the target's state: an unknown target (404), then a suite this run could not measure (422), then the ref and the build options (422), then a target that is offline or busy (409) — a refusal the suite earns does not go away when the target comes back, so it is the more useful answer. Hardware the bench has not got is the run's to report, not this check's. |
 | `POST /api/run-groups` | start a [run group](#run-groups-one-plan-on-several-hosts): the same body as a run plus `{"hosts": ["Host_Linux", "Host_Mac"]}` (at least one, each named once, at most 16). 201 with the group, each member carrying its `run_id` or the `error` that host's start gave; 422 for an unusable request, a ref not in `/api/refs`, an option that needs `build` without it, or a suite the group's hosts together could not measure (the same check as a single run, judged over every host it names, so a release plan across the bench measures a host-named gate once, and answered before the hosts are asked, so a group whose hosts are all unknown or offline is told about the suite rather than about them); when no host started, the one status every host gave (404 an unknown target, 409 busy, 503 a runner away, 504 no answer in time) or 409 where they differ |
-| `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |
+| `GET /api/run-groups[?limit=N][&before=<created_at>][&before_group_id=ID][&target=HOST][&status=STATUS][&ref=REF]` | one page of the group history, newest first, each group with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own). Paged, filtered and counted exactly as `GET /api/runs` is, by `(created_at, group_id)`: `has_more`, `next_before` with `next_before_group_id`, `total` and `matching`. A group matches `target` when it asked that host to run, and `status` is the group's own, combined from its members. 422 for a limit outside the range, a `before` that is not such a stamp, a `before_group_id` without one, or a filter value that is not a host name, a status or a ref |
 | `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, stage estimates and planned invocations (at most 600 of them, since this answer carries one list per host; the whole list stays at `GET /api/runs/{run_id}`), `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one, which a run that flashes its boards has not got: flashing the run's build is not a learned stage) |
 | `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, or once a host is still starting (its outcome says so, and the child its runner may still accept is cancelled as it arrives); 409 when nothing is running and nothing is starting; when no child could be cancelled, the one status every host gave (409 busy, 503 runner away, 504 no answer) or 409 where they differ |
-| `GET /api/runs[?target=HOST]` | runs, newest first |
+| `GET /api/runs[?limit=N][&before=<created_at>][&before_run_id=ID][&target=HOST][&status=STATUS][&ref=REF]` | one page of the run history, newest first: at most `limit` runs (50 by default, 500 at most) ordered by `(created_at, run_id)` descending. `has_more` says whether anything is behind the page, and `next_before` with `next_before_run_id` is the cursor for the next one, so paging holds no position in the controller and a run that starts in between is neither served twice nor missed. Page with both values: `before` on its own means "at or older than that instant", which skips past nothing but is not a cursor, since a page that stopped in the middle of an instant would serve those runs again. `total` is every stored run and `matching` every run the filters match. The three filters compare exactly: the target's registry name, the run's status, the ref it named. Listing reads only the runs' own records, so `event_count` and `malformed_lines` are `null` for a run whose stored `run.jsonl` has not been read since the controller started; `GET /api/runs/{run_id}` reads it and reports them. 422 for a limit outside the range, a `before` that is not such a stamp, a `before_run_id` without a `before`, or a target, status or ref that could not be one |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `GET /api/runs/{run_id}/files` | the output files the run recorded, each with its path, stream, size, line count, SHA-256, where it came from (`owner`), the checks that read it, and `readable`: whether this host holds the file itself |
 | `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID\|?group_id=ID]` | browser stream: a `snapshot`, then `target`, `run` and `group` updates. With `run_id`, that one run's `event` records too (and its group in the snapshot); with `group_id`, every member run's updates and `event` records, one stream for the whole group. Name one or the other, not both. A `group` update carries `"removed": true` when that group is forgotten (it started no run and no request can still be accepted), so a page does not keep a group the history no longer lists. A browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot); a group stream carries every member's traffic, so it reaches that mark sooner than one run's does |
-| `WS /ws/runner` | target runner protocol v7 |
+| `WS /ws/runner` | target runner protocol v8 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
 `localhost:PORT` and, if it has an `Origin`, that same origin (runner
@@ -498,7 +575,7 @@ manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
 without a valid message, and runs cannot be started on it: only a message that
-decodes as protocol v7 resets the offline timer, and malformed messages do
+decodes as protocol v8 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
@@ -521,4 +598,32 @@ skipped and counted (`malformed_lines`). A run or cancel request whose callers
 all timed out (504) is kept for a grace period (60 s) so a late answer still
 takes effect, then dropped. Overlapping cancels of one run share the
 outstanding request, and each caller has its own timeout.
+
+### What startup reads, and how long runs are kept
+
+Starting up reads one `run.json` per stored run and no `run.jsonl` at all,
+except for a run still `running`, whose stored sequence numbers are what
+recognizes its runner's replay after a reconnect. A finished run's records
+are read when something asks for them: its own `GET /api/runs/{run_id}`, its
+failure summary, a report rebuilt by a late record, or the durations learned
+from it. They are counted on the run then. So listing the history costs one
+small record per run however many records those runs hold, and
+`event_count` and `malformed_lines` are `null` until a run's records are
+read.
+
+Run directories are kept for ever by default: nothing is deleted unless
+`--keep-runs DAYS` asks for it. With a window, the controller removes a
+finished run's directory once it is that many days old, dated by when it
+finished or else by when it was created, at startup and then every hour. A
+run that is still `running` is never removed, nor is one whose stamps cannot
+be read, nor anything that is not a run directory of its own: the name must
+be a flat directory name beside the other runs, not a symbolic link, and the
+`run.json` in it must record that same run. A group record whose every run
+has been removed goes with them; the learned durations
+([estimates.json](#learned-durations)) and the `groups/` directory itself
+stay. Anything that cannot be removed is logged and kept, with the run still
+listed. A browser open on a pruned run's row gets 404 for its `report.md`
+until it reloads.
+
+### Strict decoding and target state
 

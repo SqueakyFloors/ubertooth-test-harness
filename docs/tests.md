@@ -2111,26 +2111,35 @@ with no Ubertooth and no USB at all.
 
 **Theory of operation.** This is the one receive test with a known answer for
 every packet, because the harness writes the input. The fixture
-([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) carries two LAPs, chosen
-errors, chosen channels, chosen host times, chosen distances from a CLKN
-edge, and decoy records, so the expected output is computed rather than
+([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) carries four piconets,
+chosen errors, chosen channels, chosen host times, chosen distances from a
+CLKN edge, and decoy records, so the expected output is computed rather than
 pattern-matched: which packet lines appear, in what order, with which systime
 and which clock offset, which ones a filter drops, and how many packets
 reach a capture file. That makes it possible to check decode behavior
 that no live run can pin down, and to run the whole thing in CI.
 
+The four piconets each carry something the others cannot. The first sends
+POLLs and one DH1, so its address part decodes from a payload CRC. The second
+sends ID packets only, which have no header at all, so its address part never
+decodes. The third's address part is `0x00`, which is an address like any
+other and has to start the clock search like any other. The fourth carries
+the payload types the bench does not reliably produce: an AUX1, a DV, an EV3,
+and a DH3 claiming a payload longer than one capture bank.
+
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
 **Commands.** No board. `rxreplay.py` writes the synthetic input and checks
 what came back, `stdoutdest.py` runs a command with its standard output and
-extra descriptors pointed where the case needs them, and `capturefile.py` and
-`rxdump.py` read the capture files:
+extra descriptors pointed where the case needs them, and `capturefile.py`,
+`rxdump.py` and `bredrrecord.py` read the capture files:
 
 ```text
 rxreplay.py fixture <case dir>/replay.bin --variant <full|empty|truncated> --base-time <epoch>
 ubertooth-rx -i <case dir>/replay.bin                      # the bare decode
 ubertooth-rx -i <case dir>/replay.bin -l <LAP>             # and -l -u <UAP>
 ubertooth-rx -i <case dir>/replay.bin -l <LAP> -u <UAP>
+ubertooth-rx -i <case dir>/replay.bin -l <LAP> -u <UAP> -q <case dir>/payloads.pcap
 ubertooth-rx -i <case dir>/replay.bin -e 0
 ubertooth-rx -i <case dir>/replay.bin -s                   # the default sweep
 ubertooth-rx -i <case dir>/replay.bin -z                   # the survey
@@ -2159,17 +2168,23 @@ bredrrecord.py <case dir>/replay.pcapng --lap <LAP> --reference-lap <LAP> \
 rxreplay.py dump-check <case dir>/replay.dump <case dir>/replay.bin
 rxreplay.py files <case dir>                                # the directory as it is
 rxreplay.py only-fixture <case dir> replay.bin --base-time <epoch>
-rxdump.py      <case dir>/replay.dump full --min-records 11 --types br
+rxdump.py      <case dir>/replay.dump full --min-records 19 --types br
 capturefile.py --packets <case dir>/replay.pcap
+bredrrecord.py <case dir>/payloads.pcap --lap <LAP> --reference-lap <LAP> \
+    --reference-uap <UAP> --min-packets <n> \
+    --require-types AUX1,DV/3-DH1,HV3/EV3/3-EV3,DH3/3-DH3 \
+    --require-transports ACL,SCO,eSCO --min-with-payload 3 --min-crc-valid 2 \
+    --max-payload-bytes 34 --max-access-code-errors 0
 ```
 
-**Expected outcome.** Smoke runs 13 cases (12 where there is no `/proc`): decode every LAP in the fixture,
+**Expected outcome.** Smoke runs 15 cases (14 where there is no `/proc`): decode every LAP in the fixture,
 derive the UAP with `-l`, read every field of a filtered capture's records,
 replay into PCAPNG and into PCAP (link type 255, the
 fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
-and `-s` decoding the same as without it, with `-h` listing `-s` as the
-default.
+`-s` decoding the same as without it with `-h` listing `-s` as the default,
+the payload types read out of a capture, and `-u 00` starting the clock
+search.
 
 **The capture's own records, with a known answer.** One case replays with
 `-l <LAP>` into a PCAPNG and then reads every field of every record with the
@@ -2260,6 +2275,46 @@ command line does not print, and the candidate count is matched as `<n>`
 rather than as a figure of the library's own. The `-u` case is where offset 0
 is still required.
 
+**The payload types, and a payload longer than the bank.** One smoke case
+follows the fourth piconet (`-l <LAP> -u <UAP> -q`) and reads the capture it
+writes record by record
+([`bredrrecord.py`](../ubertooth_harness/bredrrecord.py)), which is how the
+payload decoders libbtbb
+[#28](https://github.com/SqueakyFloors/libbtbb/pull/28) added are exercised
+on packets the bench's own traffic does not produce. Four records, each for
+one reason:
+
+- the AUX1 is the one type with a payload header and no CRC after the body
+  (Core, Vol 2, Part B, Section 6.5.4.7), so its length field has to be read
+  without counting two bytes that are not there, and a record that reports a
+  checked CRC on one fails;
+- the DV's record holds its data field and not the voice field ahead of it,
+  so its length field and its CRC land on the right bytes, and its transport
+  is the synchronous one;
+- the EV3's length is in no field at all and is found by trying the CRC at
+  each, and its transport is the extended synchronous one;
+- the DH3 claims a payload no 400-symbol bank can hold, so the decoder must
+  report no payload rather than decode one out of whatever followed the
+  packet in the bank. A decoder told it had ten banks decoded a payload and a
+  CRC verdict out of the buffer's zeros
+  ([ubertooth#754](https://github.com/SqueakyFloors/ubertooth/pull/754)).
+
+The case requires one record of each type, the ACL, SCO and eSCO transports
+between them, three records carrying a payload, two passing a CRC, and no
+record carrying more payload than one bank holds -- 34 bytes, the 400 symbols
+of a bank less the 122 the access code and header take, where a payload
+carries no error correction.
+
+**A piconet whose address part is `0x00`.** The other new smoke case states
+`-u 00` for the third piconet and requires the CLK6 note at offset 0 and the
+start of the CLK1-27 search, as for any other address part. A piconet given
+`0x00` read it as an absence and never reached the clock search
+([libbtbb#135](https://github.com/SqueakyFloors/libbtbb/pull/135), taken on
+by the fork in
+[ubertooth#1125](https://github.com/SqueakyFloors/ubertooth/pull/1125));
+every other case states the first piconet's `0x6b`, which took the same
+branch before and after.
+
 Six of the smoke cases are about where a capture goes
 ([`stdoutdest.py`](../ubertooth_harness/stdoutdest.py) puts the descriptors
 where the case needs them, since a harness step otherwise runs with the
@@ -2278,10 +2333,12 @@ a `-d` that names the dump `-i` is replaying is refused as
 six ends by stating the whole directory, with the input's SHA-256, so a
 refusal that truncated or rewrote the file it was reading fails.
 
-Comprehensive runs 31 (30 where there is no `/proc`), adding the survey
-listing of both piconets
-(the two addresses on standard output and the `Survey Results` heading on
-standard error),
+Comprehensive runs 33 (32 where there is no `/proc`), adding the survey
+listing of every piconet in the fixture
+(the four addresses on standard output and the `Survey Results` heading on
+standard error, with the address part shown for the three the survey settled
+one for -- `00` among them, as an address and not an absence -- and `??` for
+the ID-packet piconet),
 a LAP filter, a correct and a wrong `-u`, `-e 0` dropping the packet with an
 error, a `-d` dump compared byte for byte with the fixture, a filtered PCAP
 whose records are read field by field as above,
@@ -2313,7 +2370,7 @@ names and nothing can refuse by then, exits 0 with
 lost` and leaves the fixture's own records at the start of the file. That
 last case reads its own standard output back as a file, so it holds while the
 tool's standard output stays buffered until it exits, which it does for the
-eleven packet lines the fixture decodes to; a report long enough to flush
+nineteen packet lines the fixture decodes to; a report long enough to flush
 part-way through would be read as a record cut short and the run would exit 1
 instead of 0.
 
@@ -2355,7 +2412,7 @@ PDU header, the payload and the CRC -- so the dump is written field by field
 from the Bluetooth Core specification's encoding and the expected report is
 computed from the same constants.
 
-Two dumps. The first is a promiscuous capture of one connection: the five
+Three dumps. The first is a promiscuous capture of one connection: the five
 parameter records promiscuous mode sends as it works out which connection it
 has found, the `CONNECT_IND` that opened that connection on an advertising
 channel, and two data packets on the connection's own access address. The
@@ -2369,17 +2426,22 @@ had from the start, and one it has never assigned, which libbtbb reports as
 `not assigned`
 ([libbtbb#128](https://github.com/SqueakyFloors/libbtbb/pull/128)). The other
 reader of that table is `ubertooth-scan -x`, which needs BlueZ, a board and a
-third idle Classic device, so the dump is the cheap way to it.
+third idle Classic device, so the dump is the cheap way to it. The third is
+that same advertisement at three of the board's readings, which is the one
+way to the level a packet is reported at without a radio.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
 **Commands.** No board. `btlereplay.py` writes the synthetic dumps, computes
-the report each one should produce, and reads back the records a replay saved:
+the report each one should produce, and reads back the records and the levels
+a replay saved:
 
 ```text
-btlereplay.py fixture <case dir>/<name>.bin --variant <connection|advertising> --base-time <epoch>
+btlereplay.py fixture <case dir>/<name>.bin --variant <connection|advertising|levels> --base-time <epoch>
 ubertooth-btle -p -R <case dir>/connection.bin             # the promiscuous dump
 ubertooth-btle -n -R <case dir>/advertising.bin            # the advertising one
+ubertooth-btle -n -R <case dir>/levels.bin -q <case dir>/levels.pcap
+btlereplay.py level-check <case dir>/levels.pcap
 ubertooth-btle -p -R <case dir>/connection.bin -d <case dir>/again.bin
 btlereplay.py dump-check <case dir>/again.bin <case dir>/connection.bin
 ubertooth-btle -R <case dir>/connection.bin                # refused: no mode
@@ -2387,7 +2449,7 @@ ubertooth-btle -h
 ```
 
 
-**Expected outcome.** Smoke runs two cases. The promiscuous replay
+**Expected outcome.** Smoke runs three cases. The promiscuous replay
 (`-p -R <dump>`) begins by requiring `ubertooth-btle -h` to list `-R` and
 `-d`, so a build too old to have them fails saying which option is missing
 rather than on a refusal the checks cannot parse. It must then print the
@@ -2403,7 +2465,28 @@ registered companies and say `not assigned` for the third, in that order. A
 missing or reworded line fails the case, and the step names the first line it
 could not find.
 
-Comprehensive adds two. A replay dumping with `-d` must write the dump it
+**The level a packet is reported at.** The third smoke case replays the three
+readings into a PCAP and checks both the lines and the records. The two
+readings the board can measure must come out as two different figures: the
+level used to be the loudest reading of the last ten records of the channel,
+so a quiet packet after a loud one read as loud as the loud one
+([ubertooth#867](https://github.com/SqueakyFloors/ubertooth/pull/867)). The
+third reading is at the top of the radio's scale, where every reading gives
+the same dBm figure and so none of them is a measurement of the packet: the
+line must read `rssi=none`
+([ubertooth#1192](https://github.com/SqueakyFloors/ubertooth/pull/1192),
+[#1198](https://github.com/SqueakyFloors/ubertooth/pull/1198)). The word is
+matched as the word, so a build printing 0 dBm there -- which the low-energy
+column did until those changes -- fails rather than passing as "very loud".
+The capture's records are then required to carry the dBm figure the host's
+model of the radio gives each of those readings, 0 dBm included where the
+line said `none`: a record has no field for "not measured", and that
+asymmetry between the line and the record is what the case pins. The noise
+flag must be set on the one record written with a background estimate and
+clear on the two without, which is the rule every low-energy capture this
+harness reads is held to (below).
+
+Comprehensive adds two more. A replay dumping with `-d` must write the dump it
 read back byte for byte, the parameter records included, since a `-d` that
 dropped them would lose what a promiscuous capture was for. And a replay with
 no major mode must be refused with exit 1 and decode nothing:
@@ -3231,6 +3314,35 @@ file holds none of the DK's packets. Every case leaves the DK idle in the
 advertiser role with its boot settings and restores the Ubertooth's channel,
 squelch, and LEDs.
 
+**Every record's power fields.** Both low-energy capture readers decode the
+10-byte pseudo-header libbtbb writes ahead of each packet, and hold its power
+fields to the rules the writers follow whatever was on the air
+(`lell_pcap_append_packet()` and `lell_pcapng_append_packet()`, and the
+figures the fork hands them): every record is dewhitened, carries a signal
+figure, and carries a count of its access-address errors; the noise flag is
+set exactly when the noise figure is below the signal, which is how the
+writers decide it, so a board with no background estimate for the channel --
+given a figure no signal can reach -- comes out with the flag clear; each
+figure the flags call a measurement is inside the -120 to 0 dBm the host's
+model of the radio can produce; and the reference access address flag is set
+exactly when that field holds an address, which is what the flag is defined
+to say. The capture's signal and noise spread, with how many distinct figures
+each carries, is reported beside the counts.
+
+A record has no field for "the board could not measure this": a reading at
+the top of the radio's scale is recorded as 0 dBm, and it is the tool's own
+line that says `rssi=none`
+([ubertooth#1192](https://github.com/SqueakyFloors/ubertooth/pull/1192),
+[#1198](https://github.com/SqueakyFloors/ubertooth/pull/1198)). That
+asymmetry, and the two figures a packet's own level must differ by
+([#867](https://github.com/SqueakyFloors/ubertooth/pull/867)), are pinned
+deterministically by [BLE replay](#ble-replay), which writes the readings
+itself; what is checked here is that a live capture's records are internally
+consistent. No floor is put on how much a live capture's levels vary: that is
+measured for Classic (see
+[Classic capture record fields](#classic-capture-record-fields)) and **not
+established** for these two tests.
+
 **Known limits.** The minimum share is a floor a working bench clears
 comfortably, not an expected capture rate, and it is bench-specific: a weaker
 link or a noisier room can fail it without anything being wrong with the code.
@@ -3322,6 +3434,14 @@ to be bound distinctly, which is the hardware question rather than an RF one.
 `weaklink.CHECKS` and the plan files are the live record of which attenuation
 this test has figures for and what any remaining entry waits on; see "What
 attenuating a receiver is for" above for what the attenuation is and is not.
+
+Every record's power fields are held to the same rules as in
+[Capture known BLE advertiser](#capture-known-ble-advertiser), which are the
+writers' own and so apply to a followed connection too: a connection's
+packets carry no reference access address, because that field is the address
+configured into the tool and the tool caught them on a connection it had
+synchronized with, so the flag is clear there and set on the advertising-channel
+packets that carry `8e89bed6`.
 
 **Known limits.** The packet counts are floors a working follow clears, not
 expected counts: of 18 packets in one followed connection measured on the
@@ -3750,7 +3870,36 @@ of lines matching the older "capture died" wording (`libUSB Error`, `could
 not open Ubertooth device`) is reported too, which is the compatibility note
 [ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703) asks
 for: the stable signal now is the exit status plus one documented `error:`
-line, and a run says whether the old one would have fired at all.
+line, and a run says whether the old one would have fired at all. A board
+that resets itself is counted once for each reset it reports, however many
+reads follow: each read is compared with the one before it, so a run that
+reads the record after every restart of a flapping capture reports the
+resets the board had rather than one for every time it was asked.
+
+**No file in the run directory grows with the length of the run, and the
+progress file stays worth reading.** The captures have a per-file limit and
+a budget for the run, the tool's transcript has a budget, and
+`progress.jsonl` has one too. A byte budget alone is a poor answer for that
+last one, though, because of the way a long run goes wrong: a board that
+stops capturing in the first hour of a three-day run is restarted every few
+seconds for the rest of it, and each restart writes the same handful of
+records again — the attempt that died, the capture that followed, the
+watchdog read between them. A quarter of a million records all saying one
+thing answers no question the first few hundred and a count do not, and it
+would reach the budget and lose whatever came after. So past 200 unplanned
+restarts those records are collapsed: one `restart_storm` record per 100 of
+them, carrying what it stood for and the counts the run had reached, and the
+last block is written when the run reports, so the progress file and
+`summary.json` say the same thing — bar a progress file whose byte budget is
+spent, which the summary says as well, since a block it had no room for is
+not counted as written. What the storm has not said before is
+still written whole — a read in which the board reported a reset of its own,
+and a capture that could not be read for a reason not seen yet, judged with
+the attempt's own file name and byte count taken out of it, so the same fault
+at every restart is one fault — and the schedule's own records, a period and
+a sample, are never collapsed, since
+they are what a reader follows even a failing run by. The summary reports how
+many records were collapsed, into how many blocks, and the threshold.
 
 **The restart probe.** With `restart probe: true` the driver kills the capture
 once, at the middle of the run, with SIGKILL and no stop sent to the board —
@@ -4283,6 +4432,42 @@ nibble says what a basic-rate capture receives and nothing more. Two flags
 are read and reported but not constrained, because this writer never sets
 either: a decrypted payload and an aliased channel.
 
+**How much the level figures vary.** Every rule above is satisfied by a
+receiver that took one reading and reported it for every packet: the figure
+is inside the radio's range and agrees with its own flag, and it says nothing
+about any packet but the one it was taken from. That is what a `rssi_reset()`
+which left the running estimate standing produced -- nearly every record
+carrying one latched figure, where the bench then saw fifteen between -58 and
+-94 dBm
+([ubertooth#711](https://github.com/SqueakyFloors/ubertooth/pull/711)) -- and
+what a table of recent maxima produced for a channel's first ten packets
+([#754](https://github.com/SqueakyFloors/ubertooth/pull/754)). So each
+capture must carry at least four different signal figures and at least four
+different noise figures among the records that carry a measured one.
+
+Those floors are measured, not guessed. Twenty 25-second captures of this
+piconet at `2026-11-DEV2` (seven windows, the follow, role-swapped, audio and
+survey captures of each) held 122 to 373 records, with 21 to 36 distinct
+signal figures and 28 to 53 distinct noise figures among the 90 to 326
+records carrying a measured one. The floors are a fifth of the lowest signal
+count and a seventh of the lowest noise count, so a working receiver clears
+them on a far thinner capture than any of those, while a capture whose
+figures do not vary at all fails. The synthetic replay cannot stand in for
+this: its fixture carries one fixed reading and no background estimate at
+all, which is why the floors are here and not in
+[Raw receive replay](#raw-receive-replay).
+
+**A payload longer than the bank it arrived in.** No record may carry more
+payload than one capture bank can hold. An Ubertooth sends a Basic Rate
+packet as one bank of 400 symbols and libbtbb decodes it from that bank and
+no further, so the payload has at most 278 symbols after the access code and
+header -- 34 bytes where it carries no error correction, fewer where it does.
+A decoder told it had ten banks reported a payload decoded out of whatever
+followed the packet, CRC verdict and all
+([#754](https://github.com/SqueakyFloors/ubertooth/pull/754)). This is
+arithmetic rather than a measurement, so it holds for any capture; the
+bench's own records carry at most 30 payload bytes.
+
 The transport nibble is the one of these that the record earns rather than
 declares. libbtbb names the logical transport the payload it produced decoded
 on — ACL for the data types, SCO for the voice types, eSCO for the extended
@@ -4416,6 +4601,7 @@ esp32peer.py audio  <peer options> --type ev3 --min-frames <n> \
     -l <central LAP> -u <central UAP> -r <case dir>/audio.pcapng
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 bredrrecord.py <case dir>/records.pcapng --min-packets 10 --max-access-code-errors 2 \
+    --max-payload-bytes 34 --min-distinct-signal 4 --min-distinct-noise 4 \
     --max-span-s <s> --max-backward-step-us <us> --min-hec-valid <n> \
     --lap <central LAP> --reference-lap <central LAP> --reference-uap <central UAP> \
     --following-lap <central LAP> --following-uap <central UAP> \
@@ -5220,6 +5406,19 @@ can tell a swapped name from a wrongly reported one, so the case asks that
 **one** of the two peers came back under its own name, which proves a name
 read worked, rather than naming which; both peers wrong still fails.
 
+What that floor on its own let through is the swap itself. A failed read
+prints `[unknown]`, so a peer's line carries either its own name or that
+word, and the case now fails a peer reported under any other name: that is a
+name which came from somewhere, which is the fault fork
+[#1175](https://github.com/SqueakyFloors/ubertooth/pull/1175) fixed, and the
+one run that showed it passed the floor because the other peer was right.
+This costs no reliability -- it leaves the two `[unknown]` runs alone and
+fails only the run that carried the fault. Whether to go further and require
+**both** peers under their own names is a separate decision: it would have
+failed 3 of those 19 runs, and two of them were a page that went unanswered
+rather than a misattribution, so it is left to
+[#384](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/384).
+
 One thing the tool does that no case can prevent. It reads the name of
 **every** piconet its sweep heard, by paging the address it put together, so
 it pages devices this bench does not own if any are in range. That is the
@@ -5359,7 +5558,8 @@ esp32peer.py stream <peer options> --interrupt-after <seconds> \
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 capturefile.py <case dir>/follow.pcap --packets
 bredrrecord.py <case dir>/follow.pcap --min-packets 10 --lap <central LAP> \
-    --max-access-code-errors 2 --min-hec-valid 0 --reference-lap <central LAP> \
+    --max-access-code-errors 2 --max-payload-bytes 34 --min-hec-valid 0 \
+    --reference-lap <central LAP> \
     --reference-uap <central UAP> --min-reference-uap <n> --any-transport
 ```
 
@@ -5414,6 +5614,11 @@ nothing to check it against. What those 35 records would carry today is **not
 established**: that sweep ran against a different libbtbb than the one now
 pinned, and at the pinned commit an abandoned trial clock clears a record's
 transport and its payload together. The figures above are kept as measured.
+The two level floors `Classic capture record fields` carries are left out
+here for the same reason the HEC floor is: they were measured on captures of
+the ESP32 piconet taken by `ubertooth-rx`, and how much a level varies across
+a capture this tool takes is **not established**. The payload bound, which is
+arithmetic rather than a measurement, is checked.
 So the `-q` case checks that the
 file is a BR/EDR pcap holding the piconet's packets and leaves the records to
 `Classic capture record fields`, which reads a capture from a tool whose

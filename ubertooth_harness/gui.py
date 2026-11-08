@@ -346,15 +346,22 @@ def omitted_reason(
     The absences this cannot answer are the ones that need the target's
     resource registry, which the controller has not got: hardware no host
     here has, and a board placed differently from what the test needs. Those
-    steps are counted, and the run itself reports them.
+    steps are counted, and the run itself reports them. A step whose own
+    *cases* are what a platform cannot run belongs with them: building the
+    cases needs the resources they are built for, so only the test-wide
+    needs are read here. On a bench where no host can run any case of such a
+    step the planner leaves it out there (#154) while this still counts it,
+    and that run's own ``not applicable`` record is what says so.
 
     One of those is why a step is reported as left out rather than as the
-    run's undoing: where every host a step names is in that bench's registry
-    and none of them can run it, compiling the suite is a plan error there
-    and the run is refused outright ("no selected host can run it"). Which
-    hosts that bench has is exactly what is not known here, so what is
-    reported is the one answer that holds either way: this target does not
-    run the step.
+    run's undoing. A step whose hosts the plan left to the bench
+    (``hosts: each``) is left out on a host that cannot run it, which is
+    what this answers; a step that *names* its hosts, where every one of
+    them is in that bench's registry and none can run it, is a plan error
+    there and the run is refused outright ("no selected host can run it").
+    Which hosts that bench has is exactly what is not known here, so what
+    is reported is the one answer that holds either way: this target does
+    not run the step.
     """
     if not target:
         return ""

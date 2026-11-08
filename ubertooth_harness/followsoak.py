@@ -120,7 +120,7 @@ import statistics
 import sys
 import time
 import traceback
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 if __package__ in (None, ""):
@@ -849,6 +849,11 @@ class Soak:
         self.sink = LineSink()
         self.phases: list[Phase] = []
         self.attempts: list[Attempt] = []
+        # The attempts whose capture files are still on disk, oldest first:
+        # what the budget reads. `attempts` forgets its middle past
+        # MAX_HELD_ATTEMPTS, and an attempt the summary has forgotten still
+        # has files to count and remove (addresssoak.py's `_prunable`).
+        self._prunable: deque = deque()
         self.intervals: list[Interval] = []
         self.intervals_forgotten = 0
         self.intervals_opened = 0
@@ -1402,6 +1407,7 @@ class Soak:
         self.capture.close()
         self.read_text()
         self.attempts.append(attempt)
+        self._prunable.append(attempt)
         if len(self.attempts) > MAX_HELD_ATTEMPTS:
             # A board that died in the first hour of a three-day run is
             # restarted every few seconds for the rest of it. The oldest
@@ -1440,7 +1446,7 @@ class Soak:
 
     def prune_captures(self) -> None:
         removed, removed_bytes, stuck = prune_capture_files(
-            self.attempts, self.options.out, self.options.capture_budget_bytes,
+            self._prunable, self.options.out, self.options.capture_budget_bytes,
             self.record, stuck_already=bool(self.capture_budget_stuck))
         self.captures_removed += removed
         self.capture_bytes_removed += removed_bytes

@@ -1308,6 +1308,26 @@ Three protocol facts that look like harness or tool faults and are not:
   yet; the packet type, the timing, and the count are read from the records a
   capture writes without it.
 
+What the bench's own level figures look like, measured 2026-11-07 at
+`2026-11-DEV2` over twenty 25-second captures of the peer pair (seven
+windows, the follow, role-swapped, audio and survey captures of each, taken
+on a clear receiver, not an attenuated one):
+
+| | Measured |
+|---|---|
+| records a capture | 122 to 373 |
+| distinct signal figures | 21 to 36 |
+| records carrying a measured noise figure | 90 to 326 |
+| distinct noise figures among those | 28 to 53 |
+| longest payload a record carried | 30 bytes |
+
+`Classic capture record fields` puts floors of four distinct signal figures
+and four distinct noise figures on a capture, which is a fifth and a seventh
+of those lowest counts: the point is to fail a receiver that latched one
+reading rather than to measure this room. `docs/tests.md` carries the
+reasoning. A weak-link receiver is unmeasured for this test; the figures
+above are the clear board's.
+
 ## A worked bench layout
 
 One Linux host, two USB host controllers, and one Mac:

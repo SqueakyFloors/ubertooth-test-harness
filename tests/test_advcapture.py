@@ -11,6 +11,18 @@ ADDRESS = "C3:11:22:33:44:55"
 OTHER = "D0:00:00:00:00:02"
 
 
+# The flag word libbtbb's low-energy writers set on a record: dewhitened, a
+# signal figure, a count of access-address errors, a noise figure below the
+# signal, and a reference access address where the field holds one
+# (``lell_pcap_append_packet()``). Records built here carry it so that the
+# level rules advcapture.level_problems() holds every capture to are met by a
+# fixture as they are by a capture off the air.
+LE_FLAGS = struct.pack("<H", advcapture.LE_DEWHITENED
+                       | advcapture.LE_SIGPOWER_VALID
+                       | advcapture.LE_AA_OFFENSES_VALID
+                       | advcapture.LE_NOISEPOWER_VALID
+                       | advcapture.LE_REF_AA_VALID)
+
 def payload(counter=5, chmap=0x01, tag=b"\xc0\xff\xee", magic=b"UTAD"):
     mfg = struct.pack("<H", 0xFFFF) + magic + bytes([1, chmap]) + struct.pack("<I", counter) + tag
     return bytes([2, 0x01, 0x04, len(mfg) + 1, 0xFF]) + mfg
@@ -25,7 +37,7 @@ def record(address=ADDRESS, rf_channel=0, pdu_type=0x2, tx_add=1, data=None,
     crc = advcapture.crc24(header + pdu).to_bytes(3, "little")
     if corrupt:
         pdu = pdu[:-1] + bytes([pdu[-1] ^ 1])
-    phdr = bytes([rf_channel, 0xC0, 0x9C, 0]) + struct.pack("<I", access) + b"\x00\x00"
+    phdr = bytes([rf_channel, 0xC0, 0x9C, 0]) + struct.pack("<I", access) + LE_FLAGS
     return phdr + struct.pack("<I", access) + header + pdu + crc
 
 
@@ -243,7 +255,10 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("capture: pcap, link type 256, 2 records\n"
                          "advertiser packets: 1 (rf channel 0 x1)\n"
-                         "counters: 5-5\ncapture checks passed\n", out.getvalue())
+                         "counters: 5-5\n"
+                         "levels: signal -64 to -64 dBm, 1 distinct in 2 records\n"
+                         "levels: noise -100 to -100 dBm in 2 records, 1 distinct\n"
+                         "capture checks passed\n", out.getvalue())
         self.assertNotIn(OTHER, out.getvalue())
 
 
