@@ -375,6 +375,25 @@ def summary_events() -> list[dict]:
     ]
 
 
+class ReportDurationTests(unittest.TestCase):
+    """report.md says a length of time the way every other surface does.
+
+    The same records the console summary above is compiled from, so the two
+    cannot disagree about how long the run or any test of it took.
+    """
+
+    def report(self) -> str:
+        return report.render_run(summary_events())
+
+    def test_the_run_s_own_span_is_in_hours_minutes_and_seconds(self):
+        # 09:12:33.004 to 09:14:52.000, to the millisecond.
+        self.assertIn("(2m 18.996s)", self.report())
+
+    def test_each_test_s_span_is_too(self):
+        # 09:12:33.600 to 09:14:51.900, in the results table's own column.
+        self.assertIn("| 2m 18.300s ", self.report())
+
+
 class ConsoleSummaryTests(unittest.TestCase):
     """The block a tailed run ends with identifies the run on its own."""
 
@@ -384,7 +403,7 @@ class ConsoleSummaryTests(unittest.TestCase):
 
     def test_it_names_when_the_run_started_in_utc_and_how_long_it_took(self):
         text = self.summary()
-        self.assertIn("started (UTC)      2026-11-05T09:12:33.004 (ran 139.0s)",
+        self.assertIn("started (UTC)      2026-11-05T09:12:33.004 (ran 2m 18.996s)",
                       text)
 
     def test_it_names_each_source_by_ref_and_exact_commit(self):

@@ -57,6 +57,7 @@ import tempfile
 
 from ubertooth_harness import release as release_version
 from ubertooth_harness import sanitize
+from ubertooth_harness.durations import human_duration
 from ubertooth_harness.events import RUN_LOG, REPORT
 from ubertooth_harness.outputfiles import (
     CAPTURE_STREAM,
@@ -755,14 +756,6 @@ def _cell(value) -> str:
     return " ".join(text.split()) or "–"
 
 
-def _duration(seconds: float) -> str:
-    if seconds >= 3600:
-        return f"{seconds / 3600:.1f} h"
-    if seconds >= 60:
-        return f"{seconds / 60:.1f} min"
-    return f"{seconds:.1f} s"
-
-
 def _source_rows(runs: Sequence[RunEvidence]) -> list[tuple[str, str]]:
     """The commit each source was resolved to, once, with a note if the runs
     disagree: evidence for a release has to be evidence of one build."""
@@ -933,7 +926,7 @@ def summary(export: Export, staged: "Staged | None" = None) -> str:
             f"| {_cell(GATE_BY_KEY[run.gate].title)} "
             f"| `{_cell(run.plan)}` / `{_cell(run.suite)}` "
             f"| {_cell(run.platform)} | {_cell(run.started)} "
-            f"| {_cell(run.ended)} | {_duration(run.duration_s)} "
+            f"| {_cell(run.ended)} | {human_duration(run.duration_s)} "
             f"| {run.completed_tests}/{run.requested_tests} "
             f"| {_cell(run.status)} |"
         )

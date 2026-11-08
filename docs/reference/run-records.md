@@ -30,7 +30,11 @@ a capture case ran, and `output/` when a command printed a lot):
   ([Firmware watchdog](../guide/transitions-guards-watchdog.md#firmware-watchdog)) carries that board's record and
   what changed, and `watchdog_summary` at the end of the run carries the
   per-board self-reset count and any fork issue to file. `run_finished` holds
-  the summary, whose `watchdog_resets` is the run's total.
+  the summary, whose `watchdog_resets` is the run's total and whose
+  `duration_s` is how long the run took, in seconds and unrounded, with
+  `duration_hms` beside it: the same length of time in words
+  (`"duration_s": 4234.535980591027, "duration_hms": "1h 10m 34.536s"`).
+  Automation reads the number, which nothing rounds or replaces.
 - `report.md`: compiled from `run.jsonl` when the run ends, including failed or
   canceled runs. It lists the setup (commits, host and platform, toolchain,
   Python, device serials and firmware, RF placement, artifact hashes) and a
@@ -201,7 +205,7 @@ the firmware it was verified on, the totals, and the verdict.
 RUN SUMMARY
 ========================================================================
   run                20261105T091233Z-abcdef123456
-  started (UTC)      2026-11-05T09:12:33.004 (ran 139.0s)
+  started (UTC)      2026-11-05T09:12:33.004 (ran 2m 18.996s)
   plan / suite       fast / fast
   host               Host_Linux (Linux 24.04 6.8.0 x86_64)
   Ubertooth          main = 9903b4251f... (git-9903b42)
@@ -224,6 +228,31 @@ live stream: stdout still holds the summary JSON alone, so a caller parsing
 that is unaffected. A run that stopped before its tests ran gets the same
 block, from whatever it had recorded by then: a run that failed in its build
 still names its sources and its verdict.
+
+#### One way of saying a length of time
+
+Every finished duration a person reads is written the same way: the largest
+unit it reaches first, each smaller one after it, and seconds to the
+millisecond — `0.004s`, `34.536s`, `10m 34.536s`, `1h 10m 34.536s`,
+`2d 03h 10m 34.536s`. One formatter
+([`ubertooth_harness/durations.py`](../../ubertooth_harness/durations.py))
+produces all of them, so the terminal summary above, `report.md`, the GUI and
+its history, the [completion email](../guide/notifications.md), and a
+[release's evidence](release-evidence.md) cannot drift apart. The measured
+number is kept beside the words wherever one is reported — `duration_s` with
+`duration_hms`, `elapsed_s` with `elapsed_hms` — so a machine reads the
+seconds and nothing it reads was rounded for a reader.
+
+Two durations of the same run are measured on different spans, so read the
+one you mean. `run_finished.duration_s` is the suite's own: from the moment
+the sequencer began, which is after a `--build` run has already built its
+sources, to the moment it wrote that record. The controller's `duration_s`
+for a run or group ([`GET /api/runs/{run_id}`, `GET
+/api/run-groups`](../guide/services.md#controller)) is the wall clock of the
+whole job, from when the run was asked for to when it finished, so it
+includes resolving the ref, the clone and build, flashing, and compiling the
+report. A run that builds therefore reads longer in the GUI than in its own
+record, by the length of its build.
 
 `report.md`'s transcript says the same words on its own `[S]` line
 (`[S] STATE FAIL: guard Ubertooth 1 channel unchanged (expected 2441,

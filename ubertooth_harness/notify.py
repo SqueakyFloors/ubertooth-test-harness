@@ -55,6 +55,8 @@ import subprocess
 import time
 from typing import Callable, Mapping, Sequence
 
+from ubertooth_harness.durations import human_duration
+
 
 # Where a private configuration lives by default: outside the repository,
 # beside the connection settings scripts/harness-config.sh reads.
@@ -548,20 +550,14 @@ def _moment(value) -> datetime.datetime | None:
 
 
 def duration_text(started, finished) -> str:
-    """``1 h 12 m 05 s`` between two recorded timestamps, or why not."""
+    """``1h 12m 05.000s`` between two recorded timestamps, or why not."""
     first, last = _moment(started), _moment(finished)
     if first is None or last is None:
         return "not recorded"
     seconds = (last - first).total_seconds()
     if seconds < 0:
         return "not recorded"
-    hours, rest = divmod(int(seconds), 3600)
-    minutes, secs = divmod(rest, 60)
-    if hours:
-        return f"{hours} h {minutes:02d} m {secs:02d} s"
-    if minutes:
-        return f"{minutes} m {secs:02d} s"
-    return f"{seconds:.1f} s"
+    return human_duration(seconds)
 
 
 def test_totals(events: Sequence[Mapping]) -> dict:

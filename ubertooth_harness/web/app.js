@@ -206,13 +206,35 @@
     return el("time", { datetime: String(iso), text: shown });
   }
 
+  // How long a finished run or group took, in the words the controller gives
+  // it (durations.human_duration), so the page, report.md, the email, and a
+  // release's evidence all say the same thing. A running one has none: its
+  // clock is live, and renderClock counts it against the estimate instead.
+  function durationElement(record) {
+    const text = record && record.duration_hms;
+    if (!text) return el("span", { text: "–" });
+    return el("span", { text: String(text) });
+  }
+
+  // What a finished group's clock says. The controller's own words for how
+  // long it took, and this page's arithmetic only for a group whose record
+  // carries none.
+  function finishedAfter(group, elapsed) {
+    return `Finished after ${(group && group.duration_hms) || formatSeconds(elapsed)}`;
+  }
+
+  // An estimate or a live clock, rounded to the second: a figure that is a
+  // guess, or one that moves while you read it, has no business claiming
+  // milliseconds. A measured duration that has ended says them, in the
+  // controller's own words (durationElement).
   function formatSeconds(total) {
     const seconds = Math.max(0, Math.round(total));
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
     const pad = (n) => String(n).padStart(2, "0");
-    return h ? `${h}h ${pad(m)}m ${pad(s)}s` : `${m}m ${pad(s)}s`;
+    if (h) return `${h}h ${pad(m)}m ${pad(s)}s`;
+    return m ? `${m}m ${pad(s)}s` : `${s}s`;
   }
 
   async function api(method, path, body) {
@@ -1905,6 +1927,7 @@
       ["Plan / suite", group ? `${group.plan ?? "–"} / ${group.suite ?? "–"}` : "–"],
       ["Started", timeElement(group && group.created_at)],
       ["Finished", timeElement(group && group.finished_at)],
+      ["Duration", durationElement(group)],
       ["Steps done", progress ? `${progress.completed} of ${progress.planned}` : "–"],
     ];
     if (group && group.cancel_requested) {
@@ -2008,8 +2031,7 @@
   function stepPill(step, cell) {
     const fill = cellFill(cell);
     const about = `${step.name} on ${cell.host}: ${statusWord(cell.status)}`
-      + (cell.elapsed_s !== null && cell.elapsed_s !== undefined
-        ? `, took ${formatSeconds(cell.elapsed_s)}` : "")
+      + (cell.elapsed_hms ? `, took ${cell.elapsed_hms}` : "")
       + (cell.estimated_s ? `, estimated ${formatSeconds(cell.estimated_s)}` : "")
       + (cell.reason ? ` — ${cell.reason}` : "");
     const pill = hostPill(cell.host, cell.status, {
@@ -2278,7 +2300,7 @@
     if (!cells.length || missing) {
       $("live-clock").textContent = group.status === "running"
         ? `Elapsed ${formatSeconds(elapsed)}`
-        : `Finished after ${formatSeconds(elapsed)}`;
+        : finishedAfter(group, elapsed);
       $("live-estimate").textContent = !cells.length
         ? "No countdown yet: the hosts have not reported their steps."
         : `No countdown: ${missing} of ${cells.length} steps across the group`
@@ -2289,7 +2311,7 @@
       + ` longest of the group's ${perHost.size} host(s), which run at the`
       + " same time.";
     if (group.status !== "running") {
-      $("live-clock").textContent = `Finished after ${formatSeconds(elapsed)}`;
+      $("live-clock").textContent = finishedAfter(group, elapsed);
     } else if (elapsed <= total) {
       $("live-clock").textContent = `About ${formatSeconds(total - elapsed)} remaining`
         + ` (elapsed ${formatSeconds(elapsed)})`;
@@ -2523,6 +2545,7 @@
       return el("tr", {},
         el("td", { className: "time" }, timeElement(group.created_at)),
         el("td", { className: "time" }, timeElement(group.finished_at)),
+        el("td", { className: "time" }, durationElement(group)),
         el("td", {}, el("code", {
           text: group.implicit ? (groupRunId(group) || group.group_id)
             : `${group.group_id.slice(0, 12)}…`,

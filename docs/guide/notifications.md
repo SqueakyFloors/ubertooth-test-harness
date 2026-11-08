@@ -97,7 +97,7 @@ Plan / suite: release / release
 Tests: 23 passed, 1 failed, 2 skipped (26 of 27 planned tests reached)
 Started (UTC): 2026-01-01T12:00:00Z
 Finished (UTC): 2026-01-01T13:12:05Z
-Duration: 1 h 12 m 05 s
+Duration: 1h 12m 05.000s
 Reason: Raw receive: no packets
 
 Source (the commit is the identity; a ref can move):
