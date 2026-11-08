@@ -243,6 +243,16 @@ number is kept beside the words wherever one is reported — `duration_s` with
 `duration_hms`, `elapsed_s` with `elapsed_hms` — so a machine reads the
 seconds and nothing it reads was rounded for a reader.
 
+A figure that is still being counted rather than measured is written in the
+same units to the whole second: how old a lease is, how long a board has been
+held, and how long a command has been waiting, in
+[`ubertooth-harness boards`](../guide/leases.md) and the queue lines that go
+with it — `12s`, `4m 11s`, `1h 05m 03s`. It comes from the same formatter
+(`coarse_duration`), so the two forms differ in the milliseconds and in
+nothing else; a figure read off a running clock has none to report, and it is
+rounded down, because a lease taken 12.9s ago has been held for 12 whole
+seconds.
+
 Two durations of the same run are measured on different spans, so read the
 one you mean. `run_finished.duration_s` is the suite's own: from the moment
 the sequencer began, which is after a `--build` run has already built its

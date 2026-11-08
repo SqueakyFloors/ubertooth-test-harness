@@ -202,6 +202,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
+# How long a thing took, in the words the harness uses everywhere else, so a
+# lease age and a run's duration cannot come to spell an hour differently.
+from ubertooth_harness.durations import coarse_duration
+
 LEASE_DIR_ENV = "UBERTOOTH_HARNESS_LEASE_DIR"
 OWNER_ENV = "UBERTOOTH_HARNESS_OWNER"
 EXTERNAL_LOCK_ENV = "UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK"
@@ -1462,21 +1466,21 @@ def ticket_waited_s(name: str, *, now_ns: int | None = None) -> float | None:
 
 
 def describe_seconds(value) -> str:
-    """A wait a person reads in one line: '45s', '4m12s', '1h02m03s'.
+    """A wait a person reads in one line: '45s', '4m 12s', '1h 02m 03s'.
+
+    The harness's one duration format, to the whole second
+    (``durations.coarse_duration``): a wait is read off a clock that is
+    still running, so it has no milliseconds to report, and the words are
+    the ones every other duration the harness prints uses.
 
     Empty for anything that is not a number of seconds, including the
     infinities and not-a-numbers JSON can carry: a value read out of
     another command's file must not raise where it is only being shown.
     """
     try:
-        total = int(max(0.0, float(value)))
+        return coarse_duration(max(0.0, float(value)))
     except (TypeError, ValueError, OverflowError):
         return ""
-    if total >= 3600:
-        return f"{total // 3600}h{total % 3600 // 60:02d}m{total % 60:02d}s"
-    if total >= 60:
-        return f"{total // 60}m{total % 60:02d}s"
-    return f"{total}s"
 
 
 def queued_record(
@@ -2479,6 +2483,13 @@ def exit_status(returncode: int) -> int:
 
 
 def held_for(holder: Mapping, now: datetime.datetime | None = None) -> str:
+    """How long this lease has been held, as a wait is written above.
+
+    Empty when the lock file records no acquisition time, or one that is not
+    a stamp: another command's file is shown, never trusted. A clock that
+    went backwards between the two reads as no time at all, which is what a
+    figure counting up can honestly say.
+    """
     started = holder.get("acquired_at")
     if not started:
         return ""
@@ -2487,5 +2498,4 @@ def held_for(holder: Mapping, now: datetime.datetime | None = None) -> str:
     except ValueError:
         return ""
     now = now or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-    seconds = max(0, int((now - then).total_seconds()))
-    return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m{seconds % 60:02d}s"
+    return describe_seconds((now - then).total_seconds())
