@@ -83,8 +83,9 @@ The runner protocol has no version negotiation: the controller and runner
 must speak the same version: protocol v2 (which added the listed commit to
 `run`), v3 (which added `flash_build`), v4 (which added the `run_file`
 request and its answers), v5 (which added the run's `with_firmware` and
-`with_python`), v6 (which added its `bootloader`) and v7 (which added its
-`with_btbr`) are each a hard break
+`with_python`), v6 (which added its `bootloader`), v7 (which added its
+`with_btbr`) and v8 (which added per-board status to `register` and
+`heartbeat`, with the board-management requests) are each a hard break
 from the version before. An older runner is refused at `register` (the
 controller closes the connection, code 1008), and since it did register it
 reconnects after the shortest backoff (0.5 s) and is refused again,

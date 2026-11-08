@@ -9,7 +9,7 @@ which is what these cases use it for.
 
 The dumps are synthetic ([`btlereplay.py`](btlereplay.py)), built from the
 Bluetooth Core specification's own encoding; nothing here was captured over
-the air. Two of them:
+the air. Three of them:
 
 - a promiscuous capture of one connection, so a replay has to put back both
   halves of what the capture found: the five parameter records promiscuous
@@ -23,7 +23,12 @@ the air. Two of them:
   the one it has not (SqueakyFloors/libbtbb#75 and
   SqueakyFloors/libbtbb#128). The other reader of that table is
   ``ubertooth-scan -x``, which needs BlueZ, a board and a third idle Classic
-  device, so the dump is the cheap way to it.
+  device, so the dump is the cheap way to it;
+- that advertisement at three of the board's readings, which is the one way
+  to the level a packet is reported at without a radio: two readings the
+  board can measure, whose figures must differ, and one at the top of the
+  radio's scale, where the line reads ``none`` and the capture record keeps
+  the figure it has no way to qualify.
 
 Only summaries and decoded field names reach the run record: the checkers
 compare the fixture's own figures and print what differs, never a capture.
@@ -47,6 +52,8 @@ TEST_NAME = "BLE replay"
 _FIXTURE = str(Path(btlereplay.__file__).resolve())
 _CONNECTION = "connection.bin"
 _ADVERTISING = "advertising.bin"
+_LEVELS = "levels.bin"
+_LEVELS_CAPTURE = "levels.pcap"
 _DUMP = "again.bin"
 # A replay of a handful of records returns at once; this is the limit that
 # says the run hung rather than one it is expected to approach.
@@ -131,6 +138,8 @@ def btle_replay_cases(arguments, _resources, _resource_identities, *, now=None):
     base = btlereplay.fixture_base_time(now)
     connection = btlereplay.expected_packets(base, "connection")
     advertising = btlereplay.expected_packets(base, "advertising")
+    levels = btlereplay.expected_packets(base, "levels")
+    printed = [printed for _signal, _noise, printed in btlereplay.expected_levels()]
     cases = [
         # The parameters and the CONNECT_IND together: a replay that printed
         # the packets and dropped the parameter records would leave a reader
@@ -167,6 +176,37 @@ def btle_replay_cases(arguments, _resources, _resource_identities, *, now=None):
            f"'{btlereplay.ORIGINAL_COMPANY[1]}' named and "
            f"'{btlereplay.UNASSIGNED_COMPANY[1]}' for the identifier the "
            "Bluetooth SIG has not registered"),
+        # The level a packet is reported at, and the word for a reading that
+        # is no measurement. Three records at three readings: two the board
+        # can measure, which must come out as two different figures -- a
+        # level latched from an earlier packet reports one (fork
+        # SqueakyFloors/ubertooth#867) -- and one at the top of the radio's
+        # scale, whose line reads `none` while the record keeps the figure,
+        # having no field to say otherwise (fork
+        # SqueakyFloors/ubertooth#1192, #1198).
+        _case("btle-replay-levels",
+              "-n -R reports each packet's own level, and `none` where there "
+              "is none to report", (
+            _fixture_step(base, "levels", _LEVELS),
+            _replay_step("replay",
+                         "ubertooth-btle -n -R <levels> -q <capture>", ("-n",),
+                         source=_LEVELS,
+                         check=btlereplay.all_checks(
+                             btlereplay.packets_check(
+                                 levels, line=btlereplay.LEVEL_LINE),
+                             btlereplay.levels_check(printed)),
+                         files=(("-q", _LEVELS_CAPTURE),)),
+            Step("verify-levels",
+                 "The capture's records carry the figures the readings call for",
+                 lambda context: (sys.executable, _FIXTURE, "level-check",
+                                  _path(_LEVELS_CAPTURE)(context)),
+                 output_patterns=(r"BLE levels: \d+ records carry the figures ",),
+                 forbidden_patterns=(r"BLE level problem:",)),
+        ), "exit 0; the packet lines read "
+           + ", ".join(f"rssi={value}" for value in printed)
+           + "; the pcap's records carry the dBm figures the host's model gives "
+             "those readings, 0 dBm included where the line said none, with the "
+             "noise flag set only on the record that carries an estimate"),
     ]
     if arguments["coverage"] != "comprehensive":
         return tuple(cases)

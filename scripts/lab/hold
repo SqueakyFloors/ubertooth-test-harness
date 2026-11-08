@@ -5,7 +5,8 @@
 
 A device is a registry alias, a full serial, or an unambiguous prefix of one
 (``a1b2``), and for an nRF52840 DK its J-Link serial with or without the
-leading zeros, which is how ``nrfutil`` and sysfs each print it.
+leading zeros: the registry and the by-id name carry the padded spelling and
+a DK command line the short one.
 That is what a bench note or another agent's message gives you, so it is what
 this takes; ``ubertooth-harness lease`` wants registry aliases.
 

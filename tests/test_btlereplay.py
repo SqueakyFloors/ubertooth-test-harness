@@ -422,10 +422,12 @@ class CaseTests(unittest.TestCase):
 
     def test_the_catalog_builds_the_cases_for_each_profile(self):
         self.assertEqual(
-            ["btle-replay-connection", "btle-replay-companies"],
+            ["btle-replay-connection", "btle-replay-companies",
+             "btle-replay-levels"],
             [case.case_id for case in self.cases("smoke")])
         self.assertEqual(
             ["btle-replay-connection", "btle-replay-companies",
+             "btle-replay-levels",
              "btle-replay-dump", "btle-replay-needs-a-mode"],
             [case.case_id for case in self.cases("comprehensive")])
 

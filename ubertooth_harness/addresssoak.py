@@ -82,7 +82,11 @@ oldest complete capture and keeping the newest, and ``progress.jsonl`` and
 each transcript have budgets of their own, so no file here grows with the
 length of the run. A file the budget needs gone and cannot remove ends the
 run: writing captures past the budget for the hours it had left is the one
-thing the budget is there to prevent.
+thing the budget is there to prevent. A board that stops capturing early on
+restarts for the rest of the run, and the records of a restart are then the
+same records over and over: past a few hundred of them they are collapsed
+into one ``restart_storm`` record per block, so the progress file stays
+worth reading rather than filling with one repeated answer.
 
 Only counts, the known advertiser's own address, and the harness's own
 figures are printed or recorded. Another device's address never leaves the
@@ -138,6 +142,10 @@ LEGACY_DEATH_LINE = re.compile(r"libUSB Error|could not open Ubertooth device")
 # killed capture left it in (fork e657807): evidence that the restart path
 # met that state and cleared it.
 MODE_WARNING = "is still in mode"
+# The numbers in a capture-read failure: the attempt's own capture file and
+# the bytes it stopped at. Taken out when deciding whether a restart storm
+# has already reported that failure (Soak._note_capture_error).
+ERROR_NUMBERS = re.compile(r"\d+")
 
 POLL_S = 0.1
 # A board read is two control transfers; a board that has gone takes the
@@ -153,6 +161,16 @@ WATCHDOG_RETRY_PAUSE_S = watchdog.RECOVERY_PAUSE_S
 # takes four would otherwise be killed here and fail a three-day run at its
 # last step while passing `Interrupting a capture`.
 DEFAULT_TERM_GRACE_S = 5.0
+# How long a canceled teardown waits for the tool to go, and for the thread
+# reading its output to finish. The harness allows about two seconds between
+# its SIGTERM and its SIGKILL, and the report of a three-day run has to be
+# written inside that: the tool was signalled from the handler, the harness's
+# own SIGKILL reaches it through the process group, and the figures the
+# report needs are already counted on the reader. So the teardown of a
+# cancellation waits in tenths of a second rather than in seconds, and
+# pushes the transcript to its file itself instead of waiting for the thread
+# to do it.
+CANCEL_WAIT_S = 0.2
 # A restart no more often than this, so a board that cannot capture at all
 # is not hammered.
 DEFAULT_RESTART_MIN_INTERVAL_S = 5.0
@@ -164,6 +182,17 @@ DEFAULT_RESTART_MIN_INTERVAL_S = 5.0
 # so the figures the verdict rests on do not change; what a run loses past
 # the budget is the per-packet text, and it is recorded how much.
 MAX_LOG_BYTES = 64 * 1024 * 1024
+# How much of the transcript may wait in the file's own buffer, and for how
+# long. Flushing every kept line costs a write syscall per packet, which on
+# a crowded channel is thousands a second for a file nobody is tailing. What
+# a reader of a run that is going wrong needs is the last ``error:`` line and
+# a file no more than a moment behind, so a line is pushed to the file when
+# the buffer reaches this many bytes, when this long has passed since the
+# last push, and at once when it is one of the lines the verdict reads (an
+# ``error:`` line, or libubertooth's mode warning). A teardown pushes what is
+# left, so the guarantee is the same one and it costs a flush a packet less.
+LOG_FLUSH_BYTES = 64 * 1024
+LOG_FLUSH_S = 0.5
 # How much of a growing capture file is read per poll, so one tick's work is
 # bounded however far behind the reader is.
 TAIL_CHUNK = 4 * 1024 * 1024
@@ -214,6 +243,29 @@ MAX_CAPTURE_ERRORS = 20
 # reports what it kept, as the transcript does. summary.json holds the
 # figures whatever happened to this file.
 MAX_PROGRESS_BYTES = 64 * 1024 * 1024
+# When the records of a restart stop being news. A board that stops
+# capturing in the first hour of a three-day run is restarted every few
+# seconds for the rest of it, and each restart writes the same handful of
+# records again: the attempt that died, the capture that followed it, the
+# watchdog read between them. Past this many unplanned restarts those
+# records are collapsed, one `restart_storm` record per block of them,
+# carrying what was collapsed and the counts the storm has reached. The byte
+# budget above is the backstop that stops the file growing with the run;
+# this is what keeps what it holds worth reading, because a file of a
+# quarter of a million records all saying one thing answers no question that
+# the first few hundred and a count do not. Anything the storm has not said
+# before is still written whole: a reset the board reported, and a capture
+# that could not be read for a reason not seen yet.
+PROGRESS_FULL_RESTARTS = 200
+PROGRESS_STORM_BLOCK = 100
+# The records a storm repeats, and so the only ones it collapses. The
+# schedule's own records (a period, a sample) are not among them: they are
+# bounded by the plan's figures instead, and they are what a reader follows
+# a healthy run by.
+STORM_RECORDS = frozenset({
+    "attempt", "capture_started", "watchdog", "board_reset",
+    "capture_removed", "capture_unreadable",
+})
 # How long a capture is given to open its file before the schedule starts
 # against it. Bounded by the liveness timeout as well, so this never delays
 # the rule that notices a capture which never starts at all.
@@ -419,6 +471,12 @@ class TranscriptReader(threading.Thread):
     whatever the main loop is doing: a pipe nobody reads fills up and stops
     the capture. Every line is written to the attempt's own log file until the
     cap, and every line is parsed whether or not it was kept.
+
+    What reaches the file is pushed to it on a budget rather than a line at a
+    time (LOG_FLUSH_BYTES, LOG_FLUSH_S), with the lines the verdict reads
+    pushed at once and whatever is left pushed by the teardown, so a reader
+    tailing the log still sees a file a moment behind and a crowded channel
+    costs one flush a block instead of one a packet.
     """
 
     def __init__(self, stream, log_path: Path, sink: LineSink, clock=time.monotonic,
@@ -436,33 +494,94 @@ class TranscriptReader(threading.Thread):
         self.last_error = ""
         self.legacy_death_lines = 0
         self.mode_warning = False
+        self.flushes = 0
+        # The file, and what has not reached it yet, under one lock: the
+        # teardown pushes the buffer from the main thread (flush_now).
+        self._lock = threading.Lock()
+        self._log = None
+        self._unflushed = 0
+        self._flushed_at = 0.0
 
     def run(self) -> None:
         with self.log_path.open("wb") as log:
-            for raw in self.stream:
-                self.lines += 1
-                if self.written_bytes + len(raw) <= self.max_bytes:
-                    log.write(raw)
-                    self.written_bytes += len(raw)
-                    log.flush()
-                else:
-                    self.dropped_lines += 1
-                text = raw.decode("utf-8", "replace").rstrip("\r\n")
-                self._parse(text)
+            with self._lock:
+                self._log = log
+                self._flushed_at = self.clock()
+            try:
+                for raw in self.stream:
+                    self.lines += 1
+                    text = raw.decode("utf-8", "replace").rstrip("\r\n")
+                    # Parsed first, and whether or not the line is kept, so
+                    # the figures do not depend on the budget; what it says
+                    # is whether this line is one the verdict reads.
+                    evidence = self._parse(text)
+                    if self.written_bytes + len(raw) > self.max_bytes:
+                        self.dropped_lines += 1
+                        continue
+                    with self._lock:
+                        log.write(raw)
+                        self.written_bytes += len(raw)
+                        self._unflushed += len(raw)
+                        if (evidence or self._unflushed >= LOG_FLUSH_BYTES
+                                or self.clock() - self._flushed_at >= LOG_FLUSH_S):
+                            self._flush_held()
+            finally:
+                with self._lock:
+                    self._flush_held()
+                    self._log = None
 
-    def _parse(self, text: str) -> None:
+    def flush_now(self, *, after_s: float = 0.0) -> None:
+        """Push what has been read to the file, from another thread.
+
+        Two callers, with the interval the difference between them. The main
+        loop calls this every poll with LOG_FLUSH_S, because the reader's own
+        interval is only reached when the next line arrives: a capture that
+        printed a line and then went quiet -- a channel with nothing on it, a
+        tool about to die -- would otherwise leave that line in the buffer
+        for as long as the silence lasted, and the file a reader is tailing
+        would be arbitrarily far behind. The teardown calls it with no
+        interval at all, since the lines already read are the evidence of how
+        the run ended.
+        """
+        with self._lock:
+            if after_s and self.clock() - self._flushed_at < after_s:
+                return
+            self._flush_held()
+
+    def _flush_held(self) -> None:
+        """Push the buffer. The lock is held, and nothing here may raise."""
+        if self._log is None or self._unflushed == 0:
+            return
+        try:
+            self._log.flush()
+        except (OSError, ValueError):
+            # A full disk under the transcript, or a file already closed.
+            # Losing the per-packet text is not worth ending a run over, and
+            # the budget's own counters already say what was kept.
+            return
+        self._unflushed = 0
+        self._flushed_at = self.clock()
+        self.flushes += 1
+
+    def _parse(self, text: str) -> bool:
+        """Read one line; True when it is one the verdict rests on."""
         found = ADVA_LINE.search(text)
         if found:
             self.sink.add(("adva", self.clock(), found.group(1).upper()))
-            return
+            return False
+        evidence = False
         error = ERROR_LINE.search(text)
         if error:
             self.error_lines += 1
             self.last_error = error.group(1)
+            evidence = True
         if LEGACY_DEATH_LINE.search(text):
             self.legacy_death_lines += 1
+            evidence = True
         if MODE_WARNING in text:
             self.mode_warning = True
+            evidence = True
+        return evidence
 
 
 # ---------------------------------------------------------------------------
@@ -804,20 +923,27 @@ def check_timings(options: Timings | Options) -> None:
 # The advertiser's schedule
 
 
-class Advertiser:
-    """The DK, held open for the whole run, driven on a schedule.
+class DkShell:
+    """One DK, held open for the whole run, driven a command at a time.
 
     One shell for the run rather than one command per transition: a 72-hour
-    run turns the advertiser on and off thousands of times, and the DK's
+    run turns a fixture on and off thousands of times, and the DK's
     virtual COM port does not reset the board when it is opened, so there is
     nothing to be gained by closing it. A transition that fails is tried once
     more on a freshly opened shell, because a dropped port is the failure
-    this is likely to meet, and a transition that fails twice is recorded
-    against the period it belongs to.
+    this is likely to meet, and a transition that fails twice raises, so the
+    caller records it against the period or phase it belongs to.
+
+    Apart from `Advertiser` so another soak can hold a DK the same way: the
+    retry and the counters are the part a long run depends on, and two copies
+    of them would be two places for a fix to land (followsoak.py).
     """
 
-    def __init__(self, dk: nrfdk.Dk):
+    def __init__(self, dk: nrfdk.Dk, label: str = "advertiser"):
         self.dk = dk
+        # What a message calls this board, since one run can hold two
+        # (followsoak.py drives a central and a peripheral).
+        self.label = label
         self.shell = None
         self.transitions = 0
         self.retries = 0
@@ -843,19 +969,27 @@ class Advertiser:
             # A reopen that failed leaves none: every caller handles a
             # SoakError, and an attribute error on the next transition would
             # end the run in a traceback with no report.
-            raise SoakError("the advertiser's shell is not open")
+            raise SoakError(f"the {self.label}'s shell is not open")
         return self.shell
 
-    def command(self, text: str) -> list[str]:
-        """One shell command, retried once on a reopened shell."""
+    def command(self, text: str, timeout: float | None = None) -> list[str]:
+        """One shell command, retried once on a reopened shell.
+
+        ``timeout`` is for the commands the firmware does not answer at once:
+        the central's ``conn start`` does not return until the link is up or
+        its own five seconds are gone, and the shell's ordinary three would
+        time out a link that was merely slow (nrfdk.CONNECT_TIMEOUT_S is what
+        `nrfdk.central` passes for the same command).
+        """
         self.transitions += 1
+        wait = nrfdk.COMMAND_TIMEOUT_S if timeout is None else timeout
         try:
-            return self._shell().command(text)
+            return self._shell().command(text, wait)
         except (nrfdk.NrfDkError, OSError) as first:
             self.retries += 1
             try:
                 self._reopen()
-                return self._shell().command(text)
+                return self._shell().command(text, wait)
             except (nrfdk.NrfDkError, OSError) as second:
                 self.errors += 1
                 raise SoakError(f"'{text}' failed twice: {first}; then {second}") from second
@@ -871,6 +1005,10 @@ class Advertiser:
             except (nrfdk.NrfDkError, OSError) as second:
                 self.errors += 1
                 raise SoakError(f"status failed twice: {first}; then {second}") from second
+
+
+class Advertiser(DkShell):
+    """The advertiser DK, turned on and off by this soak's own schedule."""
 
     def configure(self, options: Options) -> dict:
         """Settings for the whole run, then the address and counter it reports."""
@@ -928,6 +1066,15 @@ def board_answers(serial: str) -> tuple[bool, str]:
     return False, reason or f"{UTIL} -v exited {result.returncode}"
 
 
+# Why a `-w` read brought no record back. Named, because the two mean
+# different things to a verdict: a board that will not answer is one the run
+# cannot use again, and firmware without the record is no failure at all
+# (watchdog.py's own doctrine). A caller that told them apart by matching the
+# text would break the first time the wording was improved.
+WATCHDOG_BOARD_SILENT = "the board did not answer the watchdog read"
+WATCHDOG_NOT_REPORTED = "this firmware does not report a watchdog record"
+
+
 def read_watchdog(serial: str, tries: int = 1,
                   pause_s: float = WATCHDOG_RETRY_PAUSE_S
                   ) -> tuple[watchdog.WatchdogRecord | None, str]:
@@ -950,8 +1097,8 @@ def read_watchdog(serial: str, tries: int = 1,
         if record is not None:
             return record, ""
     if watchdog.board_unreachable(text):
-        return None, "the board did not answer the watchdog read"
-    return None, "this firmware does not report a watchdog record"
+        return None, WATCHDOG_BOARD_SILENT
+    return None, WATCHDOG_NOT_REPORTED
 
 
 def resident_kb(pid: int, run=subprocess.run) -> int | None:
@@ -1035,17 +1182,76 @@ class Attempt:
         }
 
 
+class RecordClock:
+    """A capture record's time on the run's own timeline.
+
+    The time in a record is the board's clock, anchored once when the
+    capture's first packet arrived and advanced by the board's own counter
+    (libubertooth's ``now_ns_from_clk100ns``). Over hours that walks away
+    from the host clock -- the crystal's drift, and a whole clock period if a
+    quiet gap loses a wrap, which the fork itself warns about -- and the
+    windows a soak compares in are seconds wide. So the record clock is used
+    for the resolution between records, anchored to the host time the record
+    was read, and re-anchored whenever the two have drifted more than
+    ``reanchor_s`` apart. Every re-anchor is counted and the largest drift is
+    kept, so a run says what its capture clock did rather than hiding it.
+
+    What this does not do is make two readers independent in their clocks:
+    both end up on the host's timeline, which is the honest position, because
+    what a reader comparison is about is the decode -- the printed line
+    against the record's own bytes and CRC -- and never was about whose clock
+    was right.
+    """
+
+    def __init__(self, reanchor_s: float):
+        self.reanchor_s = reanchor_s
+        self.reanchors = 0
+        self.drift_max_s = 0.0
+        self._anchor = None
+
+    def restart(self) -> None:
+        """Forget the anchor: a new capture has its own clock."""
+        self._anchor = None
+
+    def at(self, epoch: float, host: float) -> float:
+        if self._anchor is None:
+            self._anchor = (epoch, host)
+            return host
+        anchor_epoch, anchor_host = self._anchor
+        at = anchor_host + (epoch - anchor_epoch)
+        drift = host - at
+        if abs(drift) > self.reanchor_s:
+            self.reanchors += 1
+            self.drift_max_s = max(self.drift_max_s, abs(drift))
+            self._anchor = (epoch, host)
+            return host
+        return at
+
+    def to_dict(self) -> dict:
+        return {"reanchors": self.reanchors,
+                "largest_drift_s": round(self.drift_max_s, 3),
+                "reanchor_at_s": self.reanchor_s}
+
+
 class Capture:
     """The capture process, its transcript reader, and its capture tail."""
 
     def __init__(self, options: Options, index: int, sink: LineSink,
-                 clock=time.monotonic, max_log_bytes: int = MAX_LOG_BYTES):
+                 clock=time.monotonic, max_log_bytes: int = MAX_LOG_BYTES,
+                 mode: str = "-n"):
         self.options = options
         self.clock = clock
         self.max_log_bytes = max_log_bytes
         self.capture_path = options.out / f"capture-{index:04d}.pcap"
         self.log_path = options.out / f"btle-{index:04d}.log"
-        self.argv = (TOOL, "-n", "-U", options.serial, f"-A{options.channel}",
+        # ``mode`` is the tool's own mode option: `-n` for advertising only,
+        # which is what this soak runs, and `-f` for a soak that has to
+        # follow a connection (followsoak.py). Everything else about an
+        # attempt -- the capture file, the transcript, the signals, the
+        # exit -- is the same whichever mode is running, so the mode is an
+        # argument rather than a second copy of this class.
+        self.mode = mode
+        self.argv = (TOOL, mode, "-U", options.serial, f"-A{options.channel}",
                      "-q", str(self.capture_path))
         self.attempt = Attempt(index, self.argv, self.capture_path.name,
                                self.log_path.name)
@@ -1054,6 +1260,8 @@ class Capture:
         self.tail = PcapTail(self.capture_path)
         self.sink = sink
         self._mode_warning = False
+        # Set by a stop with no grace: a canceled teardown waits in tenths.
+        self._hurry = False
 
     def start(self) -> None:
         self.attempt.started = self.clock()
@@ -1098,6 +1306,10 @@ class Capture:
         """
         self.attempt.stop_reason = reason
         grace = self.options.term_grace_s if grace_s is None else grace_s
+        # A grace of nothing is the cancellation path, which has about two
+        # seconds for the whole teardown: the waits below are then tenths.
+        hurry = grace <= 0
+        self._hurry = self._hurry or hurry
         process = self.process
         if process is not None and process.poll() is None:
             if kill:
@@ -1114,7 +1326,7 @@ class Capture:
         if process is not None:
             try:
                 self.attempt.returncode = process.wait(
-                    timeout=1.0 if grace <= 0 else 30)
+                    timeout=CANCEL_WAIT_S if hurry else 30)
             except subprocess.TimeoutExpired:
                 self.attempt.returncode = None
         self.finish()
@@ -1147,6 +1359,19 @@ class Capture:
             time.sleep(min(POLL_S, max(0.01, deadline - self.clock())))
         return self.process.poll() is not None
 
+    def _join_s(self) -> float:
+        """How long the teardown waits for the thread reading the output.
+
+        A cancellation waits in tenths (CANCEL_WAIT_S): its transcript has
+        just been pushed to disk and every figure the report needs is on the
+        reader already, so the wait would buy nothing a reader of the run
+        would see. A tool still running after its grace gets a second, and
+        one that has gone gets as long as it takes to drain its pipe.
+        """
+        if self._hurry:
+            return CANCEL_WAIT_S
+        return 1 if self.attempt.returncode is None else 30
+
     def finish(self) -> Attempt:
         """Collect what the attempt left, once the process is gone."""
         if self.attempt.ended is None:
@@ -1154,7 +1379,12 @@ class Capture:
         if self.process is not None and self.attempt.returncode is None:
             self.attempt.returncode = self.process.poll()
         if self.reader is not None:
-            self.reader.join(timeout=1 if self.attempt.returncode is None else 30)
+            # The lines it has already read are the evidence of how this
+            # attempt ended, and some of them are still in the file's buffer
+            # (LOG_FLUSH_BYTES): pushed here, so a teardown that does not
+            # wait for the thread still leaves them on disk.
+            self.reader.flush_now()
+            self.reader.join(timeout=self._join_s())
             self.attempt.last_error = self.reader.last_error
             self.attempt.error_lines = self.reader.error_lines
             self.attempt.legacy_death_lines = self.reader.legacy_death_lines
@@ -1185,6 +1415,111 @@ class Capture:
 
     def close(self) -> None:
         self.tail.close()
+
+
+def prune_capture_files(prunable: deque, out: Path, budget_bytes: int, record,
+                        *, max_kept: int = MAX_KEPT_ATTEMPTS,
+                        stuck_already: bool = False):
+    """Keep the newest captures inside a run's budget: (removed, bytes, stuck).
+
+    Only complete attempts are considered, so the capture being written is
+    never touched. Each removal is recorded through ``record`` with the
+    file's size, so the run says what it had and what it let go.
+
+    ``stuck`` is non-empty when the budget cannot be kept at all: over it,
+    with nothing left that can be removed. Recording that and carrying on
+    would leave the run writing captures past the budget for however long it
+    had left, which is the one thing the budget is there to prevent, so the
+    caller stops the run and fails instead. ``stuck_already`` says the caller
+    has already latched that, so it is reported once per run.
+
+    Apart from `Soak` because two soaks keep their captures the same way and
+    this is where the mistakes were: an attempt whose files would not go away
+    has to stay in the accounting, or a single undeletable file disables the
+    budget for the rest of a run of days (followsoak.py).
+
+    ``prunable`` is the caller's queue of attempts whose files are still on
+    disk, oldest first, and this removes from it. It is not the summary's
+    attempt list: past ``MAX_HELD_ATTEMPTS`` that list forgets its middle,
+    and an attempt the summary has forgotten still has files to count and
+    remove.
+    """
+    kept = prunable
+    # Attempts whose files would not go away: passed over rather than
+    # returned on, so one of them cannot disable the budget for the rest
+    # of a run of days.
+    skipped: list = []
+    over_budget = False
+    removed_attempts = 0
+    removed_bytes = 0
+    # Never the last one standing: the newest capture is the one a reader
+    # of a failed run wants, and "newest kept" is what this promises.
+    while len(kept) > 1:
+        total = sum(attempt.bytes_kept for attempt in kept)
+        total += sum(attempt.bytes_kept for attempt, _ in skipped)
+        over_budget = budget_bytes > 0 and total > budget_bytes
+        if not over_budget and len(kept) <= max_kept:
+            break
+        oldest = kept.popleft()
+        removed = 0
+        left = []
+        for name in (oldest.capture, oldest.log):
+            path = out / name
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue  # already gone, or never written
+            try:
+                path.unlink()
+                removed += size
+            except OSError:
+                left.append(name)
+        if left:
+            skipped.append((oldest, left))
+            # Whatever did go is gone: its bytes leave this attempt's total
+            # and are counted as freed, so the budget stops charging the run
+            # for a file that is no longer on disk and cannot call itself
+            # stuck over bytes nobody holds. The attempt is not marked
+            # removed -- some of its files are still there, and a later call
+            # tries them again.
+            if removed:
+                oldest.bytes_kept = max(0, oldest.bytes_kept - removed)
+                removed_bytes += removed
+            # A file that is still there has not been given back to the
+            # filesystem, so this attempt stays in the accounting and the
+            # run says nothing it did not do. Earlier versions put it back
+            # after unlinking, which deleted the files and then re-targeted
+            # the same attempt for ever, leaving the budget disabled for the
+            # rest of the run.
+            record({"record": "capture_not_removed",
+                    "index": oldest.index, "files": left,
+                    "bytes": removed})
+            continue
+        # Marked whether or not there were bytes to free: an attempt whose
+        # files were empty, or never written, is still one fewer attempt's
+        # worth of files in the directory.
+        oldest.files_removed = True
+        removed_attempts += 1
+        removed_bytes += removed
+        record({"record": "capture_removed", "index": oldest.index,
+                "capture": oldest.capture, "log": oldest.log,
+                "bytes": removed,
+                "reason": ("the run's capture budget" if over_budget
+                           else f"more than {max_kept} attempts")})
+    # Back at the front, in order, so a later call tries them again.
+    kept.extendleft(reversed([attempt for attempt, _ in skipped]))
+    total = sum(attempt.bytes_kept for attempt in kept)
+    stuck: list = []
+    if budget_bytes > 0 and total > budget_bytes and skipped and not stuck_already:
+        # The files that are really still there, which is not always both of
+        # an attempt's: one of the two can go while the other will not.
+        stuck = sorted(name for _, left in skipped for name in left)
+        record({"record": "capture_budget_stuck", "bytes_kept": total,
+                "budget": budget_bytes, "files": stuck})
+        say(f"the capture budget cannot be kept: {total} bytes on disk against "
+            f"{budget_bytes}, and {len(stuck)} file(s) could not be removed; "
+            "stopping the run")
+    return removed_attempts, removed_bytes, stuck
 
 
 # ---------------------------------------------------------------------------
@@ -1222,13 +1557,27 @@ class Soak:
         self.capture_errors: list = []
         self.capture_error_count = 0
         self._seen_capture_errors: set = set()
+        # The same reasons with their numbers taken out, which is what says
+        # whether a restart storm has reported this failure before.
+        self._seen_error_wordings: set = set()
         self.attempts_forgotten = 0
+        # Finished attempts whose files are still on disk, oldest first. The
+        # budget reads these rather than `attempts`, so it never rescans the
+        # thousands a restart storm leaves (see add_attempt).
+        self._prunable: deque = deque()
         self.captures_removed = 0
         self.capture_bytes_removed = 0
         # Files the budget needs gone and cannot remove: the run stops.
         self.capture_budget_stuck: list = []
         self.progress_bytes = 0
         self.progress_records_dropped = 0
+        # A restart storm's collapsed records: what is waiting to become one
+        # `restart_storm` record, when the block began, and the totals a run
+        # reports (PROGRESS_FULL_RESTARTS).
+        self.storm_collapsed: dict = {}
+        self.storm_from = 0.0
+        self.storm_blocks = 0
+        self.progress_records_coarsened = 0
         # The closing stop-and-read, which no period is judged on.
         self.closing_error = None
         self.other_addresses: set = set()
@@ -1247,14 +1596,11 @@ class Soak:
         self.canceled = ""
         # When the schedule started, which is what the duration measures.
         self.window_start = 0.0
-        # The capture record clock, anchored to the host's (record_time).
-        self._record_anchor = None
-        self.record_reanchors = 0
-        self.record_drift_max_s = 0.0
+        # The capture record clock, anchored to the host's (RecordClock).
         # Half a window: a record placed further from the host's reading than
         # that could fall in the wrong window, which is what the comparison
         # counts.
-        self.reanchor_s = max(0.25, options.window_s / 2)
+        self.record_clock = RecordClock(max(0.25, options.window_s / 2))
         # Shared by every attempt, so restarts and file rotations cannot
         # multiply what the transcript costs (MAX_LOG_BYTES).
         self.transcript_budget = MAX_LOG_BYTES
@@ -1292,16 +1638,73 @@ class Soak:
 
     # -- bookkeeping ------------------------------------------------------
 
-    def record(self, entry: dict) -> None:
+    def record(self, entry: dict, *, always: bool = False) -> None:
         """Append one record to progress.jsonl and get it onto the disk.
 
         A long run is reviewed from the run directory while it is still
         going, and after whatever started it has gone, so each record is
         flushed and synced as it is written. They are rare -- one per sample
         and one per schedule period -- so the cost is not in the way.
+
+        A run in a restart storm is the exception, because there the records
+        of a restart arrive every few seconds and each one says what the
+        last said: those are collapsed into one record per block
+        (PROGRESS_FULL_RESTARTS). ``always`` is for a record the storm has
+        not made before, which is written whole however many have gone
+        before it.
+        """
+        kind = entry.get("record")
+        if not always and kind in STORM_RECORDS and self.in_restart_storm():
+            if not self.storm_collapsed:
+                self.storm_from = self.elapsed
+            self.storm_collapsed[kind] = self.storm_collapsed.get(kind, 0) + 1
+            self.progress_records_coarsened += 1
+            if sum(self.storm_collapsed.values()) >= PROGRESS_STORM_BLOCK:
+                self.flush_storm()
+            return
+        self.write_record(entry)
+
+    def in_restart_storm(self) -> bool:
+        """Is this run clearly restarting over and over?
+
+        The unplanned restarts alone, since those are the ones a board that
+        cannot capture produces: the probe's restart and the file rotations
+        are the run's own doing and are counted apart.
+        """
+        return self.restarts >= PROGRESS_FULL_RESTARTS
+
+    def flush_storm(self) -> None:
+        """Write the one record a block of a collapsed restart storm leaves.
+
+        Called at the end of a block and once more at the end of the run, so
+        what was collapsed is always in the file rather than only in the
+        summary. Counted only when it was really written: the file's byte
+        budget can be spent, and a summary claiming a block the file has not
+        got would be the one disagreement between them this is here to
+        prevent (the dropped record is in ``records_not_written``).
+        """
+        if not self.storm_collapsed:
+            return
+        collapsed, self.storm_collapsed = self.storm_collapsed, {}
+        written = self.write_record({
+            "record": "restart_storm",
+            "collapsed": dict(sorted(collapsed.items())),
+            "from_s": round(self.storm_from, 3),
+            "restarts": self.restarts,
+            "attempts": len(self.attempts) + self.attempts_forgotten,
+            "board_resets": self.board_resets,
+        })
+        if written:
+            self.storm_blocks += 1
+
+    def write_record(self, entry: dict) -> bool:
+        """Put one record in the file, inside the file's own budget.
+
+        True when it reached the file, which is what the storm's own
+        bookkeeping rests on.
         """
         if self.progress is None:
-            return
+            return False
         entry = {"at_s": round(self.clock() - self.start_mono, 3), **entry}
         line = json.dumps(entry, sort_keys=True) + "\n"
         # Bounded like the transcript, and for the same reason: a plan may
@@ -1311,7 +1714,7 @@ class Soak:
         # reports what it kept; summary.json carries the figures either way.
         if self.progress_bytes + len(line) > MAX_PROGRESS_BYTES:
             self.progress_records_dropped += 1
-            return
+            return False
         self.progress_bytes += len(line)
         self.progress.write(line)
         self.progress.flush()
@@ -1319,6 +1722,7 @@ class Soak:
             os.fsync(self.progress.fileno())
         except OSError:
             pass
+        return True
 
     @property
     def elapsed(self) -> float:
@@ -1370,39 +1774,8 @@ class Soak:
     # -- the readers ------------------------------------------------------
 
     def record_time(self, epoch: float) -> float:
-        """A capture record's time on this run's own timeline.
-
-        The time in a record is the board's clock, anchored once when the
-        capture's first packet arrived and advanced by the board's own
-        counter (libubertooth's ``now_ns_from_clk100ns``). Over hours that
-        walks away from the host clock -- the crystal's drift, and a whole
-        clock period if a quiet gap loses a wrap, which the fork itself warns
-        about -- and the windows this is compared in are seconds wide. So the
-        record clock is used for the resolution between records, anchored to
-        the host time the record was read, and re-anchored whenever the two
-        have drifted more than half a window apart. Every re-anchor is
-        counted and the largest drift is reported, so a run says what its
-        capture clock did rather than hiding it.
-
-        What this does not do is make the two readers independent in their
-        clocks: both end up on the host's timeline, which is the honest
-        position, because what the parity comparison is about is the decode
-        -- the printed line against the record's own bytes and CRC -- and
-        never was about whose clock was right.
-        """
-        host = self.clock() - self.start_mono
-        if self._record_anchor is None:
-            self._record_anchor = (epoch, host)
-            return host
-        anchor_epoch, anchor_host = self._record_anchor
-        at = anchor_host + (epoch - anchor_epoch)
-        drift = host - at
-        if abs(drift) > self.reanchor_s:
-            self.record_reanchors += 1
-            self.record_drift_max_s = max(self.record_drift_max_s, abs(drift))
-            self._record_anchor = (epoch, host)
-            return host
-        return at
+        """A capture record's time on this run's own timeline (RecordClock)."""
+        return self.record_clock.at(epoch, self.clock() - self.start_mono)
 
     def period_at(self, at: float) -> Period | None:
         """The period a sighting belongs to, by its own time.
@@ -1420,6 +1793,14 @@ class Soak:
         return None
 
     def read_text(self) -> None:
+        if self.capture is not None and self.capture.reader is not None:
+            # The transcript is written by the reader thread and pushed to
+            # the file on an interval; the interval is only reached when a
+            # line arrives, so the loop asks for it here as well. A channel
+            # that has gone quiet then leaves the file no more than
+            # LOG_FLUSH_S behind, and this costs one flush a poll at most
+            # however many lines arrived.
+            self.capture.reader.flush_now(after_s=LOG_FLUSH_S)
         for kind, at, address in self.sink.drain():
             if kind != "adva":
                 continue
@@ -1454,10 +1835,11 @@ class Soak:
             # later for a reason that is a symptom (the readers disagreed, or
             # no advertiser packet at all) on the very fault this test is
             # here to diagnose.
-            self._note_capture_error(error)
+            new = self._note_capture_error(error)
             say(f"capture {self.capture_index}: {error}")
             self.record({"record": "capture_unreadable",
-                          "index": self.capture_index, "reason": error})
+                          "index": self.capture_index, "reason": error},
+                         always=new)
         if records:
             # Any record at all is the capture working, whether or not
             # libbtbb printed an AdvA line for it: the liveness rule is about
@@ -1506,7 +1888,7 @@ class Soak:
     def start_capture(self, reason: str, *, planned: bool = True) -> None:
         self.note_capture_gap(planned)
         self.capture_index += 1
-        self._record_anchor = None
+        self.record_clock.restart()
         self.attempt_text_packets = 0
         self.attempt_rss_first = None
         self.attempt_rss_last = None
@@ -1583,14 +1965,7 @@ class Soak:
             self.transcript_dropped_lines += self.capture.reader.dropped_lines
         self.capture.close()
         self.read_text()
-        self.attempts.append(attempt)
-        if len(self.attempts) > MAX_HELD_ATTEMPTS:
-            # A board that died in the first hour of a three-day run is
-            # restarted every few seconds for the rest of it. The oldest
-            # records are in progress.jsonl; what is held here is what the
-            # summary and the pruning read.
-            self.attempts_forgotten += 1
-            del self.attempts[MAX_HELD_ATTEMPTS // 2]
+        self.add_attempt(attempt)
         if attempt.forced and not kill:
             self.forced_stops += 1
         if attempt.returncode is not None and not attempt.signalled:
@@ -1605,105 +1980,73 @@ class Soak:
             # cannot be read to its end. After a kill it is ordinary.
             reason = (f"{attempt.capture} ends in {attempt.partial_tail_bytes} "
                       "bytes of an incomplete record")
-            self._note_capture_error(reason)
+            new = self._note_capture_error(reason)
             say(f"capture {attempt.index}: {reason}")
             self.record({"record": "capture_unreadable", "index": attempt.index,
-                          "reason": reason})
+                          "reason": reason}, always=new)
         self.record(attempt.to_dict())
         self.capture = None
         self.prune_captures()
         return attempt
 
-    def _note_capture_error(self, reason: str) -> None:
+    def _note_capture_error(self, reason: str) -> bool:
         """Record a capture that could not be read, bounded like the rest.
 
         A run that keeps restarting would otherwise add one of these per
         attempt and copy all of them into the summary; what a reader needs is
-        that it happened, how often, and the first few reasons.
+        that it happened, how often, and the first few reasons. True when
+        this reason is one the run has not had before, which is what makes
+        it worth a record of its own inside a restart storm -- and that is
+        judged with the numbers taken out, because a reason names the
+        attempt's own capture file and the bytes it stopped at: the same
+        fault on every attempt of a storm would otherwise read as a new one
+        each time and be written whole, which is the one thing the
+        coarsening is for. The count and the first few reasons are the exact
+        ones, so a run still says how many attempts it happened to.
         """
         self.capture_error_count += 1
         self._seen_capture_errors.add(reason)
         if len(self.capture_errors) < MAX_CAPTURE_ERRORS:
             self.capture_errors.append(reason)
+        wording = ERROR_NUMBERS.sub("N", reason)
+        new = wording not in self._seen_error_wordings
+        self._seen_error_wordings.add(wording)
+        return new
+
+    def add_attempt(self, attempt: Attempt) -> None:
+        """Hold a finished attempt, for the summary and for the budget.
+
+        Two lists, because the two readers of an attempt are bounded
+        differently. ``attempts`` is what the summary and the verdict read,
+        and past MAX_HELD_ATTEMPTS its middle is forgotten: a board that died
+        in the first hour of a three-day run is restarted every few seconds
+        for the rest of it, and the oldest and newest are what a reader
+        needs (every attempt is in progress.jsonl). ``_prunable`` is what the
+        capture budget reads, holds only the attempts whose files are still
+        on disk, and is therefore already bounded by MAX_KEPT_ATTEMPTS and
+        by whatever could not be removed.
+
+        Keeping them apart does two things. The budget no longer rescans the
+        whole attempt list on every stop, and an attempt the summary has
+        forgotten still has its files counted and removed -- reading
+        ``attempts`` meant a forgotten attempt's capture was left on disk and
+        out of the accounting for the rest of the run.
+        """
+        self.attempts.append(attempt)
+        self._prunable.append(attempt)
+        if len(self.attempts) > MAX_HELD_ATTEMPTS:
+            self.attempts_forgotten += 1
+            del self.attempts[MAX_HELD_ATTEMPTS // 2]
 
     def prune_captures(self) -> None:
-        """Keep the newest captures inside the run's budget.
-
-        Only complete attempts are considered, so the capture being written
-        is never touched. Each removal is recorded with the file's size, so
-        the run says what it had and what it let go.
-        """
-        options = self.options
-        kept = [attempt for attempt in self.attempts if not attempt.files_removed]
-        # Attempts whose files would not go away: passed over rather than
-        # returned on, so one of them cannot disable the budget for the rest
-        # of a run of days.
-        skipped: list = []
-        over_budget = False
-        # Never the last one standing: the newest capture is the one a reader
-        # of a failed run wants, and "newest kept" is what this promises.
-        while len(kept) > 1:
-            total = sum(attempt.bytes_kept for attempt in kept + skipped)
-            over_budget = (options.capture_budget_bytes > 0
-                           and total > options.capture_budget_bytes)
-            if not over_budget and len(kept) <= MAX_KEPT_ATTEMPTS:
-                break
-            oldest = kept.pop(0)
-            removed = 0
-            left = []
-            for name in (oldest.capture, oldest.log):
-                path = options.out / name
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    continue  # already gone, or never written
-                try:
-                    path.unlink()
-                    removed += size
-                except OSError:
-                    left.append(name)
-            if left:
-                skipped.append(oldest)
-                # A file that is still there has not been given back to the
-                # filesystem, so this attempt stays in the accounting and
-                # the run says nothing it did not do. Earlier versions put
-                # it back after unlinking, which deleted the files and then
-                # re-targeted the same attempt for ever, leaving the budget
-                # disabled for the rest of the run.
-                self.record({"record": "capture_not_removed",
-                              "index": oldest.index, "files": left})
-                continue
-            # Marked whether or not there were bytes to free: an attempt
-            # whose files were empty, or never written, is still one fewer
-            # attempt's worth of files in the directory.
-            oldest.files_removed = True
-            self.captures_removed += 1
-            self.capture_bytes_removed += removed
-            self.record({"record": "capture_removed", "index": oldest.index,
-                          "capture": oldest.capture, "log": oldest.log,
-                          "bytes": removed,
-                          "reason": ("the run's capture budget"
-                                     if over_budget else
-                                     f"more than {MAX_KEPT_ATTEMPTS} attempts")})
-        # Over the budget with nothing left that can be removed. Recording it
-        # and carrying on would leave the run writing captures past the
-        # budget for however long it had left, which is the one thing the
-        # budget is there to prevent, so the run stops and fails instead.
-        total = sum(attempt.bytes_kept for attempt in kept + skipped)
-        if (options.capture_budget_bytes > 0
-                and total > options.capture_budget_bytes
-                and skipped and not self.capture_budget_stuck):
-            self.capture_budget_stuck = sorted(
-                name for attempt in skipped
-                for name in (attempt.capture, attempt.log))
-            self.record({"record": "capture_budget_stuck",
-                          "bytes_kept": total,
-                          "budget": options.capture_budget_bytes,
-                          "files": self.capture_budget_stuck})
-            say(f"the capture budget cannot be kept: {total} bytes on disk against "
-                f"{options.capture_budget_bytes}, and "
-                f"{len(self.capture_budget_stuck)} file(s) could not be removed; "
-                "stopping the run")
+        """Keep the newest captures inside the run's budget."""
+        removed, removed_bytes, stuck = prune_capture_files(
+            self._prunable, self.options.out, self.options.capture_budget_bytes,
+            self.record, stuck_already=bool(self.capture_budget_stuck))
+        self.captures_removed += removed
+        self.capture_bytes_removed += removed_bytes
+        if stuck:
+            self.capture_budget_stuck = stuck
 
     def rotate_if_large(self) -> None:
         """Start a new capture file once this one is big enough.
@@ -1782,6 +2125,7 @@ class Soak:
         """Read the watchdog record while no capture is running."""
         record, reason = read_watchdog(self.options.serial, tries)
         entry = {"record": "watchdog", "when": when, "reason": reason}
+        reported_a_reset = False
         if record is not None:
             change = watchdog.compare(self.watchdog_baseline, record)
             if self.watchdog_baseline is None:
@@ -1791,14 +2135,32 @@ class Soak:
                 # counters start again, so it is re-baselined there.
                 self.watchdog_baseline = record
             elif change.reset_itself:
+                reported_a_reset = True
                 self.watchdog_resets += change.new_resets
                 if len(self.watchdog_where) < MAX_WATCHDOG_WHERE:
-                    self.watchdog_where.append(record.last_reset_where())
+                    # A property, not a call: this read is the one place a
+                    # run names where the board reset itself, and calling it
+                    # ended the run with a TypeError on the one board state
+                    # it exists to report (#353). Where the firmware
+                    # recorded no place, it says so rather than reporting
+                    # the reader's phrase for an absence.
+                    self.watchdog_where.append(
+                        record.last_reset_where if record.last_reset_reported
+                        else "not reported")
+                # Re-baselined on what has just been counted, so each read
+                # reports what is new since the last one. `compare` measures
+                # the rise from the baseline, so leaving it where it was
+                # counted one self-reset again at every later read: a run
+                # that reads the record after every restart would report
+                # thousands of resets for the one the board really had.
+                self.watchdog_baseline = record
             entry["watchdog"] = record.to_dict()
         # Counted, not kept: a run that restarts for three days reads the
-        # record thousands of times, and progress.jsonl holds every one.
+        # record thousands of times, and progress.jsonl holds every one --
+        # bar the ones a restart storm collapses, and a read in which the
+        # board reported a reset of its own is never one of those.
         self.watchdog_reads += 1
-        self.record(entry)
+        self.record(entry, always=reported_a_reset)
 
     # -- sampling ---------------------------------------------------------
 
@@ -2529,9 +2891,7 @@ class Soak:
                           "file_limit_bytes": self.options.capture_limit_bytes,
                           "kept_attempts": MAX_KEPT_ATTEMPTS,
                           "budget_stuck_files": list(self.capture_budget_stuck)},
-            "progress": {"kept_bytes": self.progress_bytes,
-                          "budget_bytes": MAX_PROGRESS_BYTES,
-                          "records_not_written": self.progress_records_dropped},
+            "progress": self.progress_figures(),
             "transcript": {"kept_bytes": self.transcript_bytes,
                             "budget_bytes": MAX_LOG_BYTES,
                             "dropped_lines": self.transcript_dropped_lines,
@@ -2544,9 +2904,7 @@ class Soak:
                             "payload_matches": self.payload_matches},
             "detection": self.detection(),
             "off_quiet": self.off_quiet(),
-            "record_clock": {"reanchors": self.record_reanchors,
-                              "largest_drift_s": round(self.record_drift_max_s, 3),
-                              "reanchor_at_s": self.reanchor_s},
+            "record_clock": self.record_clock.to_dict(),
             "parity": self.parity(),
             # Sightings that fell between two periods, which belong to
             # neither: the schedule command's own latency sits there.
@@ -2574,6 +2932,22 @@ class Soak:
             "attempt_count": len(self.attempts),
             "canceled": self.canceled,
         }
+
+    def progress_figures(self) -> dict:
+        """What the progress file took, and what it had no room for.
+
+        Its own method because the summary reads it twice: once while it is
+        built, and once just before it is written, after the record that says
+        how the run came out. Otherwise a file whose budget was spent would
+        leave the summary understating by that last record exactly the
+        disagreement between the two that the end-of-run flush is for.
+        """
+        return {"kept_bytes": self.progress_bytes,
+                "budget_bytes": MAX_PROGRESS_BYTES,
+                "records_not_written": self.progress_records_dropped,
+                "records_coarsened": self.progress_records_coarsened,
+                "restart_storm_blocks": self.storm_blocks,
+                "coarsen_after_restarts": PROGRESS_FULL_RESTARTS}
 
     def attempt_summaries(self) -> list:
         """Every attempt, or the first and last of them when there are many."""
@@ -2605,6 +2979,10 @@ class Soak:
         return status
 
     def report(self, final: Attempt | None, verdict: str | None = None) -> int:
+        # Whatever a storm collapsed and has not yet become a record: in the
+        # file before the summary is written, so the progress file and the
+        # summary say the same thing however the run ended.
+        self.flush_storm()
         summary = self.summary()
         detection = summary["detection"]
         parity = summary["parity"]
@@ -2637,6 +3015,10 @@ class Soak:
         say(f"progress: {self.progress_bytes} of {MAX_PROGRESS_BYTES} bytes kept, "
             f"{self.progress_records_dropped} record(s) past the budget not "
             "written (every figure is in summary.json)")
+        if self.progress_records_coarsened:
+            say(f"progress: {self.progress_records_coarsened} restart record(s) "
+                f"collapsed into {self.storm_blocks} block record(s), the run "
+                f"having restarted more than {PROGRESS_FULL_RESTARTS} times")
         # The judged figure first and named as such: the text-only and
         # structural-only counts include every window a buffer split at a
         # boundary, which is exactly what the allowance does not apply to, so
@@ -2650,9 +3032,9 @@ class Soak:
         quiet = summary["off_quiet"]
         say(f"off periods: {quiet['periods']} judged, {quiet['noisy']} still heard "
             f"more than {quiet['settle_s']:g}s in (allowance {quiet['allowance']})")
-        say(f"record clock: {self.record_reanchors} re-anchor(s), largest drift "
-            f"{self.record_drift_max_s:.3f}s (re-anchored past "
-            f"{self.reanchor_s:g}s)")
+        say(f"record clock: {self.record_clock.reanchors} re-anchor(s), largest "
+            f"drift {self.record_clock.drift_max_s:.3f}s (re-anchored past "
+            f"{self.record_clock.reanchor_s:g}s)")
         say(f"gaps: longest {gaps['structural_max_s']}s structural, "
               f"{gaps['text_max_s']}s text, limit {self.options.max_gap_s:g}s, "
               f"{gaps['periods_over_limit']} period(s) over it (allowance "
@@ -2697,6 +3079,13 @@ class Soak:
         # artifact of a run of days has to say how it came out.
         summary["verdict"] = verdict
         summary["problems"] = list(self.problems)
+        # The record that says how the run came out goes in the progress file
+        # first, so the figures the summary carries about that file count it
+        # too: a reader of a run whose progress budget was spent can then
+        # reconcile the file with the summary exactly.
+        self.record({"record": "finished", "verdict": verdict,
+                      "problems": list(self.problems)})
+        summary["progress"] = self.progress_figures()
         # Written beside and renamed into place: a canceled run has about
         # two seconds before the harness kills it, and a truncate-then-write
         # interrupted in the middle would leave an empty file where the one
@@ -2706,8 +3095,6 @@ class Soak:
         beside.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
                           encoding="utf-8")
         os.replace(beside, final_path)
-        self.record({"record": "finished", "verdict": verdict,
-                      "problems": list(self.problems)})
         for problem in self.problems:
             say(f"FAIL: {problem}")
         say(f"SOAK VERDICT: {verdict}")

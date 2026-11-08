@@ -10,8 +10,9 @@ rather than symbols -- the access address, the PDU header, the payload and the
 CRC -- so a fixture is written from the Bluetooth Core specification's own
 encoding and the decode is known in advance.
 
-This module builds two such files. Nothing in either was received over the
-air: every address, identifier, and parameter below is made up here.
+This module builds three such files. Nothing in any of them was received over
+the air: every address, identifier, parameter, and level below is made up
+here.
 
 ``connection`` is a promiscuous capture of one connection. It holds the five
 parameter records promiscuous mode sends as it works out which connection it
@@ -29,12 +30,21 @@ libbtbb reads the identifier out of the field and names the company
 three pin both the table and the wording for an identifier that is not in it
 (SqueakyFloors/libbtbb#75 and SqueakyFloors/libbtbb#128).
 
+``levels`` is that same advertisement three times over, at three of the
+board's readings: two the board can measure, which have to come out as two
+different figures, and one at the top of the radio's scale, where there is no
+figure to report and the tool's line says ``none``.
+
 A transition step runs ``python <this file> ...`` as an ordinary logged
-command. It imports only the standard library, so it runs from any working
+command. It imports only the standard library, except for the one check that
+reads a capture file back, which reaches for
+``ubertooth_harness.advcapture`` when it runs. So it runs from any working
 directory, and prints summaries only:
 
-    python btlereplay.py fixture PATH [--variant connection|advertising]
-    python btlereplay.py dump-check DUMP FIXTURE [--variant V]
+    python btlereplay.py fixture PATH
+        [--variant connection|advertising|levels]
+    python btlereplay.py dump-check DUMP FIXTURE
+    python btlereplay.py level-check CAPTURE
     python btlereplay.py files DIR
 """
 
@@ -106,16 +116,66 @@ ORIGINAL_COMPANY = (0x0002, "Intel Corp.")     # in the table from the start
 # reserves for internal use, so this one stays unassigned.
 UNASSIGNED_COMPANY = (0xF0F0, "not assigned")
 
-VARIANTS = ("connection", "advertising")
+VARIANTS = ("connection", "advertising", "levels")
+
+# --- the levels the `levels` fixture carries ---------------------------------
+#
+# The host turns the board's raw reading into dBm with a piece-wise model of
+# the radio's curve, and the top of that curve is flat: every reading from
+# RSSI_CEILING_RAW up gives 0 dBm, so the figure cannot say which reading it
+# came from. A packet read there is not measured, and the tool's own line
+# says so with the word `none` while the record keeps the figure, having no
+# way to say otherwise (fork SqueakyFloors/ubertooth#1192, #1198).
+#
+# So three records: two readings the board can measure, which must come out
+# as two different figures -- a level latched from an earlier packet would
+# report one (fork SqueakyFloors/ubertooth#867) -- and one at the ceiling,
+# whose line reads `none`.
+RSSI_CEILING_RAW = 35
+# status bits of usb_pkt_rx (ubertooth_interface.h): the noise byte holds an
+# estimate, and the average is this packet's own power.
+NOISE_ESTIMATE = 0x40
+SIGNAL_VALID = 0x80
+# (raw average, raw noise or None) of each record, loudest last.
+LEVEL_READINGS = ((-20, -60), (10, None), (RSSI_CEILING_RAW, None))
+
+
+def rssi_to_dbm(rssi: int) -> int:
+    """The dBm figure the host's model of the CC2400 gives this reading.
+
+    cc2400_rssi_to_dbm() in the fork's callback, in C arithmetic: integer
+    division truncates toward zero, which the two sloped parts rely on.
+    """
+    if rssi < -48:
+        return -120
+    if rssi <= -45:
+        return 6 * (rssi + 28)
+    if rssi <= 30:
+        return int(99 * (rssi - 62) / 110)
+    if rssi < RSSI_CEILING_RAW:
+        return int(60 * (rssi - RSSI_CEILING_RAW) / 11)
+    return 0
+
+
+def expected_levels() -> list[tuple[int, int | None, str]]:
+    """(signal dBm, noise dBm or None, printed level) of each levels record."""
+    out = []
+    for raw, noise in LEVEL_READINGS:
+        signal = rssi_to_dbm(raw)
+        measured = None if noise is None else rssi_to_dbm(noise)
+        out.append((signal, measured,
+                    "none" if raw >= RSSI_CEILING_RAW else str(signal)))
+    return out
 
 
 def record(host_time: int, clk100ns: int, pkt_type: int, data: bytes,
-           channel: int) -> bytes:
+           channel: int, *, status: int = 0, rssi_avg: int = -70,
+           rssi_noise: int = 0) -> bytes:
     """One dump record: the host time it arrived, then the usb_pkt_rx."""
     if len(data) > DATA_LEN:
         raise ValueError(f"{len(data)} bytes of data, at most {DATA_LEN}")
-    header = struct.pack("<BBBBIbbbB2x", pkt_type, 0, channel, 0, clk100ns,
-                         -40, -90, -70, 1)
+    header = struct.pack("<BBBBIbbbBBx", pkt_type, status, channel, 0, clk100ns,
+                         -40, -90, rssi_avg, 1, rssi_noise & 0xFF)
     return (struct.pack(">I", host_time) + header + data
             + bytes(DATA_LEN - len(data)))
 
@@ -215,11 +275,31 @@ def _advertising_records(base_time: int) -> list[bytes]:
                    ADVERTISING_CHANNEL)]
 
 
+def _levels_records(base_time: int) -> list[bytes]:
+    """The same ADV_IND at three readings, quietest first.
+
+    Every record carries SIGNAL_VALID, so the packet's own average is its
+    level, and the one with a background estimate carries NOISE_ESTIMATE
+    too: without the bit the noise byte means nothing and the record's noise
+    flag comes out clear.
+    """
+    out = []
+    for index, (raw, noise) in enumerate(LEVEL_READINGS):
+        status = SIGNAL_VALID | (0 if noise is None else NOISE_ESTIMATE)
+        out.append(record(base_time + index, CLK100NS_STEP * (index + 1),
+                          LE_PACKET, adv_ind(), ADVERTISING_CHANNEL,
+                          status=status, rssi_avg=raw,
+                          rssi_noise=0 if noise is None else noise))
+    return out
+
+
 def fixture_bytes(base_time: int, variant: str = "connection") -> bytes:
     if variant == "connection":
         return b"".join(_connection_records(base_time))
     if variant == "advertising":
         return b"".join(_advertising_records(base_time))
+    if variant == "levels":
+        return b"".join(_levels_records(base_time))
     raise ValueError(variant)
 
 
@@ -242,6 +322,9 @@ def expected_packets(base_time: int,
     """
     if variant == "advertising":
         return [(base_time, 2402 + ADVERTISING_CHANNEL, ADVERTISING_AA)]
+    if variant == "levels":
+        return [(base_time + index, 2402 + ADVERTISING_CHANNEL, ADVERTISING_AA)
+                for index in range(len(LEVEL_READINGS))]
     if variant != "connection":
         raise ValueError(variant)
     first = base_time + len(PARAMETERS)
@@ -264,6 +347,37 @@ PACKET_LINE = re.compile(
     r"^systime=(?P<systime>\d+) freq=(?P<freq>\d+) "
     r"addr=(?P<addr>[0-9a-f]{8}) delta_t=-?\d+\.\d{3} ms rssi=-?\d+$"
 )
+# The same line with the level read out, and the word allowed: the `levels`
+# fixture is the one that carries a reading the board cannot measure.
+LEVEL_LINE = re.compile(
+    r"^systime=(?P<systime>\d+) freq=(?P<freq>\d+) "
+    r"addr=(?P<addr>[0-9a-f]{8}) delta_t=-?\d+\.\d{3} ms "
+    r"rssi=(?P<rssi>-?\d+|none)$"
+)
+
+
+def levels_check(expected: list[str]):
+    """A Step.output_check: these level columns, in this order.
+
+    ``none`` is matched as the word, so a build that printed a figure where
+    the board had no measurement -- 0 dBm, which is what the low-energy
+    column used to print -- fails rather than passing as "very loud".
+    """
+    def check(output) -> str:
+        seen = [match["rssi"]
+                for match in map(LEVEL_LINE.match, text_lines(output)) if match]
+        if seen == expected:
+            return ""
+        if len(seen) != len(expected):
+            return (f"{len(seen)} packet lines with a level column, expected "
+                    f"{len(expected)}")
+        for index, (got, want) in enumerate(zip(seen, expected)):
+            if got != want:
+                return (f"packet line {index + 1} reports rssi={got}, expected "
+                        f"rssi={want}")
+        return "level columns differ"  # pragma: no cover
+
+    return check
 
 
 def connection_lines() -> list[str]:
@@ -346,13 +460,20 @@ def lines_check(expected: list[str]):
     return check
 
 
-def packets_check(expected: list[tuple[int, int, int]]):
-    """A Step.output_check: exactly these packet lines, in this order."""
+def packets_check(expected: list[tuple[int, int, int]], *, line=None):
+    """A Step.output_check: exactly these packet lines, in this order.
+
+    ``line`` is the pattern a packet line is read with, which is
+    PACKET_LINE's figure-only level column unless a caller says otherwise:
+    the ``levels`` fixture is the one whose lines may read ``none`` there,
+    and it passes LEVEL_LINE.
+    """
+    pattern = PACKET_LINE if line is None else line
 
     def check(output) -> str:
         seen = [
             (int(m["systime"]), int(m["freq"]), int(m["addr"], 16))
-            for m in map(PACKET_LINE.match, text_lines(output)) if m
+            for m in map(pattern.match, text_lines(output)) if m
         ]
         if seen == expected:
             return ""
@@ -428,6 +549,50 @@ def dump_check(dump: Path, fixture: Path) -> str:
     return "records differ"  # pragma: no cover
 
 
+def level_record_check(capture: Path) -> str:
+    """'' when a capture of the levels fixture carries the right power fields.
+
+    Each record's signal is the dBm the host's model gives the reading that
+    record was written with, which pins the record against the line beside
+    it: where the line reads ``none`` the record still carries the figure,
+    because a record has no way to say a level was not measured. The noise
+    figure and the flag word are checked by the same rules every low-energy
+    capture is held to (advcapture.level_problems).
+
+    The capture reader is imported here rather than at the top of the file:
+    reaching it through the package costs about half a second of imports,
+    which the other commands this module runs -- writing a fixture, listing a
+    directory -- have no use for, and a replay case runs several of those for
+    every one of these.
+    """
+    if __package__ in (None, ""):  # run as a script
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from ubertooth_harness import advcapture
+
+    try:
+        _format, link_type, records = advcapture.read_records(capture.read_bytes())
+    except (OSError, advcapture.CaptureError) as error:
+        return str(error)
+    if link_type != advcapture.LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR:
+        return (f"link type {link_type}, not "
+                f"{advcapture.LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR}")
+    found = advcapture.levels(records)
+    problems = advcapture.level_problems(found)
+    want = expected_levels()
+    if len(found) != len(want):
+        problems.append(f"{len(found)} records, expected {len(want)}")
+    for record, (signal, noise, _printed) in zip(found, want):
+        if record.signal_power != signal:
+            problems.append(f"record {record.index}: signal "
+                            f"{record.signal_power} dBm, expected {signal}")
+        if noise is None:
+            continue
+        if record.noise_power != noise:
+            problems.append(f"record {record.index}: noise "
+                            f"{record.noise_power} dBm, expected {noise}")
+    return "; ".join(problems)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="btlereplay.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -440,7 +605,27 @@ def main(argv: list[str] | None = None) -> int:
     dump.add_argument("fixture", type=Path)
     files = sub.add_parser("files", help="list a directory's files and sizes")
     files.add_argument("directory", type=Path)
+    level = sub.add_parser(
+        "level-check",
+        help="the levels fixture's own power figures reached the capture")
+    level.add_argument("capture", type=Path)
     args = parser.parse_args(argv)
+
+    if args.command == "level-check":
+        if not args.capture.exists():
+            print(f"BLE level problem: {args.capture} does not exist")
+            return 1
+        for signal, noise, printed in expected_levels():
+            print(f"BLE level: signal {signal} dBm, noise "
+                  + ("none" if noise is None else f"{noise} dBm")
+                  + f", line reads rssi={printed}")
+        problem = level_record_check(args.capture)
+        if problem:
+            print(f"BLE level problem: {problem}")
+            return 1
+        print(f"BLE levels: {len(expected_levels())} records carry the figures "
+              "their readings call for")
+        return 0
 
     if args.command == "fixture":
         base = args.base_time

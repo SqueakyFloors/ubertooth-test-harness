@@ -115,14 +115,14 @@ def _serial_widths(value: str) -> set[str]:
     """The other widths one numeric serial is written in.
 
     A J-Link serial reaches the run in two spellings of the same number: as
-    the registry holds it, which is how `nrfutil device list` prints it
-    (``001050210121`` on this bench), and as a number, because nrfdk.py takes
-    it as one and preflight.py puts it on the command line with the leading
-    zeros gone (``1050210121``). A DK's by-id name pads it to 12 digits
-    again. ``--redact-serials`` has to mask each of them, or the serial
-    survives in the transcript. Any numeric serial is treated this way, so a
-    numeric bridge serial gains a padded width nothing writes, which costs
-    nothing; one written in hex is masked as the registry holds it.
+    the registry holds it, padded to 12 digits (``000123456789``), and as a
+    number, because nrfdk.py takes it as one and preflight.py puts it on the
+    command line with the leading zeros gone (``123456789``). A DK's by-id
+    name pads it to 12 digits again. ``--redact-serials`` has to mask each of
+    them, or the serial survives in the transcript. Any numeric serial is
+    treated this way, so a numeric bridge serial gains a padded width nothing
+    writes, which costs nothing; one written in hex is masked as the registry
+    holds it.
     """
     if not value.isdigit():
         return set()

@@ -2111,26 +2111,35 @@ with no Ubertooth and no USB at all.
 
 **Theory of operation.** This is the one receive test with a known answer for
 every packet, because the harness writes the input. The fixture
-([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) carries two LAPs, chosen
-errors, chosen channels, chosen host times, chosen distances from a CLKN
-edge, and decoy records, so the expected output is computed rather than
+([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) carries four piconets,
+chosen errors, chosen channels, chosen host times, chosen distances from a
+CLKN edge, and decoy records, so the expected output is computed rather than
 pattern-matched: which packet lines appear, in what order, with which systime
 and which clock offset, which ones a filter drops, and how many packets
 reach a capture file. That makes it possible to check decode behavior
 that no live run can pin down, and to run the whole thing in CI.
 
+The four piconets each carry something the others cannot. The first sends
+POLLs and one DH1, so its address part decodes from a payload CRC. The second
+sends ID packets only, which have no header at all, so its address part never
+decodes. The third's address part is `0x00`, which is an address like any
+other and has to start the clock search like any other. The fourth carries
+the payload types the bench does not reliably produce: an AUX1, a DV, an EV3,
+and a DH3 claiming a payload longer than one capture bank.
+
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
 **Commands.** No board. `rxreplay.py` writes the synthetic input and checks
 what came back, `stdoutdest.py` runs a command with its standard output and
-extra descriptors pointed where the case needs them, and `capturefile.py` and
-`rxdump.py` read the capture files:
+extra descriptors pointed where the case needs them, and `capturefile.py`,
+`rxdump.py` and `bredrrecord.py` read the capture files:
 
 ```text
 rxreplay.py fixture <case dir>/replay.bin --variant <full|empty|truncated> --base-time <epoch>
 ubertooth-rx -i <case dir>/replay.bin                      # the bare decode
 ubertooth-rx -i <case dir>/replay.bin -l <LAP>             # and -l -u <UAP>
 ubertooth-rx -i <case dir>/replay.bin -l <LAP> -u <UAP>
+ubertooth-rx -i <case dir>/replay.bin -l <LAP> -u <UAP> -q <case dir>/payloads.pcap
 ubertooth-rx -i <case dir>/replay.bin -e 0
 ubertooth-rx -i <case dir>/replay.bin -s                   # the default sweep
 ubertooth-rx -i <case dir>/replay.bin -z                   # the survey
@@ -2159,17 +2168,23 @@ bredrrecord.py <case dir>/replay.pcapng --lap <LAP> --reference-lap <LAP> \
 rxreplay.py dump-check <case dir>/replay.dump <case dir>/replay.bin
 rxreplay.py files <case dir>                                # the directory as it is
 rxreplay.py only-fixture <case dir> replay.bin --base-time <epoch>
-rxdump.py      <case dir>/replay.dump full --min-records 11 --types br
+rxdump.py      <case dir>/replay.dump full --min-records 19 --types br
 capturefile.py --packets <case dir>/replay.pcap
+bredrrecord.py <case dir>/payloads.pcap --lap <LAP> --reference-lap <LAP> \
+    --reference-uap <UAP> --min-packets <n> \
+    --require-types AUX1,DV/3-DH1,HV3/EV3/3-EV3,DH3/3-DH3 \
+    --require-transports ACL,SCO,eSCO --min-with-payload 3 --min-crc-valid 2 \
+    --max-payload-bytes 34 --max-access-code-errors 0
 ```
 
-**Expected outcome.** Smoke runs 13 cases (12 where there is no `/proc`): decode every LAP in the fixture,
+**Expected outcome.** Smoke runs 15 cases (14 where there is no `/proc`): decode every LAP in the fixture,
 derive the UAP with `-l`, read every field of a filtered capture's records,
 replay into PCAPNG and into PCAP (link type 255, the
 fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
-and `-s` decoding the same as without it, with `-h` listing `-s` as the
-default.
+`-s` decoding the same as without it with `-h` listing `-s` as the default,
+the payload types read out of a capture, and `-u 00` starting the clock
+search.
 
 **The capture's own records, with a known answer.** One case replays with
 `-l <LAP>` into a PCAPNG and then reads every field of every record with the
@@ -2260,6 +2275,46 @@ command line does not print, and the candidate count is matched as `<n>`
 rather than as a figure of the library's own. The `-u` case is where offset 0
 is still required.
 
+**The payload types, and a payload longer than the bank.** One smoke case
+follows the fourth piconet (`-l <LAP> -u <UAP> -q`) and reads the capture it
+writes record by record
+([`bredrrecord.py`](../ubertooth_harness/bredrrecord.py)), which is how the
+payload decoders libbtbb
+[#28](https://github.com/SqueakyFloors/libbtbb/pull/28) added are exercised
+on packets the bench's own traffic does not produce. Four records, each for
+one reason:
+
+- the AUX1 is the one type with a payload header and no CRC after the body
+  (Core, Vol 2, Part B, Section 6.5.4.7), so its length field has to be read
+  without counting two bytes that are not there, and a record that reports a
+  checked CRC on one fails;
+- the DV's record holds its data field and not the voice field ahead of it,
+  so its length field and its CRC land on the right bytes, and its transport
+  is the synchronous one;
+- the EV3's length is in no field at all and is found by trying the CRC at
+  each, and its transport is the extended synchronous one;
+- the DH3 claims a payload no 400-symbol bank can hold, so the decoder must
+  report no payload rather than decode one out of whatever followed the
+  packet in the bank. A decoder told it had ten banks decoded a payload and a
+  CRC verdict out of the buffer's zeros
+  ([ubertooth#754](https://github.com/SqueakyFloors/ubertooth/pull/754)).
+
+The case requires one record of each type, the ACL, SCO and eSCO transports
+between them, three records carrying a payload, two passing a CRC, and no
+record carrying more payload than one bank holds -- 34 bytes, the 400 symbols
+of a bank less the 122 the access code and header take, where a payload
+carries no error correction.
+
+**A piconet whose address part is `0x00`.** The other new smoke case states
+`-u 00` for the third piconet and requires the CLK6 note at offset 0 and the
+start of the CLK1-27 search, as for any other address part. A piconet given
+`0x00` read it as an absence and never reached the clock search
+([libbtbb#135](https://github.com/SqueakyFloors/libbtbb/pull/135), taken on
+by the fork in
+[ubertooth#1125](https://github.com/SqueakyFloors/ubertooth/pull/1125));
+every other case states the first piconet's `0x6b`, which took the same
+branch before and after.
+
 Six of the smoke cases are about where a capture goes
 ([`stdoutdest.py`](../ubertooth_harness/stdoutdest.py) puts the descriptors
 where the case needs them, since a harness step otherwise runs with the
@@ -2278,10 +2333,12 @@ a `-d` that names the dump `-i` is replaying is refused as
 six ends by stating the whole directory, with the input's SHA-256, so a
 refusal that truncated or rewrote the file it was reading fails.
 
-Comprehensive runs 31 (30 where there is no `/proc`), adding the survey
-listing of both piconets
-(the two addresses on standard output and the `Survey Results` heading on
-standard error),
+Comprehensive runs 33 (32 where there is no `/proc`), adding the survey
+listing of every piconet in the fixture
+(the four addresses on standard output and the `Survey Results` heading on
+standard error, with the address part shown for the three the survey settled
+one for -- `00` among them, as an address and not an absence -- and `??` for
+the ID-packet piconet),
 a LAP filter, a correct and a wrong `-u`, `-e 0` dropping the packet with an
 error, a `-d` dump compared byte for byte with the fixture, a filtered PCAP
 whose records are read field by field as above,
@@ -2313,7 +2370,7 @@ names and nothing can refuse by then, exits 0 with
 lost` and leaves the fixture's own records at the start of the file. That
 last case reads its own standard output back as a file, so it holds while the
 tool's standard output stays buffered until it exits, which it does for the
-eleven packet lines the fixture decodes to; a report long enough to flush
+nineteen packet lines the fixture decodes to; a report long enough to flush
 part-way through would be read as a record cut short and the run would exit 1
 instead of 0.
 
@@ -2355,7 +2412,7 @@ PDU header, the payload and the CRC -- so the dump is written field by field
 from the Bluetooth Core specification's encoding and the expected report is
 computed from the same constants.
 
-Two dumps. The first is a promiscuous capture of one connection: the five
+Three dumps. The first is a promiscuous capture of one connection: the five
 parameter records promiscuous mode sends as it works out which connection it
 has found, the `CONNECT_IND` that opened that connection on an advertising
 channel, and two data packets on the connection's own access address. The
@@ -2369,17 +2426,22 @@ had from the start, and one it has never assigned, which libbtbb reports as
 `not assigned`
 ([libbtbb#128](https://github.com/SqueakyFloors/libbtbb/pull/128)). The other
 reader of that table is `ubertooth-scan -x`, which needs BlueZ, a board and a
-third idle Classic device, so the dump is the cheap way to it.
+third idle Classic device, so the dump is the cheap way to it. The third is
+that same advertisement at three of the board's readings, which is the one
+way to the level a packet is reported at without a radio.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
 **Commands.** No board. `btlereplay.py` writes the synthetic dumps, computes
-the report each one should produce, and reads back the records a replay saved:
+the report each one should produce, and reads back the records and the levels
+a replay saved:
 
 ```text
-btlereplay.py fixture <case dir>/<name>.bin --variant <connection|advertising> --base-time <epoch>
+btlereplay.py fixture <case dir>/<name>.bin --variant <connection|advertising|levels> --base-time <epoch>
 ubertooth-btle -p -R <case dir>/connection.bin             # the promiscuous dump
 ubertooth-btle -n -R <case dir>/advertising.bin            # the advertising one
+ubertooth-btle -n -R <case dir>/levels.bin -q <case dir>/levels.pcap
+btlereplay.py level-check <case dir>/levels.pcap
 ubertooth-btle -p -R <case dir>/connection.bin -d <case dir>/again.bin
 btlereplay.py dump-check <case dir>/again.bin <case dir>/connection.bin
 ubertooth-btle -R <case dir>/connection.bin                # refused: no mode
@@ -2387,7 +2449,7 @@ ubertooth-btle -h
 ```
 
 
-**Expected outcome.** Smoke runs two cases. The promiscuous replay
+**Expected outcome.** Smoke runs three cases. The promiscuous replay
 (`-p -R <dump>`) begins by requiring `ubertooth-btle -h` to list `-R` and
 `-d`, so a build too old to have them fails saying which option is missing
 rather than on a refusal the checks cannot parse. It must then print the
@@ -2403,7 +2465,28 @@ registered companies and say `not assigned` for the third, in that order. A
 missing or reworded line fails the case, and the step names the first line it
 could not find.
 
-Comprehensive adds two. A replay dumping with `-d` must write the dump it
+**The level a packet is reported at.** The third smoke case replays the three
+readings into a PCAP and checks both the lines and the records. The two
+readings the board can measure must come out as two different figures: the
+level used to be the loudest reading of the last ten records of the channel,
+so a quiet packet after a loud one read as loud as the loud one
+([ubertooth#867](https://github.com/SqueakyFloors/ubertooth/pull/867)). The
+third reading is at the top of the radio's scale, where every reading gives
+the same dBm figure and so none of them is a measurement of the packet: the
+line must read `rssi=none`
+([ubertooth#1192](https://github.com/SqueakyFloors/ubertooth/pull/1192),
+[#1198](https://github.com/SqueakyFloors/ubertooth/pull/1198)). The word is
+matched as the word, so a build printing 0 dBm there -- which the low-energy
+column did until those changes -- fails rather than passing as "very loud".
+The capture's records are then required to carry the dBm figure the host's
+model of the radio gives each of those readings, 0 dBm included where the
+line said `none`: a record has no field for "not measured", and that
+asymmetry between the line and the record is what the case pins. The noise
+flag must be set on the one record written with a background estimate and
+clear on the two without, which is the rule every low-energy capture this
+harness reads is held to (below).
+
+Comprehensive adds two more. A replay dumping with `-d` must write the dump it
 read back byte for byte, the parameter records included, since a `-d` that
 dropped them would lose what a promiscuous capture was for. And a replay with
 no major mode must be refused with exit 1 and decode nothing:
@@ -3231,6 +3314,35 @@ file holds none of the DK's packets. Every case leaves the DK idle in the
 advertiser role with its boot settings and restores the Ubertooth's channel,
 squelch, and LEDs.
 
+**Every record's power fields.** Both low-energy capture readers decode the
+10-byte pseudo-header libbtbb writes ahead of each packet, and hold its power
+fields to the rules the writers follow whatever was on the air
+(`lell_pcap_append_packet()` and `lell_pcapng_append_packet()`, and the
+figures the fork hands them): every record is dewhitened, carries a signal
+figure, and carries a count of its access-address errors; the noise flag is
+set exactly when the noise figure is below the signal, which is how the
+writers decide it, so a board with no background estimate for the channel --
+given a figure no signal can reach -- comes out with the flag clear; each
+figure the flags call a measurement is inside the -120 to 0 dBm the host's
+model of the radio can produce; and the reference access address flag is set
+exactly when that field holds an address, which is what the flag is defined
+to say. The capture's signal and noise spread, with how many distinct figures
+each carries, is reported beside the counts.
+
+A record has no field for "the board could not measure this": a reading at
+the top of the radio's scale is recorded as 0 dBm, and it is the tool's own
+line that says `rssi=none`
+([ubertooth#1192](https://github.com/SqueakyFloors/ubertooth/pull/1192),
+[#1198](https://github.com/SqueakyFloors/ubertooth/pull/1198)). That
+asymmetry, and the two figures a packet's own level must differ by
+([#867](https://github.com/SqueakyFloors/ubertooth/pull/867)), are pinned
+deterministically by [BLE replay](#ble-replay), which writes the readings
+itself; what is checked here is that a live capture's records are internally
+consistent. No floor is put on how much a live capture's levels vary: that is
+measured for Classic (see
+[Classic capture record fields](#classic-capture-record-fields)) and **not
+established** for these two tests.
+
 **Known limits.** The minimum share is a floor a working bench clears
 comfortably, not an expected capture rate, and it is bench-specific: a weaker
 link or a noisier room can fail it without anything being wrong with the code.
@@ -3322,6 +3434,14 @@ to be bound distinctly, which is the hardware question rather than an RF one.
 `weaklink.CHECKS` and the plan files are the live record of which attenuation
 this test has figures for and what any remaining entry waits on; see "What
 attenuating a receiver is for" above for what the attenuation is and is not.
+
+Every record's power fields are held to the same rules as in
+[Capture known BLE advertiser](#capture-known-ble-advertiser), which are the
+writers' own and so apply to a followed connection too: a connection's
+packets carry no reference access address, because that field is the address
+configured into the tool and the tool caught them on a connection it had
+synchronized with, so the flag is clear there and set on the advertising-channel
+packets that carry `8e89bed6`.
 
 **Known limits.** The packet counts are floors a working follow clears, not
 expected counts: of 18 packets in one followed connection measured on the
@@ -3750,7 +3870,36 @@ of lines matching the older "capture died" wording (`libUSB Error`, `could
 not open Ubertooth device`) is reported too, which is the compatibility note
 [ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703) asks
 for: the stable signal now is the exit status plus one documented `error:`
-line, and a run says whether the old one would have fired at all.
+line, and a run says whether the old one would have fired at all. A board
+that resets itself is counted once for each reset it reports, however many
+reads follow: each read is compared with the one before it, so a run that
+reads the record after every restart of a flapping capture reports the
+resets the board had rather than one for every time it was asked.
+
+**No file in the run directory grows with the length of the run, and the
+progress file stays worth reading.** The captures have a per-file limit and
+a budget for the run, the tool's transcript has a budget, and
+`progress.jsonl` has one too. A byte budget alone is a poor answer for that
+last one, though, because of the way a long run goes wrong: a board that
+stops capturing in the first hour of a three-day run is restarted every few
+seconds for the rest of it, and each restart writes the same handful of
+records again — the attempt that died, the capture that followed, the
+watchdog read between them. A quarter of a million records all saying one
+thing answers no question the first few hundred and a count do not, and it
+would reach the budget and lose whatever came after. So past 200 unplanned
+restarts those records are collapsed: one `restart_storm` record per 100 of
+them, carrying what it stood for and the counts the run had reached, and the
+last block is written when the run reports, so the progress file and
+`summary.json` say the same thing — bar a progress file whose byte budget is
+spent, which the summary says as well, since a block it had no room for is
+not counted as written. What the storm has not said before is
+still written whole — a read in which the board reported a reset of its own,
+and a capture that could not be read for a reason not seen yet, judged with
+the attempt's own file name and byte count taken out of it, so the same fault
+at every restart is one fault — and the schedule's own records, a period and
+a sample, are never collapsed, since
+they are what a reader follows even a failing run by. The summary reports how
+many records were collapsed, into how many blocks, and the threshold.
 
 **The restart probe.** With `restart probe: true` the driver kills the capture
 once, at the middle of the run, with SIGKILL and no stop sent to the board —
@@ -3834,6 +3983,252 @@ instead of counting as a missed detection. A run the harness kills outright
 holding the board for a moment; the case's own cleanup stops it. And the
 test needs two kinds of hardware and a flashable DK, so it cannot run
 anywhere the DK is absent.
+
+## Intermittent follow soak
+
+**What it does.** Runs one `ubertooth-btle -f` capture for as long as the plan
+asks, while two registered nRF52840 DKs cycle through the peripheral
+advertising, a connection the central makes and carries, and both going off
+the air. It reports whether the board found the advertiser each time it
+appeared, acquired the connection from its own CONNECT_IND and recorded its
+packets, stopped reporting both when the fixture went away, and found the
+device again on the next cycle — and it reads the board's watchdog record at
+planned checkpoints along the way.
+
+**Theory of operation.** This is the other half of the long-run question that
+[`BLE address parity soak`](#ble-address-parity-soak) leaves open. That one
+holds one state for its whole window: an advertiser going on and off while
+the board does nothing but listen, which is what asking whether the tool's
+text output still means what it meant needs. What it cannot ask
+is whether the board keeps up with the *radio state* changing under it, and
+that is what a service watching a real device meets: the device appears, it
+is connected to, the link is carried, the link drops, the device goes away,
+and later it is back. Each of those is a separate thing to get wrong, and a
+five-second capture of any one of them says nothing about the thousandth.
+
+So the cycle has three phases and the harness applies them one at a time:
+
+1. **advertising** — the peripheral advertises connectable and waits to be
+   connected, and nothing is connected, so the board is hunting and has to
+   find it;
+2. **connected** — the central connects to the peripheral and writes to it
+   for the whole phase, so the board has to acquire the connection from the
+   CONNECT_IND it saw and record the data packets on it;
+3. **absent** — the central disconnects and the peripheral stops advertising,
+   so the pair is off the air and the board has to stop reporting both.
+
+Every advertising phase is therefore a detection with a deadline, every
+connected phase a follow with a deadline, and every absent phase a silence
+with a known cause rather than an absence of evidence. And because every
+advertising phase after the first follows an absence, its first-sighting time
+*is* the reacquisition time: how long the board took to find a device that
+went away and came back. That is reported with its own distribution and not
+as a separate objective, because in this cycle it is the same population as
+detection.
+
+**The fixture is driven, not watched, and it reports on itself.** Each
+transition is a shell command to a DK, and the central's own counters are read
+at the start and the end of each connected phase. A phase whose command did
+not reach the board, whose central never reported itself connected inside
+`connect within`, or whose central wrote nothing over the phase is recorded as
+a **fixture failure** and left out of the verdict. That is what keeps the two
+possible meanings of an empty capture apart: a board that failed to follow,
+and a connection that never happened. Without it a flaky pair of DKs would
+read as a broken follow for three days.
+
+**Watchdog checkpoints.** `ubertooth-util -w` is a control read on the board
+the capture is holding, so it is never asked for beside a running capture.
+The planned way to get one is a checkpoint, taken at the start of an absent
+phase where the fixture is off the air anyway:
+
+- the capture is ended cleanly, SIGTERM then the term grace;
+- the run waits for the process to go and confirms the board answers a read,
+  which is what says it is idle and nothing else has it;
+- `ubertooth-util -U <serial> -w` is read;
+- the counters, and what rose since the last read, are recorded;
+- the next capture is started, in a file of its own.
+
+A checkpoint is classified as planned throughout: it is not a restart, not a
+recovery, and the phase it lands in is marked with a *planned* capture gap,
+exactly as a capture file rollover is. What **is** a failure is a checkpoint
+that could not do its job — a capture that had to be killed, a board that
+would not answer afterwards, or a board the next capture found still in a
+mode, which libubertooth warns about and which a clean stop leaves nothing of.
+
+**Counters belong to an interval, not to the run.** The record read before the
+run, at each checkpoint, after each unplanned restart, and at the end closes
+an **interval**: the stretch of the run since the previous read, with the
+phases and cycles it covered, the packets inside it, and every counter that
+rose — unrequested resets, capture transfer errors, the radio waits that gave
+up, and a new processor fault. The counters the board keeps are since
+power-on, so a single read at the end of a three-day run can say only that
+something happened sometime; what a reader needs is which hour it happened in,
+which is what the interval records give. Each one is in `progress.jsonl` as it
+is written, and the ones that moved a counter are in `summary.json`.
+
+**Checkpoints come at least two cycles apart**, and the catalog refuses a plan
+where they do not. A checkpoint interrupts the absent phase it lands in, so
+that phase is not judged; an interval of one cycle would interrupt every
+absent phase there was, and the run would fail saying the fixture's going away
+was never measured. With two, every other absent phase is untouched.
+
+**The absent phase is where half the cycle is checked.** A board that went on
+reporting the advertiser after `conn stop`, or went on following a connection
+the central had dropped, would meet every detection and acquisition objective
+while telling a service a device was still there. So in each judged absent
+phase, past a settle time for the packets already on the air and already in
+the tool's buffers, neither the peripheral's advertising nor a packet of the
+connection the previous phase made may still arrive. The two are counted
+apart, because they are different faults.
+
+**Timing relationships are checked before any board is leased.** The run holds
+one Ubertooth and two DKs for hours, so a plan whose figures contradict each
+other has to fail when the plan loads, not on the bench. The rules are the
+driver's (`followsoak.check_timings`), read through the same conversion the
+driver's own command line gets, so the plan is judged by what will really run:
+
+| Relationship | Why |
+|---|---|
+| `detect within` ≤ `advertising` | a phase must outlast its own detection deadline |
+| `presence window` × `presence windows` ≤ `advertising` | sustained presence has to fit |
+| `connect within` ≤ `acquire within` ≤ `connected` | a link allowed up after the follow deadline would miss it for the fixture's own slowness |
+| `absent` − `quiet after` ≥ 0.45 s | an absent phase needs a stretch long enough for a peripheral still advertising to have been heard in |
+| `detect within` ≤ `maximum gap` < `advertising` | a gap is measured inside one phase |
+| `liveness timeout` > `connected` + `absent` + `detect within` | the cycle's own silence must not restart the capture |
+| two cycles ≤ `checkpoint every` ≤ half the duration | above |
+| duration ≥ three cycles | the first advertising phase is not a reacquisition |
+| `minimum connection packets` ≤ the central's writes in a phase | a floor above what the fixture sends can never be met |
+| `presence window` ≥ three advertising events | a window would be empty whenever one event was lost or late |
+
+The liveness one is the real difference from the address soak, and it makes
+this soak's liveness rule weaker on purpose. There, the only silence a healthy
+run has is one off period; here the fixture is off the air for a connected
+phase and an absent phase together, because a sniffer that is not the
+connection's peer may catch none of the link. A capture that goes deaf inside
+one cycle is therefore found by the detection objective rather than by
+liveness, which is the honest position rather than a timeout tuned to catch
+it.
+
+**Hardware and arguments.** One `Ubertooth` (receiving only, selected by
+serial, on an ordinary link), one `central` and one `peripheral` nRF52840 DK.
+`duration` and `channel`; the cycle's `advertising`, `connected`, and `absent`
+legs; `checkpoint every` and `sample every`; what the fixture puts on the air
+(`connection interval`, `write bytes`, `write period`); `presence window` and
+`presence windows`; `liveness timeout`;
+`detect within` and `minimum detection share`; `connect within`, `acquire
+within`, `minimum follow share`, and `minimum connection packets`; `quiet
+after` and `maximum gap`; `maximum restarts` and the optional `maximum memory
+growth`; and `capture file limit` and `capture budget`, which are what keep a
+run of days inside the host's disk.
+
+**The peripheral's advertising interval is the firmware's, not a plan's.**
+The peripheral role advertises connectable at 100 to 150 ms
+(`BT_GAP_ADV_FAST_INT_MIN_2` to `MAX_2` in
+`firmware/nrf52840dk/src/connection.c`, `start_peripheral_locked`) and takes
+no interval command: `adv interval` belongs to the advertiser role, which
+this test does not use. So there is no argument for it, and the
+presence-window check reads the firmware's own slower end — the worst case a
+window has to hold an event in — rather than a figure a plan could set and
+the fixture would ignore.
+
+**Two things it deliberately does not do**, and both are about running beside
+other work. It **writes no firmware**: the first case checks that both DKs
+already run the version the harness pins and refuses with what it found,
+naming the test to run first. And it **guards no other Ubertooth**, because
+every command it runs names its board by serial, so there is nothing a guard
+would protect against. Together those mean `run-suite` takes no host lock, so
+the run holds its own three devices and nothing else — which matters when the
+longest suite holds them for three days. A test that flashed would hold the
+host lock for that whole window and stop every other hardware run on the
+host.
+
+**Commands.** `nrfdk.py` identifies each DK, leaves it in its role, and
+releases it, and `followsoak.py` is the driver that runs the whole soak: the
+cycle, the capture, the checkpoints, and the verdict. It runs the
+`ubertooth-btle -f` capture itself, with the channel and the capture
+directory the plan gave it, and `ubertooth-util` brings the board to idle,
+reads its settings before the capture, and writes them back after (the shared
+transition commands above):
+
+```text
+nrfdk.py identify --jlink <serial> --alias <alias> --port <port>
+nrfdk.py role     --jlink <serial> --alias <alias> --port <port> --role <role>
+nrfdk.py idle     --jlink <serial> --alias <alias> --port <port>
+followsoak.py --serial <serial> --channel <37|38|39> --out <capture dir> \
+    --peripheral-jlink <serial> --peripheral-address <addr> \
+    --peripheral-alias <alias> --peripheral-port <port> \
+    --central-jlink <serial> --central-address <addr> \
+    --central-alias <alias> --central-port <port> \
+    --duration <s> --advertising <s> --connected <s> --absent <s> \
+    --checkpoint-every <s> --sample-every <s> \
+    --conn-interval <ms> --write-bytes <n> --write-period <ms> \
+    --presence-window <s> --presence-windows <n> --liveness-timeout <s> \
+    --detect-within <s> --connect-within <s> --acquire-within <s> \
+    --quiet-after <s> --max-gap <s> \
+    --min-detection-share <share> --min-follow-share <share> \
+    --min-connection-packets <n> --max-restarts <n> \
+    --max-capture-bytes <n> --max-total-capture-bytes <n>
+```
+
+Each DK command takes `--port <port>` and `--alias <alias>` where the registry
+names them, as the other DK tests' do, and the driver takes
+`--max-memory-growth-kb <n>` only where the plan sets `maximum memory
+growth`. No `--hex` appears anywhere: this test never flashes.
+
+**Expected outcome.** Two cases. `fixture-ready` identifies both DKs' probes
+and ports and leaves each one in its role at its registered address, running
+the pinned firmware. `intermittent-follow-soak` brings the Ubertooth to idle,
+records its channel, PA level, squelch, and LEDs, runs the driver, and then
+leaves both DKs idle in the advertiser role and puts the board's settings
+back. The step passes on `SOAK VERDICT: pass` and fails on any `FAIL:` line.
+
+A phase is judged only if it ran for nearly its whole scheduled length, its
+transitions reached the boards, and something was listening throughout. Each
+state is held to a **coverage floor** of its own, so a capture that kept dying
+fails rather than passing on the few phases it covered; the phases the run
+interrupted on purpose are credited against that floor, and a state in which
+nothing at all could be judged fails saying so, since a check nothing was
+measured against would otherwise read as a pass. No allowance is ever the
+whole population it applies to, so a comparison resting on one or two judged
+phases can still fail.
+
+**Known limits.** The connection figures come from the capture's records
+alone: libbtbb prints no `AdvA:` line for a data packet, so the tool's text
+output can say nothing about the connection half of this soak. It is read
+beside the records for the advertising phases and reported rather than judged
+— the check that the fixture went quiet included — because whether the two
+agree is
+[`BLE address parity soak`](#ble-address-parity-soak)'s question, asked there
+over a capture that holds one state.
+
+`ubertooth-btle -f` follows whatever connection it meets, so on a bench with
+other BLE traffic it can be busy following a link this fixture did not make.
+Those are counted and never described — an access address is not a device
+address, but it belongs to somebody's connection — and such a phase shows up
+as a missed acquisition rather than as a failure of its own.
+
+How much of a followed connection arrives intact varies from capture to
+capture, since a sniffer that is not the connection's peer catches a fraction
+of it, so `minimum connection packets` is a floor a working follow clears
+rather than an expected count. The detection and acquisition floors are bench
+figures and not bounds from the specification: a noisier room can fail them
+with nothing wrong in the code. A self-reset is reported and not failed on, as
+everywhere else in the harness; what fails is a read that brought nothing
+back. The memory figures come from the operating system's resident set size,
+which says nothing about what inside the process grew, and no growth limit is
+applied unless a plan sets one, because what counts as growth over three days
+is not established. What the captures cost the host is the channel's traffic
+rather than this fixture's, so the disk budget removes the oldest complete
+capture and keeps the newest, recording each removal; the transcript and the
+progress file are bounded for the whole run the same way. A run the harness
+kills outright can leave the capture tool holding the board for a moment; the
+case's own cleanup stops it.
+
+Relates to
+[#368](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/368),
+[#350](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/350),
+[ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703), and
+[ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505).
 
 ## Capture known Classic device
 
@@ -4037,6 +4432,42 @@ nibble says what a basic-rate capture receives and nothing more. Two flags
 are read and reported but not constrained, because this writer never sets
 either: a decrypted payload and an aliased channel.
 
+**How much the level figures vary.** Every rule above is satisfied by a
+receiver that took one reading and reported it for every packet: the figure
+is inside the radio's range and agrees with its own flag, and it says nothing
+about any packet but the one it was taken from. That is what a `rssi_reset()`
+which left the running estimate standing produced -- nearly every record
+carrying one latched figure, where the bench then saw fifteen between -58 and
+-94 dBm
+([ubertooth#711](https://github.com/SqueakyFloors/ubertooth/pull/711)) -- and
+what a table of recent maxima produced for a channel's first ten packets
+([#754](https://github.com/SqueakyFloors/ubertooth/pull/754)). So each
+capture must carry at least four different signal figures and at least four
+different noise figures among the records that carry a measured one.
+
+Those floors are measured, not guessed. Twenty 25-second captures of this
+piconet at `2026-11-DEV2` (seven windows, the follow, role-swapped, audio and
+survey captures of each) held 122 to 373 records, with 21 to 36 distinct
+signal figures and 28 to 53 distinct noise figures among the 90 to 326
+records carrying a measured one. The floors are a fifth of the lowest signal
+count and a seventh of the lowest noise count, so a working receiver clears
+them on a far thinner capture than any of those, while a capture whose
+figures do not vary at all fails. The synthetic replay cannot stand in for
+this: its fixture carries one fixed reading and no background estimate at
+all, which is why the floors are here and not in
+[Raw receive replay](#raw-receive-replay).
+
+**A payload longer than the bank it arrived in.** No record may carry more
+payload than one capture bank can hold. An Ubertooth sends a Basic Rate
+packet as one bank of 400 symbols and libbtbb decodes it from that bank and
+no further, so the payload has at most 278 symbols after the access code and
+header -- 34 bytes where it carries no error correction, fewer where it does.
+A decoder told it had ten banks reported a payload decoded out of whatever
+followed the packet, CRC verdict and all
+([#754](https://github.com/SqueakyFloors/ubertooth/pull/754)). This is
+arithmetic rather than a measurement, so it holds for any capture; the
+bench's own records carry at most 30 payload bytes.
+
 The transport nibble is the one of these that the record earns rather than
 declares. libbtbb names the logical transport the payload it produced decoded
 on — ACL for the data types, SCO for the voice types, eSCO for the extended
@@ -4170,6 +4601,7 @@ esp32peer.py audio  <peer options> --type ev3 --min-frames <n> \
     -l <central LAP> -u <central UAP> -r <case dir>/audio.pcapng
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 bredrrecord.py <case dir>/records.pcapng --min-packets 10 --max-access-code-errors 2 \
+    --max-payload-bytes 34 --min-distinct-signal 4 --min-distinct-noise 4 \
     --max-span-s <s> --max-backward-step-us <us> --min-hec-valid <n> \
     --lap <central LAP> --reference-lap <central LAP> --reference-uap <central UAP> \
     --following-lap <central LAP> --following-uap <central UAP> \
@@ -4974,6 +5406,19 @@ can tell a swapped name from a wrongly reported one, so the case asks that
 **one** of the two peers came back under its own name, which proves a name
 read worked, rather than naming which; both peers wrong still fails.
 
+What that floor on its own let through is the swap itself. A failed read
+prints `[unknown]`, so a peer's line carries either its own name or that
+word, and the case now fails a peer reported under any other name: that is a
+name which came from somewhere, which is the fault fork
+[#1175](https://github.com/SqueakyFloors/ubertooth/pull/1175) fixed, and the
+one run that showed it passed the floor because the other peer was right.
+This costs no reliability -- it leaves the two `[unknown]` runs alone and
+fails only the run that carried the fault. Whether to go further and require
+**both** peers under their own names is a separate decision: it would have
+failed 3 of those 19 runs, and two of them were a page that went unanswered
+rather than a misattribution, so it is left to
+[#384](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/384).
+
 One thing the tool does that no case can prevent. It reads the name of
 **every** piconet its sweep heard, by paging the address it put together, so
 it pages devices this bench does not own if any are in range. That is the
@@ -5113,7 +5558,8 @@ esp32peer.py stream <peer options> --interrupt-after <seconds> \
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 capturefile.py <case dir>/follow.pcap --packets
 bredrrecord.py <case dir>/follow.pcap --min-packets 10 --lap <central LAP> \
-    --max-access-code-errors 2 --min-hec-valid 0 --reference-lap <central LAP> \
+    --max-access-code-errors 2 --max-payload-bytes 34 --min-hec-valid 0 \
+    --reference-lap <central LAP> \
     --reference-uap <central UAP> --min-reference-uap <n> --any-transport
 ```
 
@@ -5168,6 +5614,11 @@ nothing to check it against. What those 35 records would carry today is **not
 established**: that sweep ran against a different libbtbb than the one now
 pinned, and at the pinned commit an abandoned trial clock clears a record's
 transport and its payload together. The figures above are kept as measured.
+The two level floors `Classic capture record fields` carries are left out
+here for the same reason the HEC floor is: they were measured on captures of
+the ESP32 piconet taken by `ubertooth-rx`, and how much a level varies across
+a capture this tool takes is **not established**. The payload bound, which is
+arithmetic rather than a measurement, is checked.
 So the `-q` case checks that the
 file is a BR/EDR pcap holding the piconet's packets and leaves the records to
 `Classic capture record fields`, which reads a capture from a tool whose

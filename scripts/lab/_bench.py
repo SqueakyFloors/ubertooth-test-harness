@@ -62,7 +62,7 @@ def _identity_values(resource) -> list[str]:
             continue
         values.append(text)
         if text.isdigit():
-            values.append(text.lstrip("0"))  # nrfutil's form of a J-Link serial
+            values.append(text.lstrip("0"))  # a J-Link serial written short
     return values
 
 
@@ -75,8 +75,9 @@ def resolve(registry, name: str):
     """The one resource a name selects, or an error naming what it matched.
 
     A registry alias, a full serial, or an unambiguous prefix of one; for an
-    nRF52840 DK, its J-Link serial with or without the leading zeros, which is
-    how nrfutil and sysfs each print it.
+    nRF52840 DK, its J-Link serial with or without the leading zeros: the
+    registry and the by-id name carry the padded spelling, a DK command line
+    the short one, and a bench note may use either.
     """
     if not name:
         raise RegistryError("empty device name")

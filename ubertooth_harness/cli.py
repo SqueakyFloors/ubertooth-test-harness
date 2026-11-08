@@ -767,6 +767,12 @@ def _parser() -> argparse.ArgumentParser:
         help="directory of <plan>.yaml files the GUI lists",
     )
     controller.add_argument(
+        "--keep-runs", type=float, metavar="DAYS", default=None,
+        help="remove a finished run's directory once it is this many days "
+        "old (default: keep every run for ever); a running run is never "
+        "removed, and the window is applied at startup and every hour",
+    )
+    controller.add_argument(
         "--host", "--bind", "--address", dest="refused_bind",
         action=_RefuseBind, help=argparse.SUPPRESS,
     )
@@ -802,13 +808,20 @@ def _controller(args: argparse.Namespace) -> int:
 
     refuse_bind_overrides()
     repository = args.ubertooth_repo or DEFAULT_UBERTOOTH_REPOSITORY
+    # A retention window outside 0 < days is refused by the Controller with
+    # a ControllerConfigError, which main reports as an error and exits 2.
     controller = Controller(
         args.results_dir or default_results_dir(),
         ref_source=GitRefSource(repository),
         plans_dir=args.plans_dir,
+        keep_runs_days=args.keep_runs,
     )
     controller.log(f"refs from {controller.ref_source.display}")
     controller.log(f"results in {controller.results_dir}")
+    controller.log(
+        "runs are kept for ever" if controller.keep_runs_days is None
+        else f"runs are kept {controller.keep_runs_days:g} day(s)"
+    )
 
     def stop(signum, frame):
         raise KeyboardInterrupt

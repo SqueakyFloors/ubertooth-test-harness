@@ -208,7 +208,7 @@ class HoldResolution(Bench):
             (UT_SERIAL[:6], "UT0"),
             ("fedc", "UT1"),
             (JLINK, "DK0"),
-            ("123456789", "DK0"),  # nrfutil drops the leading zeros
+            ("123456789", "DK0"),  # the same serial written short
             (BRIDGE, "ESP0"),
             (BRIDGE[:8], "ESP0"),
             (PROG_SERIAL, "Prog0"),
@@ -295,8 +295,8 @@ class HoldLockKeys(Bench):
     def test_either_spelling_of_a_dk_s_serial_takes_the_one_lock_file(self):
         """A DK is named two ways and held one way (harness #324).
 
-        `nrfutil device list` prints a J-Link serial without the leading
-        zeros the registry and the by-id name carry, so a bench note may use
+        A DK command line carries a J-Link serial without the leading zeros
+        the registry and the by-id name carry, so a bench note may use
         either; the registry takes the padded spelling alone, and the lock
         file a hold takes is named after that, whichever name resolved it.
         """
