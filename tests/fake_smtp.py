@@ -11,6 +11,14 @@ needs are settings rather than certificates: ``starttls=False`` leaves
 STARTTLS out of the EHLO reply, which is what a relay that cannot be
 upgraded looks like to ``smtplib``, and ``password`` set with a different
 password answers AUTH with 535.
+
+The session reads and writes through two file objects over the one socket,
+as ``socketserver.StreamRequestHandler`` does. One ``makefile("rwb")`` is a
+``BufferedRWPair`` over a single raw stream, which the standard library
+warns against; on a loaded CI runner it closed sessions mid-greeting.
+Whatever a session thread does raise is kept in ``errors`` rather than
+disappearing with the thread, so a test sees the cause instead of only
+``SMTPServerDisconnected``.
 """
 
 import base64
@@ -41,6 +49,7 @@ class FakeSmtpServer:
         self.greeting = greeting
         self.messages: list[dict] = []
         self.auth_attempts: list[str] = []
+        self.errors: list[str] = []
         self.deliveries = 0
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -64,7 +73,7 @@ class FakeSmtpServer:
             self._socket.close()
         except OSError:
             pass
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=10)
 
     def _serve(self) -> None:
         while not self._stop.is_set():
@@ -74,8 +83,9 @@ class FakeSmtpServer:
                 return
             try:
                 self._session(connection)
-            except OSError:
-                pass
+            except Exception as error:  # noqa: BLE001 - kept for the test
+                if not self._stop.is_set():
+                    self.errors.append(f"{type(error).__name__}: {error}")
             finally:
                 try:
                     connection.close()
@@ -83,13 +93,27 @@ class FakeSmtpServer:
                     pass
 
     def _session(self, connection: socket.socket) -> None:
-        connection.settimeout(10)
-        stream = connection.makefile("rwb")
-        stream.write(self.greeting.encode())
-        stream.flush()
+        connection.settimeout(30)
+        reader = connection.makefile("rb")
+        writer = connection.makefile("wb")
+        try:
+            self._converse(reader, writer)
+        finally:
+            for stream in (writer, reader):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    def _converse(self, reader, writer) -> None:
+        def say(text: bytes) -> None:
+            writer.write(text)
+            writer.flush()
+
+        say(self.greeting.encode())
         sender, recipients, authenticated = "", [], not self.username
         while True:
-            line = stream.readline()
+            line = reader.readline()
             if not line:
                 return
             text = line.decode("utf-8", "replace").strip()
@@ -102,63 +126,58 @@ class FakeSmtpServer:
                 if self.starttls:
                     replies.append("250-STARTTLS")
                 replies.append("250 HELP")
-                stream.write(("\r\n".join(replies) + "\r\n").encode())
+                say(("\r\n".join(replies) + "\r\n").encode())
             elif word == "STARTTLS":
                 # Offered only to prove the harness asks for it; this fake
                 # has no certificate, so the upgrade itself is refused.
-                stream.write(b"454 TLS not available on this fake\r\n")
+                say(b"454 TLS not available on this fake\r\n")
             elif word == "AUTH":
-                authenticated = self._auth(stream, rest)
-                stream.write(
+                authenticated = self._auth(reader, say, rest)
+                say(
                     b"235 authenticated\r\n" if authenticated
                     else b"535 authentication failed\r\n"
                 )
             elif word == "MAIL":
                 if not authenticated:
-                    stream.write(b"530 authentication required\r\n")
+                    say(b"530 authentication required\r\n")
                 else:
                     sender, recipients = _address(rest), []
-                    stream.write(b"250 sender ok\r\n")
+                    say(b"250 sender ok\r\n")
             elif word == "RCPT":
                 if self.reject_recipients:
-                    stream.write(b"550 no such recipient\r\n")
+                    say(b"550 no such recipient\r\n")
                 else:
                     recipients.append(_address(rest))
-                    stream.write(b"250 recipient ok\r\n")
+                    say(b"250 recipient ok\r\n")
             elif word == "DATA":
                 self.deliveries += 1
                 if self.deliveries <= self.fail_first:
-                    stream.write(b"451 try again later\r\n")
-                    stream.flush()
+                    say(b"451 try again later\r\n")
                     continue
-                stream.write(b"354 send it\r\n")
-                stream.flush()
-                body = self._read_data(stream)
+                say(b"354 send it\r\n")
                 self.messages.append({
-                    "sender": sender, "recipients": list(recipients), "data": body,
+                    "sender": sender, "recipients": list(recipients),
+                    "data": _read_data(reader),
                 })
-                stream.write(b"250 queued\r\n")
+                say(b"250 queued\r\n")
             elif word == "RSET":
                 sender, recipients = "", []
-                stream.write(b"250 reset\r\n")
+                say(b"250 reset\r\n")
             elif word == "NOOP":
-                stream.write(b"250 ok\r\n")
+                say(b"250 ok\r\n")
             elif word == "QUIT":
-                stream.write(b"221 bye\r\n")
-                stream.flush()
+                say(b"221 bye\r\n")
                 return
             else:
-                stream.write(b"502 not implemented\r\n")
-            stream.flush()
+                say(b"502 not implemented\r\n")
 
-    def _auth(self, stream, rest: str) -> bool:
+    def _auth(self, reader, say, rest: str) -> bool:
         mechanism = rest.split(" ", 1)[0].upper()
         initial = rest[len(mechanism):].strip()
         if mechanism == "PLAIN":
             if not initial:
-                stream.write(b"334 \r\n")
-                stream.flush()
-                initial = stream.readline().decode().strip()
+                say(b"334 \r\n")
+                initial = reader.readline().decode().strip()
             try:
                 _, user, password = base64.b64decode(initial).decode().split("\0")
             except (ValueError, UnicodeDecodeError):
@@ -168,25 +187,24 @@ class FakeSmtpServer:
                 # smtplib sends the user name as the initial response.
                 user = _decode(initial.encode())
             else:
-                stream.write(b"334 VXNlcm5hbWU6\r\n")
-                stream.flush()
-                user = _decode(stream.readline())
-            stream.write(b"334 UGFzc3dvcmQ6\r\n")
-            stream.flush()
-            password = _decode(stream.readline())
+                say(b"334 VXNlcm5hbWU6\r\n")
+                user = _decode(reader.readline())
+            say(b"334 UGFzc3dvcmQ6\r\n")
+            password = _decode(reader.readline())
         else:
             return False
         self.auth_attempts.append(user)
         return user == self.username and password == self.password
 
-    def _read_data(self, stream) -> bytes:
-        lines = []
-        while True:
-            line = stream.readline()
-            if not line or line.strip() == b".":
-                break
-            lines.append(line[1:] if line.startswith(b"..") else line)
-        return b"".join(lines)
+
+def _read_data(reader) -> bytes:
+    lines = []
+    while True:
+        line = reader.readline()
+        if not line or line.strip() == b".":
+            break
+        lines.append(line[1:] if line.startswith(b"..") else line)
+    return b"".join(lines)
 
 
 def _address(text: str) -> str:

@@ -115,7 +115,9 @@ def smtp_config(server, **overrides) -> NotifyConfig:
         "smtp": {"host": server.host, "port": server.port, "tls": "none"},
         "attempts": 1,
         "retry_delay_s": 0,
-        "timeout_s": 10,
+        # Generous: a loaded CI runner can be slow even on loopback, and a
+        # timeout here would look like a delivery failure.
+        "timeout_s": 60,
         "gui_base_url": "http://127.0.0.1:8765",
     }
     data.update(overrides)
@@ -681,6 +683,7 @@ class SmtpDeliveryTests(unittest.TestCase):
         self.assertIn("Verdict: failed", text)
         self.assertIn(RUN["run_id"], text)
         self.assertNotIn("Bcc:", text)
+        self.assertEqual(server.errors, [])
 
     def test_the_relay_sees_no_header_the_run_smuggled_in(self):
         run = {**RUN, "reason": "boom\r\nBcc: someone@example.invalid"}
