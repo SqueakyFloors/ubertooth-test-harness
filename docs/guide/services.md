@@ -257,7 +257,7 @@ word and symbol (colour only reinforces it).
   one a host's own platform does not run (`Exclusive Ubertooth topology`
   on a macOS target), is left out of that host's figure and then named, with
   the time it takes on the host that does run it: the release suite is about
-  669.7 s on a host that step does not name, and 1189.7 s counting it.
+  670.5 s on a host that step does not name, and 1190.5 s counting it.
   Ticking another host reloads its list and keeps the plan and suite you
   had chosen. A suite no step of which runs on a host says that
   instead of a time. Estimates learned on a host are used wherever it

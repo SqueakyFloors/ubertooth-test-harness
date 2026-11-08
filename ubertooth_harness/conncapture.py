@@ -87,6 +87,9 @@ from ubertooth_harness.advcapture import (  # noqa: E402
     _PCAPNG_SHB,
     crc24,
     format_address,
+    level_problems,
+    level_summary,
+    levels,
     read_timed_records,
 )
 
@@ -335,6 +338,7 @@ class Result:
     quiet_ms: int | None = None
     connection_info: str = "not looked for"
     connection_info_options: int = 0
+    levels: list = field(default_factory=list)
     problems: list = field(default_factory=list)
 
 
@@ -361,6 +365,13 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
             f"link type {link_type}, not {LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR}")
         return header, result
     result.records = len(timed)
+    # The power fields of every record, judged by the rules libbtbb's writers
+    # hold to whatever was on the air. A followed connection is where the
+    # reference access address is 0 and its flag clear, which those rules
+    # cover: the field is the address configured into the tool, and a
+    # connection's own packets were not caught by one.
+    result.levels = levels([record.data for record in timed])
+    result.problems.extend(level_problems(result.levels))
     times = [record.micros for record in timed if record.micros is not None]
     result.start_micros = min(times) if times else None
     result.span_ms = (max(times) - min(times)) // 1000 if times else None
@@ -655,6 +666,8 @@ def main(argv=None) -> int:
           f"correct CRC, {result.long_packets} of {args.min_data_length} bytes or "
           f"more, longest {result.longest})")
     print(f"connection info option: {result.connection_info}")
+    for line in level_summary(result.levels):
+        print(line)
     for problem in result.problems:
         print(f"FAIL: {problem}")
     if result.problems:

@@ -52,6 +52,12 @@ import time
 
 DLT = 256
 ADV_ACCESS_ADDRESS = 0x8E89BED6
+# The flag word libbtbb's low-energy writers set on a record: dewhitened, a
+# signal figure, a count of access-address errors, a noise figure below the
+# signal, and the reference access address this record carries. Spelled out
+# rather than imported, because this file stands in for a tool outside the
+# harness and imports nothing of it.
+LE_FLAGS = struct.pack("<H", 0x0001 | 0x0002 | 0x0020 | 0x0004 | 0x0010)
 ADV_CRC_INIT = 0x555555
 PDU_NONCONN = 0x2
 # The harness payload the DK firmware sends: company 0xffff, magic, format,
@@ -97,7 +103,7 @@ def record(address: str, counter: int, rf_channel: int = 0) -> bytes:
     access = struct.pack("<I", ADV_ACCESS_ADDRESS)
     # RF channel, signal, noise, access-address offenses, reference access
     # address, flags.
-    phdr = bytes([rf_channel, 0xC0, 0x9C, 0]) + access + b"\x00\x00"
+    phdr = bytes([rf_channel, 0xC0, 0x9C, 0]) + access + LE_FLAGS
     return phdr + access + header + pdu + crc
 
 
