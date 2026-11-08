@@ -49,7 +49,7 @@ from ubertooth_harness.flash import (
     HarnessError,
 )
 from ubertooth_harness import leases as board_leases
-from ubertooth_harness import dfuparts, libbtbbpin
+from ubertooth_harness import dfuparts, libbtbbpin, notify
 from ubertooth_harness.manifest import (
     FileIdentity,
     GitRevisionResolver,
@@ -90,6 +90,9 @@ from ubertooth_harness.validate import validate_command
 
 
 _DEFAULT_PLAN = Path(__file__).resolve().parents[1] / "testplans" / "slow.yaml"
+# Where a service unit names the private completion-notice configuration.
+# Imported from notify.py so there is one spelling of it.
+NOTIFY_CONFIG_ENVIRONMENT = notify.CONFIG_ENVIRONMENT
 
 
 def _detected_platform() -> str:
@@ -659,8 +662,30 @@ def _parser() -> argparse.ArgumentParser:
         help="directory of <plan>.yaml files the GUI lists",
     )
     controller.add_argument(
+        "--notify-config", type=Path, metavar="FILE",
+        help="private completion-notice configuration (email). Without it, "
+        "and without " + NOTIFY_CONFIG_ENVIRONMENT + ", no notice is sent; "
+        "see docs/guide/notifications.md",
+    )
+    controller.add_argument(
         "--host", "--bind", "--address", dest="refused_bind",
         action=_RefuseBind, help=argparse.SUPPRESS,
+    )
+
+    notify_test = subparsers.add_parser(
+        "notify-test",
+        help="send one test completion notice through the configured "
+        "transport, to check the setup (no credential is printed)",
+    )
+    notify_test.add_argument(
+        "--notify-config", type=Path, metavar="FILE",
+        help="the configuration to test (default: "
+        + NOTIFY_CONFIG_ENVIRONMENT + ", else "
+        "$XDG_CONFIG_HOME/ubertooth-harness/notify.yaml)",
+    )
+    notify_test.add_argument(
+        "--dry-run", action="store_true",
+        help="print what would be sent and where, and send nothing",
     )
 
     return parser
@@ -694,10 +719,12 @@ def _controller(args: argparse.Namespace) -> int:
 
     refuse_bind_overrides()
     repository = args.ubertooth_repo or DEFAULT_UBERTOOTH_REPOSITORY
+    results_dir = args.results_dir or default_results_dir()
     controller = Controller(
-        args.results_dir or default_results_dir(),
+        results_dir,
         ref_source=GitRefSource(repository),
         plans_dir=args.plans_dir,
+        notifier=_notifier(args.notify_config, results_dir),
     )
     controller.log(f"refs from {controller.ref_source.display}")
     controller.log(f"results in {controller.results_dir}")
@@ -712,6 +739,103 @@ def _controller(args: argparse.Namespace) -> int:
         asyncio.run(serve(controller, args.port))
     except KeyboardInterrupt:
         controller.log("stopped")
+    return 0
+
+
+def _notify_config_path(chosen, environ=os.environ):
+    """Which configuration the notices come from, or None for "none".
+
+    The option wins, then the environment variable (how a service unit names
+    one), then the default private path if it exists. Nothing there means
+    notifications stay off, which is the default.
+    """
+    from ubertooth_harness.notify import default_config_path
+
+    if chosen is not None:
+        return Path(chosen)
+    named = environ.get(NOTIFY_CONFIG_ENVIRONMENT, "")
+    if named:
+        return Path(named)
+    default = default_config_path(environ)
+    return default if default.is_file() else None
+
+
+def _notifier(chosen, results_dir: Path):
+    """The controller's notifier, or None when nothing configures notices.
+
+    A configuration that cannot be read is a startup error: a bench that
+    asked for notices must not run for hours believing it will get one.
+    """
+    from ubertooth_harness.notify import (
+        LEDGER_DIR,
+        NotifyConfigError,
+        Notifier,
+        load_config,
+    )
+
+    path = _notify_config_path(chosen)
+    if path is None:
+        return None
+    try:
+        config = load_config(path)
+    except NotifyConfigError as error:
+        raise HarnessError(f"completion notices: {error}") from None
+    if not config.enabled:
+        print(
+            f"completion notices: {path} has enabled: false; no notice will "
+            "be sent", file=sys.stderr,
+        )
+        return None
+    return Notifier(config, Path(results_dir).expanduser() / LEDGER_DIR)
+
+
+def _notify_test(args: argparse.Namespace) -> int:
+    """Send one fixed test notice, so a setup can be checked end to end.
+
+    Prints where the notice goes and which source the password comes from,
+    never the password itself.
+    """
+    from ubertooth_harness.notify import (
+        NotifyConfigError,
+        Notifier,
+        build_message,
+        load_config,
+        sample_notice,
+    )
+
+    path = _notify_config_path(args.notify_config)
+    if path is None:
+        raise HarnessError(
+            "no notification configuration: pass --notify-config FILE, set "
+            f"{NOTIFY_CONFIG_ENVIRONMENT}, or write "
+            "$XDG_CONFIG_HOME/ubertooth-harness/notify.yaml "
+            "(docs/guide/notifications.md)"
+        )
+    try:
+        config = load_config(path)
+    except NotifyConfigError as error:
+        raise HarnessError(str(error)) from None
+    notice = sample_notice(config.subject_prefix, config.gui_base_url)
+    print(f"configuration: {path}")
+    print(f"notices: {config.describe()}")
+    print(f"subject: {notice.subject}")
+    if not config.enabled:
+        raise HarnessError(
+            f"{path} has enabled: false, so nothing would be sent; set "
+            "enabled: true to test a real delivery"
+        )
+    if args.dry_run:
+        print()
+        print(build_message(config, notice).decode("utf-8", "replace"))
+        print("dry run: nothing was sent")
+        return 0
+    # No ledger entry: a test notice may be sent as often as somebody wants
+    # to check the setup.
+    notifier = Notifier(config)
+    if not notifier.send(notice, deduplicate=False):
+        raise HarnessError(
+            "the test notice was not sent; the warnings above say why"
+        )
     return 0
 
 
@@ -1851,6 +1975,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "controller":
             require_harness_environment()
             return _controller(args)
+        if args.command == "notify-test":
+            return _notify_test(args)
         if args.command == "boards":
             return _boards_command(args)
         if args.command == "lease":

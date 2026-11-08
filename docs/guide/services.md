@@ -135,7 +135,8 @@ applied to the target.
 python -m ubertooth_harness controller --port 8765 \
   [--results-dir ~/.local/share/ubertooth-harness/controller/runs] \
   [--ubertooth-repo https://github.com/SqueakyFloors/ubertooth.git] \
-  [--plans-dir testplans]
+  [--plans-dir testplans] \
+  [--notify-config ~/.config/ubertooth-harness/notify.yaml]
 ```
 
 `--ubertooth-repo` is the repository whose branches and tags the GUI offers
@@ -522,3 +523,18 @@ all timed out (504) is kept for a grace period (60 s) so a late answer still
 takes effect, then dropped. Overlapping cancels of one run share the
 outstanding request, and each caller has its own timeout.
 
+
+### Completion notices
+
+With `--notify-config FILE` (or `UBERTOOTH_HARNESS_NOTIFY_CONFIG`, or a file
+at `$XDG_CONFIG_HOME/ubertooth-harness/notify.yaml`), the controller emails
+one short notice when a run or a run group has finished: verdict, IDs, the
+commits that were built, UTC times and duration, plan, suite, totals, the
+result directory, and the loopback GUI link. Nothing is attached, and it is
+sent after the run's `report.md` is on disk and at most once per run or group
+ID, so a restart or a replayed run end does not send it twice. Notices are
+**off** unless such a file says `enabled: true`, and a notice that cannot be
+sent is a warning in this log and nothing else, never a change to a verdict.
+The whole setup, including where credentials come from and what keeps a
+public URL out of the message, is in
+[notifications.md](notifications.md).

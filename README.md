@@ -21,6 +21,7 @@ document that answers your question. The architecture is in
 | build, flash, or chase a version mismatch | [docs/guide/builds-and-firmware.md](docs/guide/builds-and-firmware.md) |
 | share the bench with other runs | [docs/guide/leases.md](docs/guide/leases.md) |
 | run the services or the GUI | [docs/guide/services.md](docs/guide/services.md) |
+| be emailed when a long run finishes | [docs/guide/notifications.md](docs/guide/notifications.md) |
 | deploy them | [docs/guide/deploy.md](docs/guide/deploy.md) |
 | read a run's records | [docs/reference/run-records.md](docs/reference/run-records.md) |
 | switch USB power | [docs/reference/power-control.md](docs/reference/power-control.md) |
@@ -181,6 +182,7 @@ board behind an attenuator asks for it with `weak link:`
 | `validate <run dir>` | re-run a finished run's recorded output checks |
 | `report <run dir>...` | render one Markdown report from one or more runs |
 | `runner`, `controller` | the persistent services ([services.md](docs/guide/services.md)) |
+| `notify-test` | send one test completion notice, to check that setup ([notifications.md](docs/guide/notifications.md)) |
 
 By-hand bench helpers (holding a device, driving a peer, switching a hub port)
 are in [`scripts/lab/`](scripts/lab/README.md).

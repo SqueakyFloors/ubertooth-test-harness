@@ -8,6 +8,7 @@ __pycache__/
 runs/
 hardware.yaml
 harness-open.conf
+notify.yaml
 
 # ESP-IDF writes the resolved configuration next to the project; the
 # checked-in source is sdkconfig.defaults.
