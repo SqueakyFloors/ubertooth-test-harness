@@ -68,6 +68,24 @@
     groups: new Map(),
     // The plan list fetched for no target at all: what the plan and suite
     // selects are filled from, so they work before a runner registers.
+    // The history: the group IDs the loaded pages hold (the rows), the
+    // filters those pages were asked for, the cursor the next page starts
+    // after (null once the oldest group is on the page), the counts the last
+    // page reported, and a token so a slower answer for filters already
+    // left, or an older page asked for before them, cannot replace or be
+    // appended to a newer one.
+    historyIds: new Set(),
+    historyFilters: { target: "", status: "", ref: "" },
+    historyCursor: null,
+    historyMatching: 0,
+    historyTotal: 0,
+    historyToken: 0,
+    // Rows added since that page was fetched, and rows it counted that no
+    // longer match: what the count line adds to and takes off the page's
+    // own figure. The next page's figure is current, so both are cleared
+    // whenever one arrives.
+    historyAdded: new Set(),
+    historyGone: new Set(),
     plans: [],
     // What each listed test is for, keyed by catalog name, as /api/plans
     // sends it once per response (#315). Empty until the plans load.
@@ -246,6 +264,8 @@
     }
     renderHostChoices();
     maybeLoadPlans();
+    // A newly registered target is a history filter choice too.
+    renderHistoryChoices();
   }
 
   // The hosts a plan listing belongs to, and the platforms it was judged
@@ -424,6 +444,8 @@
         .find((value) => value && state.refOptions.has(value));
       if (preferred) select.value = preferred;
       status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}.`;
+      // The listed refs are the history ref filter's suggestions too.
+      renderHistoryChoices();
     } catch (error) {
       state.refOptions = new Map();
       select.replaceChildren(el("option", { value: "", text: "(refs unavailable)" }));
@@ -2029,6 +2051,101 @@
 
   // ----- history -----------------------------------------------------------
 
+  // The history is paged newest first: the latest HISTORY_PAGE groups, then a
+  // page at a time behind the cursor the controller returns, so a bench with
+  // months of runs neither sends nor draws all of them.
+  const HISTORY_PAGE = 50;
+
+  function chosenFilters() {
+    return {
+      target: $("history-target").value,
+      status: $("history-status").value,
+      ref: $("history-ref").value.trim(),
+    };
+  }
+
+  function filtering() {
+    const filters = state.historyFilters;
+    return Boolean(filters.target || filters.status || filters.ref);
+  }
+
+  // The same three comparisons the controller makes, so a live update lands
+  // in the rows exactly where the next page would have put it. A group
+  // matches a target when it asked that host to run, which is the host the
+  // row draws a pill for.
+  function matchesFilters(group) {
+    const filters = state.historyFilters;
+    const hosts = group.hosts || [];
+    if (filters.target && !hosts.includes(filters.target)) return false;
+    if (filters.status && group.status !== filters.status) return false;
+    if (filters.ref && group.ref !== filters.ref) return false;
+    return true;
+  }
+
+  function historyQuery(cursor) {
+    const query = new URLSearchParams({ limit: String(HISTORY_PAGE) });
+    const filters = state.historyFilters;
+    for (const name of ["target", "status", "ref"]) {
+      if (filters[name]) query.set(name, filters[name]);
+    }
+    if (cursor) {
+      query.set("before", cursor.created_at);
+      // The group of that instant the page ended on: two groups stamped
+      // alike are then neither repeated nor lost at a page boundary.
+      if (cursor.group_id) query.set("before_group_id", cursor.group_id);
+    }
+    return `/api/run-groups?${query.toString()}`;
+  }
+
+  // One page into the rows. state.groups is the page's cache of group views
+  // and state.runs of the member runs, which the live view reads too, so
+  // nothing is dropped from either; the rows are state.historyIds, the
+  // groups the loaded pages hold.
+  function takeGroupPage(data, append) {
+    if (!append) state.historyIds = new Set();
+    for (const group of data.groups || []) {
+      storeGroup(group);
+      state.historyIds.add(group.group_id);
+    }
+    state.historyCursor = data.has_more
+      ? { created_at: data.next_before, group_id: data.next_before_group_id }
+      : null;
+    state.historyMatching = Number.isInteger(data.matching)
+      ? data.matching : state.historyIds.size;
+    state.historyTotal = Number.isInteger(data.total)
+      ? data.total : state.historyMatching;
+    // This figure counts every stored group the filters match now, so it
+    // already counts the rows added since the last page and leaves out the
+    // ones that stopped matching.
+    state.historyAdded = new Set();
+    state.historyGone = new Set();
+  }
+
+  // A group the live stream reports, or one this page has just started: it
+  // joins the rows when the filters match it, and leaves them when they no
+  // longer do. A group read by ID (watching one, a #group= link) goes to the
+  // cache through storeGroup and never makes a row of its own: the rows are
+  // the pages the controller served.
+  function joinOrLeaveRows(group) {
+    const known = state.groups.has(group.group_id);
+    if (matchesFilters(group)) {
+      state.historyGone.delete(group.group_id);
+      if (!state.historyIds.has(group.group_id)) {
+        state.historyIds.add(group.group_id);
+        // A group no page has held: it has just started, so it is newer than
+        // any page, and it belongs at the top of the rows and in the count.
+        if (!known) state.historyAdded.add(group.group_id);
+      }
+    } else if (state.historyIds.delete(group.group_id)) {
+      // A group the filters no longer match (one that was running and has
+      // finished, with "running" chosen) leaves the rows; its view stays in
+      // the cache, so watching it still works.
+      if (!state.historyAdded.delete(group.group_id)) {
+        state.historyGone.add(group.group_id);
+      }
+    }
+  }
+
   function upsertRun(run) {
     storeRun(run);
     // A run moved, so a cell of it may have: the rows are the group's own
@@ -2045,6 +2162,7 @@
   }
 
   function upsertGroup(group) {
+    if (group && typeof group.group_id === "string") joinOrLeaveRows(group);
     storeGroup(group);
     const view = state.group;
     if (view && group && view.group_id === group.group_id) {
@@ -2072,10 +2190,14 @@
   }
 
   function renderHistory() {
-    const groups = [...state.groups.values()].sort((a, b) =>
-      String(b.created_at).localeCompare(String(a.created_at))
-      || b.group_id.localeCompare(a.group_id));
+    const groups = [...state.historyIds]
+      .map((groupId) => state.groups.get(groupId))
+      .filter(Boolean)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))
+        || b.group_id.localeCompare(a.group_id));
     $("history-empty").hidden = groups.length > 0;
+    $("history-empty").textContent = filtering()
+      ? "No run group matches these filters." : "No runs yet.";
     $("history").replaceChildren(...groups.map((group) => {
       const members = group.members || [];
       const actions = el("td", { className: "actions" },
@@ -2124,21 +2246,109 @@
         el("td", {}, statusBadge(group.status)),
         actions);
     }));
+    renderHistoryCount(groups.length);
+    renderHistoryChoices();
   }
 
+  function renderHistoryCount(shown) {
+    // The page's own figure, with the rows added since taken on and the
+    // rows that stopped matching taken off, and never fewer groups than are
+    // on display.
+    const matching = Math.max(
+      state.historyMatching + state.historyAdded.size - state.historyGone.size,
+      shown,
+    );
+    const stored = Math.max(state.historyTotal + state.historyAdded.size, matching);
+    $("history-older").hidden = !state.historyCursor;
+    if (!shown) {
+      $("history-count").textContent = "";
+      return;
+    }
+    const sentences = [
+      `Showing ${shown} of ${matching} run group${matching === 1 ? "" : "s"}`
+      + (filtering() ? ` that match these filters, of ${stored} stored.` : "."),
+    ];
+    if (state.historyCursor) {
+      sentences.push(`Load older adds up to ${HISTORY_PAGE} more, oldest last.`);
+    }
+    $("history-count").textContent = sentences.join(" ");
+  }
+
+  // The filter choices: every registered target and every host a loaded row
+  // asked to run, and the listed refs beside the refs those rows name. Both
+  // are rebuilt only when they change, since this runs on every render.
+  function renderHistoryChoices() {
+    const targets = new Set(state.targets.keys());
+    const refs = new Set([...state.refOptions.values()].map((ref) => ref.name));
+    for (const group of state.groups.values()) {
+      for (const host of group.hosts || []) targets.add(host);
+      if (group.ref) refs.add(group.ref);
+    }
+    const select = $("history-target");
+    // A chosen target stays a choice even when no row or target names it,
+    // or choosing it would clear the filter it is there to apply.
+    if (select.value) targets.add(select.value);
+    const hosts = [...targets].sort((a, b) => a.localeCompare(b));
+    if (select.dataset.hosts !== hosts.join("\n")) {
+      select.dataset.hosts = hosts.join("\n");
+      const chosen = select.value;
+      select.replaceChildren(
+        el("option", { value: "", text: "Any target" }),
+        ...hosts.map((host) => el("option", { value: host, text: host })));
+      select.value = chosen;
+    }
+    const names = [...refs].sort((a, b) => a.localeCompare(b));
+    const list = $("history-refs");
+    if (list.dataset.refs !== names.join("\n")) {
+      list.dataset.refs = names.join("\n");
+      list.replaceChildren(...names.map((name) => el("option", { value: name })));
+    }
+  }
+
+  // The newest page, for the filters now chosen: on connect, on reconnect,
+  // and whenever the filters change.
   async function loadGroups() {
+    state.historyFilters = chosenFilters();
+    const token = ++state.historyToken;
     try {
-      const data = await api("GET", "/api/run-groups");
-      state.groups = new Map(data.groups.map((group) => [group.group_id, group]));
-      for (const group of data.groups) {
-        for (const member of group.members || []) {
-          if (member.run) state.runs.set(member.run.run_id, member.run);
-        }
-      }
+      const data = await api("GET", historyQuery(null));
+      // Filters have changed, or an older page has been asked for, since
+      // this was sent: that request's answer is the page now.
+      if (token !== state.historyToken) return;
+      takeGroupPage(data, false);
       renderHistory();
     } catch (error) {
+      if (token !== state.historyToken) return;
+      $("history-empty").hidden = false;
       $("history-empty").textContent = `Cannot list run groups: ${error.message}`;
     }
+  }
+
+  async function loadOlderGroups() {
+    const cursor = state.historyCursor;
+    if (!cursor) return;
+    const button = $("history-older");
+    const hadFocus = document.activeElement === button;
+    const token = ++state.historyToken;
+    button.disabled = true;
+    $("history-count").textContent = "Loading older run groups…";
+    try {
+      const data = await api("GET", historyQuery(cursor));
+      // Never appended to rows the filters have changed under: that page
+      // belongs to a query nobody is showing any more.
+      if (token !== state.historyToken) return;
+      takeGroupPage(data, true);
+      renderHistory();
+    } catch (error) {
+      if (token === state.historyToken) {
+        $("history-count").textContent = `Cannot load older run groups: ${error.message}`;
+      }
+    } finally {
+      button.disabled = false;
+    }
+    // The button goes once the oldest group is on the page, so the keyboard
+    // moves to the line that says so rather than back to the document.
+    if (hadFocus) (state.historyCursor ? button : $("history-count")).focus();
   }
 
   // The failed steps of a whole group, host by host: each member's own
@@ -2354,6 +2564,25 @@
     $("plan").addEventListener("change", () => renderSuites());
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelGroup);
+    // The history filters: a change applies at once, and the form's own
+    // submit (Enter in the ref box, or Apply) does the same rather than
+    // navigating away.
+    $("history-filters").addEventListener("submit", (submit) => {
+      submit.preventDefault();
+      loadGroups();
+    });
+    $("history-target").addEventListener("change", loadGroups);
+    $("history-status").addEventListener("change", loadGroups);
+    // A ref picked from the suggestions, or typed and left, applies too.
+    $("history-ref").addEventListener("change", loadGroups);
+    $("history-clear").addEventListener("click", () => {
+      $("history-target").value = "";
+      $("history-status").value = "";
+      $("history-ref").value = "";
+      loadGroups();
+      $("history-target").focus();
+    });
+    $("history-older").addEventListener("click", loadOlderGroups);
     // The information dialog: Close and Escape both close it, and focus
     // goes back to the button it was opened from however it closed.
     $("test-info-close").addEventListener("click", closeTestInfo);

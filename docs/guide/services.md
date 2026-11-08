@@ -135,7 +135,8 @@ applied to the target.
 python -m ubertooth_harness controller --port 8765 \
   [--results-dir ~/.local/share/ubertooth-harness/controller/runs] \
   [--ubertooth-repo https://github.com/SqueakyFloors/ubertooth.git] \
-  [--plans-dir testplans]
+  [--plans-dir testplans] \
+  [--keep-runs DAYS]
 ```
 
 `--ubertooth-repo` is the repository whose branches and tags the GUI offers
@@ -359,6 +360,18 @@ word and symbol (colour only reinforces it).
   with its reason and last output lines, then each run's own reason, and a
   host that got no run at all with the reason it did not). A run of one host
   is listed as a group of one, by its own run ID.
+  **Load older** adds the next 50, oldest last, and goes once the oldest
+  group is on the page; the line beside it counts the rows against the whole
+  history. Above the table, **Target**, **Status** and **Ref** filter the
+  list; a group matches a target when it asked that host to run. Each change
+  fetches the newest page for those filters, and a group that starts or
+  finishes while a page is open joins or leaves the rows by the same
+  comparisons. The filters offer every registered target and every target or
+  ref the loaded rows name, beside the refs `GET /api/refs` lists; the ref
+  box takes any name. On a narrow window the filters stack and the table
+  scrolls sideways. A keyboard reaches each control in turn, and when Load
+  older runs out the focus moves to the line that says so rather than back
+  to the document.
 - **What a test is for:** beside every test name — in Run setup's suite
   list, the live checklist, and a failure summary — is a small round *i*
   button that opens a dialog in the page: the test's purpose, theory of
@@ -468,10 +481,10 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, `platform` (the registry platform its OS is, `linux` or `macos`, else null), Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_btbr": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware`, `with_btbr` and `with_python` add `--with-firmware`, `--with-btbr` and `--with-python` to the run's build, and any of them without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer. A run the plan says this target could not measure is refused with 422 before the ref is resolved: a suite no step of which runs there, and a step whose own hardware is what it measures (`required hardware:`) whose `hosts:` names no host of the run (see [Hardware a step is about](plans-and-resources.md#hardware-a-step-is-about-blocked-not-left-out)); the detail names the step, where it is required and the hardware it needs there. The order is the request's own faults before the target's state: an unknown target (404), then a suite this run could not measure (422), then the ref and the build options (422), then a target that is offline or busy (409) — a refusal the suite earns does not go away when the target comes back, so it is the more useful answer. Hardware the bench has not got is the run's to report, not this check's. |
 | `POST /api/run-groups` | start a [run group](#run-groups-one-plan-on-several-hosts): the same body as a run plus `{"hosts": ["Host_Linux", "Host_Mac"]}` (at least one, each named once, at most 16). 201 with the group, each member carrying its `run_id` or the `error` that host's start gave; 422 for an unusable request, a ref not in `/api/refs`, an option that needs `build` without it, or a suite the group's hosts together could not measure (the same check as a single run, judged over every host it names, so a release plan across the bench measures a host-named gate once, and answered before the hosts are asked, so a group whose hosts are all unknown or offline is told about the suite rather than about them); when no host started, the one status every host gave (404 an unknown target, 409 busy, 503 a runner away, 504 no answer in time) or 409 where they differ |
-| `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |
+| `GET /api/run-groups[?limit=N][&before=<created_at>][&before_group_id=ID][&target=HOST][&status=STATUS][&ref=REF]` | one page of the group history, newest first, each group with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own). Paged, filtered and counted exactly as `GET /api/runs` is, by `(created_at, group_id)`: `has_more`, `next_before` with `next_before_group_id`, `total` and `matching`. A group matches `target` when it asked that host to run, and `status` is the group's own, combined from its members. 422 for a limit outside the range, a `before` that is not such a stamp, a `before_group_id` without one, or a filter value that is not a host name, a status or a ref |
 | `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, stage estimates and planned invocations (at most 600 of them, since this answer carries one list per host; the whole list stays at `GET /api/runs/{run_id}`), `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one, which a run that flashes its boards has not got: flashing the run's build is not a learned stage) |
 | `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, or once a host is still starting (its outcome says so, and the child its runner may still accept is cancelled as it arrives); 409 when nothing is running and nothing is starting; when no child could be cancelled, the one status every host gave (409 busy, 503 runner away, 504 no answer) or 409 where they differ |
-| `GET /api/runs[?target=HOST]` | runs, newest first |
+| `GET /api/runs[?limit=N][&before=<created_at>][&before_run_id=ID][&target=HOST][&status=STATUS][&ref=REF]` | one page of the run history, newest first: at most `limit` runs (50 by default, 500 at most) ordered by `(created_at, run_id)` descending. `has_more` says whether anything is behind the page, and `next_before` with `next_before_run_id` is the cursor for the next one, so paging holds no position in the controller and a run that starts in between is neither served twice nor missed. Page with both values: `before` on its own means "at or older than that instant", which skips past nothing but is not a cursor, since a page that stopped in the middle of an instant would serve those runs again. `total` is every stored run and `matching` every run the filters match. The three filters compare exactly: the target's registry name, the run's status, the ref it named. Listing reads only the runs' own records, so `event_count` and `malformed_lines` are `null` for a run whose stored `run.jsonl` has not been read since the controller started; `GET /api/runs/{run_id}` reads it and reports them. 422 for a limit outside the range, a `before` that is not such a stamp, a `before_run_id` without a `before`, or a target, status or ref that could not be one |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `GET /api/runs/{run_id}/files` | the output files the run recorded, each with its path, stream, size, line count, SHA-256, where it came from (`owner`), the checks that read it, and `readable`: whether this host holds the file itself |
@@ -581,4 +594,32 @@ skipped and counted (`malformed_lines`). A run or cancel request whose callers
 all timed out (504) is kept for a grace period (60 s) so a late answer still
 takes effect, then dropped. Overlapping cancels of one run share the
 outstanding request, and each caller has its own timeout.
+
+### What startup reads, and how long runs are kept
+
+Starting up reads one `run.json` per stored run and no `run.jsonl` at all,
+except for a run still `running`, whose stored sequence numbers are what
+recognizes its runner's replay after a reconnect. A finished run's records
+are read when something asks for them: its own `GET /api/runs/{run_id}`, its
+failure summary, a report rebuilt by a late record, or the durations learned
+from it. They are counted on the run then. So listing the history costs one
+small record per run however many records those runs hold, and
+`event_count` and `malformed_lines` are `null` until a run's records are
+read.
+
+Run directories are kept for ever by default: nothing is deleted unless
+`--keep-runs DAYS` asks for it. With a window, the controller removes a
+finished run's directory once it is that many days old, dated by when it
+finished or else by when it was created, at startup and then every hour. A
+run that is still `running` is never removed, nor is one whose stamps cannot
+be read, nor anything that is not a run directory of its own: the name must
+be a flat directory name beside the other runs, not a symbolic link, and the
+`run.json` in it must record that same run. A group record whose every run
+has been removed goes with them; the learned durations
+([estimates.json](#learned-durations)) and the `groups/` directory itself
+stay. Anything that cannot be removed is logged and kept, with the run still
+listed. A browser open on a pruned run's row gets 404 for its `report.md`
+until it reloads.
+
+### Strict decoding and target state
 

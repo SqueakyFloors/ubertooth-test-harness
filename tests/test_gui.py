@@ -1146,12 +1146,96 @@ class PageWiringTests(unittest.TestCase):
     def test_script_wires_to_the_controller_endpoints(self):
         for endpoint in (
             '"/api/refs"', '"/api/plans"', "?target=${encodeURIComponent(host)}",
-            '"/api/run-groups"', "/ws/live", "/report.md", "/cancel",
+            "`/api/run-groups?${query.toString()}`",
+            "/ws/live", "/report.md", "/cancel",
             "`/api/runs/${encodeURIComponent(runId)}`",
             "`/api/run-groups/${encodeURIComponent(groupId)}`",
         ):
             self.assertIn(endpoint, self.js)
         self.assertIn('"Content-Type"] = "application/json"', self.js)
+
+    def test_the_history_is_drawn_one_page_at_a_time(self):
+        # The newest 50, then a page at a time behind the controller's own
+        # cursor, which carries the group of the instant the page ended on.
+        self.assertIn("const HISTORY_PAGE = 50;", self.js)
+        body = self.js[self.js.index("function historyQuery(cursor)"):
+                       self.js.index("function takeGroupPage(")]
+        self.assertIn('limit: String(HISTORY_PAGE)', body)
+        self.assertIn('query.set("before", cursor.created_at)', body)
+        self.assertIn('query.set("before_group_id", cursor.group_id)', body)
+        # A page that is the oldest leaves no cursor, and the button goes.
+        self.assertIn('state.historyCursor = data.has_more', self.js)
+        self.assertIn('$("history-older").hidden = !state.historyCursor;', self.js)
+
+    def test_the_history_filters_reach_the_controller_and_the_live_updates(self):
+        for name in ("history-target", "history-status", "history-ref"):
+            self.assertIn(f'id="{name}"', self.html)
+        query = self.js[self.js.index("function historyQuery(cursor)"):
+                        self.js.index("function takeGroupPage(")]
+        self.assertIn('for (const name of ["target", "status", "ref"])', query)
+        # The same three comparisons on a live update, so a group that
+        # starts or finishes lands in the rows where the next page would put
+        # it. A group matches a target when it asked that host to run.
+        matches = self.js[self.js.index("function matchesFilters(group)"):
+                          self.js.index("function historyQuery(cursor)")]
+        for comparison in (
+            "!hosts.includes(filters.target)", "group.status !== filters.status",
+            "group.ref !== filters.ref",
+        ):
+            self.assertIn(comparison, matches)
+
+    def test_the_pager_keeps_the_keyboard_and_announces_the_count(self):
+        # The count line is a status region, and takes focus when the button
+        # it sits beside goes away under the keyboard.
+        self.assertRegex(
+            self.html, r'id="history-count"[^>]*role="status"[^>]*tabindex="-1"'
+        )
+        self.assertIn('const hadFocus = document.activeElement === button;', self.js)
+        self.assertIn(
+            'if (hadFocus) (state.historyCursor ? button : $("history-count")).focus();',
+            self.js,
+        )
+
+    def test_the_history_panel_fits_a_narrow_window(self):
+        # The filters wrap onto their own lines rather than shrinking to a
+        # few characters, and the table keeps its own horizontal scroll.
+        filters = self.css[self.css.index(".history-filters {"):
+                           self.css.index(".history-filter-actions {")]
+        self.assertIn("flex-wrap: wrap", filters)
+        self.assertIn("flex: 1 1 11rem", filters)
+        self.assertIn("overflow-x: auto", self.css)
+        more = self.css[self.css.index(".history-more {"):
+                        self.css.index(".history-more .hint")]
+        self.assertIn("flex-wrap: wrap", more)
+
+    def test_a_stale_history_answer_cannot_replace_the_page(self):
+        # Filters that change while a page is in flight, and an older page
+        # asked for before them: the answer is dropped rather than shown
+        # beside, or appended to, rows of another query.
+        self.assertIn("historyToken: 0,", self.js)
+        self.assertIn("const token = ++state.historyToken;", self.js)
+        self.assertEqual(
+            3, self.js.count("if (token !== state.historyToken) return;")
+        )
+        self.assertIn("if (token === state.historyToken) {", self.js)
+
+    def test_the_row_count_follows_the_rows_live_updates_change(self):
+        # The page's own figure, plus the rows added since and less the
+        # rows that stopped matching; a fresh page clears both.
+        self.assertIn("state.historyAdded = new Set();", self.js)
+        self.assertIn("state.historyGone = new Set();", self.js)
+        self.assertIn(
+            "state.historyMatching + state.historyAdded.size - state.historyGone.size",
+            self.js,
+        )
+        # A group fetched by ID may be any group, however old, so it
+        # reaches the cache and not the rows: only the live stream and a
+        # group this page started add a row, through joinOrLeaveRows.
+        self.assertIn("function storeGroup(group)", self.js)
+        self.assertIn("function joinOrLeaveRows(group)", self.js)
+        rows = self.js[self.js.index("function upsertGroup(group)"):
+                       self.js.index("  function storeGroup(group)")]
+        self.assertIn("joinOrLeaveRows(group)", rows)
 
     def test_only_runnable_plans_are_offered_to_start(self):
         # The plan <select> is filled from plans that load and are runnable;
@@ -1820,7 +1904,9 @@ class GroupViewTests(unittest.TestCase):
     def test_history_lists_groups_with_their_per_host_results(self):
         body = self.js[self.js.index("function renderHistory()"):
                        self.js.index("async function loadGroups()")]
-        self.assertIn("[...state.groups.values()]", body)
+        # The rows are the pages the controller served, in its own order.
+        self.assertIn("[...state.historyIds]", body)
+        self.assertIn("state.groups.get(groupId)", body)
         self.assertIn("hostPill(member.host, member.status,", body)
         self.assertIn("onclick: () => selectGroup(group.group_id, { tab: member.host })",
                       body)
@@ -1829,7 +1915,9 @@ class GroupViewTests(unittest.TestCase):
         self.assertIn("group.implicit ? (groupRunId(group) || group.group_id)", body)
         load = self.js[self.js.index("async function loadGroups()"):
                        self.js.index("// The failed steps of a whole group")]
-        self.assertIn('api("GET", "/api/run-groups")', load)
+        # One page of them, through the history query the pager builds.
+        self.assertIn('api("GET", historyQuery(null))', load)
+        self.assertIn("/api/run-groups?${query.toString()}", self.js)
         self.assertIn("Hosts", self.html)
         self.assertIn("a run of one host is a group of one", self.html)
         # The failure summary is the group's, host by host.

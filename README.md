@@ -75,7 +75,8 @@ it through an SSH tunnel; nothing is exposed on the network.
    ticked (the two "Build … too" boxes follow what the suite needs), and
    press Run. The Live run group card ticks off each test with one pill per
    host it is tested on; History keeps every group with each host's
-   `report.md`. Beside every
+   `report.md`, newest 50 first, with Target, Status and Ref filters and
+   Load older behind them. Beside every
    test name is a small *i* button: it opens what that test is for, what it
    drives, and what a pass does not prove, with a link to its
    [docs/tests.md](docs/tests.md) section.
