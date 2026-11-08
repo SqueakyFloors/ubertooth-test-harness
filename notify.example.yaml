@@ -1,0 +1,70 @@
+# Completion notices by email: every setting, with its default.
+#
+# Copy this to a private file OUTSIDE this repository, readable only by you,
+# and turn `enabled` on:
+#
+#   mkdir -p ~/.config/ubertooth-harness
+#   cp notify.example.yaml ~/.config/ubertooth-harness/notify.yaml
+#   chmod 600 ~/.config/ubertooth-harness/notify.yaml
+#
+# That path is the default; `--notify-config FILE` and
+# UBERTOOTH_HARNESS_NOTIFY_CONFIG name another one. With none of them, and no
+# file at the default path, no notice is sent.
+#
+# Never put a password in here: name the environment variable or the private
+# file it comes from. An unknown setting is refused rather than ignored.
+#
+# docs/guide/notifications.md has the whole story.
+
+# Nothing is sent until this is true.
+enabled: false
+
+# One plain address each: no display name, no comma, no newline.
+sender: harness-notices@example.com
+recipients:
+  - you@example.com
+
+# smtp (default) or sendmail.
+transport: smtp
+
+smtp:
+  host: smtp.example.com
+  port: 587
+  # starttls (default) upgrades the connection; tls connects with TLS from
+  # the first byte. Both verify the certificate and the host name, and there
+  # is no setting that turns that off. `none` is allowed only for a relay on
+  # 127.0.0.1, and never with a username.
+  tls: starttls
+  # Set a username to authenticate. Then TLS is required, and exactly one of
+  # password_env or password_file must name where the password comes from.
+  username: harness-notices@example.com
+  # An environment variable whose name starts with UBERTOOTH_HARNESS_, read
+  # at send time. For the systemd user service, put it in a private
+  # EnvironmentFile (see docs/guide/notifications.md).
+  password_env: UBERTOOTH_HARNESS_SMTP_PASSWORD
+  # Or an absolute path to a file holding only the password, owned by you
+  # with mode 600. Name one source, not both.
+  # password_file: /private/path/to/smtp-password
+  # What the client calls itself in EHLO. By default the sender's domain,
+  # because asking this host its own name depends on the DNS it happens to
+  # have and puts the lab host's name in the conversation.
+  # ehlo_name: bench.example.com
+
+# Only with transport: sendmail. An absolute path to a regular executable
+# file no one else can write; it is run with the addresses as arguments and
+# the message on standard input, never through a shell.
+# sendmail:
+#   path: /usr/sbin/sendmail
+
+# Bounded retries. A notice that still cannot be sent is a warning in the
+# controller's log; it never changes a run's verdict.
+attempts: 3
+retry_delay_s: 5
+timeout_s: 20
+
+subject_prefix: "[ubertooth-harness]"
+
+# The loopback GUI a link in the notice points at. Leave it out to use the
+# controller's own port. It must be http://127.0.0.1[:PORT]: the GUI listens
+# on loopback only, and is reached through the usual SSH tunnel.
+# gui_base_url: http://127.0.0.1:8765

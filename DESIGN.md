@@ -228,6 +228,12 @@ One flat directory per run, outside the repository by default.
   <run dir>` measures every recorded file again and re-runs every recorded
   pattern over the same bytes. A check written as code records its verdict
   only, which is the price of counting things no pattern can.
+- Beside the run directories, the controller keeps `estimates.json` (learned
+  durations), `groups/` (one record per run group), `notifications/` (one
+  record per completion notice already sent, which is what keeps a notice
+  unique across restarts), and `publications/` (one record per published
+  validation bundle, the only thing that puts a public URL in a notice). A
+  run ID may not take any of those names.
 
 Details: [run records](docs/reference/run-records.md).
 
@@ -257,8 +263,14 @@ Two properties matter for the design:
 Estimates are the catalog's, improved by what a host has actually taken:
 durations are learned per host for tests, builds, preflight, and flashes.
 
+Opt-in completion notices are outbound only and sit outside the run's own
+path: the controller emails one message per finished run or group, after that
+run's `report.md` is durable, claimed in a ledger beside the run directories
+so a restart cannot send it twice. A notice can never change a verdict.
+
 Details: [controller, runner, and GUI](docs/guide/services.md),
-[runner protocol](docs/reference/runner-protocol.md).
+[runner protocol](docs/reference/runner-protocol.md),
+[completion notices](docs/guide/notifications.md).
 
 ## 10. Deployment
 

@@ -21,6 +21,7 @@ document that answers your question. The architecture is in
 | build, flash, or chase a version mismatch | [docs/guide/builds-and-firmware.md](docs/guide/builds-and-firmware.md) |
 | share the bench with other runs | [docs/guide/leases.md](docs/guide/leases.md) |
 | run the services or the GUI | [docs/guide/services.md](docs/guide/services.md) |
+| be emailed when a long run finishes | [docs/guide/notifications.md](docs/guide/notifications.md) |
 | deploy them | [docs/guide/deploy.md](docs/guide/deploy.md) |
 | read a run's records | [docs/reference/run-records.md](docs/reference/run-records.md) |
 | publish a release's evidence | [docs/reference/release-evidence.md](docs/reference/release-evidence.md) |
@@ -190,6 +191,7 @@ board behind an attenuator asks for it with `weak link:`
 | `report <run dir>...` | render one Markdown report from one or more runs |
 | `release-evidence <run dir>...` | build one release's public-safe summary, sanitized logs, and sums ([release-evidence.md](docs/reference/release-evidence.md)); uploads nothing |
 | `runner`, `controller` | the persistent services ([services.md](docs/guide/services.md)) |
+| `notify-test` | send one test completion notice, to check that setup ([notifications.md](docs/guide/notifications.md)) |
 
 By-hand bench helpers (holding a device, driving a peer, switching a hub port)
 are in [`scripts/lab/`](scripts/lab/README.md).

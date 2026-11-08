@@ -138,7 +138,8 @@ python -m ubertooth_harness controller --port 8765 \
   [--results-dir ~/.local/share/ubertooth-harness/controller/runs] \
   [--ubertooth-repo https://github.com/SqueakyFloors/ubertooth.git] \
   [--plans-dir testplans] \
-  [--keep-runs DAYS]
+  [--keep-runs DAYS] \
+  [--notify-config ~/.config/ubertooth-harness/notify.yaml]
 ```
 
 `--ubertooth-repo` is the repository whose branches and tags the GUI offers
@@ -625,5 +626,19 @@ stay. Anything that cannot be removed is logged and kept, with the run still
 listed. A browser open on a pruned run's row gets 404 for its `report.md`
 until it reloads.
 
-### Strict decoding and target state
+### Completion notices
 
+With `--notify-config FILE` (or `UBERTOOTH_HARNESS_NOTIFY_CONFIG`, or a file
+at `$XDG_CONFIG_HOME/ubertooth-harness/notify.yaml`), the controller emails
+one short notice when a run or a run group has finished: verdict, IDs, the
+commits that were built, UTC times and duration, plan, suite, totals, the
+result directory, and the loopback GUI link. Nothing is attached, and it is
+sent after the run's `report.md` is on disk and at most once per run or group
+ID, so a restart or a replayed run end does not send it twice. Notices are
+**off** unless such a file says `enabled: true`, and a notice that cannot be
+sent is a warning in this log and nothing else, never a change to a verdict.
+The whole setup, including where credentials come from and what keeps a
+public URL out of the message, is in
+[notifications.md](notifications.md).
+
+### Strict decoding and target state
