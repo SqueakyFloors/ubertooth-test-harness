@@ -29,6 +29,66 @@
     </div>
   </section>
 
+  <section id="manage" class="panel panel-manage" hidden aria-labelledby="manage-heading">
+    <div class="panel-head panel-head-closable">
+      <h2 id="manage-heading" tabindex="-1">Manage boards</h2>
+      <button type="button" id="manage-close">Close</button>
+    </div>
+    <div class="panel-body">
+      <p id="manage-about" class="hint"></p>
+      <p id="manage-status" class="hint" role="status" aria-live="polite"></p>
+
+      <h3 id="manage-registered-heading">Registered on this target</h3>
+      <p id="manage-registered-empty" class="empty">No board is registered on this target.</p>
+      <ul id="manage-registered" class="boards" aria-labelledby="manage-registered-heading"></ul>
+
+      <h3 id="manage-detected-heading">Attached to this target</h3>
+      <p id="manage-detected-note" class="hint">Autodetect reads what the target's kernel already knows about its USB bus. No device is opened and nothing is sent to one, so a board in the middle of a capture is not disturbed.</p>
+      <div class="manage-actions">
+        <button type="button" id="manage-detect">Autodetect boards</button>
+      </div>
+      <p id="manage-detected-empty" class="empty">Press Autodetect boards to list what is attached.</p>
+      <div id="manage-detected-wrap" class="table-wrap" hidden>
+        <table class="detected">
+          <caption>Ubertooths attached to the target, from a read-only USB scan</caption>
+          <thead>
+            <tr>
+              <th scope="col">Serial</th>
+              <th scope="col">USB path</th>
+              <th scope="col">VID:PID</th>
+              <th scope="col">In the registry</th>
+              <th scope="col" class="actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="manage-detected"></tbody>
+        </table>
+      </div>
+
+      <form id="add-board" class="form" novalidate hidden aria-labelledby="add-board-heading">
+        <h3 id="add-board-heading">Register this board</h3>
+        <p id="add-board-device" class="hint"></p>
+        <div class="field-pair">
+          <div class="field">
+            <label for="add-alias">Alias</label>
+            <input type="text" id="add-alias" name="alias" required
+                   autocomplete="off" spellcheck="false"
+                   aria-describedby="add-alias-note">
+            <p id="add-alias-note" class="hint">The name plans and reports call this board. A letter, then letters, digits, underscores or hyphens.</p>
+          </div>
+          <div class="field">
+            <label for="add-power">Switchable port</label>
+            <select id="add-power" name="power" aria-describedby="add-power-note"></select>
+            <p id="add-power-note" class="hint">A board on a switchable hub port can be powered off by a test that needs it off. Leave this at no port for a board plugged straight into the host.</p>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" id="add-submit" class="primary">Register board</button>
+          <button type="button" id="add-cancel">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
   <section class="panel panel-setup" aria-labelledby="setup-heading">
     <div class="panel-head">
       <h2 id="setup-heading">Run setup</h2>

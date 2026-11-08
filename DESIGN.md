@@ -341,7 +341,7 @@ Open:
 | [docs/guide/test-devices.md](docs/guide/test-devices.md) | how the harness drives the DKs, the ESP32 peers, and a host adapter |
 | [docs/guide/services.md](docs/guide/services.md) | controller, runner service, web GUI, run groups |
 | [docs/guide/deploy.md](docs/guide/deploy.md) | deploying the services on the lab host and a Mac |
-| [docs/reference/runner-protocol.md](docs/reference/runner-protocol.md) | the controller↔runner wire protocol, version 7 |
+| [docs/reference/runner-protocol.md](docs/reference/runner-protocol.md) | the controller↔runner wire protocol, version 8 |
 | [docs/reference/run-records.md](docs/reference/run-records.md) | `run.jsonl`, `report.md`, output files, re-checking a run |
 | [docs/reference/power-control.md](docs/reference/power-control.md) | power drivers, armed changes, isolation, manual recovery |
 | [docs/reference/soak-workload.md](docs/reference/soak-workload.md) | the modeled MAC polling workload |

@@ -2,7 +2,7 @@
 
 Every message is one JSON object in one WebSocket text frame:
 
-    {"version": 7, "type": "<type>", ...fields}
+    {"version": 8, "type": "<type>", ...fields}
 
 Each type has an exact field set. Decoding is strict: a message that is not a
 JSON object, has an unknown version or type, lacks a field, has a field of the
@@ -27,10 +27,13 @@ from typing import Any, Callable, Mapping
 # version 4 added the ``run_file`` request and its two answers; version 5
 # added ``with_firmware`` and ``with_python`` to the run message; version 6
 # added ``bootloader``; version 7 added ``with_btbr`` beside the other build
-# options. There is no negotiation: a message of any other version is refused,
-# so a controller and a runner of different versions never work together
-# (DESIGN.md section 2).
-PROTOCOL_VERSION = 7
+# options; version 8 added per-board status to ``register`` and
+# ``heartbeat``, and board management: the ``list_devices`` and
+# ``update_registry`` requests with their ``devices``, ``registry_updated``
+# and ``registry_refused`` answers. There is no negotiation: a message of any
+# other version is refused, so a controller and a runner of different
+# versions never work together (DESIGN.md section 2).
+PROTOCOL_VERSION = 8
 # Bounds what the runner accepts from the controller. Outbound events may be
 # larger (the manifest record is bounded at 1 MiB).
 MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
@@ -227,6 +230,122 @@ def _refusal_status(value) -> bool:
     return value in (400, 404, 503) and _integer(value)
 
 
+# What a registry edit may be asked to do. The same two words
+# ``registryedit`` takes, named here so the wire schema stays a statement of
+# its own.
+def _registry_action(value) -> bool:
+    return value in ("add", "remove")
+
+
+def _registry_status(value) -> bool:
+    """The HTTP status the controller answers a refused registry edit with.
+
+    409 beside the file request's three: the commonest refusal is that the
+    registry, a lease, or a run already says otherwise.
+    """
+    return value in (400, 404, 409, 503) and _integer(value)
+
+
+# One registered board's status, as ``register``, ``heartbeat`` and
+# ``registry_updated`` carry it. Only what the runner can establish without
+# opening the device: whether USB still has it, whether a lease holds it, and
+# the firmware revision the last run that read it found. What that adds up to
+# is derived on the controller (``boardstatus``), not sent.
+_BOARD_FIELDS: Mapping[str, Validator] = {
+    "alias": _name,
+    "serial": _text,
+    # Null when this target cannot list USB devices at all; the status is
+    # then unknown rather than offline.
+    "present": _optional(_boolean),
+    "held": _boolean,
+    # The lease holder as the lease file describes it; "" when free.
+    "holder": _text,
+    # Null until a run has read the board.
+    "firmware_revision": _optional(_text),
+    "power_controller": _optional(_name),
+    "power_port": _optional(_non_negative_integer),
+}
+MAX_BOARDS = 64
+
+
+def _board(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(_BOARD_FIELDS)
+        and all(check(value[field]) for field, check in _BOARD_FIELDS.items())
+    )
+
+
+def _boards(value) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= MAX_BOARDS
+        and all(_board(item) for item in value)
+        and len({item["alias"] for item in value}) == len(value)
+    )
+
+
+# One attached Ubertooth as a read-only USB scan found it. ``alias`` is the
+# registered board it is, or null for one the registry has not got.
+_DEVICE_FIELDS: Mapping[str, Validator] = {
+    # "" for a board in its DFU bootloader, which reports none.
+    "serial": _text,
+    "vendor": _text,
+    "product": _text,
+    "path": _text,
+    "alias": _optional(_name),
+}
+
+
+def _device(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(_DEVICE_FIELDS)
+        and all(check(value[field]) for field, check in _DEVICE_FIELDS.items())
+    )
+
+
+def _devices(value) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= MAX_BOARDS
+        and all(_device(item) for item in value)
+    )
+
+
+# One switchable hub on the target, with the ports a board could still be
+# registered on.
+_CONTROLLER_FIELDS: Mapping[str, Validator] = {
+    "alias": _name,
+    "driver": _optional(_text),
+    "ports": lambda value: (
+        isinstance(value, list)
+        and len(value) <= 256
+        and all(_non_negative_integer(item) for item in value)
+    ),
+}
+
+
+def _power_controllers(value) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= MAX_BOARDS
+        and all(
+            isinstance(item, dict)
+            and set(item) == set(_CONTROLLER_FIELDS)
+            and all(
+                check(item[field])
+                for field, check in _CONTROLLER_FIELDS.items()
+            )
+            for item in value
+        )
+    )
+
+
+def _suggested_alias(value) -> bool:
+    return value is None or _name(value)
+
+
 def valid_file_page(page) -> bool:
     """Whether ``page`` can be carried in a ``run_file_page`` answer.
 
@@ -234,6 +353,22 @@ def valid_file_page(page) -> bool:
     answer a request it cannot carry with a refusal rather than fall silent.
     """
     return _file_page(page)
+
+
+def valid_boards(boards) -> bool:
+    """Whether ``boards`` can be carried in ``register`` or ``heartbeat``.
+
+    For the runner, which builds the list from a registry a person wrote and
+    checks one entry at a time: an alias or a serial that will not fit the
+    schema must cost that board its line in the Targets card, not cost the
+    target its connection.
+    """
+    return _boards(boards)
+
+
+def valid_devices(devices) -> bool:
+    """Whether ``devices`` can be carried in a ``devices`` answer."""
+    return _devices(devices)
 
 
 # Controller -> runner.
@@ -290,6 +425,29 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "offset": _file_count,
         "limit": _page_limit,
     },
+    # Every Ubertooth attached to the target, from a read-only USB scan
+    # (sysfs on Linux, ioreg on macOS): no device is opened and no command is
+    # sent, so a board that is capturing is undisturbed. The answer marks
+    # each one registered or new, so a person can register a board they can
+    # see rather than one they have to look up.
+    "list_devices": {
+        "request_id": _identifier,
+    },
+    # Register or unregister one Ubertooth in the target's own hardware
+    # registry. ``alias`` is the registry alias; ``serial``,
+    # ``power_controller`` and ``power_port`` belong to ``add`` only, and a
+    # power mapping needs both of its halves or neither. The runner owns the
+    # file: it validates the change against its own registry, writes it
+    # atomically keeping a backup, reloads it, and answers with the boards it
+    # then has. A removed board stays on USB; nothing is sent to it.
+    "update_registry": {
+        "request_id": _identifier,
+        "action": _registry_action,
+        "alias": _name,
+        "serial": _optional(_text),
+        "power_controller": _optional(_name),
+        "power_port": _optional(_non_negative_integer),
+    },
 }
 
 # Runner -> controller.
@@ -303,6 +461,9 @@ RUNNER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         # Null when enumeration is unavailable (see enumeration_error).
         "ubertooth_serials": _optional(_serials),
         "enumeration_error": _optional(_text),
+        # One entry per registered Ubertooth of this host, with what the
+        # runner can establish about it without opening it.
+        "boards": _boards,
         "heartbeat_interval_s": _non_negative_number,
         # Run still executing or not yet reported; its events are replayed
         # from the start on this connection.
@@ -313,6 +474,9 @@ RUNNER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "elapsed_s": _optional(_non_negative_number),
         "last_event_sequence": _optional(_integer),
         "last_event_type": _optional(_text),
+        # The same board list as ``register``, refreshed: a board that left
+        # USB or was leased by another command is seen within one interval.
+        "boards": _boards,
     },
     "run_accepted": {
         "request_id": _identifier,
@@ -368,6 +532,38 @@ RUNNER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "status": _refusal_status,
         "reason": _text,
     },
+    # The answer to list_devices: every attached Ubertooth the read-only
+    # scan found, each marked with the alias it is registered as or null for
+    # one the registry has not got; the hubs a new board could be registered
+    # on, with their free ports; and the alias the runner suggests for the
+    # next board (null when it could not make one). ``error`` is why the
+    # scan found nothing, when it could not run at all.
+    "devices": {
+        "request_id": _identifier,
+        "devices": _devices,
+        "error": _optional(_text),
+        "power_controllers": _power_controllers,
+        "suggested_alias": _suggested_alias,
+        "boards": _boards,
+    },
+    # The registry was changed: the action taken, the alias it was taken on,
+    # and the boards the target has now. The controller replaces the
+    # target's board list with this one.
+    "registry_updated": {
+        "request_id": _identifier,
+        "action": _registry_action,
+        "alias": _name,
+        "boards": _boards,
+        "ubertooth_serials": _optional(_serials),
+    },
+    # The registry was not changed, and why. ``reason`` names aliases,
+    # serials and what the registry already holds, never where the registry
+    # file is on the target.
+    "registry_refused": {
+        "request_id": _identifier,
+        "status": _registry_status,
+        "reason": _text,
+    },
     # The controller sent a message the runner rejected; nothing was done.
     "protocol_error": {
         "reason": _text,
@@ -399,11 +595,35 @@ def _run_options(message: Mapping) -> str:
     return ""
 
 
+def _registry_fields(message: Mapping) -> str:
+    """Why an update_registry message's fields cannot be acted on, or ''.
+
+    Refused in both directions, as the run options are: the controller
+    cannot encode a change that means nothing, and a runner sent one rejects
+    it with ``protocol_error`` rather than reading past the contradiction.
+    """
+    add = message["action"] == "add"
+    if add and not message["serial"]:
+        return "add requires the serial of the board to register"
+    if not add:
+        for field in ("serial", "power_controller", "power_port"):
+            if message[field] is not None:
+                return f"remove takes the alias only, not {field}"
+        return ""
+    if (message["power_controller"] is None) != (message["power_port"] is None):
+        # One half of a power mapping names no port on no hub. The registry
+        # refuses it too; refusing it here keeps a half-filled request from
+        # reaching the file at all.
+        return "a power mapping needs both power_controller and power_port"
+    return ""
+
+
 # Checks across the fields of one message type, applied after every field of
 # that type validated on its own. One map per direction, so a runner message
 # type can never pick up a controller-only check.
 CONTROLLER_COMBINATIONS: Mapping[str, Callable[[Mapping], str]] = {
     "run": _run_options,
+    "update_registry": _registry_fields,
 }
 RUNNER_COMBINATIONS: Mapping[str, Callable[[Mapping], str]] = {}
 

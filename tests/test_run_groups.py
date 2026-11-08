@@ -140,7 +140,7 @@ class ScriptedRunner(FakeRunner):
             "register", host=host or self.host, hostname=f"{self.host}-box",
             os=OPERATING_SYSTEMS[self.platform], python="3.12.6",
             ubertooth_serials=[self.serial], enumeration_error=None,
-            heartbeat_interval_s=interval, active_run_id=active,
+            boards=[], heartbeat_interval_s=interval, active_run_id=active,
         )
 
 

@@ -164,9 +164,10 @@ code { overflow-wrap: anywhere; }
   max-width: 80rem; margin: 0 auto; padding: var(--gap) 1.25rem 3rem;
   display: grid; gap: var(--gap);
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "targets" "setup" "live" "history";
+  grid-template-areas: "targets" "manage" "setup" "live" "history";
 }
 .panel-targets { grid-area: targets; }
+.panel-manage { grid-area: manage; }
 .panel-setup { grid-area: setup; }
 .panel-live { grid-area: live; }
 .panel-history { grid-area: history; }
@@ -174,7 +175,7 @@ code { overflow-wrap: anywhere; }
 @media (min-width: 60rem) {
   .layout {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
-    grid-template-areas: "targets setup" "live live" "history history";
+    grid-template-areas: "targets setup" "manage manage" "live live" "history history";
   }
 }
 
@@ -240,6 +241,18 @@ code { overflow-wrap: anywhere; }
 .status-not-applicable, .status-canceled, .status-unknown {
   color: var(--neutral-fg); background: var(--neutral-bg); border-color: var(--neutral-line);
 }
+/* A registered board's status: green for one a run can take, amber for one
+   that needs looking at, red for one USB has not got. The status word is
+   always beside the symbol, so the color only repeats what the text says. */
+.level-ready {
+  color: var(--ok-fg); background: var(--ok-bg); border-color: var(--ok-line);
+}
+.level-attention {
+  color: var(--run-fg); background: var(--run-bg); border-color: var(--run-line);
+}
+.level-offline {
+  color: var(--bad-fg); background: var(--bad-bg); border-color: var(--bad-line);
+}
 .badges { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 
 /* ----- definition grids ------------------------------------------------- */
@@ -264,11 +277,41 @@ code { overflow-wrap: anywhere; }
 .card h3 { font-size: 1rem; margin: 0 0 0.6rem; overflow-wrap: anywhere; }
 .target-card dd button { margin-top: 0.3rem; }
 
+/* ----- a target's registered boards, and managing them ------------------ */
+
+.target-boards { margin-top: 0.7rem; border-top: 1px solid var(--line); padding-top: 0.6rem; }
+.target-boards h4 { margin: 0; font-size: 0.9rem; }
+.target-boards > button { margin-top: 0.5rem; }
+.target-boards .boards { margin-top: 0.4rem; }
+.reg-board {
+  background: var(--surface); border: 1px solid var(--line);
+  padding: 0.35rem 0.5rem;
+}
+.board-serial, .board-power { color: var(--muted); font-size: 0.8rem; }
+
+/* The Manage boards panel: a row of its own across the page, because the
+   scan's table (a 32-digit serial, a bus path, a VID:PID, what the registry
+   says, and the button that acts on the row) does not fit a narrow column
+   without folding a serial into four lines or pushing the button out of
+   sight. */
+.panel-head-closable { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.panel-manage h3 { margin: 1rem 0 0.4rem; font-size: 0.95rem; }
+.panel-manage h3:first-of-type { margin-top: 0.2rem; }
+.panel-manage .boards { max-width: 60rem; }
+.manage-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0.5rem 0; }
+.panel-manage .form { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 0.8rem; }
+.detected code { overflow-wrap: anywhere; }
 /* ----- forms ------------------------------------------------------------ */
 
 button, select, input, textarea { font: inherit; color: inherit; }
 
 select {
+  width: 100%; min-height: 2.25rem; padding: 0.35rem 0.6rem;
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-small);
+}
+
+input[type="text"] {
   width: 100%; min-height: 2.25rem; padding: 0.35rem 0.6rem;
   background: var(--surface); color: var(--fg);
   border: 1px solid var(--line-strong); border-radius: var(--radius-small);
