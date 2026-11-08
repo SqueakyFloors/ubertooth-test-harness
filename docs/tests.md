@@ -591,9 +591,9 @@ only that the count differed.
 ## Bootloader identity
 
 **What it does.** Nothing as a plan entry: a catalog entry for the bootloader
-read, which mandatory preflight does instead — for the boards whose
-firmware a run requires and then verifies, which leaves out a guard-only
-board and a board whose test establishes its own firmware.
+read, which mandatory preflight does instead — for every Ubertooth a test of
+the suite selects, which leaves out a guard-only board, whose bootloader the
+guard baseline reads instead.
 
 **Theory of operation.** A board's bootloader is the first 16 KiB of its
 flash, and `ubertooth-dfu` runs from there, so an ordinary firmware write
@@ -621,7 +621,7 @@ and compares that: a release name for equality, since there is no shorter form
 of one to accept, and a hash as an abbreviation of the commit, since two
 checkouts need not abbreviate to the same length.
 
-Preflight reads it for every board whose firmware the run requires, after the
+Preflight reads it for every Ubertooth a test of the suite selects, after the
 firmware checks, since firmware older than the read refuses it. What the run
 then requires is `--bootloader`:
 
@@ -657,6 +657,52 @@ the same command and the same check — so they were removed rather than
 implemented twice
 ([#347](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/347)).
 
+**A board whose application image a test of the suite writes.** `Flash
+reliability`, `DFU images`, `Classic btbr console` and `Reset into invalid
+application` each establish their own board's image, so the run does not
+require a firmware revision of that board — and the read used to be left out
+with it, which took the check off the one board where the bootloader is the
+subject of the test
+([#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
+The read covers those boards now, with one tolerance: what such a board is
+carrying when preflight runs is whatever the last run left, and firmware older
+than the request refuses it, which the 2020-12-R1 image a flash test
+alternates in does. There that refusal is the reading — the verdict is `not
+read`, the reason says nothing was compared, and the run goes on. Only the one
+wording libubertooth prints for a stalled request is read that way; a read
+that failed any other way (no board, a board another command holds, a libusb
+error, a timeout) still fails the check, on that board as on any other. A
+board that does answer is compared like the rest, so `check` fails the run on
+a stale bootloader there, naming the programmer: the write covers the boards
+whose firmware preflight requires and no others, because a board the suite
+reflashes could not then be held to the application revision an update
+verifies. `update` on a suite whose every board is one of these says it had no
+board to install on and reads and compares them anyway.
+
+**A board's bootloader under each of its two application images.** `Classic
+btbr console` is where that is read, because it is the one test that puts the
+alternate `btbr` image on a board and the application image back
+([#329](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/329)).
+It reads `-B` once the run's own `btbr` image is on the board and again, in
+its cleanup, with the application image back, so the run record carries the
+board's bootloader as each image reports it.
+
+The two are recorded and not compared, which is a limit of the harness rather
+than a judgement about the reading. `ubertooth-dfu` writes the application
+region only, so the two lines ought to be identical, and a difference would
+mean a write had reached the bootloader. Asserting it needs a cleanup step
+that compares against a baseline a failed case may never have recorded, and a
+cleanup step that cannot run stops the test whether it is skipped or failed,
+so a case that failed at its own write would be reported as a board left
+unrestored. The equality is worth asserting and waits on a way to say
+"compare only if there is something to compare with"
+([#366](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/366)).
+Either read may also answer that the firmware has not got the request, which
+is recorded as the reading: a fork commit with the `btbr` image but without
+`-B` answers that way, and so does a board that arrives carrying firmware
+older than the request, which this test's board can, since it establishes its
+own image.
+
 **Hardware and arguments.** One `Ubertooth` per check, selected by full
 serial. `update` also needs a `Debug programmer` paired with the board, with a
 `serial device`, plus `lpc21isp` and `arm-none-eabi-gcc` on the host; see
@@ -673,14 +719,22 @@ ubertooth-util -U <serial> -v                     # the application came back
 
 **Expected outcome.** No implementation as a plan entry; only a
 `runnable: false` plan may name it. As a preflight check: one `-B` per
-selected board whose firmware the run requires, recorded in `run.jsonl` as a
+Ubertooth a test of the suite selects, recorded in `run.jsonl` as a
 `bootloader_identity` record and
 shown in the report's Bootloader section and in the GUI's board list.
 `record` passes on any answer, including a factory bootloader; `check` and
-`update` pass only on the identity the artifact names.
+`update` pass only on the identity the artifact names. A board whose
+application image the suite writes may answer that its firmware has not got
+the request, which records `not read` and passes.
 
 **Known limits.** A run against a fork commit from before `-B` existed has no
-check at all, and records that it had none. The region hash is worked out from
+check at all, and records that it had none. A `not read` verdict is exactly
+that: nothing about that board's bootloader was established, so a stale
+bootloader under old firmware passes unnoticed until that board is read on a
+run that requires its firmware, or by hand. The tolerance also cannot be told
+apart from a wedged board, which stalls every request it is sent; the firmware
+and serial checks that ran before it are what would have caught one. The
+region hash is worked out from
 the artifact, which is the image padded with the 0xff of erased flash and the
 vector checksum filled in; a programmer that wrote the region any other way
 would be caught by the read-back rather than predicted, which is what the
@@ -2106,23 +2160,82 @@ stdoutdest.py check <case dir> --sha256 <name>=<digest> --prefix <name>=<digest>
     --also <name> --absent <name> --kept <name> --symlink <name>=<target> \
     --hardlink <name>=<target>
 stdoutdest.py run --stdout <case dir>/<name> --append -- <command ...>
+bredrrecord.py <case dir>/replay.pcapng --lap <LAP> --reference-lap <LAP> \
+    --reference-uap <UAP> --min-reference-uap <n> --min-packets <n> \
+    --min-with-payload <n> --min-crc-valid <n> --min-hec-valid <n> \
+    --require-types <types> --signal-dbm <dBm> --no-measured-noise \
+    --following-lap <LAP> --following-uap-mask <mask> --settling-record
 rxreplay.py dump-check <case dir>/replay.dump <case dir>/replay.bin
 rxreplay.py files <case dir>                                # the directory as it is
 rxreplay.py only-fixture <case dir> replay.bin --base-time <epoch>
 rxdump.py      <case dir>/replay.dump full --min-records 19 --types br
 capturefile.py --packets <case dir>/replay.pcap
 bredrrecord.py <case dir>/payloads.pcap --lap <LAP> --reference-lap <LAP> \
-    --reference-uap <UAP> --require-types AUX1,DV/3-DH1,HV3/EV3/3-EV3,DH3/3-DH3 \
-    --require-transports ACL,SCO,eSCO --max-payload-bytes 34
+    --reference-uap <UAP> --min-packets <n> \
+    --require-types AUX1,DV/3-DH1,HV3/EV3/3-EV3,DH3/3-DH3 \
+    --require-transports ACL,SCO,eSCO --min-with-payload 3 --min-crc-valid 2 \
+    --max-payload-bytes 34 --max-access-code-errors 0
 ```
 
-**Expected outcome.** Smoke runs 14 cases (13 where there is no `/proc`): decode every LAP in the fixture,
-derive the UAP with `-l`, replay into PCAPNG and into PCAP (link type 255, the
+**Expected outcome.** Smoke runs 15 cases (14 where there is no `/proc`): decode every LAP in the fixture,
+derive the UAP with `-l`, read every field of a filtered capture's records,
+replay into PCAPNG and into PCAP (link type 255, the
 fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
 `-s` decoding the same as without it with `-h` listing `-s` as the default,
 the payload types read out of a capture, and `-u 00` starting the clock
 search.
+
+**The capture's own records, with a known answer.** One case replays with
+`-l <LAP>` into a PCAPNG and then reads every field of every record with the
+same decoder the live Classic tests use
+([`bredrrecord.py`](../ubertooth_harness/bredrrecord.py); see
+`Classic capture record fields` for what it reads). It is here because what
+that decoder's sharpest checks need is a record the bench rarely produces: on
+live traffic a payload-bearing record turns up about 11 times in 2620 and a
+settled address part about one run in nine, so the checks that read a
+payload's own length field, recompute its CRC-16, and hold a record's transport
+nibble to the payload it names are checks waiting for something to fire on.
+The harness wrote this input, so they fire on every run, with no board, in CI.
+
+What the case requires, beyond every rule the decoder applies to every
+record: each of the eight records carries LAP A and names it as the reference
+LAP; each record that carries a reference UAP names UAP A, which the records
+before the address part settles do not and are not asked to -- the rule is on
+the field a record claims, which is how a capture that gave a clock up is an
+honest record rather than a wrong one; at least four carry that UAP; at least
+one carries a payload, at least one passed a payload CRC, and at least one
+passed a header HEC with a reference UAP to check it against; a `DH1/2-DH1` record is among them and its transport is
+named `ACL`; every record carries the fixture's own signal level and none
+claims a measured noise power; the file names LAP A, with an empty UAP mask,
+as the address it was following; and **the record that settled the address
+part carries its own header and the payload whose CRC settled it**. That last
+one is the point of reading these records at all: three fixes are each about
+that one record, and every floor around it is met by the records either side
+([ubertooth#770](https://github.com/SqueakyFloors/ubertooth/pull/770),
+[libbtbb#99](https://github.com/SqueakyFloors/libbtbb/pull/99), and
+[libbtbb#85](https://github.com/SqueakyFloors/libbtbb/pull/85)). The
+comprehensive filtered-PCAP case reads the same records in the other format,
+which carries no interface option and so is the one check it leaves out.
+
+The two level rules are here rather than on a live capture for the same
+reason. Neither of the decoder's standing rules can fail on a level that
+stopped being the packet's own: the -120 to 0 dBm range is wide enough for a
+figure taken from another packet, and the noise-power flag is how libbtbb's
+writer computes it from the two figures, so it restates the writer. Pinned
+against a known answer they bite: each of these records says its average
+reading is that packet's own power and carries three readings far apart, so a
+level taken from anything else -- the strongest reading of the packet, which
+gives -82 dBm, or the loudest of the records around it on the same channel --
+reads as another figure
+([ubertooth#754](https://github.com/SqueakyFloors/ubertooth/pull/754)), and
+they carry no background estimate, so a record claiming a measured noise
+power is a figure made up
+([ubertooth#909](https://github.com/SqueakyFloors/ubertooth/pull/909)). The
+printed side is held the same way: every packet line of a replay of this
+fixture must carry that level and `n=none snr=none`, required rather than
+accepted, which `receive_cases`' pattern for a live capture cannot do because
+a live packet may carry either.
 
 Every case that reads packet lines requires each line's `clk_offset` to be
 the figure the record's own timestamp calls for, and not merely a number.
@@ -2220,14 +2333,15 @@ a `-d` that names the dump `-i` is replaying is refused as
 six ends by stating the whole directory, with the input's SHA-256, so a
 refusal that truncated or rewrote the file it was reading fails.
 
-Comprehensive runs 32 (31 where there is no `/proc`), adding the survey
+Comprehensive runs 33 (32 where there is no `/proc`), adding the survey
 listing of every piconet in the fixture
 (the four addresses on standard output and the `Survey Results` heading on
 standard error, with the address part shown for the three the survey settled
 one for -- `00` among them, as an address and not an absence -- and `??` for
 the ID-packet piconet),
 a LAP filter, a correct and a wrong `-u`, `-e 0` dropping the packet with an
-error, a `-d` dump compared byte for byte with the fixture, a filtered PCAP,
+error, a `-d` dump compared byte for byte with the fixture, a filtered PCAP
+whose records are read field by field as above,
 an empty file, a file whose last record is cut short (exit 1 after the whole
 records), a missing file, the recorded systime on every packet line, a
 directory passed as `-i` (exit 1 with the read error), and `-u` without `-l`
@@ -2437,11 +2551,36 @@ env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-follow -- -x        # and -h stray, an
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -q - -c <case dir>/extra.pcap
                                         # accepted: the extra file is warned
                                         # about on stderr and never created
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<a> -d <case dir>/new.dump
+                                        # the ubertooth-rx board list
+                                        # (fork ubertooth#1063): a board named
+                                        # twice, before the -d refusal
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,,<b> -d <case dir>/new.dump
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b>,<c> -c 39,39 -q <case dir>/new.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b> -d <case dir>/new.dump
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b> -V
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b> -c 39, -q <case dir>/new.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <9 boards> -d <case dir>/new.dump
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<b> -c <9 channels> -q <case dir>/new.pcap
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -i <case dir>/kept.dump -U <a>,<b>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-rx -U <a>,<a> -c 1,2,3
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -R <case dir>/kept.dump
+                                        # the replay: refused with no major
+                                        # mode, and -k, -t, -A, -U, -i, -I,
+                                        # -j, -J each refused beside it
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -p -R <case dir>/kept.dump -A 38
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -p -R <case dir>/kept.dump -d <case dir>/kept.dump
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-btle -n -q - -d -
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu -u -          # the read-back is
+                                        # renamed over the name given, so a
+                                        # name of standard output is refused
 refusal.py probe <tool>                   # opens every case: can the switch be used
 refusal.py seed <case dir> <names>        # the files a case must find unchanged
 refusal.py files <case dir>               # the cleanup: the directory as it
                                           # ends up, after the check
-refusal.py check <case dir> --absent <files> --kept <files>
+refusal.py link <case dir> --symlink <name>=<target> --hardlink <name>=<target>
+refusal.py check <case dir> --absent <files> --kept <files> \
+    --symlink <name>=<target> --hardlink <name>=<target>
 ```
 
 `<refusal>` is what the case refuses the command with: a stray word; `-h`;
@@ -2453,9 +2592,10 @@ later value, which is each tool's own (`btle -A 40`, `rx -c 79`,
 and follow lines take the four that need no file: a stray word, `-h stray`,
 a bare `-`, and `-- -x`.
 
-**Expected outcome.** On a Linux host, smoke runs 45 cases and comprehensive
-67; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
-applicable. Every file option of `btle`, `follow`, `rx`, `dump`, `specan`, and
+**Expected outcome.** On a Linux host, smoke runs 54 cases and comprehensive
+89; a macOS host runs 12 fewer in smoke and 19 fewer comprehensive, since the
+BlueZ-only cases are not applicable. Every file option of `btle`, `follow`,
+`rx`, `dump`, `specan`, and
 `dfu` is refused three ways: with a stray word, with `-h` (which exits 0 and
 must still create nothing), and with a bad option value later on the line.
 Beyond that: the extra-capture-file note goes to stderr, so it cannot land in
@@ -2466,11 +2606,99 @@ board lookup; `dump -d` with `-c` and `-l` in either order is refused with
 before the dump file is opened; and `scan` and `follow` refuse a stray word
 with no usage text after the message.
 
+**The `ubertooth-rx` board list.** A capture may read several boards at once,
+`-U a,b,c` with one channel each
+([ubertooth#1063](https://github.com/SqueakyFloors/ubertooth/pull/1063)). What
+the boards then share — a corroborated UAP, and the merged map of channels
+the piconet was heard on — depends on which board heard what, so nothing
+asserts it; that half is named under "Known limits" below. The command lines
+the list *cannot* be given are deterministic and need no traffic, and every
+one of them is refused before a board is opened or a file created, which is
+what the rest of this test already establishes. Five are in smoke: a board
+named twice (`-U <a>,<a>`), an empty list entry (`-U <a>,,<b>`), two channels
+for three boards (`-c` naming a count that is neither one nor one per board),
+`-d` beside several boards, and `-V` beside several boards. Comprehensive adds
+five: an empty channel entry, lists longer than the eight boards a capture
+reads (in each of `-U` and `-c`), `-i` beside several boards, and a board
+named twice beside a channel count that does not line up either. Each case
+requires
+exit 1 and pins the whole of what the tool said: that one `error:` line and no
+second error, note, or warning line, and an **empty standard output**. Both
+halves matter. Expecting the message alone would pass a tool that printed it
+and then went on to say something else, a refusal a reader cannot act on
+because it does not say which of two sentences to believe; and the empty
+standard output is what the `-V` case rests on, since that is where a version
+answer would go, so a refusal cannot be read as an answer. Where two refusals would apply
+to one command line, the other message is forbidden, so the order is asserted
+rather than assumed: the board list is read before the channel list (a board
+named twice beside `-c 1,2,3`, and beside `-d`), and only a list longer than
+the tool takes at all is refused as too long, the counts that merely fail to
+line up getting the count message instead. The selectors are invented rather
+than taken from the registry, since no board is opened; each begins with a
+letter, because libubertooth reads an all-digit selector as a USB index.
+
+**`ubertooth-btle`'s replay, and the dump it writes.** `-R` replays a dump
+`-d` saved (fork `04dbe53c`, [ubertooth#1129](https://github.com/SqueakyFloors/ubertooth/pull/1129)),
+and four of its decisions come before a board is asked for and before any
+destination is opened for writing, so they run here with no board. `-R` with none of `-f`, `-n` or `-p` is refused: a
+record does not say which mode wrote it, and the modes stamp their packets
+from different clocks, so the times a replay reconstructed would be wrong past
+the first wrap with nothing in the file to say so. Every option that drives,
+names, or tunes a board — `-k`, `-t`, `-A`, `-U`, and the interference letters
+`-i`, `-I`, `-j`, `-J` — is refused beside `-R` naming itself, rather than
+accepted and dropped in silence (comprehensive, one case with a step per
+letter). `-A` with `-p` is refused for not going with promiscuous mode at all,
+and that is decided first, so `-p -R <dump> -A 38` is about the mode and not
+about a replay having no board to tune. And a destination that is the dump
+`-R` is replaying is refused with the dump left as it was: a destination is
+opened for writing, which would empty the file before a record of it had been
+read. Smoke refuses it by name; comprehensive adds a symbolic link, a hard
+link, and the replay reading the link while the destination names the file, so
+what is compared is the file. That one comparison takes the open input to say
+which file it holds, so it is made after the input has been opened for
+reading, and a `-R` input that is not there is reported as
+`error: <file>: No such file or directory` first (comprehensive) -- both still
+before any board and before any destination is opened. One capture at a time
+may have standard output, so `-q -` (and `-c -`, comprehensive) beside `-d -`
+is refused while the command line is read, as is either pair naming one file.
+
+**`ubertooth-dfu -u` and standard output.** The read-back is written through a
+temporary file renamed over the name given, and a retry rewinds it to block
+zero; a pipe can do neither, so a value naming standard output is refused as
+the value is read. The lone `-` and the names of descriptor 1 (`/dev/stdout`,
+`/dev/fd/1`) are refused with
+`error: -u cannot write the read-back to stdout; give a file name`, before
+`-h` (comprehensive) and before any board. A path whose last component is `-`
+is an ordinary file of that name, so that command line is accepted and the run
+goes on to the board lookup, leaving neither the file nor a temporary one
+behind (comprehensive).
+
 **Known limits.** Forks from before the no-devices switch ignore it, so the
 first step of every case reads the built library's bytes and the case skips
 when the name is absent. That is a run-time skip because only the built
 library can tell. The test says nothing about what the tools do once a command
-line is accepted.
+line is accepted. In particular, the accepted half of the `ubertooth-rx` board
+list is not covered anywhere: a capture that really reads several boards, and
+the UAP corroboration and merged channel map they share, depend on which board
+hears what, so a case asserting the agreement notes would be counting the
+room rather than the code
+([#340](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/340)).
+Three further questions that pull-request left open are design decisions
+rather than gaps here: `-U all` for a capture, a dump per board, and a PCAPNG
+interface per board.
+
+The replay cases are about `ubertooth-btle`'s own call and its own option
+letters, not about the comparison behind it: the redirected-standard-output
+and descriptor forms of "this destination is the file being replayed" are
+covered on `ubertooth-rx` in [Raw receive replay](#raw-receive-replay), and
+both tools hand their names to the same `opt_parse.c` helpers. Nothing here
+replays a dump that holds records, so what a replay decodes, and whether it
+preserves a connection's parameters, is untested: that needs a synthetic BLE
+dump, which the harness has not got
+([#357](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/357)).
+`/proc/self/fd/1` is a fourth name for descriptor 1 on Linux and is not among
+the `dfu -u` spellings here, because a case left out on a host without
+`/proc` belongs where that is already handled, in Raw receive replay.
 
 ## Failed capture files
 
@@ -3642,7 +3870,36 @@ of lines matching the older "capture died" wording (`libUSB Error`, `could
 not open Ubertooth device`) is reported too, which is the compatibility note
 [ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703) asks
 for: the stable signal now is the exit status plus one documented `error:`
-line, and a run says whether the old one would have fired at all.
+line, and a run says whether the old one would have fired at all. A board
+that resets itself is counted once for each reset it reports, however many
+reads follow: each read is compared with the one before it, so a run that
+reads the record after every restart of a flapping capture reports the
+resets the board had rather than one for every time it was asked.
+
+**No file in the run directory grows with the length of the run, and the
+progress file stays worth reading.** The captures have a per-file limit and
+a budget for the run, the tool's transcript has a budget, and
+`progress.jsonl` has one too. A byte budget alone is a poor answer for that
+last one, though, because of the way a long run goes wrong: a board that
+stops capturing in the first hour of a three-day run is restarted every few
+seconds for the rest of it, and each restart writes the same handful of
+records again — the attempt that died, the capture that followed, the
+watchdog read between them. A quarter of a million records all saying one
+thing answers no question the first few hundred and a count do not, and it
+would reach the budget and lose whatever came after. So past 200 unplanned
+restarts those records are collapsed: one `restart_storm` record per 100 of
+them, carrying what it stood for and the counts the run had reached, and the
+last block is written when the run reports, so the progress file and
+`summary.json` say the same thing — bar a progress file whose byte budget is
+spent, which the summary says as well, since a block it had no room for is
+not counted as written. What the storm has not said before is
+still written whole — a read in which the board reported a reset of its own,
+and a capture that could not be read for a reason not seen yet, judged with
+the attempt's own file name and byte count taken out of it, so the same fault
+at every restart is one fault — and the schedule's own records, a period and
+a sample, are never collapsed, since
+they are what a reader follows even a failing run by. The summary reports how
+many records were collapsed, into how many blocks, and the threshold.
 
 **The restart probe.** With `restart probe: true` the driver kills the capture
 once, at the middle of the run, with SIGKILL and no stop sent to the board —
@@ -3977,29 +4234,35 @@ two rules hold: a record with no payload names no transport, and a record
 with one names its own type's. Only TYPE code `0111` takes two answers, and
 that is the point of the field — an HV3 and an EV3 share that code and a
 length, so nothing else in a record says which it holds, and so whether the
-payload ends in a CRC. A record naming `any` passes either way, which is what
-a libbtbb from before that change wrote for every packet, so a run against an
-older `--libbtbb-ref` is not failed for a field that library never filled in.
-No case puts a floor on how many records name a transport: payload-bearing
-records are rare on this bench (see the known limits), so a floor would be a
-count of the room rather than of the decoder.
+payload ends in a CRC.
 
-**That `any` is a real gap, kept on purpose.** At the libbtbb the *fork*
-pins, a payload-bearing record always names a transport — the library names
-one whenever it produced a payload, and an abandoned trial clock clears the
-transport and the payload together — so a libbtbb that stopped filling the
-field in would pass here. What it covers is a run that names a libbtbb from
-before [libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133)
-itself, which names no transport at all. A run that takes the fork's pin, as a
-deployed runner's `fork-pin` does, has named transports since that change; the
-*harness's* own `LIBBTBB_PIN` and the README's example refs named an older one
-until
+**A payload-bearing record naming `any` fails.** It used to pass, because a
+libbtbb from before
+[libbtbb#133](https://github.com/SqueakyFloors/libbtbb/pull/133) names no
+transport at all and a run against such a `--libbtbb-ref` should not fail for
+a field that library never filled in. The escape also let a libbtbb that
+stopped filling the field in pass, and the only refs that needed it were the
+*harness's* own `LIBBTBB_PIN` and the README's examples, which
 [#341](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/341)
-moved them, and those were the runs the escape was written for. A floor is no
-substitute either way, at 11 payload-bearing records in 2620. Dropping it is
-[#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339),
-whose one precondition, that pin, is now met; it is left there because it
-changes the rule a live capture is judged by, which is that issue's subject.
+moved to the commit the fork pins. At that commit the library names a
+transport whenever it produced a payload and clears it with the payload
+wherever it drops one, so a payload-bearing record always names one, and the
+rule says so ([#339](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/339)).
+
+What that costs: a run told to build a libbtbb from before that change fails
+this rule, and no catalog case can turn it off. `--any-transport` exists, and
+the inquiry-scan case passes it, but for a different reason — a capture whose
+headers do not decode gives the nibble no type to be checked against — and
+no plan argument reaches it. Such a run is not something the harness supports
+anyway: every other rule here assumes the pinned library's clears, as the
+known limits below say. Running `bredrrecord.py` by hand on an older capture
+is where the option is for.
+
+No case here puts a floor on how many records name a transport, because
+payload-bearing records are rare on this bench (see the known limits), so a
+floor would be a count of the room rather than of the decoder. What does hold
+the rule to a record is `Raw receive replay`, whose synthetic input carries a
+DH1 whose payload must be named `ACL` on every run, in CI, with no board.
 
 On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the
@@ -4135,6 +4398,19 @@ for" above: the flag-to-field agreements of this test are what a
 marginal link would exercise, and the measurements below are what the
 bench found when it was tried.
 
+**The level fields are read here and pinned elsewhere.** Every record's
+signal and noise are read, their flags held to the fields they describe, and
+their range checked, and neither of those can fail on a figure that stopped
+being the packet's own: the -120 to 0 dBm range is wide enough for a figure
+taken from another packet, and the noise-power flag is how libbtbb's writer
+computes it from the two figures, so the rule restates the writer. What would
+catch a change there is a capture whose own answer is known, which is
+`Raw receive replay`: its records carry one recorded reading each and no
+background estimate, so the level and the absence of a noise figure are both
+required there, on every run and with no board. A floor on how many *distinct*
+figures a live capture's records carry would be the bench's own version of
+that, and no run has measured one to set it with.
+
 **The payload checks barely fire on the bench's own traffic.** Measured over
 four 25-second captures, no record carried a payload at all: `ubertooth-rx`
 kept re-seeding its CLK1-27 candidates and never entered follow mode. A
@@ -4144,10 +4420,13 @@ the explanation: 7 of the 11 came from windows that recovered no clock, so a
 payload-bearing record is not something follow mode is needed for. They are
 simply rare, 11 records in 2620. So no case puts a floor on records with a
 payload, and the payload length and CRC checks are there for the capture that
-does settle a clock — they are exercised deterministically by the unit tests
-and by replaying the synthetic fixture, where a DH1 payload's length field and
-CRC both have to agree. Whether the clock recovery should settle on this pair
-is the fork's question.
+does settle a clock. Where they are required rather than merely applied is
+`Raw receive replay`, which replays the synthetic fixture and asks for at
+least one payload-bearing record, at least one passing a payload CRC, and the
+record that settled the address part carrying its own header and that
+payload; the unit tests build records field by field and check each failure
+is named. Whether the clock recovery should settle on this pair is the fork's
+question.
 
 A malformed record cannot be produced on purpose here. A well-behaved peer
 will not send a payload header that disagrees with its own packet, or a
@@ -4299,10 +4578,11 @@ not this test's.
 
 **What it does.** Runs the tool's command line for the option values it must
 refuse before it looks for a board, writes the `btbr` firmware image to the
-board, checks the board reports that image, drives one `ubertooth-btbr`
-console session against a registered ESP32 Classic peer, and always writes the
-application image back. It is the only test that puts a firmware image other
-than `bluetooth_rxtx` on a board, and the only one that runs
+board, checks the board reports that image, records the bootloader under it,
+drives one `ubertooth-btbr` console session against a registered ESP32
+Classic peer, and always writes the application image back and records the
+bootloader under that one too. It is the only test that puts a firmware image
+other than `bluetooth_rxtx` on a board, and the only one that runs
 `ubertooth-btbr`.
 
 **Theory of operation.** `ubertooth-btbr` needs the separate `btbr` image and
@@ -4314,6 +4594,22 @@ from ahead of the revision, so the board must report `btbr` and the run's
 revision after the write and `bluetooth_rxtx` and the same revision after the
 restore. Reading the revision alone would pass a board on either image, and
 the application-image check every other board gets would turn this board down.
+
+The bootloader under each image: `ubertooth-dfu` writes the application
+region only, so a board keeps its bootloader across both of this case's
+writes, and both images implement the `-B` request. `ubertooth-util -B` is
+therefore read once the run's `btbr` image is on the board and again, in the
+cleanup, with the application image back
+([#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327),
+[#329](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/329)).
+Reading after the write rather than before it is deliberate: this test
+establishes its board's image, so the board can arrive carrying firmware older
+than the request, and a reading taken then can only be a refusal. Both are
+recorded and neither is compared with the other, for the reason under
+"Bootloader identity" above
+([#366](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/366));
+a read the firmware has not got is the reading too, so a commit with the
+`btbr` image but without `-B` records that rather than failing the case.
 
 The peer: the ESP32 Classic peer is discoverable and connectable from boot
 (see [`hardware.md`](hardware.md)), its BD_ADDR is in the registry, and the
@@ -4443,6 +4739,9 @@ btbrconsole.py options                                   # the command line, no 
 ubertooth-dfu  -U <serial> -d <btbr image> -r
 ubertooth-util -U <serial> -v                            # it reports btbr at the revision
 ubertooth-util -U <serial> -V
+ubertooth-util -U <serial> -B                            # the bootloader under each
+                                                         # image, read here and again
+                                                         # in the cleanup (#329)
 btbrconsole.py session --serial <serial> --peer <BD_ADDR> --peer-name <name> \
     --peer-reset esp32peer.py --peer-device <peer port> --inquiry-seconds <n> \
     --page-seconds <n> --hold-seconds <n> --no-answer-seconds <n> \
@@ -4473,9 +4772,12 @@ each scan). Comprehensive decides 21: paging an address nothing answers must
 end in `paging timeout` with no connection, and it also makes five more
 transmit runs, covering three more formats, and pages the peer once more. The report says how many checks passed,
 how many failed, and how many never ran, so a session that stopped early is not
-read as a pass. The cleanup always writes the application image back, reads it,
-and resets the peer; a cleanup failure fails the case, so the board cannot be
-left on `btbr` quietly.
+read as a pass. The cleanup always writes the application image back, reads
+it, records the bootloader the application image reports, and resets the peer;
+a cleanup failure fails the case, so the board cannot be left on `btbr`
+quietly. No cleanup step wants a value the steps may not have recorded: one
+that cannot run stops the test, so a case that failed at its own write still
+reports a verified restore.
 
 The capture itself never leaves the driver. An inquiry hears every discoverable
 device in range, so passing it on would put third-party addresses and device
@@ -4621,9 +4923,9 @@ carries `required hardware: true`, so the naming costs the other benches
 nothing and hides nothing either: a registry without those peers, or without
 that host, runs every other release test and records this one as blocked, and
 the run finishes failed rather than passing with the recovery unmeasured. Its
-smoke estimate is about 520 s, which takes the release suite to about 1182 s
+smoke estimate is about 520 s, which takes the release suite to about 1190 s
 (roughly 20 minutes) on the host it names; a target without the peers plans
-about 662 s of the suite and fails on this step. The third, `-t` case stays in the
+about 670 s of the suite and fails on this step. The third, `-t` case stays in the
 `classic-comprehensive` suite, which a release runs alongside the gate.
 
 **Commands.** `esp32peer.py stream` holds the piconet to a chosen channel map
@@ -5566,17 +5868,20 @@ not fail — it bricks the board, which then needs its P4 entry pin bridged,
 because that bootloader jumps into the erased vectors it was given. So the
 committed plan names the board the registry pairs with a `Debug programmer`,
 which is also what gives that board a recovery path, and holding the board
-holds the programmer with it. Read the bootloader before and after
-(`ubertooth-util -U <serial> -B`) by hand: `--bootloader check` does not
-cover this board, because preflight reads the bootloader of a board whose
-firmware the run requires and this test establishes its own, so the read is
-skipped for it
+holds the programmer with it. Run this plan with `--bootloader check`, which
+does cover this board: the read reaches every Ubertooth a test of the suite
+selects, so the run states which bootloader the verdict was taken against
 ([#303](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/303),
 [#327](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/327)).
-`--bootloader update` does not reach this board either — it installs over a
-programmer for the same boards the read covers — so a board that needs a
-bootloader gets one before this plan is run: from a run that does require its
-firmware, or by hand over the programmer. Required:
+Two things it still cannot do. The board may be carrying firmware older than
+the request when preflight reads it, since this test establishes its own
+image; that answer is recorded as `not read` and the run goes on, so a
+`check` run proves the bootloader only when the row says `current`. And
+`--bootloader update` does not reach this board — the write covers the boards
+whose firmware preflight requires — so a board that needs a bootloader gets
+one before this plan is run: from a run that does require its firmware, or by
+hand over the programmer. Nothing reads `-B` after the test either, so read it
+by hand afterwards (`ubertooth-util -U <serial> -B`). Required:
 `platforms:`, because the hub is reached through a serial-device path that
 only Linux has, and
 `USB power controller:`, the hub the board must be on. A plan pointed at the

@@ -195,12 +195,14 @@ class EstimateTests(unittest.TestCase):
         # to Host CLI surface, scaled from its own calibration at 0.24 s a
         # case (#347). BLE replay (comprehensive) adds 1.6 s, the cases' own
         # commands timed on the macOS host against a build of fork 4b28aec9
-        # (#357). #363 adds 0.8 s between them: 0.6 s for Raw receive
-        # replay's two new cases and 0.2 s for BLE replay's one, measured as
-        # the catalog comments beside those entries say.
+        # (#357), and Refused command lines' btle replay and dfu read-back
+        # cases add 5.3 s to its own (#333, catalog.py). #363 adds 0.8 s on
+        # top of those: 0.6 s for Raw receive replay's two new cases and
+        # 0.2 s for BLE replay's one, measured as the catalog comments
+        # beside those entries say.
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(1184.6, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1190.5, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 

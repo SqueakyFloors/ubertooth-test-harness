@@ -79,6 +79,7 @@ from ubertooth_harness.patterns import (
     APPLICATION_IMAGE,
     BOARD_ID_PATTERN,
     FIRMWARE_PATTERN,
+    FIRMWARE_UNSUPPORTED_PATTERN,
     HOST_VERSION_TIMEOUT_S,
     IMAGE_NAME_PATTERN,
     PART_ID_PATTERN,
@@ -1760,9 +1761,10 @@ GUARD_UNSUPPORTED = "unsupported"
 # matches what was printed. The LED read, which makes three, is held strictly
 # for that reason (GUARD_STRICT_KEYS); `-V` makes two, and firmware too old
 # for the second is the case this tolerance is for.
+# The stall wording itself is shared with the bootloader read, which tolerates
+# it for the same reason (patterns.FIRMWARE_UNSUPPORTED_PATTERN, #327).
 GUARD_UNANSWERED_PATTERN = (
-    r"(?P<guard_unsupported>error: [^\n]*: the board's firmware does not "
-    r"support it \(stalled(?:, libusb -9)?\)"
+    rf"(?P<guard_unsupported>{FIRMWARE_UNSUPPORTED_PATTERN}"
     r"|error: the Ubertooth is running \S+; this tool needs "
     rf"{re.escape(APPLICATION_IMAGE)})"
 )

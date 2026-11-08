@@ -113,13 +113,21 @@ def _packet(symbols, clock, fixture=None):
     uap = ref_uap_from_hec(data, hec)
     kind = fixture.kind if fixture is not None else ""
     packet = {"uap": uap, "type": (data >> 3) & 0xF, "crc": False,
-              "header": data, "hec": hec,
+              # The 18 header bits as a capture record carries them, least
+              # significant first, and the payload bytes the decoder copies
+              # out: what a BR/EDR capture record holds besides the metadata.
+              # The payload of a type carried under error correction, or
+              # whose length its own CRC settles, comes from the fixture.
+              "header": bits_to_int(header), "hec": hec,
               "payload": rxreplay.payload_bytes(fixture) if fixture else b""}
     if packet["type"] == rxreplay.DH1:
         payload = [b ^ w for b, w in zip(symbols[122:122 + 56], white[18:])]
         length = bits_to_int(payload[3:8]) + 3
         body = payload[:(length - 2) * 8]
         packet["crc"] = ref_crcgen(body, uap) == bits_to_int(payload[(length - 2) * 8:length * 8])
+        packet["payload"] = bytes(
+            bits_to_int(payload[i:i + 8]) for i in range(0, length * 8, 8)
+        )
     elif kind in ("dv", "ev3"):
         # Both carry a CRC over their payload, and the fixture built it.
         packet["crc"] = True
@@ -133,7 +141,14 @@ class ReplayRx:
     models 3b22c95, with #202 (replay time printed), #203 (a read error or a
     cut last record exits 0 silently) and #236 (-u without -l checked only
     after a device is opened, and ignored with -i). ``bugs``
-    switches on a misbehavior per case: decoys, no-uap, wrong-uap, ignores-l,
+    switches on a misbehavior per case. The capture-record ones are
+    settling-uap-late, settling-stale-header and settling-no-payload, each
+    taking one of the three fixes about the record that settles the piconet's
+    address part back out of that record; no-transport, a payload-bearing
+    record naming none; record-level, a level worked out from the records
+    around a packet rather than from its own; and measures-noise, a record
+    claiming a measured background where the packet carries no estimate.
+    The rest: decoys, no-uap, wrong-uap, ignores-l,
     ignores-e, link-type, no-capture, dump-mangled, survey-no-uap,
     survey-heading-on-stdout (the heading among the addresses on standard
     output, as it was before the fork split the two streams),
@@ -160,8 +175,8 @@ class ReplayRx:
             return self._stdout_destination(command)
         if command[0] == sys.executable and command[1].endswith(".py"):
             module = {"rxreplay.py": rxreplay, "capturefile.py": capturefile,
-                      "bredrrecord.py": bredrrecord,
-                      "rxdump.py": rxdump, "stdoutdest.py": stdoutdest}[
+                      "rxdump.py": rxdump, "stdoutdest.py": stdoutdest,
+                      "bredrrecord.py": bredrrecord}[
                           Path(command[1]).name]
             out = io.StringIO()
             with redirect_stdout(out):
@@ -468,6 +483,7 @@ class ReplayRx:
         # libbtbb's notes go to stderr since libbtbb bf878df2 (piconet_note);
         # the packet and survey lines are the tool's own, on stdout.
         lines, notes, found, dumped, uap_seen = [], [], [], [], {}
+        # What each reported packet puts in a capture record, in file order.
         captured = []
         for index, record in enumerate(records):
             if "decoys" in self.bugs:
@@ -477,16 +493,26 @@ class ReplayRx:
                 continue
             got_lap, errors, channel, clk_offset, packet = result
             systime = struct.unpack(">I", record[:4])[0] if self.fixed else int(time.time()) + 7
+            # The level is the packet's own, from the record's strongest
+            # reading (SqueakyFloors/ubertooth#754), and these records carry
+            # no background estimate, so the noise and the ratio beside it
+            # are the word rather than a figure (#909). What a line that got
+            # either of those wrong costs is in CheckTests, which reads the
+            # pattern directly rather than through a whole suite.
             lines.append(f"systime={systime} ch={channel:2d} LAP={got_lap:06x} "
                          f"err={errors} clkn=1 clk_offset={clk_offset} "
-                         "s=-55 n=-120 snr=65")
+                         f"s={rxreplay.SIGNAL_DBM} n=none snr=none")
             found.append(record)
             dumped.append(record)
-            captured.append(_capture_record(
-                raw_channel=channel, lap=got_lap, errors=errors, packet=packet,
-                ref_lap=int(lap, 16) if lap is not None else None,
-                ref_uap=int(uap, 16) if uap is not None else None,
-                bugs=self.bugs))
+            captured.append({
+                "channel": channel, "lap": got_lap, "errors": errors,
+                "packet": packet,
+                # The level this packet's record carries: its own, unless the
+                # bug puts back a figure worked out from the records around
+                # it on the same channel (#754).
+                "level": (-55 if "record-level" in self.bugs
+                          else rxreplay.SIGNAL_DBM),
+            })
             if packet and packet["crc"] and got_lap not in uap_seen:
                 uap_seen[got_lap] = packet["uap"]
                 survey = "-z" in options
@@ -550,7 +576,11 @@ class ReplayRx:
         if on_stdout and "report-on-stderr" in self.bugs:
             notes = list(notes) + [line for line in lines]
         self._write_outputs(options, found, dumped, stdout_name, fds,
-                            prefix=spoiled.encode(), captured=captured)
+                            prefix=spoiled.encode(), captured=captured,
+                            reference_lap=(int(lap, 16) if lap is not None
+                                           else bredrrecord.LAP_ANY),
+                            stated_uap=(int(uap, 16) if uap is not None
+                                        else None))
         if on_stdout:
             report = ""
         elif stdout_name is not None:
@@ -592,12 +622,91 @@ class ReplayRx:
                 return fds[int(number)]
         return value
 
+    def _bredr_records(self, captured, reference_lap, stated_uap):
+        """One LINKTYPE_BLUETOOTH_BREDR_BB record per reported packet.
+
+        The pseudo-header both of libbtbb's BR/EDR writers build, filled in
+        as the library fills it: the reference address part is `UAP_ANY`
+        until a payload CRC settles it, and the record of the packet that
+        settled it carries the new part, its own header, and that payload
+        (SqueakyFloors/ubertooth#770, SqueakyFloors/libbtbb#99 and #85). A
+        record written before anything settled a part carries no decoded
+        header, which is eighteen zero bits and a NULL packet with no flags
+        about a check nobody made.
+        """
+        reference_uap = bredrrecord.UAP_ANY if stated_uap is None else stated_uap
+        out = []
+        for entry in captured:
+            packet = entry["packet"]
+            settling = False
+            if (packet and packet["crc"] and stated_uap is None
+                    and reference_uap == bredrrecord.UAP_ANY):
+                settling = True
+                reference_uap = packet["uap"]
+            known = reference_uap != bredrrecord.UAP_ANY
+            header = packet["header"] if (packet and known) else 0
+            payload = packet["payload"] if (packet and known) else b""
+            carried = reference_uap
+            if settling and "settling-uap-late" in self.bugs:
+                # The reference read before the decoder rather than after
+                # it: this record does not carry the part it settled, and
+                # the record after it does. Only that field changes, which
+                # is what a revert of fork #770 does; the header and the
+                # payload stay, so the check has to notice the field.
+                carried, known = bredrrecord.UAP_ANY, False
+            if settling and "settling-stale-header" in self.bugs:
+                header = 0
+            if settling and "settling-no-payload" in self.bugs:
+                payload = b""
+            flags = bredrrecord.DEWHITENED | bredrrecord.SIGPOWER_VALID
+            if reference_lap != bredrrecord.LAP_ANY:
+                flags |= bredrrecord.REFLAP_VALID
+            if known:
+                flags |= bredrrecord.REFUAP_VALID
+            if header:
+                flags |= bredrrecord.HEC_CHECKED | bredrrecord.HEC_VALID
+            if "payload-type-lost" in self.bugs:
+                # A decoder bounded to the wrong number of symbols, or one
+                # with no payload decoder for the type, leaves the type and
+                # the payload behind (harness #363).
+                header, payload = 0, b""
+            transport = bredrrecord.TRANSPORT_ANY
+            if payload:
+                flags |= bredrrecord.PAYLOAD_PRESENT
+                if packet["crc"]:
+                    flags |= (bredrrecord.CRC_CHECKED
+                              | bredrrecord.CRC_VALID)
+                if "no-transport" not in self.bugs:
+                    # The transport the packet's own type earns: a DV is
+                    # SCO, an EV3 eSCO, and the data types ACL.
+                    transport = _TRANSPORTS.get(
+                        packet["type"], bredrrecord.TRANSPORT_ACL)
+            noise, level = 127, entry["level"]
+            if "measures-noise" in self.bugs:
+                # A figure below the signal, which is what the writer sets
+                # the noise-power flag from, so the record claims it as a
+                # measurement (#909 before it).
+                noise = level - 10
+                flags |= bredrrecord.NOISEPOWER_VALID
+            out.append(struct.pack(
+                "<BbbBBBhIIIH", entry["channel"], level, noise,
+                entry["errors"], (transport << 4) | bredrrecord.MOD_GFSK,
+                0, 0, entry["lap"],
+                ((carried << 24) | reference_lap) & 0xFFFFFFFF,
+                header, flags,
+            ) + payload)
+        return out
+
     def _write_outputs(self, options, found, dumped, stdout_name=None, fds=None,
-                       prefix=b"", captured=()):
+                       prefix=b"", captured=(), reference_lap=None,
+                       stated_uap=None):
         fds = dict(fds or {})
         link = 1 if "link-type" in self.bugs else 255
         count = 0 if "no-capture" in self.bugs else len(found)
-        records = list(captured)[:count]
+        if reference_lap is None:
+            reference_lap = bredrrecord.LAP_ANY
+        payloads = self._bredr_records(list(captured)[:count], reference_lap,
+                                       stated_uap)
 
         def write(option, data):
             target = self._destination_path(
@@ -610,23 +719,38 @@ class ReplayRx:
                 return
             Path(target).write_bytes(prefix + data)
 
+        # A record a case does not read the fields of: six zero bytes, which
+        # is enough for a packet count and a link type and nothing else.
+        stub = [bytes(6)] * count
         if "-q" in options:
             data = struct.pack("<IHHiIII", 0xA1B23C4D, 2, 4, 0, 0, 400, link)
-            for record in records:
-                data += (struct.pack("<IIII", 1, 2, len(record), len(record))
-                         + record)
+            for body in (payloads or stub):
+                data += struct.pack("<IIII", 1, 2, len(body), len(body)) + body
             write("-q", data)
         if "-r" in options:
             shb = struct.pack("<IIIHHq", 0x0A0D0D0A, 28, 0x1A2B3C4D, 1, 0, -1)
             shb += struct.pack("<I", 28)
             idb = struct.pack("<IIHHI", 1, 20, link, 0, 0) + struct.pack("<I", 20)
             blocks = b""
-            for record in records:
-                padded = record + bytes(-len(record) % 4)
-                length = 32 + len(padded)
-                blocks += (struct.pack("<IIIIII", 6, length, 0, 0, 0, len(record))
-                           + struct.pack("<I", len(record)) + padded
-                           + struct.pack("<I", length))
+            for body in (payloads or stub):
+                padding = -len(body) % 4
+                size = 32 + len(body) + padding
+                blocks += (struct.pack("<IIIIIII", 6, size, 0, 0, 0,
+                                       len(body), len(body))
+                           + body + bytes(padding) + struct.pack("<I", size))
+            if reference_lap != bredrrecord.LAP_ANY:
+                # libbtbb records the address a capture was following once,
+                # as an interface option: the LAP, the UAP where the caller
+                # stated one, and a zero non-significant part marked
+                # invalid (PCAPNG_BREDR_OPTION_BD_ADDR).
+                address = reference_lap | ((stated_uap or 0) << 24)
+                value = (address.to_bytes(6, "little")
+                         + bytes([0xFF if stated_uap is not None else 0, 0]))
+                option = struct.pack("<HH", bredrrecord.OPTION_BD_ADDR,
+                                     len(value)) + value
+                option += struct.pack("<HH", 0, 0)
+                idb = (struct.pack("<IIHHI", 1, 20 + len(option), link, 0, 0)
+                       + option + struct.pack("<I", 20 + len(option)))
             write("-r", shb + idb + blocks)
         if "-d" in options:
             data = b"".join(dumped)
@@ -635,45 +759,14 @@ class ReplayRx:
             write("-d", data)
 
 
-def _capture_record(*, raw_channel, lap, errors, packet, ref_lap, ref_uap,
-                    bugs=()):
-    """One LINKTYPE_BLUETOOTH_BREDR_BB record, as libbtbb writes one.
-
-    The pseudo-header fields and the flag word that go with what this model
-    decoded, so that a case reading a capture field by field
-    (``bredrrecord.py``) has something to read. ``payload-type-lost`` drops
-    the packet's type and payload, which is what a decoder bounded to the
-    wrong number of symbols, or one with no payload decoder for the type,
-    leaves behind.
-    """
-    lost = "payload-type-lost" in bugs
-    payload = b"" if packet is None or lost else packet["payload"]
-    header = 0 if packet is None or lost else (
-        packet["header"] | packet["hec"] << 10)
-    crc_valid = bool(packet) and not lost and packet["crc"]
-    transports = {rxreplay.DH1: 3, rxreplay.AUX1: 3, rxreplay.DH3: 3,
-                  rxreplay.DV: 1, rxreplay.EV3: 2}
-    transport = transports.get(packet["type"], 0) if packet and payload else 0
-    flags = bredrrecord.DEWHITENED | bredrrecord.SIGPOWER_VALID
-    signal, noise = -55, -120
-    if noise < signal:
-        flags |= bredrrecord.NOISEPOWER_VALID
-    if payload:
-        flags |= bredrrecord.PAYLOAD_PRESENT
-    if ref_lap is not None:
-        flags |= bredrrecord.REFLAP_VALID
-    if ref_uap is not None:
-        flags |= bredrrecord.REFUAP_VALID
-    if header:
-        flags |= bredrrecord.HEC_CHECKED | bredrrecord.HEC_VALID
-    if crc_valid:
-        flags |= bredrrecord.CRC_CHECKED | bredrrecord.CRC_VALID
-    return struct.pack(
-        "<BbbBBBhIIIH", raw_channel, signal, noise, errors, transport << 4, 0, 0,
-        lap,
-        (bredrrecord.LAP_ANY if ref_lap is None else ref_lap)
-        | (bredrrecord.UAP_ANY if ref_uap is None else ref_uap) << 24,
-        header, flags) + payload
+# The transport each payload-bearing type earns, as libbtbb names it.
+_TRANSPORTS = {
+    rxreplay.DH1: bredrrecord.TRANSPORT_ACL,
+    rxreplay.AUX1: bredrrecord.TRANSPORT_ACL,
+    rxreplay.DH3: bredrrecord.TRANSPORT_ACL,
+    rxreplay.DV: bredrrecord.TRANSPORT_SCO,
+    rxreplay.EV3: bredrrecord.TRANSPORT_ESCO,
+}
 
 
 def replay_cases(coverage):
@@ -890,8 +983,13 @@ class FixtureTests(unittest.TestCase):
 
 class CheckTests(unittest.TestCase):
 
+    # The level and the two words are the fixture's own, required rather
+    # than allowed for: these records carry one recorded reading each and no
+    # background estimate for the packet's channel (fork 532adc19, and
+    # SqueakyFloors/ubertooth#754 and #909). The offset is the record's own,
+    # which is what makes a packet line a known answer rather than a shape.
     LINE = ("systime={t} ch={ch:2d} LAP={lap:06x} err={err} clkn=1 "
-            "clk_offset={off} s=-1 n=-2 snr=1")
+            "clk_offset={off} s=-91 n=none snr=none")
 
     def lines(self, packets, t=5):
         return "".join(self.LINE.format(t=t, lap=lap, err=err, ch=ch, off=off)
@@ -908,30 +1006,45 @@ class CheckTests(unittest.TestCase):
         swapped = [want[1], want[0]] + want[2:]
         self.assertIn("packet line 1", check(self.lines(swapped)))
 
-    # The fixture's records claim no background estimate, so a current
-    # ubertooth-rx prints the word instead of a figure (fork 532adc19).
-    NONE_LINE = ("systime={t} ch={ch:2d} LAP={lap:06x} err={err} clkn=1 "
-                 "clk_offset={off} s=-1 n=none snr=none")
+    def variant(self, want, **replacements):
+        line = self.LINE
+        for before, after in replacements.items():
+            line = line.replace(before, after)
+        return "".join(line.format(t=5, lap=lap, err=err, ch=ch, off=off) + "\n"
+                       for lap, err, ch, off in want)
 
-    def test_packets_check_takes_an_absent_noise_figure(self):
+    def test_a_measured_background_where_there_is_none_is_not_a_packet(self):
+        """A replay of this fixture has nothing to estimate a background
+        from, so the word is what the two columns must read: a build printing
+        a figure there made it up (SqueakyFloors/ubertooth#909, and #1192 on
+        the level column). Accepting either is what harness #344 found: the
+        pattern took a figure as readily as the word, so nothing required the
+        representation."""
         want = rxreplay.expected_packets()
-        output = "".join(
-            self.NONE_LINE.format(t=5, lap=lap, err=err, ch=ch, off=off) + "\n"
-            for lap, err, ch, off in want
-        )
-        self.assertEqual("", rxreplay.packets_check(want)(output))
+        check = rxreplay.packets_check(want)
+        # The word in both columns is what the fixture's own records call for,
+        # so the unaltered lines pass.
+        self.assertEqual("", check(self.variant(want)))
+        self.assertIn("0 packet lines",
+                      check(self.variant(want, **{"n=none snr=none":
+                                                  "n=-120 snr=65"})))
+
+    def test_another_level_is_not_this_fixtures_packet(self):
+        """Every record carries one recorded reading, so the level is a known
+        answer: a level worked out from the records around a packet rather
+        than from its own reads as another figure
+        (SqueakyFloors/ubertooth#754)."""
+        want = rxreplay.expected_packets()
+        self.assertIn("0 packet lines", rxreplay.packets_check(want)(
+            self.variant(want, **{"s=-91": "s=-55"})))
 
     def test_a_line_with_one_figure_and_one_word_is_not_a_packet(self):
         # The ratio comes from the noise, so one of each is a malformed line.
         want = rxreplay.expected_packets()
-        for noise, snr in (("none", "1"), ("-2", "none")):
-            line = self.NONE_LINE.replace("n=none", f"n={noise}").replace(
-                "snr=none", f"snr={snr}")
-            output = "".join(
-                line.format(t=5, lap=lap, err=err, ch=ch, off=off) + "\n"
-                for lap, err, ch, off in want
-            )
-            self.assertIn("0 packet lines", rxreplay.packets_check(want)(output))
+        for pair in ("n=none snr=1", "n=-2 snr=none"):
+            with self.subTest(pair=pair):
+                self.assertIn("0 packet lines", rxreplay.packets_check(want)(
+                    self.variant(want, **{"n=none snr=none": pair})))
 
     def test_uap_and_survey_checks(self):
         want = rxreplay.expected_packets(lap=rxreplay.LAP_A)
@@ -1001,6 +1114,15 @@ _STDOUT_ALIAS_CASES = {
 _STDOUT_CAPTURE_CASES = _STDOUT_ALIAS_CASES | {
     "-i -q - writes the capture to stdout",
     "-i -q /dev/fd/3 is the caller's file, not stdout",
+}
+_RECORD_FIELDS_CASE = "-i -l 5a3c96 -r: every record's fields"
+# The two cases that read a capture's records field by field, rather than its
+# header and packet count: the smoke PCAPNG one and the comprehensive
+# filtered PCAP. Both replay with -l and no -u, so both recover the piconet's
+# address part for themselves.
+_RECORD_CASES = {
+    _RECORD_FIELDS_CASE,
+    "-i -l 5a3c96 -q: only that LAP captured",
 }
 
 
@@ -1073,7 +1195,8 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertTrue(definition.implemented)
         self.assertEqual({}, dict(definition.hardware_roles or {}))
         _a, smoke = replay_cases("smoke")
-        self.assertEqual(["replay-decode-lap", "replay-lap-uap", "replay-pcapng",
+        self.assertEqual(["replay-decode-lap", "replay-lap-uap",
+                          "replay-lap-records", "replay-pcapng",
                           "replay-pcap", "replay-dump-unopenable",
                           "replay-sweep-explicit", "replay-payload-types",
                           "replay-uap-zero", "replay-stdout-dash",
@@ -1088,9 +1211,9 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertEqual(["replay-stdout-proc-path"],
                          [c.case_id for c in smoke if c.needs.platforms])
         _a, full = replay_cases("comprehensive")
-        self.assertEqual(32, len(full))
+        self.assertEqual(33, len(full))
         # One of them is Linux's: /proc names descriptor 1 there and nothing
-        # at all elsewhere, so a macOS run has 31.
+        # at all elsewhere, so a macOS run has 32.
         linux_only = [case.case_id for case in full
                       if case.needs.platforms == ("linux",)]
         self.assertEqual(["replay-stdout-proc-path"], linux_only)
@@ -1172,11 +1295,14 @@ class ReplayCaseTests(unittest.TestCase):
                        "-i -d writes the packet records back",
                        "-i of a file whose last record is cut", _SURVEY_CASE,
                        "-i packet lines carry the recorded systime",
-                       "-i -s decodes as without -s"} | _STDOUT_CAPTURE_CASES | {
+                       "-i -s decodes as without -s",
+                       # Its records are read too, so a decoy among them is
+                       # a payload the case does not expect.
+                       _PAYLOAD_CASE} | _STDOUT_CAPTURE_CASES | {
                            "-i: one file under two names is refused, "
                            "/dev/null twice is not"},
-            "no-uap": {"-i -l <LAP> derives the UAP"},
-            "wrong-uap": {"-i -l <LAP> derives the UAP"},
+            "no-uap": {"-i -l <LAP> derives the UAP", _RECORD_FIELDS_CASE},
+            "wrong-uap": {"-i -l <LAP> derives the UAP", _RECORD_FIELDS_CASE},
             # A revert of libbtbb #137: the UAP is still worked out, and the
             # clock search it should start never happens (harness #341).
             "clk6-rerun": {"-i -l <LAP> derives the UAP"},
@@ -1184,16 +1310,26 @@ class ReplayCaseTests(unittest.TestCase):
                           "-i -l -u with the right UAP",
                           "-i -l -u with a wrong UAP confirms nothing",
                           "-i -l 5a3c96 -q: only that LAP captured",
-                          _UAP_ZERO_CASE, _PAYLOAD_CASE},
+                          _UAP_ZERO_CASE, _PAYLOAD_CASE, _RECORD_FIELDS_CASE},
             "ignores-e": {"-i -e 0 drops the packet with an error"},
             "link-type": {"-i -r replays into PCAPNG", "-i -q replays into PCAP",
                           "-i -l 5a3c96 -q: only that LAP captured",
-                          _PAYLOAD_CASE}
+                          _PAYLOAD_CASE, _RECORD_FIELDS_CASE}
                          | _STDOUT_CAPTURE_CASES,
             "no-capture": {"-i -r replays into PCAPNG", "-i -q replays into PCAP",
                            "-i -l 5a3c96 -q: only that LAP captured",
-                           _PAYLOAD_CASE}
+                           _PAYLOAD_CASE, _RECORD_FIELDS_CASE}
                           | _STDOUT_CAPTURE_CASES,
+            # The capture's own records (#339, #344). Both cases that read
+            # them replay with -l and no -u, so both recover an address part
+            # and both hold the record that settled it to what it should
+            # carry.
+            "settling-uap-late": _RECORD_CASES,
+            "settling-stale-header": _RECORD_CASES,
+            "settling-no-payload": _RECORD_CASES,
+            "no-transport": _RECORD_CASES | {_PAYLOAD_CASE},
+            "record-level": _RECORD_CASES,
+            "measures-noise": _RECORD_CASES,
             "dump-mangled": {"-i -d writes the packet records back"},
             "survey-no-uap": {_SURVEY_CASE},
             "survey-heading-on-stdout": {_SURVEY_CASE},
@@ -1209,7 +1345,7 @@ class ReplayCaseTests(unittest.TestCase):
             "u-fails": {"-i -l -u with the right UAP", _UAP_ZERO_CASE},
             # A payload the decoder gave up on, or a type it has no decoder
             # for: the record carries no type and no payload (fork #754).
-            "payload-type-lost": {_PAYLOAD_CASE},
+            "payload-type-lost": {_PAYLOAD_CASE} | _RECORD_CASES,
             "wrong-u-confirms": {"-i -l -u with a wrong UAP confirms nothing"},
             # Where a capture goes, and the pairs that are one file (#333).
             "stdout-report": _STDOUT_CAPTURE_CASES

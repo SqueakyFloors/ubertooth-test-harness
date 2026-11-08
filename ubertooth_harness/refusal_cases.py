@@ -47,6 +47,56 @@ used, including
 -s <file.bin> -d <bad image>: since fork f2e06fa (#286) the files that are
 only read are checked first, so the refused image neither creates nor
 replaces <file>.dfu (ubertooth-dfu.md).
+
+The ubertooth-rx board list (fork ubertooth#1063) is read here too. A capture
+may name several boards, -U a,b,c, with one channel each; what the boards then
+share depends on which of them hears what, so that half is not asserted
+anywhere. The command lines the list cannot be given are deterministic, need
+no traffic, and are all refused before a board is opened or a file created,
+which is exactly what this test already establishes for the file options: a
+board named twice, an empty or over-long list entry, a channel count that is
+neither one nor one per board, and -V, -d or -i beside several boards. Each
+is one error: line on standard error with standard output left empty, so a
+reader cannot mistake a refusal for an answer, and the order between them is
+asserted where two would otherwise apply.
+
+ubertooth-btle's replay (fork 04dbe53c, fork #1129) decides four things of
+its own, each before a board is asked for and before any destination is
+opened for writing, so they belong here (ubertooth-btle.md, REPLAYING A
+DUMP). The first three are decided while the command line is read; the
+fourth comes after the replay's input has been opened for reading, because
+identifying the file it holds takes the open input, so a -R input that is
+not there is reported before it:
+
+  * -R needs the major mode its dump was recorded with, because a record does
+    not say which mode wrote it and -f/-n and -p stamp their packets from
+    different clocks, so the times a replay reconstructs would be wrong past
+    the first wrap with nothing in the file to say so;
+  * every option that drives, names, or tunes a board (-k, -t, -A, -U, and
+    the interference letters -i, -I, -j, -J) is refused beside -R rather than
+    accepted and dropped without a word;
+  * -A with -p is refused for not going with promiscuous mode at all, which
+    is decided before the replay's own refusals, so the message is about the
+    mode rather than about there being no board to tune;
+  * a -d that would write over the dump -R is replaying is refused with the
+    dump left as it was, since a destination is opened for writing and would
+    empty the file before a record of it was read. It is the file that is
+    compared and not the name. One capture may have standard output, so -q or
+    -c and -d both asking for it is refused as well, as is either pair naming
+    one file.
+
+The link, descriptor and redirected-standard-output forms of that last
+comparison are covered on ubertooth-rx in Raw receive replay: both tools hand
+their names to the same opt_parse.c helpers, so what is checked here is
+ubertooth-btle's own call and its own option letters.
+
+ubertooth-dfu -u writes its read-back through a temporary file renamed over
+the name given, and rewinds to block zero to retry, neither of which a pipe
+can do, so a value naming standard output is refused as the value is read --
+before -h, and before any board (ubertooth-dfu.md, READING FLASH BACK). The
+lone "-" and the names of descriptor 1 are refused; only the lone "-" is the
+stream, so a path whose last component is "-" names a file of that name, and
+that command line is accepted and goes on to look for a board.
 """
 
 from __future__ import annotations
@@ -65,6 +115,7 @@ from ubertooth_harness.stateful import (
     Observation,
     StateCase,
     Step,
+    nothing_on_stdout,
     require,
 )
 
@@ -159,17 +210,40 @@ def _seed(names) -> Step:
     )
 
 
-def _check(absent, kept, step_id="check") -> Step:
+def _link(*, symlinks=(), hardlinks=()) -> Step:
+    """Give a seeded file more names, for the cases about one file under two."""
+    names = [f"{name} -> {target}" for name, target in tuple(symlinks) + tuple(hardlinks)]
+    arguments = [word for name, target in symlinks
+                 for word in ("--symlink", f"{name}={target}")]
+    arguments += [word for name, target in hardlinks
+                  for word in ("--hardlink", f"{name}={target}")]
+    return Step(
+        "link", "Link " + ", ".join(names),
+        lambda context: (sys.executable, _HELPER, "link", _dir(context), *arguments),
+        output_patterns=(r"Linked: \d+ symbolic, \d+ hard, ",),
+    )
+
+
+def _check(absent, kept, step_id="check", *, symlinks=(), hardlinks=()) -> Step:
     what = []
     if absent:
         what.append(", ".join(absent) + " absent")
     if kept:
         what.append(", ".join(kept) + " unchanged")
+    links = tuple(symlinks) + tuple(hardlinks)
+    if links:
+        what.append(", ".join(f"{name} still linked to {target}"
+                              for name, target in links))
+    arguments = ["--absent", *absent, "--kept", *kept]
+    arguments += [word for name, target in symlinks
+                  for word in ("--symlink", f"{name}={target}")]
+    arguments += [word for name, target in hardlinks
+                  for word in ("--hardlink", f"{name}={target}")]
     return Step(
         step_id, "Check " + "; ".join(what) + "; nothing else in the directory"
         if what else "Check that nothing is in the directory",
         lambda context: (sys.executable, _HELPER, "check", _dir(context),
-                         "--absent", *absent, "--kept", *kept),
+                         *arguments),
         output_patterns=(r"Refusal check: ",),
     )
 
@@ -320,6 +394,236 @@ def _repeat_and_extra_cases():
             "file created",
         ))
     return cases
+
+
+# ubertooth-btle's replay input, seeded like any other file here, so every
+# case can require it byte for byte afterwards: a command line refused for
+# naming it as a destination must not have opened it for writing. A seeded
+# file is a line of text rather than records, which the replay cases that
+# reach a decode report as a partial record; none of these reaches one.
+_DUMP = "dump.bin"
+_NEEDS_MODE = (
+    r"(?m)^error: -R needs -f, -n or -p: a dump does not record which mode "
+    r"wrote it, and the modes stamp their packets with different clocks$"
+)
+# The channel refusal that is decided before the replay's own, so that
+# "-p -R <dump> -A 38" is about -p and -A rather than about a replay having no
+# board to tune.
+_CHANNEL_NOT_WITH_PROMISC = (
+    r"(?m)^error: -A does not go with -p: promiscuous mode listens on the "
+    r"channel the board is holding$"
+)
+
+
+def _board_option_with_replay(option: str) -> str:
+    """What btle says about an option that drives a board, beside -R."""
+    return (rf"(?m)^error: -{re.escape(option)} cannot be combined with -R; a "
+            r"replay reads a saved dump rather than driving a board$")
+
+
+def _dump_over_input(shown: str) -> str:
+    """What btle says when -d would write over the dump -R is replaying.
+
+    The name is reported as the user wrote it, which here is a path in the
+    case directory, so ``shown`` is the tail of it as a pattern.
+    """
+    return (r"(?m)^error: -d would write over the dump -R is replaying "
+            rf"\(\S*{shown}\)$")
+
+
+def _two_captures_on_stdout(option: str) -> str:
+    """-q or -c and -d both asking for the one stream standard output is."""
+    return (rf"(?m)^error: -{option} and -d cannot both write to standard "
+            r"output$")
+
+
+def _replay_case(case_id, name, words, patterns, expected, *,
+                 absent=(), forbidden=(NO_BOARD_NOTE,),
+                 seeded=(_DUMP,), kept=(_DUMP,)) -> StateCase:
+    """One refused ubertooth-btle replay command line, over a seeded dump."""
+    steps = [probe_step("ubertooth-btle")]
+    if seeded:
+        steps.append(_seed(seeded))
+    steps += [
+        tool_step("refuse", "ubertooth-btle", words, patterns=patterns,
+                  forbidden=forbidden),
+        _check(absent, kept),
+    ]
+    return _case(case_id, name, steps, expected)
+
+
+def _replay_cases(coverage: str):
+    """btle -R and -d: the decisions made before a board or a file is opened."""
+    cases = [
+        # A replay with no major mode: refused before the dump is opened.
+        _replay_case(
+            "btle-replay-no-mode", "btle -R <dump> with no -f, -n or -p",
+            ("-R", ("file", _DUMP)), (_NEEDS_MODE,),
+            "refused (exit 1) before any board is asked for; the dump "
+            "unchanged; nothing created"),
+        # The dump -R is replaying, named as the destination of -d: opening it
+        # for writing would empty it before a record was read.
+        _replay_case(
+            "btle-replay-dump-over-input", "btle -f -R <dump> -d <the same dump>",
+            ("-f", "-R", ("file", _DUMP), "-d", ("file", _DUMP)),
+            (_dump_over_input(re.escape(_DUMP)),),
+            "refused (exit 1) naming the dump, before it is opened for "
+            "writing; the dump unchanged byte for byte; nothing created"),
+        # Standard output carries one stream, so one capture can have it.
+        _replay_case(
+            "btle-q-d-stdout", "btle -n -q - -d -: one stream, one capture",
+            ("-n", "-q", "-", "-d", "-"), (_two_captures_on_stdout("q"),),
+            "refused (exit 1) before any board is asked for; nothing created",
+            seeded=(), kept=()),
+    ]
+    if coverage != "comprehensive":
+        return tuple(cases)
+    # Every option that drives, names, or tunes a board, beside -R. -f is the
+    # mode throughout: -A is refused with -p for its own reason (below), and
+    # the rest go with any of the three.
+    cases.append(_case(
+        "btle-replay-board-options",
+        "btle -f -R <dump> with each option that drives a board",
+        (
+            probe_step("ubertooth-btle"),
+            _seed((_DUMP,)),
+            *(tool_step(
+                f"refuse-{slug}", "ubertooth-btle",
+                ("-f", "-R", ("file", _DUMP)) + words,
+                patterns=(_board_option_with_replay(option),))
+              for slug, option, words in (
+                  ("crc", "k", ("-k",)),
+                  ("target", "t", ("-t", "11:22:33:44:55:66")),
+                  ("channel", "A", ("-A", "38")),
+                  ("device", "U", ("-U", "1234")),
+                  # The four interference letters are two options and their
+                  # aliases; each must name itself as the user wrote it.
+                  ("interfere-once", "i", ("-i",)),
+                  ("interfere-always", "I", ("-I",)),
+                  ("interfere-once-alias", "j", ("-j",)),
+                  ("interfere-always-alias", "J", ("-J",)),
+              )),
+            _check((), (_DUMP,)),
+        ),
+        "each refused (exit 1) naming the option, before any board is asked "
+        f"for; {_DUMP} unchanged; nothing created"))
+    # -A with -p is about the mode, and is decided first.
+    cases.append(_replay_case(
+        "btle-replay-promisc-channel", "btle -p -R <dump> -A 38: -A is about -p",
+        ("-p", "-R", ("file", _DUMP), "-A", "38"),
+        (_CHANNEL_NOT_WITH_PROMISC,),
+        "refused (exit 1) for -A not going with -p, not for the replay; the "
+        "dump unchanged; nothing created",
+        forbidden=(NO_BOARD_NOTE, _board_option_with_replay("A"))))
+    # It is the file that is compared and not the name, so a second name for
+    # the dump is the dump: a symbolic link, which the destination would be
+    # opened through, and a hard link, which is the file itself under another
+    # name. The redirected-standard-output and descriptor forms of the
+    # comparison are covered on ubertooth-rx in Raw receive replay, which
+    # reaches the same opt_parse.c helpers.
+    cases.append(_case(
+        "btle-replay-dump-over-input-links",
+        "btle -f -R <dump> -d <another name for it>",
+        (
+            probe_step("ubertooth-btle"),
+            _seed((_DUMP,)),
+            _link(symlinks=(("link.bin", _DUMP),), hardlinks=(("hard.bin", _DUMP),)),
+            *(tool_step(f"refuse-{slug}", "ubertooth-btle",
+                        ("-f", "-R", ("file", source), "-d", ("file", destination)),
+                        patterns=(_dump_over_input(re.escape(destination)),))
+              for slug, source, destination in (
+                  ("symlink", _DUMP, "link.bin"),
+                  ("hardlink", _DUMP, "hard.bin"),
+                  # And the other way round: the replay reads the link and
+                  # the destination names the file it points at.
+                  ("through-the-link", "link.bin", _DUMP),
+              )),
+            _check((), (_DUMP,), symlinks=(("link.bin", _DUMP),),
+                   hardlinks=(("hard.bin", _DUMP),)),
+        ),
+        "each refused (exit 1) naming the destination as it was written: it "
+        f"is the file that is compared; {_DUMP} unchanged byte for byte; "
+        "nothing created"))
+    # A destination pair naming one file, with the letter the PCAP option was
+    # given.
+    cases.append(_replay_case(
+        "btle-q-d-same-file", "btle -f -R <dump> -q <file> -d <the same file>",
+        ("-f", "-R", ("file", _DUMP), "-q", ("file", "cap.pcap"),
+         "-d", ("file", "cap.pcap")),
+        (r"(?m)^error: -q and -d cannot both write to \S*cap\.pcap$",),
+        "refused (exit 1) naming both options; cap.pcap not created; the dump "
+        "unchanged", absent=("cap.pcap",)))
+    cases.append(_replay_case(
+        "btle-c-d-stdout", "btle -n -c - -d -: the letter -c was given",
+        ("-n", "-c", "-", "-d", "-"), (_two_captures_on_stdout("c"),),
+        "refused (exit 1) before any board is asked for; nothing created",
+        seeded=(), kept=()))
+    # A replay's input is opened before the board, so a dump that is not
+    # there is reported instead of the board lookup, and creates nothing.
+    cases.append(_replay_case(
+        "btle-replay-missing-input", "btle -f -R <a dump that is not there>",
+        ("-f", "-R", ("file", "missing.bin")),
+        (r"(?m)^error: \S*missing\.bin: No such file or directory$",),
+        "exit 1 at the input, before any board is asked for; missing.bin not "
+        "created; nothing else in the directory",
+        absent=("missing.bin",), seeded=(), kept=()))
+    return tuple(cases)
+
+
+# ubertooth-dfu -u renames a temporary file over the name it was given and
+# rewinds to block zero to retry a block, so standard output is refused as
+# the value is read: before -h, and before any board.
+_UPLOAD_TO_STDOUT = (
+    r"(?m)^error: -u cannot write the read-back to stdout; give a file name$"
+)
+# The spellings of descriptor 1 that every host here has. Linux also answers
+# /proc/self/fd/1; Raw receive replay covers that one, where the case can be
+# left out on a host without /proc.
+_STDOUT_SPELLINGS = (("dash", "-"), ("dev-stdout", "/dev/stdout"),
+                     ("dev-fd-1", "/dev/fd/1"))
+
+
+def _upload_stdout_cases(coverage: str):
+    """dfu -u: standard output is not a file the read-back can be written to."""
+    cases = [_case(
+        "dfu-u-stdout", "dfu -u: the lone - and the names of descriptor 1",
+        (
+            probe_step("ubertooth-dfu"),
+            *(tool_step(f"refuse-{slug}", "ubertooth-dfu", ("-u", spelling),
+                        patterns=(_UPLOAD_TO_STDOUT,))
+              for slug, spelling in _STDOUT_SPELLINGS),
+            _check((), ()),
+        ),
+        "each refused (exit 1) as the value is read, before any board is "
+        "asked for; nothing created")]
+    if coverage != "comprehensive":
+        return tuple(cases)
+    # The value is refused in the option loop, which -h never reaches.
+    dfu = next(item for item in TOOLS if item.name == "ubertooth-dfu")
+    cases.append(_case(
+        "dfu-u-stdout-help", "dfu -u /dev/stdout with -h: no usage text", (
+            probe_step("ubertooth-dfu"),
+            tool_step("refuse", "ubertooth-dfu", ("-u", "/dev/stdout", "-h"),
+                      patterns=(_UPLOAD_TO_STDOUT,),
+                      forbidden=(NO_BOARD_NOTE, dfu.usage)),
+            _check((), ()),
+        ), "refused (exit 1) with no usage text, before any board is asked "
+           "for; nothing created"))
+    # Only the lone "-" is the stream: a path ending in a "-" names a file of
+    # that name, so the command line is accepted and the run goes on to look
+    # for a board. The temporary file comes only once a read-back has
+    # arrived, so a run stopped at the lookup leaves nothing.
+    cases.append(_case(
+        "dfu-u-dash-is-a-file", "dfu -u <dir>/-: a file whose name is -", (
+            probe_step("ubertooth-dfu"),
+            tool_step("accepted", "ubertooth-dfu", ("-u", ("file", "-")),
+                      patterns=(NO_BOARD_NOTE,
+                                r"(?m)^error: no Ubertooth devices found$"),
+                      forbidden=(_UPLOAD_TO_STDOUT,)),
+            _check((), ()),
+        ), "accepted and stopped at the board lookup (exit 1); no file and no "
+           "temporary file created"))
+    return tuple(cases)
 
 
 # A seeded bad.dfu is a line of text, not an image, so what the image check
@@ -484,6 +788,199 @@ def bluez_stray_cases(coverage: str):
     )
 
 
+# The board list of ubertooth-rx (fork ubertooth#1063, RX_MAX_BOARDS 8).
+# Selectors the harness invents: no board is opened in any of these cases, so
+# what they name need not exist, and they are not registry serials, so a
+# reader cannot mistake one for a bench board. libubertooth reads an all-digit
+# selector as a USB index, so each begins with a letter and stays a selector.
+_SEL = ("ba11", "bb22", "bc33")
+_MAX_BOARDS = 8
+_OVER_LONG = ",".join(f"b{index:02d}" for index in range(_MAX_BOARDS + 1))
+# Each refusal, in the order the tool reaches it. Two of them would both
+# apply to one command line, and the message that must come out is the one
+# named here, so the other is forbidden: the board list is read before the
+# channel list, and -d is refused on the boards rather than on its file.
+_NAMED_TWICE = rf"(?m)^error: board {_SEL[0]} is named twice$"
+_CHANNEL_COUNT = (r"(?m)^error: -c names 2 channels for 3 boards; give one each "
+                  r"or one for all$")
+# The count message whatever the numbers in it: forbidden where another
+# refusal must come out instead.
+_CHANNEL_NAMES = r"error: -c names \d+ channel"
+_DUMP_ONE_BOARD = (r"(?m)^error: -d writes one dump for -i to replay as one "
+                   r"board, so it cannot be given several boards$")
+_VERSION_ONE_BOARD = (r"(?m)^error: -V reports one board; name one with -U, or "
+                      r"none to report every board attached$")
+_REPLAY_ONE_BOARD = (r"(?m)^error: -i names one saved capture, so it cannot be "
+                     r"given several boards to read$")
+# What the refusal must be, beyond carrying its own line: one error: line and
+# nothing else. Expecting the message alone would pass a tool that printed it
+# and then went on to say something else -- a second reason, a note about a
+# board, a warning about a file -- which is a refusal a reader cannot act on.
+# Standard output is required empty by nothing_on_stdout, so between them the
+# whole of what the tool said is pinned.
+_SECOND_ERROR = r"(?m)^error:[^\n]*\n(?:[^\n]*\n)*?error:"
+_ANY_NOTE = r"(?m)^note:"
+_ANY_WARNING = r"(?m)^warning:"
+_ONE_ERROR_ONLY = (_SECOND_ERROR, _ANY_NOTE, _ANY_WARNING)
+
+
+# Where a case names a capture file, the word to put it in. Each such case
+# refuses the command twice, once naming a file that does not exist and once
+# naming a seeded one, as every other case in this test does: "creates
+# nothing" and "truncates nothing" are two statements, and a destination
+# opened for writing before the refusal would break only the second.
+DEST = object()
+
+
+def _multi_board_case(case_id, label, words, patterns, *, forbidden=(),
+                      extension="", seeded=(), absent=(), kept=(),
+                      expected) -> StateCase:
+    """One ubertooth-rx command line the board list cannot be given.
+
+    Every case requires exit 1, that one error: line and no other error, note
+    or warning line, an empty standard output (so a refusal is never read as
+    an answer), and that the command came nowhere near a board: the no-devices
+    note is forbidden, as it is in every other refusal here.
+
+    ``extension`` gives the case a capture destination: DEST in ``words`` is
+    replaced by a file of that extension, and the command is refused once
+    naming a new file and once naming a seeded one.
+    """
+    forbidden = (NO_BOARD_NOTE,) + _ONE_ERROR_ONLY + tuple(forbidden)
+
+    def refuse(step_id, name):
+        return tool_step(
+            step_id, "ubertooth-rx",
+            tuple(("file", name) if word is DEST else word for word in words),
+            patterns=patterns, forbidden=forbidden, check=nothing_on_stdout)
+
+    steps = [probe_step("ubertooth-rx")]
+    if extension:
+        new, existing = f"new.{extension}", f"kept.{extension}"
+        seeded, absent, kept = (existing,), (new,), (existing,)
+        steps += [_seed(seeded), refuse("refuse-new", new),
+                  refuse("refuse-kept", existing)]
+    else:
+        if seeded:
+            steps.append(_seed(seeded))
+        steps.append(refuse("refuse", ""))
+    steps.append(_check(absent, kept))
+    return _case(f"rx-{case_id}", f"rx {label}", steps, expected)
+
+
+def _multi_board_cases(coverage):
+    """ubertooth-rx board and channel list refusals: no board, no traffic."""
+    one, two, three = _SEL
+    cases = [
+        # The duplicate check comes before the channel list and before the
+        # -d check, so a command line that would also fail those two must
+        # still report the board that was named twice.
+        _multi_board_case(
+            "boards-named-twice", f"-U {one},{one} -d <file>: the board named twice",
+            ("-U", f"{one},{one}", "-d", DEST),
+            (_NAMED_TWICE,), forbidden=(_DUMP_ONE_BOARD,), extension="dump",
+            expected="refused (exit 1) naming the board given twice, before the "
+                     "-d refusal and before any board is asked for; the dump "
+                     "named is neither created nor truncated; no other file"),
+        _multi_board_case(
+            "boards-empty-entry", f"-U {one},,{two} -d <file>: an empty list entry",
+            ("-U", f"{one},,{two}", "-d", DEST),
+            (r"(?m)^error: the board list has an empty entry$",), extension="dump",
+            expected="refused (exit 1) naming the empty entry, before any board "
+                     "is asked for; the dump named is neither created nor "
+                     "truncated; no other file"),
+        # One channel each or one for all: anything else is a command line
+        # whose boards and channels do not line up, and which board got which
+        # channel could not be read back off the output.
+        _multi_board_case(
+            "channel-count", f"-U {one},{two},{three} -c 39,39 -q <file>: two "
+            "channels for three boards",
+            ("-U", f"{one},{two},{three}", "-c", "39,39", "-q", DEST),
+            (_CHANNEL_COUNT,), extension="pcap",
+            expected="refused (exit 1) naming both counts, before any board is "
+                     "asked for; the capture named is neither created nor "
+                     "truncated; no other file"),
+        # A dump record carries no board and -i hands a whole dump to one
+        # piconet, so a dump of several boards' records could not be replayed:
+        # it is refused rather than written.
+        _multi_board_case(
+            "dump-several-boards", f"-U {one},{two} -d <file>: one dump, several boards",
+            ("-U", f"{one},{two}", "-d", DEST),
+            (_DUMP_ONE_BOARD,), extension="dump",
+            expected="refused (exit 1) because -d writes one dump to replay as "
+                     "one board, before any board is asked for; the dump named "
+                     "is neither created nor truncated; no other file"),
+        # -V reports one board, and with no -U at all it reports every board
+        # attached, so a list beside it cannot be answered as asked. Standard
+        # output must stay empty: that is where the version answer would go.
+        _multi_board_case(
+            "version-several-boards", f"-U {one},{two} -V: -V reports one board",
+            ("-U", f"{one},{two}", "-V"),
+            (_VERSION_ONE_BOARD,),
+            forbidden=(r"Host tools version:", r"Firmware version"),
+            expected="refused (exit 1) with no version answer on stdout, before "
+                     "any board is asked for; nothing created"),
+    ]
+    if coverage != "comprehensive":
+        return tuple(cases)
+    cases += [
+        # The channel list is split against the tool's limit rather than
+        # against the boards named, so one mistake gets one message: a list
+        # that does not line up is the count above, and only a list longer
+        # than the tool takes at all is refused as too long.
+        _multi_board_case(
+            "channel-empty-entry", f"-U {one},{two} -c 39, -q <file>: an empty "
+            "channel entry",
+            ("-U", f"{one},{two}", "-c", "39,", "-q", DEST),
+            (r"(?m)^error: the channel list has an empty entry$",),
+            forbidden=(_CHANNEL_NAMES,), extension="pcap",
+            expected="refused (exit 1) naming the empty entry rather than the "
+                     "count, before any board is asked for; the capture named "
+                     "is neither created nor truncated; no other file"),
+        _multi_board_case(
+            "boards-over-long", f"-U <{_MAX_BOARDS + 1} boards> -d <file>: more "
+            "boards than the tool takes",
+            ("-U", _OVER_LONG, "-d", DEST),
+            (rf"(?m)^error: at most {_MAX_BOARDS} boards can be given$",),
+            extension="dump",
+            expected=f"refused (exit 1) naming the {_MAX_BOARDS}-board limit, "
+                     "before any board is asked for; the dump named is neither "
+                     "created nor truncated; no other file"),
+        _multi_board_case(
+            "channels-over-long", f"-U {one},{two} -c <{_MAX_BOARDS + 1} channels> "
+            "-q <file>: more channels than the tool takes",
+            ("-U", f"{one},{two}", "-c", ",".join(["39"] * (_MAX_BOARDS + 1)),
+             "-q", DEST),
+            (rf"(?m)^error: at most {_MAX_BOARDS} channels can be given$",),
+            forbidden=(_CHANNEL_NAMES,), extension="pcap",
+            expected=f"refused (exit 1) naming the {_MAX_BOARDS}-channel limit "
+                     "rather than the count, before any board is asked for; the "
+                     "capture named is neither created nor truncated; no other file"),
+        # A replay reads one saved capture, so it has no second board to read
+        # from. Refused before the input is opened: it must come back byte for
+        # byte, with nothing written beside it.
+        _multi_board_case(
+            "replay-several-boards", f"-i <file> -U {one},{two}: one saved capture, "
+            "several boards",
+            ("-i", ("file", "kept.dump"), "-U", f"{one},{two}"),
+            (_REPLAY_ONE_BOARD,),
+            seeded=("kept.dump",), kept=("kept.dump",),
+            expected="refused (exit 1) because a replay reads one saved capture, "
+                     "with its input unchanged and nothing created beside it"),
+        # Two refusals in one command line the other way round from the -d
+        # case: here the channel list is what the duplicate check comes
+        # before.
+        _multi_board_case(
+            "boards-named-twice-before-channels",
+            f"-U {one},{one} -c 1,2,3: the board named twice, not the channel count",
+            ("-U", f"{one},{one}", "-c", "1,2,3"),
+            (_NAMED_TWICE,), forbidden=(_CHANNEL_NAMES,),
+            expected="refused (exit 1) naming the board given twice rather than "
+                     "the channel count, before any board is asked for; nothing "
+                     "created"),
+    ]
+    return tuple(cases)
+
 def refusal_cases(arguments, _resources, _resource_identities):
     """Host-only cases: every tool runs with UBERTOOTH_TEST_NO_DEVICES=1."""
     cases = []
@@ -492,7 +989,10 @@ def refusal_cases(arguments, _resources, _resource_identities):
             for way in _ways(tool):
                 cases.append(_refusal_case(tool, option, extension, way))
     cases += _repeat_and_extra_cases()
+    cases += _replay_cases(arguments["coverage"])
+    cases += _upload_stdout_cases(arguments["coverage"])
     cases += bluez_stray_cases(arguments["coverage"])
+    cases += _multi_board_cases(arguments["coverage"])
     if arguments["coverage"] == "comprehensive":
         cases += _comprehensive_cases()
     return tuple(cases)

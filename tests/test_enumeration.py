@@ -162,6 +162,23 @@ class SysfsEnumeratorTests(unittest.TestCase):
     def test_unreadable_root_fails_closed(self):
         with self.assertRaisesRegex(EnumerationError, "cannot read USB devices"):
             SysfsUbertoothEnumerator("/nonexistent/usb").serials()
+        with self.assertRaisesRegex(EnumerationError, "cannot read USB devices"):
+            SysfsUbertoothEnumerator("/nonexistent/usb").devices()
+
+    def test_devices_name_the_bus_path_and_the_ids_each_board_reports(self):
+        # What a person registering a board needs beyond the serial (#134):
+        # which port it is plugged into, and which Ubertooth it says it is.
+        with tempfile.TemporaryDirectory() as root:
+            write_device(root, "3-2.1", "1d50", "6002", SELECTED.upper())
+            write_device(root, "3-2.3", "1d50", "6003")  # DFU: no serial
+            write_device(root, "3-2.4", "0403", "6001", "B001DBLH")  # ignored
+            devices = SysfsUbertoothEnumerator(root).devices()
+        self.assertEqual(
+            [(SELECTED, "1d50", "6002", "3-2.1"),
+             ("", "1d50", "6003", "3-2.3")],
+            [(d.serial, d.vendor, d.product, d.path) for d in devices],
+        )
+        self.assertEqual("unidentified:3-2.3:6003", devices[1].entry)
 
 
 # tests/data/ioreg-iousb.plist was derived from a real
@@ -214,6 +231,36 @@ class IoregEnumeratorTests(unittest.TestCase):
         self.assertEqual(subprocess.DEVNULL, kwargs["stdin"])
         self.assertEqual(IOREG_TIMEOUT_S, kwargs["timeout"])
         self.assertFalse(kwargs["check"])
+
+    def test_devices_name_where_each_board_is_and_what_it_reports(self):
+        # The same scan, with the fields a person needs to tell two
+        # unlabelled boards apart (#134): what it reports and where it sits.
+        devices = self.enumerator(output=IOREG_FIXTURE.read_bytes()).devices()
+        self.assertEqual(
+            [(FIRST, "1d50", "6002", "02140000"),
+             (SECOND, "1d50", "6002", "02210000"),
+             ("", "1d50", "6003", "02220000")],
+            [(d.serial, d.vendor, d.product, d.path) for d in devices],
+        )
+        # The DFU bootloader reports no serial, so it is the one device an
+        # isolation check cannot name, and it fails closed on it.
+        self.assertEqual("unidentified:02220000:6003", devices[2].entry)
+        self.assertEqual(FIRST, devices[0].entry)
+        # And the serial listing is exactly what these devices are.
+        self.assertEqual(
+            {device.entry for device in devices},
+            self.enumerator(output=IOREG_FIXTURE.read_bytes()).serials(),
+        )
+
+    def test_a_device_reports_itself_in_the_fields_the_protocol_carries(self):
+        (device,) = self.enumerator(
+            output=self.plist([self.device(0x1D50, 0x6002, "AbCd")])
+        ).devices()
+        self.assertEqual(
+            {"serial": "abcd", "vendor": "1d50", "product": "6002",
+             "path": "02100000"},
+            device.view(),
+        )
 
     def plist(self, children):
         return plistlib.dumps({"IORegistryEntryChildren": children})

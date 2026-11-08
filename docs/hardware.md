@@ -123,8 +123,16 @@ reports the capture process's resident memory from `ps`, which needs no
 privilege and nothing installed; a host that refuses to run `ps` costs the
 memory figures and nothing else.
 
-Registered by its J-Link serial, quoted so leading zeros survive, plus the
-BLE address its `status` reports. That address is a static random address
+Registered by its J-Link serial, plus the BLE address its `status` reports.
+The serial is all 12 digits, as the `/dev/serial/by-id` name carries it and
+quoted so the leading zeros survive: that is the one spelling the registry
+takes, because the DK's external lock file is named after the serial and the
+zero-stripped spelling of the same number would name a second file
+([#324](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/324)).
+A shorter all-digit serial is refused with the padded form to write instead.
+Either spelling still *names* the board to `scripts/lab/hold`, and the lease
+key is `nrf52840dk-<serial without its leading zeros>` either way. That
+address is a static random address
 derived from the chip's FICR, so it is the same on every boot of the same
 board, which is what makes it worth registering:
 
@@ -1030,7 +1038,7 @@ last `isolation_applied` event, and write it back.
 
 | Command | What it does |
 |---|---|
-| `nrfutil device list` | lists attached probes with their serials, padded to 12 digits |
+| `nrfutil device list` | lists attached probes; `--json` is what the harness reads a probe's serial and its VCOM0 path from (`nrfdk.find_probe`, `nrfdk.probe_vcom0`) |
 | `nrfutil device program --serial-number <serial> --firmware <hex> --options chip_erase_mode=ERASE_ALL,verify=VERIFY_READ,reset=RESET_SYSTEM` | flashes a DK and verifies the write |
 | `nrfutil device reset` | reboots a DK, which is the only remote reset it has when it is not on a switchable port |
 | `JLinkExe` | J-Link Commander: updates the probe's own firmware, and `vcom enable` turns its virtual COM port on |
@@ -1038,6 +1046,14 @@ last `isolation_applied` event, and write it back.
 The harness checks the pinned `nrfutil` (8.2.1) and `nrfutil device` (2.23.0)
 versions before it flashes, and every command fails closed with an `error:`
 line. SEGGER J-Link 9.88 is the validated host software.
+
+A probe's serial is one number, and the harness puts it on an `nrfutil`
+command line with its leading zeros gone (`preflight.py`, `nrfdk.py`), which
+is also how it matches the serial `nrfutil device list` reports: as a number,
+so neither spelling of the digits matters there. The registry is the one
+place that insists on a spelling: register the 12 digits the
+`/dev/serial/by-id` name carries, padding a reading that arrives without its
+leading zeros (see "Registered by its J-Link serial" above).
 
 ### esptool
 

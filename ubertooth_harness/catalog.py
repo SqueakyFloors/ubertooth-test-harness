@@ -1091,8 +1091,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # cannot be measured here; the three commands of a case like it cost
     # about 0.3 s on the hosts above, hence 2.8 + 0.3 = 3.1. A Linux
     # measurement should replace that estimate rather than this reasoning.
-    # 14 cases and 60 commands in smoke, 32 and 137 comprehensive (13 and 55,
-    # and 31 and 132, where there is no /proc and the one case about it is not
+    # Then the record-fields case, five commands at that same 0.1 s each, in
+    # both profiles, and one more command on the comprehensive filtered-PCAP
+    # case: 3.1 + 0.5 = 3.6 and 9.0 + 0.6 = 9.6, reasoned the same way
+    # because the host it would be measured on was carrying other work.
+    # 15 cases and 65 commands in smoke, 33 and 143 comprehensive (14 and 60,
+    # and 32 and 138, where there is no /proc and the one case about it is not
     # applicable); the smoke figure carries that case, so a macOS run comes
     # in a little under it. Each pair of command-time figures was taken back
     # to back, because a busy host takes two to six times longer, which is
@@ -1104,9 +1108,11 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # 2026-11-DEV2 over three passes of five rounds, cost 0.318 s and 0.128 s
     # a round, against 0.130 s for a case of the same shape already here, so
     # 0.45 s of command time; a macOS run of the same test measured 0.5 s
-    # more in smoke and 0.6 s more comprehensive, which is where these
-    # figures come from.
-    "Raw receive replay": _profiles(Estimate(3.6), Estimate(9.6)),
+    # more in smoke and 0.6 s more comprehensive. Those are the same two
+    # figures the record-fields case above measured, and the two cases are
+    # separate work, so both increases stand: 3.1 + 0.5 + 0.5 = 4.1 and
+    # 9.0 + 0.6 + 0.6 = 10.2.
+    "Raw receive replay": _profiles(Estimate(4.1), Estimate(10.2)),
     # Two replays of a handful of records in smoke, four in comprehensive,
     # each with the fixture writer and the directory listing beside it.
     # The cases' own commands, timed back to back on the macOS host against
@@ -1130,7 +1136,15 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # sweep case costs the most, since specan takes longest to reach its
     # floor.
     "Interrupting a capture": _profiles(Estimate(11.2), Estimate(18.5)),
-    "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
+    # Every case is a handful of short commands, so the cost goes with the
+    # command count: the btle replay and dfu read-back cases (#333) take the
+    # commands this test runs on a macOS host from 192 to 212 in smoke and
+    # from 256 to 322 comprehensive, and the figures are the earlier ones
+    # scaled by that. Measuring the two profiles end to end on this host gave
+    # 10.7 s and 16.6 s, and the same comprehensive suite without the new
+    # cases took 89.3 s on a busy host, which is why the count and not a
+    # stopwatch is what the increase rests on.
+    "Refused command lines": _profiles(Estimate(11.0), Estimate(26.0)),
     # No hardware: 6 cases and 39 commands in smoke, 16 and 112
     # comprehensive, all of them short (preflight is not counted, as it is in
     # no estimate). The lightest run of them on the macOS host cost 0.135 s a

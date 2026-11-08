@@ -30,7 +30,9 @@ ESP32_CLASSIC_PEER = "ESP32 Classic peer"
 
 # Stable device paths on Linux: udev's by-id name carries the probe's or the
 # bridge's serial, so the path can be derived from the registry's identity.
-# nrfutil pads a J-Link serial to 12 digits in the name it reports.
+# A J-Link serial is 12 digits here, the spelling the registry takes as well
+# (resources._JLINK_SERIAL); a DK command line carries the same number with
+# its leading zeros gone.
 DK_BY_ID = "/dev/serial/by-id/usb-SEGGER_J-Link_{serial:012d}-if00"
 PEER_BY_ID = ("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
               "Controller_{serial}-if00-port0")

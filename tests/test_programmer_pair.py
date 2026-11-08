@@ -261,8 +261,8 @@ class PairRegistry(PairTestCase):
         for serial, fragment in (
             (TARGET, "UT_Debug (Ubertooth)"),
             ("000123456789", "DK_Pair (nRF52840 DK)"),
-            # nrfutil prints a J-Link serial without its leading zeros, and
-            # a bench script may name the lock either way.
+            # A DK command line carries a J-Link serial without its leading
+            # zeros, and a bench script may name the lock either way.
             ("123456789", "DK_Pair (nRF52840 DK)"),
             ("a1b2c3d400000000a1b2c3d400000000", "ESP_Pair (ESP32 Classic peer)"),
             ("host-power", "this host's power/firmware lock"),
@@ -821,7 +821,7 @@ class PairRunRecords(PairTestCase):
         web = Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
         js = (web / "app.js").read_text(encoding="utf-8")
         self.assertIn('kind === "lease_pairing"', js)
-        self.assertIn('$("live-pairings").hidden = live.pairings.length === 0;', js)
+        self.assertIn('$("live-pairings").hidden = pairings.length === 0;', js)
         html = (web / "index.html").read_text(encoding="utf-8")
         self.assertIn("Leases from a wired pair", html)
         # The elements the view writes into: without them every render

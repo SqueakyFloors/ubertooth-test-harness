@@ -46,6 +46,21 @@ from tests.test_sequencer import CollectSink, run_contract
 MAC = HostCapabilities("Host_Mac", "macos", frozenset(), False, False, basis="build")
 LINUX = HostCapabilities("Host_Linux", "linux", frozenset(BLUEZ_TOOLS), True, True,
                          basis="build")
+# One host and its board, as a Mac target's own registry holds them: the
+# bench a plan written for a Linux host and a Mac has to compile against
+# when only the Mac is asked (#154).
+MAC_ONLY = """
+resources:
+  Host_Mac:
+    type: Host
+    platform: macos
+    roles: [test target]
+    defaults: {Ubertooth: UT_Mac0}
+  UT_Mac0:
+    type: Ubertooth
+    attached to: Host_Mac
+    identity: {serial: mac-0}
+"""
 
 
 class NeedsTests(unittest.TestCase):
@@ -229,11 +244,11 @@ def _bluez_only_catalog():
 
 class PlanningTests(unittest.TestCase):
 
-    def compile(self, plan_text, suite="fast"):
+    def compile(self, plan_text, suite="fast", hardware=HARDWARE):
         catalog = _bluez_only_catalog()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "hardware.yaml").write_text(HARDWARE)
+            (root / "hardware.yaml").write_text(hardware)
             (root / "plan.yaml").write_text(plan_text)
             plan = load_plan(root / "plan.yaml", catalog)
             registry = FileResourceRegistry.load(root / "hardware.yaml")
@@ -277,6 +292,53 @@ class PlanningTests(unittest.TestCase):
                           ("Host CLI surface", "Host_Mac")],
                          [(i.test_name, i.host) for i in compiled.invocations])
         self.assertEqual((), compiled.not_applicable)
+
+    def test_a_step_left_to_the_bench_is_left_out_where_nothing_runs_it(self):
+        # A Mac-only bench, which is what a Mac target's own registry is:
+        # a step the plan left to the bench (`hosts: each`, the default) and
+        # this host cannot run is not applicable here, not a plan error, so
+        # one plan runs on a Linux host and a Mac at once (#154).
+        for step in ("    - Linux only:\n        hosts: each\n",
+                     "    - Linux only:\n",
+                     "    - BlueZ only:\n        platforms: [linux]\n"):
+            with self.subTest(step=step):
+                compiled = self.compile(
+                    f"plan: p\nsuites:\n  fast:\n{step}"
+                    "    - Host CLI surface:\n", hardware=MAC_ONLY)
+                self.assertEqual(
+                    [("Host CLI surface", "Host_Mac")],
+                    [(i.test_name, i.host) for i in compiled.invocations])
+                (item,) = compiled.not_applicable
+                self.assertEqual("Host_Mac", item.host)
+                self.assertIn("Linux", item.reason)
+                # Left out, never blocked: nothing about the bench's
+                # hardware is missing, so no run fails on it.
+                self.assertEqual((), compiled.blocked)
+                self.assertEqual((), compiled.blocked_for_host("Host_Mac"))
+
+    def test_a_step_no_case_of_which_runs_here_is_left_out_with_its_cases(self):
+        # The same for a step whose own cases are what this platform cannot
+        # run: every case of BlueZ only needs a BlueZ tool, so on a Mac-only
+        # bench the step is left out with the reason its cases give.
+        compiled = self.compile(
+            "plan: p\nsuites:\n  fast:\n    - BlueZ only:\n        hosts: each\n"
+            "    - Host CLI surface:\n", hardware=MAC_ONLY)
+        self.assertEqual([("Host CLI surface", "Host_Mac")],
+                         [(i.test_name, i.host) for i in compiled.invocations])
+        (item,) = compiled.not_applicable
+        self.assertEqual(("Host_Mac", "BlueZ only"), (item.host, item.test_name))
+        self.assertIn("ubertooth-follow", item.reason)
+
+    def test_a_suite_nothing_of_which_runs_here_is_still_refused(self):
+        # Every step left out is not a run that passes having done nothing:
+        # the suite produces no invocation and says so, test by test, which
+        # is what run-suite refuses the host's run with.
+        with self.assertRaisesRegex(
+            PlanningError,
+            "suite 'fast' produced no runnable invocations.*Linux only",
+        ):
+            self.compile("plan: p\nsuites:\n  fast:\n    - Linux only:\n",
+                         hardware=MAC_ONLY)
 
     def test_the_host_plan_compiles_on_both_platforms(self):
         plan_path = Path(__file__).resolve().parents[1] / "testplans" / "host-only.yaml"

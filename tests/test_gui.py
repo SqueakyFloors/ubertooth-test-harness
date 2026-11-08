@@ -450,7 +450,7 @@ class PlanTests(ControllerTestCase):
             return suite
 
         suite = await release(other)
-        self.assertAlmostEqual(663.8, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(670.5, suite["estimated_s"], delta=0.2)
         self.assertEqual(
             [{"name": "Recover AFH map",
               "reason": f"runs on {named}, not on {other}",
@@ -466,7 +466,7 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(0, suite["unestimated_tests"])
         # The host the step names, and no target at all, count every step.
         for suite in (await release(named), await release()):
-            self.assertAlmostEqual(1183.8, suite["estimated_s"], delta=0.2)
+            self.assertAlmostEqual(1190.5, suite["estimated_s"], delta=0.2)
             self.assertEqual([], suite["omitted_tests"])
             self.assertEqual(0.0, suite["omitted_estimated_s"])
             self.assertEqual(
@@ -517,6 +517,41 @@ class PlanTests(ControllerTestCase):
         )
         self.assertIn("serial", information["Ubertooth identity"]["theory"])
         self.assertEqual("default", identity["estimate_profile"])
+
+    async def test_one_plans_response_fills_the_information_dialog(self):
+        # The GUI dialog reads one response: the prose keyed by catalog
+        # name, and beside it the facts the catalog owns, on the row (#315).
+        # Nothing it shows needs a second request, and no field it reads is
+        # absent from a row.
+        status, payload, _ = await self.http("GET", "/api/plans")
+        self.assertEqual(200, status)
+        information = payload["test_information"]
+        rows = [test for plan in payload["plans"] for suite in plan["suites"]
+                for test in suite["tests"]]
+        self.assertTrue(rows)
+        for test in rows:
+            with self.subTest(test=test["name"]):
+                for field in ("catalog_estimated_s", "estimate_source",
+                              "estimate_profile", "per_board", "hardware_roles",
+                              "arguments"):
+                    self.assertIn(field, test)
+                info = information[test["name"]]
+                for field in ("available", "unavailable_reason", "purpose",
+                              "theory", "hardware", "expected", "limitations",
+                              "related", "documentation"):
+                    self.assertIn(field, info)
+                # The only attribute the page builds from this response is
+                # the href of a link, and it takes only https.
+                self.assertTrue(
+                    info["documentation"]["url"].startswith("https://"),
+                    info["documentation"],
+                )
+                for item in info["related"]:
+                    self.assertTrue(item["url"].startswith("https://"), item)
+        # A plan of planned tests is listed as not runnable, which is how
+        # the dialog says a soak or long form exists without offering it.
+        planned = [plan for plan in payload["plans"] if plan["runnable"] is not True]
+        self.assertTrue(planned)
 
     async def test_the_plans_endpoint_takes_nothing_but_a_target(self):
         # Nothing routes a filesystem path into the information the listing
@@ -1083,9 +1118,12 @@ class PageWiringTests(unittest.TestCase):
 
     def test_the_live_view_closes_a_build_step_with_its_outcome(self):
         # The step's own status and reason, as report.md's transcript shows
-        # them (`--- <step> EXIT: <status>: <reason> ---`).
+        # them (`--- <step> EXIT: <status>: <reason> ---`), in the transcript
+        # of the host that ran it.
         self.assertIn('kind === "build_step_finished"', self.js)
-        self.assertRegex(self.js, r'pushLog\(`--- \$\{details\.step_name.*EXIT: \$\{status\}')
+        self.assertRegex(
+            self.js,
+            r'pushLog\(live, `--- \$\{details\.step_name.*EXIT: \$\{status\}')
 
     def test_script_sends_the_commit_it_listed(self):
         self.assertIn("commit: chosen ? chosen.commit : null", self.js)
@@ -1107,11 +1145,97 @@ class PageWiringTests(unittest.TestCase):
 
     def test_script_wires_to_the_controller_endpoints(self):
         for endpoint in (
-            '"/api/refs"', "`/api/plans${query}`", '"/api/runs"', "/api/targets/${",
-            "/ws/live", "/report.md", "/cancel", "`/api/runs/${encodeURIComponent(runId)}`",
+            '"/api/refs"', '"/api/plans"', "?target=${encodeURIComponent(host)}",
+            "`/api/run-groups?${query.toString()}`",
+            "/ws/live", "/report.md", "/cancel",
+            "`/api/runs/${encodeURIComponent(runId)}`",
+            "`/api/run-groups/${encodeURIComponent(groupId)}`",
         ):
             self.assertIn(endpoint, self.js)
         self.assertIn('"Content-Type"] = "application/json"', self.js)
+
+    def test_the_history_is_drawn_one_page_at_a_time(self):
+        # The newest 50, then a page at a time behind the controller's own
+        # cursor, which carries the group of the instant the page ended on.
+        self.assertIn("const HISTORY_PAGE = 50;", self.js)
+        body = self.js[self.js.index("function historyQuery(cursor)"):
+                       self.js.index("function takeGroupPage(")]
+        self.assertIn('limit: String(HISTORY_PAGE)', body)
+        self.assertIn('query.set("before", cursor.created_at)', body)
+        self.assertIn('query.set("before_group_id", cursor.group_id)', body)
+        # A page that is the oldest leaves no cursor, and the button goes.
+        self.assertIn('state.historyCursor = data.has_more', self.js)
+        self.assertIn('$("history-older").hidden = !state.historyCursor;', self.js)
+
+    def test_the_history_filters_reach_the_controller_and_the_live_updates(self):
+        for name in ("history-target", "history-status", "history-ref"):
+            self.assertIn(f'id="{name}"', self.html)
+        query = self.js[self.js.index("function historyQuery(cursor)"):
+                        self.js.index("function takeGroupPage(")]
+        self.assertIn('for (const name of ["target", "status", "ref"])', query)
+        # The same three comparisons on a live update, so a group that
+        # starts or finishes lands in the rows where the next page would put
+        # it. A group matches a target when it asked that host to run.
+        matches = self.js[self.js.index("function matchesFilters(group)"):
+                          self.js.index("function historyQuery(cursor)")]
+        for comparison in (
+            "!hosts.includes(filters.target)", "group.status !== filters.status",
+            "group.ref !== filters.ref",
+        ):
+            self.assertIn(comparison, matches)
+
+    def test_the_pager_keeps_the_keyboard_and_announces_the_count(self):
+        # The count line is a status region, and takes focus when the button
+        # it sits beside goes away under the keyboard.
+        self.assertRegex(
+            self.html, r'id="history-count"[^>]*role="status"[^>]*tabindex="-1"'
+        )
+        self.assertIn('const hadFocus = document.activeElement === button;', self.js)
+        self.assertIn(
+            'if (hadFocus) (state.historyCursor ? button : $("history-count")).focus();',
+            self.js,
+        )
+
+    def test_the_history_panel_fits_a_narrow_window(self):
+        # The filters wrap onto their own lines rather than shrinking to a
+        # few characters, and the table keeps its own horizontal scroll.
+        filters = self.css[self.css.index(".history-filters {"):
+                           self.css.index(".history-filter-actions {")]
+        self.assertIn("flex-wrap: wrap", filters)
+        self.assertIn("flex: 1 1 11rem", filters)
+        self.assertIn("overflow-x: auto", self.css)
+        more = self.css[self.css.index(".history-more {"):
+                        self.css.index(".history-more .hint")]
+        self.assertIn("flex-wrap: wrap", more)
+
+    def test_a_stale_history_answer_cannot_replace_the_page(self):
+        # Filters that change while a page is in flight, and an older page
+        # asked for before them: the answer is dropped rather than shown
+        # beside, or appended to, rows of another query.
+        self.assertIn("historyToken: 0,", self.js)
+        self.assertIn("const token = ++state.historyToken;", self.js)
+        self.assertEqual(
+            3, self.js.count("if (token !== state.historyToken) return;")
+        )
+        self.assertIn("if (token === state.historyToken) {", self.js)
+
+    def test_the_row_count_follows_the_rows_live_updates_change(self):
+        # The page's own figure, plus the rows added since and less the
+        # rows that stopped matching; a fresh page clears both.
+        self.assertIn("state.historyAdded = new Set();", self.js)
+        self.assertIn("state.historyGone = new Set();", self.js)
+        self.assertIn(
+            "state.historyMatching + state.historyAdded.size - state.historyGone.size",
+            self.js,
+        )
+        # A group fetched by ID may be any group, however old, so it
+        # reaches the cache and not the rows: only the live stream and a
+        # group this page started add a row, through joinOrLeaveRows.
+        self.assertIn("function storeGroup(group)", self.js)
+        self.assertIn("function joinOrLeaveRows(group)", self.js)
+        rows = self.js[self.js.index("function upsertGroup(group)"):
+                       self.js.index("  function storeGroup(group)")]
+        self.assertIn("joinOrLeaveRows(group)", rows)
 
     def test_only_runnable_plans_are_offered_to_start(self):
         # The plan <select> is filled from plans that load and are runnable;
@@ -1126,32 +1250,35 @@ class PageWiringTests(unittest.TestCase):
         self.assertEqual(1, body.count("select.replaceChildren("))
         self.assertIn("Not runnable (planned tests)", body)
 
-    def test_the_plan_list_is_loaded_for_the_chosen_target(self):
-        # Estimates and omitted steps belong to one target, so the list is
-        # fetched for the chosen one and again whenever it changes, and a
-        # slower answer for a target already left cannot replace it.
+    def test_the_plan_list_is_loaded_for_every_registered_host(self):
+        # Estimates and omitted steps belong to one host, so one list is
+        # fetched per registered host — before it is ticked, so its row can
+        # say what the suite would do there — and again whenever the hosts
+        # or their platforms change; a slower answer for hosts already left
+        # cannot replace it.
         body = self.js[self.js.index("async function loadPlans()"):
                        self.js.index("function findSuite(")]
-        self.assertIn("const target = $(\"target\").value;", body)
-        self.assertIn("?target=${encodeURIComponent(target)}", body)
+        self.assertIn("const hosts = groupPlanHosts();", body)
+        self.assertIn("?target=${encodeURIComponent(host)}", body)
         self.assertIn("const token = ++state.plansToken;", body)
         self.assertIn("if (token !== state.plansToken) return;", body)
+        self.assertIn("state.plansByHost.set(answer.host, answer.data.plans);", body)
+        # And one list for no host at all, which is what the plan and suite
+        # selects are filled from before a runner has registered.
+        self.assertIn('api("GET", "/api/plans").catch', body)
         # A failed load's message does not survive the next good one.
-        self.assertIn('$("plan-status").textContent = "";', body)
-        # The operator's own target change reloads it, beside the plan and
-        # suite selects; a target update while a load is in flight does not
-        # start another.
-        start = self.js[self.js.index("function start()"):]
-        self.assertIn('$("target").addEventListener("change", loadPlans);', start)
-        self.assertIn("state.plansWanted = target;", body)
-        select = self.js[self.js.index("function renderTargetSelect()"):
-                         self.js.index("// ----- run setup")]
-        self.assertIn("select.value !== state.plansWanted", select)
-        # A target that registers while already chosen gains a platform,
-        # which is what the steps are judged by: that is a reload too.
-        self.assertIn("targetPlatform(select.value) !== state.plansPlatform", select)
-        self.assertIn("state.plansPlatform = platform;", body)
-        # The operator's plan survives a reload for another target, and so
+        self.assertIn('$("plan-status").textContent = problems.join(". ");', body)
+        hosts = self.js[self.js.index("function groupPlanHosts()"):
+                        self.js.index("function maybeLoadPlans()")]
+        self.assertIn("[...state.targets.keys()].sort()", hosts)
+        # A host that registers, or that gains a platform while registered,
+        # is a reload; a target update that changes neither is not.
+        select = self.js[self.js.index("function maybeLoadPlans()"):
+                         self.js.index("function renderHostChoices()")]
+        self.assertIn("plansKey() !== state.plansWanted", select)
+        self.assertIn("plansPlatformsKey() !== state.plansPlatforms", select)
+        self.assertIn("state.plansPlatforms = hosts.map", body)
+        # The operator's plan survives a reload for other hosts, and so
         # does the suite they chose; choosing a plan takes the suite named
         # after that plan, as before.
         self.assertIn('const keep = [current, "fast"].find(', body)
@@ -1160,32 +1287,94 @@ class PageWiringTests(unittest.TestCase):
                          self.js.index("function renderSuiteTests()")]
         self.assertIn("keepChoice && suites.find((suite) => suite.name === current)",
                       suites)
+        start = self.js[self.js.index("function start()"):]
         self.assertIn('$("plan").addEventListener("change", () => renderSuites());',
                       start)
 
-    def test_the_estimate_says_what_the_target_does_not_run(self):
+    def test_each_host_is_ticked_on_its_own_and_says_what_it_would_run(self):
+        # One row per host, with a box of its own: every ticked host gets
+        # its own child run of the plan, started together as one group
+        # (#154). A host the suite runs nothing on is held out of the group,
+        # and its row carries the controller's own reason.
+        body = self.js[self.js.index("function renderHostChoices()"):
+                       self.js.index("function groupHosts()")]
+        self.assertIn('type: "checkbox", id, name: "hosts", value: host,', body)
+        self.assertIn("checked: state.chosen.has(host),", body)
+        self.assertIn("disabled: Boolean(blocked),", body)
+        self.assertIn("if (box.checked) state.chosen.add(host);", body)
+        self.assertRegex(self.html, r'<fieldset class="field hosts"')
+        self.assertIn("<legend>Targets</legend>", self.html)
+        refusal = self.js[self.js.index("function hostRefusal(host)"):
+                          self.js.index("function hostNote(host)")]
+        self.assertIn("suite.runnable_on_target === false", refusal)
+        self.assertIn("suite.not_runnable_reason", refusal)
+        note = self.js[self.js.index("function hostNote(host)"):
+                       self.js.index("function chosenText()")]
+        self.assertIn("tests run here", note)
+        self.assertIn("not applicable here", note)
+        # Only ticked, registered, able hosts are sent, and Run is held when
+        # there is none.
+        hosts = self.js[self.js.index("function groupHosts()"):
+                        self.js.index("function hostRefusal(host)")]
+        self.assertIn(
+            "state.targets.has(host) && !hostRefusal(host)", hosts)
+        button = self.js[self.js.index("function syncRunButton()"):
+                         self.js.index("function artifactWarning(suite)")]
+        self.assertIn("Tick the host, or hosts, to run the plan on.", button)
+        self.assertIn("No ticked host can run this suite", button)
+        self.assertIn('$("run-button").disabled = Boolean(reason);', button)
+        # The page ticks the first host to register once, and never again:
+        # a host the operator unticked must not come back on the next
+        # heartbeat, which would start a run there.
+        targets = self.js[self.js.index("function renderTargets()"):
+                          self.js.index("const plansKey = ()")]
+        self.assertIn(
+            "if (!state.autoTicked && !state.chosen.size && targets.length) {",
+            targets)
+        self.assertIn("state.autoTicked = true;", targets)
+        self.assertIn("state.autoChosen = false;", body)
+
+    def test_a_host_whose_plans_cannot_be_read_says_so_and_is_tried_again(self):
+        body = self.js[self.js.index("async function loadPlans()"):
+                       self.js.index("function findSuite(")]
+        self.assertIn("state.plansErrors.set(answer.host, answer.error.message);",
+                      body)
+        # Tried again on the next target update, by forgetting what this
+        # load was for: nothing else would ask for that host again.
+        self.assertIn('if (state.plansErrors.size) state.plansWanted = "";', body)
+        note = self.js[self.js.index("function hostNote(host)"):
+                       self.js.index("function chosenText()")]
+        self.assertIn("Could not read this host's plans", note)
+
+    def test_a_group_is_started_on_every_ticked_host_at_once(self):
+        body = self.js[self.js.index("async function submitRun("):
+                       self.js.index("// ----- the live run group")]
+        self.assertIn('api("POST", "/api/run-groups", body)', body)
+        self.assertIn("hosts,", body)
+        self.assertIn("selectGroup(data.group.group_id);", body)
+        self.assertIn("Choose a ref, plan, suite and at least one host first.", body)
+
+    def test_the_estimate_says_what_each_host_does_not_run(self):
         body = self.js[self.js.index("function estimateText(suite)"):
-                       self.js.index("async function submitRun(")]
-        # The target the figure is for, and the steps it leaves out with the
-        # time they take where they run.
-        self.assertIn("const target = state.plansTarget;", body)
-        self.assertIn("Estimated test time${on}", body)
-        omitted = self.js[self.js.index("function omittedText(suite)"):
+                       self.js.index("function omittedText(host, suite)")]
+        # One line per host of the group, with the time that host is
+        # expected to spend, and the group's own figure: the longest host's,
+        # because the hosts run at the same time.
+        self.assertIn("const pairs = groupSuites();", body)
+        self.assertIn("Estimated test time on ${host}", body)
+        self.assertIn("The group takes the longest host's time", body)
+        self.assertIn("its hosts run at the same time", body)
+        omitted = self.js[self.js.index("function omittedText(host, suite)"):
                           self.js.index("async function submitRun(")]
         self.assertIn("suite.omitted_tests", omitted)
-        self.assertIn("are not run there", omitted)
+        self.assertIn("are not applicable on ${host}", omitted)
         self.assertIn("not counted above", omitted)
         # One sentence per reason, and a step without an estimate does not
         # hide the time of the rest.
         self.assertIn("const groups = new Map();", omitted)
         self.assertIn('typeof test.estimated_s === "number"', omitted)
         self.assertIn("with no estimate", omitted)
-        self.assertIn("No test of this suite runs${on}", body)
-        # The checklist a run starts with leaves out what its target does
-        # not run, but only while the list belongs to that target.
-        checklist = self.js[self.js.index("function rebuildChecklist()"):]
-        self.assertIn("run.target === state.plansTarget", checklist)
-        self.assertIn("test.runs_on_target !== false", checklist)
+        self.assertIn("No test of this suite runs on ${host}", body)
 
     def test_the_build_options_are_offered_explained_and_sent(self):
         # Every option is on the form, each with the note the operator reads
@@ -1258,25 +1447,34 @@ class PageWiringTests(unittest.TestCase):
         )
         self.assertNotIn("syncFlashBuild", self.js)
 
-    def test_a_suite_the_target_cannot_measure_holds_run(self):
-        # Run is held, with the reason the controller would refuse with, so
-        # pressing it is not how the operator finds out (#285).
+    def test_a_suite_no_ticked_host_can_measure_holds_run(self):
+        # Run is held, and each host's row carries the reason the controller
+        # would refuse with, so pressing it is not how the operator finds
+        # out (#285, #154).
         body = self.js[self.js.index("function syncRunButton()"):
                        self.js.index("// A suite with a test that needs an image")]
-        self.assertIn("suite.runnable_on_target === false", body)
-        self.assertIn("suite.not_runnable_reason", body)
+        self.assertIn("const hosts = groupHosts();", body)
+        self.assertIn("No ticked host can run this suite", body)
         self.assertIn('$("run-button").disabled = Boolean(reason);', body)
+        refusal = self.js[self.js.index("function hostRefusal(host)"):
+                          self.js.index("function hostNote(host)")]
+        self.assertIn("suite.runnable_on_target === false", refusal)
+        self.assertIn("suite.not_runnable_reason", refusal)
         # Shown first, then filled, so the status region announces it.
         self.assertRegex(
             body, r"note\.hidden = !reason;\s*\n\s*note\.textContent = reason;")
-        # Called wherever the suite, the plan, or the target changes
-        # (renderSuiteTests), and again after a start attempt, so a refusal
-        # does not leave Run enabled for a suite that is still held.
+        # Called wherever the suite, the plan, or the ticks change (through
+        # renderHostChoices, which draws each host's reason), and again after
+        # a start attempt, so a refusal does not leave Run enabled for a
+        # suite that is still held.
         tests_body = self.js[self.js.index("function renderSuiteTests()"):
                              self.js.index("function syncRunButton()")]
-        self.assertIn("syncRunButton();", tests_body)
+        self.assertIn("renderHostChoices();", tests_body)
+        choices = self.js[self.js.index("function renderHostChoices()"):
+                          self.js.index("function groupHosts()")]
+        self.assertIn("syncRunButton();", choices)
         submit = self.js[self.js.index("async function submitRun("):
-                         self.js.index("// ----- live run")]
+                         self.js.index("// ----- the live run group")]
         self.assertIn("syncRunButton();", submit)
         self.assertNotIn("button.disabled = false;", submit)
         # The reason is a status region the button points at.
@@ -1301,7 +1499,198 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("builds first, and flashes whatever", body)
         self.assertIn("+ artifactWarning(suite)", self.js)
 
+    def test_every_listed_test_name_carries_an_info_button(self):
+        # Run setup, the live checklist and a failure summary each put a
+        # real button beside the name, and nothing is behind a right-click
+        # (#315).
+        self.assertRegex(
+            self.html,
+            r'<ul id="suite-test-list" class="test-list" role="list" aria-label="[^"]+">')
+        setup = self.js[self.js.index("function renderSuiteTests()"):
+                        self.js.index("function syncRunButton()")]
+        self.assertIn("infoButton(test.name)", setup)
+        self.assertIn('className: "test-name", text: test.name', setup)
+        # The group checklist draws one row per step, so only a test row
+        # carries a button: build, flash and preflight are stages.
+        live = self.js[self.js.index("function renderChecklist()"):
+                       self.js.index("function stepPill(step, cell)")]
+        self.assertIn('step.kind === "test"', live)
+        self.assertIn("infoButton(step.name, {", live)
+        self.assertIn("plan: view.group && view.group.plan,", live)
+        failures = self.js[self.js.index("async function showFailures(groupId)"):
+                           self.js.index("// ----- live socket")]
+        self.assertIn(
+            "infoButton(failure.step, { plan: group.plan, suite: group.suite })",
+            failures)
+        self.assertIn("state.testInfo[failure.step]", failures)
+        button = self.js[self.js.index("function infoButton(name, context)"):
+                         self.js.index("function openTestInfo(name, invoker, context)")]
+        self.assertIn('type: "button", className: "info-button"', button)
+        # Named for a screen reader and for a pointer, and the glyph itself
+        # is hidden, so the name is not read as the letter i.
+        self.assertIn('"aria-label": label, title: label', button)
+        self.assertIn('"aria-hidden": "true", text: "i"', button)
+        self.assertIn("openTestInfo(name, event.currentTarget, context)", button)
+        # No right-click path anywhere: the issue rules it out.
+        self.assertNotIn("contextmenu", self.js)
+
+    def test_the_info_dialog_is_keyboard_accessible(self):
+        # A dialog of the page itself, named and described by its own
+        # heading and purpose; focus enters it at the heading, and Close and
+        # Escape both put focus back on the button.
+        self.assertRegex(
+            self.html, r'<dialog id="test-info"[^>]*aria-labelledby="test-info-title"')
+        self.assertRegex(
+            self.html, r'<dialog id="test-info"[^>]*aria-describedby="test-info-purpose"')
+        self.assertIn('<h2 id="test-info-title" tabindex="-1">', self.html)
+        self.assertIn('<button type="button" id="test-info-close">', self.html)
+        body = self.js[self.js.index("function openTestInfo(name, invoker, context)"):
+                       self.js.index("function closeTestInfo()")]
+        # Focus is moved after the dialog is shown: before it, the
+        # browser's own initial focus would win.
+        self.assertRegex(
+            body,
+            r'(?s)dialog\.showModal\(\);.*\$\("test-info-title"\)\.focus\(\);',
+        )
+        self.assertIn("state.infoInvoker = invoker || null;", body)
+        start = self.js[self.js.index("function start()"):]
+        self.assertIn('$("test-info-close").addEventListener("click", closeTestInfo);',
+                      start)
+        self.assertIn('$("test-info").addEventListener("close", restoreInfoFocus);',
+                      start)
+        self.assertIn('event.key === "Escape"', start)
+        restore = self.js[self.js.index("function restoreInfoFocus()"):
+                          self.js.index("// ----- the live run group")]
+        self.assertIn("if (invoker && invoker.isConnected) invoker.focus();", restore)
+        # Narrow windows: the dialog is never wider than the viewport.
+        self.assertIn("width: min(44rem, calc(100vw - 1.5rem));", self.css)
+
+    def test_the_dialog_shows_the_prose_beside_the_catalog_facts(self):
+        # The prose comes down with the plans, keyed by the catalog name the
+        # rows carry: no request of its own, and no path from the client.
+        self.assertIn("state.testInfo = any.test_information || {};", self.js)
+        self.assertNotIn("/api/test-info", self.js)
+        body = self.js[self.js.index("function openTestInfo(name, invoker, context)"):
+                       self.js.index("function closeTestInfo()")]
+        for heading in ("Theory of operation", "Hardware and traffic",
+                        "Expected outcome", "What a pass does not prove",
+                        "Runtime", "Plans that list it"):
+            self.assertIn(f'"{heading}"', self.js)
+        for field in ("info.purpose", "info.theory", "info.expected",
+                      "info.limitations"):
+            self.assertIn(field, self.js)
+        self.assertIn("Open full documentation", body)
+        # The catalog's own facts, from the row rather than the prose.
+        hardware = self.js[self.js.index("function hardwareSection(info, row)"):
+                           self.js.index("function relatedSection(info)")]
+        self.assertIn("row.hardware_roles", hardware)
+        self.assertIn("row.arguments", hardware)
+        runtime = self.js[self.js.index("function runtimeText(found)"):
+                          self.js.index("function safeHref(url)")]
+        self.assertIn("row.catalog_estimated_s", runtime)
+        self.assertIn("row.estimate_profile", runtime)
+        self.assertIn('row.estimate_source === "learned"', runtime)
+        self.assertIn("row.per_board", runtime)
+        # A longer or soak form of the test is visible as the plans that
+        # list it, with the plans that cannot be started marked.
+        appearances = self.js[self.js.index("function testAppearances(name)"):
+                              self.js.index("function runtimeText(found)")]
+        self.assertIn("plan.runnable === true", appearances)
+        self.assertIn("(planned, not runnable)", appearances)
+        # Related issues as links, and the full document as one more.
+        related = self.js[self.js.index("function relatedSection(info)"):
+                          self.js.index("function infoButton(name, context)")]
+        self.assertIn("info.related", related)
+        self.assertIn("Related issues", related)
+
+    def test_the_runtime_figure_comes_from_the_listing_it_is_asked_about(self):
+        # `fast` lists Argument validation at smoke coverage and `release`
+        # at comprehensive, so the catalog estimate and profile differ per
+        # listing: the dialog reads the run's own listing when it is opened
+        # beside a run's step, and names whichever it read.
+        catalog = builtin_catalog()
+        plans = {
+            path.stem: load_plan(path, catalog)
+            for path in sorted((REPOSITORY / "testplans").glob("*.yaml"))
+        }
+        coverages = {}
+        for name, plan in plans.items():
+            for suite, steps in plan.suites.items():
+                for step in steps:
+                    coverages.setdefault(step.test_name, set()).add(
+                        step.arguments.get("coverage"))
+        self.assertTrue(
+            [test for test, seen in coverages.items() if len(seen) > 1],
+            "no test is listed at two coverages, so this would not matter",
+        )
+        body = self.js[self.js.index("function catalogRow(name, context)"):
+                       self.js.index("function testAppearances(name)")]
+        # The listing asked about first, then Run setup's own choice, then
+        # any listing that holds the test, and which one it was is returned.
+        self.assertIn("if (context && context.plan) wanted.push([context.plan, context.suite]);",
+                      body)
+        self.assertIn('wanted.push([$("plan").value, $("suite").value]);', body)
+        self.assertIn("return { row, plan, suite };", body)
+        runtime = self.js[self.js.index("function runtimeText(found)"):
+                          self.js.index("function safeHref(url)")]
+        self.assertIn("const listing = `as ${found.plan} / ${found.suite} lists it`;",
+                      runtime)
+        self.assertIn("${listing}", runtime)
+
+    def test_information_the_page_has_not_got_is_said_and_stops_nothing(self):
+        # A test with no entry, a file the controller could not read, a
+        # listing that failed, and a name no plan holds: each ends at a
+        # dialog that says why, and none of them is read by Run.
+        missing = self.js[self.js.index("function testInfoFor(name)"):
+                          self.js.index("function catalogRow(name, context)")]
+        self.assertIn("available: false", missing)
+        self.assertIn("No plan the controller lists holds this test", missing)
+        self.assertIn("The plan listing has not loaded", missing)
+        body = self.js[self.js.index("function openTestInfo(name, invoker, context)"):
+                       self.js.index("function closeTestInfo()")]
+        # The server's own reason (a missing or malformed file) is shown as
+        # the dialog's description, with the catalog facts still under it.
+        self.assertIn("info.unavailable_reason", body)
+        self.assertIn("info.available ? infoSection(", body)
+        self.assertIn("What the catalog itself says about it is below.", body)
+        runtime = self.js[self.js.index("function runtimeText(found)"):
+                          self.js.index("function safeHref(url)")]
+        self.assertIn("if (!row) {", runtime)
+        # Run holds for what the controller would refuse, never for this.
+        held = self.js[self.js.index("function syncRunButton()"):
+                       self.js.index("// A suite with a test that needs an image")]
+        self.assertNotIn("testInfo", held)
+        submit = self.js[self.js.index("async function submitRun("):
+                         self.js.index("// One bootloader identity record")]
+        self.assertNotIn("testInfo", submit)
+        # A failed load drops what the last one said rather than showing it
+        # for another target's plans.
+        plans = self.js[self.js.index("async function loadPlans()"):
+                        self.js.index("function findSuite(")]
+        self.assertIn("state.testInfo = {};", plans)
+
+    def test_the_dialog_renders_text_and_links_only_what_it_can_check(self):
+        # The prose is data: every field reaches the page as text through
+        # el()'s `text`, which is textContent. The only attribute built from
+        # the response is an href, and only when it is an https URL.
+        safe = self.js[self.js.index("function safeHref(url)"):
+                       self.js.index("function infoSection(")]
+        self.assertIn('text.startsWith("https://") ? text : ""', safe)
+        # Every href the dialog builds comes from safeHref and nothing
+        # else: one for a related issue, one for the full documentation,
+        # each passed as the shorthand of the checked local.
+        dialog = self.js[self.js.index("function relatedSection(info)"):
+                         self.js.index("function closeTestInfo()")]
+        self.assertEqual(2, dialog.count("const href = "), dialog)
+        self.assertEqual(2, dialog.count(" href,"), dialog)
+        self.assertNotRegex(dialog, r"href:")  # never set from an expression
+        self.assertIn("const href = safeHref(item && item.url);", dialog)
+        self.assertIn('const href = documentation ? safeHref(documentation.url) : "";',
+                      dialog)
+        self.assertIn('rel: "noreferrer noopener"', self.js)
+
     def test_script_has_no_html_injection_sinks(self):
+
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
                      "eval(", "new Function", "setTimeout(\"", "javascript:"):
             self.assertNotIn(sink, self.js)
@@ -1318,6 +1707,237 @@ class PageWiringTests(unittest.TestCase):
         self.assertEqual(set(), controls - labels)
         self.assertRegex(self.html, r'id="checklist"[^>]*aria-live="polite"')
         self.assertIn('lang="en"', self.html)
+
+
+class GroupViewTests(unittest.TestCase):
+    """A JS-free check of the live view of a run group (#154).
+
+    One row per step with one pill per host that runs it, one transcript per
+    host, and a summary, clock and Cancel that belong to the whole group.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.js = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+        cls.css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
+
+    def test_the_rows_and_cells_come_from_the_group_and_not_from_here(self):
+        # The group's own answer is the one source of a status: a record
+        # that may have moved a step asks for the rows again rather than
+        # deciding anything (rungroups.merge_steps).
+        body = self.js[self.js.index("function renderChecklist()"):
+                       self.js.index("function stepPill(step, cell)")]
+        self.assertIn("view.detail && view.detail.steps", body)
+        # The cells in the group's own host order, not the answer's object
+        # key order, so a host name of digits alone cannot reorder them.
+        self.assertIn("const cells = hosts.map((host) => step.hosts[host])", body)
+        self.assertIn("One pill per host that runs the step, and only those",
+                      body)
+        refresh = self.js[self.js.index("async function refreshGroup()"):
+                          self.js.index("function scheduleRefresh()")]
+        self.assertIn('api("GET", groupPath(view.group_id))', refresh)
+        # One fetch at a time, with a trailing one for records that arrived
+        # while it was in flight, and no more often than the poll interval.
+        self.assertIn("view.again = true;", refresh)
+        self.assertIn("const GROUP_POLL_MS = 1500;", self.js)
+        schedule = self.js[self.js.index("function scheduleRefresh()"):
+                           self.js.index("async function loadTranscript(")]
+        self.assertIn("GROUP_POLL_MS - (Date.now() - view.fetchedAt)", schedule)
+        # A fetch stores what it read without asking for another, so a group
+        # on display cannot poll itself for ever.
+        self.assertIn("storeGroup(detail.group);", refresh)
+        self.assertIn("storeRun(member.run);", refresh)
+        store = self.js[self.js.index("function storeGroup(group)"):
+                        self.js.index("function renderHistory()")]
+        self.assertNotIn("scheduleRefresh", store)
+        upsert = self.js[self.js.index("function upsertGroup(group)"):
+                         self.js.index("function storeGroup(group)")]
+        self.assertIn("scheduleRefresh();", upsert)
+        # A host whose child run is accepted after an earlier fetch gets its
+        # own transcript, and its records from the start.
+        self.assertIn("loadTranscript(view.group_id, member.host, member.run_id);",
+                      refresh)
+
+    def test_each_pill_names_its_host_its_status_and_its_own_transcript(self):
+        pill = self.js[self.js.index("function hostPill(host, status,"):
+                       self.js.index("function cellFill(cell)")]
+        # The host and the status, as text, in the pill itself; the
+        # stylesheet is what makes it LINUX ✓ PASSED.
+        self.assertIn('className: "pill-host", text: hostLabel(host)', pill)
+        self.assertIn('className: "pill-status", text: word', pill)
+        self.assertIn("text-transform: uppercase", self.css)
+        # A status this page has no entry for is styled as unknown, as a
+        # status badge does with one, rather than put into a class of its
+        # own out of controller text.
+        self.assertIn('const kind = known ? shown.replace(/ /g, "-") : "unknown";',
+                      pill)
+        step = self.js[self.js.index("function stepPill(step, cell)"):
+                       self.js.index("function tickFills()")]
+        self.assertIn("onclick: () => showHost(cell.host),", step)
+        self.assertIn("Transcript of ${cell.host}", step)
+        # A short label for the pill, with the full name in its own label.
+        label = self.js[self.js.index("function hostLabel(host)"):
+                        self.js.index("function timeElement(iso)")]
+        self.assertIn('replace(/^Host[_-]/, "")', label)
+        # Every status a cell can carry has a word and a symbol, including
+        # the two the group API writes with an underscore.
+        for status in ("pending", "running", "passed", "failed", "blocked",
+                       "canceled", "lost", "error", "skipped",
+                       "not applicable", "not reached", "starting"):
+            self.assertIn(f'"{status}"' if " " in status else f"{status}:", self.js)
+        self.assertIn("not_reached: \"not reached\"", self.js)
+        self.assertIn("not_applicable: \"not applicable\"", self.js)
+
+    def test_a_running_pill_fills_from_its_own_estimate(self):
+        fill = self.js[self.js.index("function cellFill(cell)"):
+                       self.js.index("function cellFiles(cell)")]
+        # Only a step that is running, has started, and has an estimate can
+        # be filled; past its estimate it stays full and keeps moving.
+        self.assertIn('statusWord(cell.status) !== "running"', fill)
+        self.assertIn("Math.min(100, Math.round((elapsed / estimate) * 100))", fill)
+        self.assertIn("over: elapsed > estimate,", fill)
+        # The fill is decorative, so it carries a progressbar role and its
+        # own value for a screen reader, and the pill's text still says the
+        # status.
+        pill = self.js[self.js.index("function hostPill(host, status,"):
+                       self.js.index("function cellFill(cell)")]
+        self.assertIn('role: "progressbar"', pill)
+        set_fill = self.js[self.js.index("function setFill(pill, node, fill)"):
+                           self.js.index("// How far a running step is")]
+        self.assertIn('node.setAttribute("aria-valuenow", String(fill.percent));',
+                      set_fill)
+        self.assertIn('"aria-valuetext"', set_fill)
+        # No style attribute is ever set: the width is one of the
+        # stylesheet's own steps, named in a data attribute.
+        self.assertIn('String(Math.round(fill.percent / 5) * 5)', set_fill)
+        for percent in (0, 5, 50, 95, 100):
+            self.assertIn(f'[data-fill="{percent}"] {{ width: {percent}%; }}', self.css)
+        self.assertNotIn(".style", self.js)
+        self.assertIn(".pill-over .pill-fill { animation: pulse", self.css)
+        # It moves with the clock, and moves nothing else: the fill of each
+        # running pill is set again where it stands, never by drawing the
+        # rows afresh, which would announce the whole checklist to a screen
+        # reader and take the focus off a pill once a second.
+        tick = self.js[self.js.index("function tickFills()"):
+                       self.js.index("function setFill(pill, node, fill)")]
+        self.assertIn('followed.pill.querySelector(".pill-fill")', tick)
+        self.assertIn("setFill(followed.pill,", tick)
+        self.assertNotIn("renderChecklist", tick)
+        start = self.js[self.js.index("function start()"):]
+        self.assertIn("window.setInterval(tickFills, 1000);", start)
+        self.assertNotIn("setInterval(renderChecklist", self.js)
+
+    def test_the_card_title_is_the_whole_group_s_progress(self):
+        self.assertRegex(
+            self.html,
+            r'<div id="group-progress" class="group-progress" role="progressbar"')
+        self.assertIn('aria-valuemin="0" aria-valuemax="100"', self.html)
+        body = self.js[self.js.index("function renderTitleProgress(progress)"):
+                       self.js.index("async function cancelGroup()")]
+        self.assertIn("progress.completed / progress.planned", body)
+        self.assertIn("steps done", body)
+        self.assertIn(".panel-head-progress", self.css)
+        self.assertIn(".group-progress {", self.css)
+
+    def test_one_transcript_per_host_each_with_its_own_tab(self):
+        tabs = self.js[self.js.index("function renderHostTabs()"):
+                       self.js.index("function onTabKey(event)")]
+        self.assertIn('role: "tab"', tabs)
+        self.assertIn('"aria-controls": "log"', tabs)
+        self.assertIn("view.detail && view.detail.members", tabs)
+        self.assertRegex(self.html, r'id="host-tabs"[^>]*role="tablist"')
+        self.assertRegex(self.html, r'id="log"[^>]*role="tabpanel"')
+        # One stop in the tab order, and the arrow keys along the hosts, as
+        # the ARIA tabs pattern asks; the tab that becomes current is the
+        # one focus moves to.
+        self.assertIn('tabindex: chosen ? "0" : "-1"', tabs)
+        keys = self.js[self.js.index("function onTabKey(event)"):
+                       self.js.index("function showHost(host,")]
+        for key in ("ArrowRight", "ArrowLeft", "Home", "End"):
+            self.assertIn(key, keys)
+        self.assertIn("showHost(hosts[wanted], { focus: true });", keys)
+        self.assertIn('$("host-tabs").addEventListener("keydown", onTabKey);',
+                      self.js)
+        show = self.js[self.js.index("function showHost(host,"):
+                       self.js.index("function renderTranscript()")]
+        self.assertIn("if (tab) tab.focus();", show)
+        # Each host's records go to that host's transcript, and a run this
+        # group has nothing to do with is left out (the stream is
+        # unfiltered, so every run's records arrive).
+        body = self.js[self.js.index("function transcriptOf(runId)"):
+                       self.js.index("function pushLog(transcript, line)")]
+        self.assertIn("if (transcript.run_id === runId) return transcript;", body)
+        self.assertIn("const live = transcriptOf(runId);", self.js)
+        # The boards, the leases and the log tail are the open host's, and
+        # the tail follows only a reader who is already at the end of it.
+        transcript = self.js[self.js.index("function renderTranscript()"):
+                             self.js.index("function renderClock()")]
+        self.assertIn("view.transcripts.get(view.tab)", transcript)
+        self.assertIn('$("log").setAttribute("aria-labelledby"', transcript)
+        self.assertIn("if (atEnd) logNode.scrollTop = logNode.scrollHeight;",
+                      transcript)
+
+    def test_the_summary_the_clock_and_cancel_are_the_group_s(self):
+        body = self.js[self.js.index("function renderGroup()"):
+                       self.js.index("function groupRunId(group)")]
+        for term in ("Group", "Status", "Hosts", "Steps done"):
+            self.assertIn(f'["{term}"', body)
+        clock = self.js[self.js.index("function renderClock()"):
+                        self.js.index("function renderTitleProgress(progress)")]
+        # Elapsed over the whole group, against the longest host rather than
+        # the sum, because the hosts run at the same time; and no countdown
+        # unless every step of every host has an estimate, as the group's own
+        # progress figure requires.
+        self.assertIn("group.created_at", clock)
+        self.assertIn("Math.max(...perHost.values())", clock)
+        self.assertIn("longest of the group's", clock)
+        self.assertIn("have no estimated duration", clock)
+        cancel = self.js[self.js.index("async function cancelGroup()"):
+                         self.js.index("// ----- history")]
+        self.assertIn("`${groupPath(view.group_id)}/cancel`", cancel)
+        self.assertIn("Asking every host of the group to cancel…", cancel)
+        self.assertIn('$("cancel-button").addEventListener("click", cancelGroup);',
+                      self.js)
+        self.assertIn("Cancel the group", self.html)
+
+    def test_history_lists_groups_with_their_per_host_results(self):
+        body = self.js[self.js.index("function renderHistory()"):
+                       self.js.index("async function loadGroups()")]
+        # The rows are the pages the controller served, in its own order.
+        self.assertIn("[...state.historyIds]", body)
+        self.assertIn("state.groups.get(groupId)", body)
+        self.assertIn("hostPill(member.host, member.status,", body)
+        self.assertIn("onclick: () => selectGroup(group.group_id, { tab: member.host })",
+                      body)
+        # A group of one is listed by its run's own ID, which is what the
+        # controller gives such a group (rungroups.implicit_group).
+        self.assertIn("group.implicit ? (groupRunId(group) || group.group_id)", body)
+        load = self.js[self.js.index("async function loadGroups()"):
+                       self.js.index("// The failed steps of a whole group")]
+        # One page of them, through the history query the pager builds.
+        self.assertIn('api("GET", historyQuery(null))', load)
+        self.assertIn("/api/run-groups?${query.toString()}", self.js)
+        self.assertIn("Hosts", self.html)
+        self.assertIn("a run of one host is a group of one", self.html)
+        # The failure summary is the group's, host by host.
+        failures = self.js[self.js.index("async function showFailures(groupId)"):
+                           self.js.index("// ----- live socket")]
+        self.assertIn("for (const member of data.members)", failures)
+        self.assertIn("${member.host} · ${failure.step}", failures)
+
+    def test_a_link_to_a_group_or_to_one_host_s_run_both_work(self):
+        start = self.js[self.js.index("function start()"):]
+        self.assertIn(r"/^#(group|run)=([^&]+)(?:&file=(.+))?$/", start)
+        run = self.js[self.js.index("async function selectRun(runId"):
+                      self.js.index("async function selectGroup(groupId")]
+        # A run names the group it is a host of, so an older link, and a
+        # target card's Watch, open that group with that host's transcript.
+        self.assertIn("selectGroup(groupIdOf(run), { tab: run.target, scroll })", run)
+        self.assertIn("return (run && (run.group_id || run.run_id)) || null;", self.js)
+        group = self.js[self.js.index("async function selectGroup(groupId"):
+                        self.js.index("function memberOf(view, host)")]
+        self.assertIn('`#group=${groupId}`', group)
 
 
 if __name__ == "__main__":
