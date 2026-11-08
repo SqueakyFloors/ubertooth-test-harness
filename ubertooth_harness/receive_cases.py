@@ -35,7 +35,9 @@ import sys
 import time
 from pathlib import Path
 
-from ubertooth_harness import capturefile, rxdump, rxreplay, stalecheck, stdoutdest
+from ubertooth_harness import (
+    bredrrecord, capturefile, rxdump, rxreplay, stalecheck, stdoutdest,
+)
 from ubertooth_harness.hostneeds import NO_NEEDS, Needs
 from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.stateful import (
@@ -71,6 +73,7 @@ ABSENT_SERIAL = "f" * 32
 
 _CAPTURE_CHECKER = str(Path(capturefile.__file__).resolve())
 _DUMP_CHECKER = str(Path(rxdump.__file__).resolve())
+_RECORD_CHECKER = str(Path(bredrrecord.__file__).resolve())
 
 
 def seconds_arg(arguments) -> int:
@@ -742,6 +745,75 @@ def _capture_packets(step_id, name, file_name, header_format, packets):
     )
 
 
+# What a replay of the full fixture, filtered to LAP A, has to hold.
+#
+# The record count is the fixture's own: the harness wrote the input, so
+# every packet of that LAP is one record. The rest are floors of one,
+# because what they are for is making a check fire at all. On live traffic a
+# payload-bearing record turns up about 11 times in 2620 and a settled
+# address part about one run in nine, so the checks that read a payload's own
+# length field, recompute its CRC-16, and hold a record's transport nibble to
+# the payload it names are checks waiting for a record; one record each is
+# what sets them going (ubertooth-test-harness#339, #344). How many of the
+# eight this libbtbb settles a UAP for, and from which one, is the library's
+# own business and would make a floor of four a check on the library's
+# bookkeeping rather than on the fields; `--settling-record` is what asks
+# about the record that matters.
+_LAP_A_RECORDS = len(rxreplay.expected_packets(lap=rxreplay.LAP_A))
+# The DH1 the fixture carries, as libbtbb names the type.
+_PAYLOAD_TYPE = "DH1/2-DH1"
+# Records carrying the reference UAP once the address part settles. Measured
+# with the pinned libbtbb: four of the eight, the first of them the DH1 whose
+# CRC settled it. The floor is below what was measured because how many of
+# the eight the library keeps the part for is its own bookkeeping, where the
+# record that settled it is the subject of three fixes; `--settling-record`
+# is what asks about that one.
+_LAP_A_WITH_UAP = 4
+
+
+def _record_fields(step_id, name, file_name, *, following=False):
+    """Read every record of a filtered replay capture, field by field."""
+    def argv(context):
+        options = (
+            "--lap", f"{rxreplay.LAP_A:06x}",
+            "--reference-lap", f"{rxreplay.LAP_A:06x}",
+            "--reference-uap", f"{rxreplay.UAP_A:02x}",
+            "--min-packets", str(_LAP_A_RECORDS),
+            "--min-reference-uap", str(_LAP_A_WITH_UAP),
+            "--min-hec-valid", "1",
+            "--min-with-payload", "1",
+            "--min-crc-valid", "1",
+            "--require-types", _PAYLOAD_TYPE,
+            "--settling-record",
+            "--signal-dbm", str(rxreplay.SIGNAL_DBM),
+            "--no-measured-noise",
+        )
+        if following:
+            # A PCAPNG records the address the capture was following; this
+            # command line states a LAP and no UAP, so the mask is empty.
+            options += ("--following-lap", f"{rxreplay.LAP_A:06x}",
+                        "--following-uap-mask", "0")
+        return (sys.executable, _RECORD_CHECKER,
+                _path(file_name)(context)) + options
+
+    return Step(
+        step_id, name, argv, timeout_s=30.0,
+        output_patterns=(
+            rf"(?m)^BR/EDR records: {_LAP_A_RECORDS} in ",
+            r"(?m)^BR/EDR payloads: [1-9]\d* records carry one, ",
+            # The transport the payload earns, which is the field a libbtbb
+            # that stopped naming one would leave empty (#339). Matched
+            # wherever it sits on the line, since the summary lists the
+            # transports it found in its own order.
+            r"(?m)^BR/EDR transports: .*\bACL \([1-9]\d*\)",
+            rf"(?m)^BR/EDR signal: {rxreplay.SIGNAL_DBM} to "
+            rf"{rxreplay.SIGNAL_DBM} dBm$",
+            r"(?m)^BR/EDR noise: no record reports a measured figure$",
+        ),
+        forbidden_patterns=(r"(?m)^BR/EDR record problem: ",),
+    )
+
+
 # --- where a replay's capture goes, and the pairs that are one file ----------
 #
 # A capture option's value may be standard output: the documented "-", a path
@@ -1241,6 +1313,33 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
                          forbidden=(_CLK6_FOUND,)),
         ), f"only LAP {_A} lines; UAP {rxreplay.UAP_A:02x} found and the "
            "CLK1-27 search started from the packet that found it; no CLK6 note"),
+        # The one case that reads a capture's records rather than its header
+        # and packet count. Its answer is known, which is what the live
+        # Classic tests cannot have: `Classic capture record fields` runs the
+        # same decoder over the bench's own traffic, where a payload-bearing
+        # record turns up about 11 times in 2620 and a settled address part
+        # about one run in nine, so the payload, CRC and transport rules there
+        # are checks waiting for a record to fire on. Here they fire every
+        # run, on a board-free host, so a change to any of them fails in CI.
+        _replay_case("replay-lap-records",
+                     f"-i -l {_A} -r: every record's fields", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -l {_A} -r", ("-l", _A),
+                         check=rxreplay.uap_check(lap_a),
+                         patterns=(rxreplay.uap_note(rxreplay.UAP_A),),
+                         files=(("-r", "records.pcapng"),)),
+            _capture_packets("verify-capture", "Verify the -r file",
+                             "records.pcapng", "pcapng", len(lap_a)),
+            _record_fields("verify-records", "Read every record of the -r file",
+                           "records.pcapng", following=True),
+        ), f"pcapng, link type 255, {len(lap_a)} records: all of LAP {_A} with "
+           f"that LAP and UAP {rxreplay.UAP_A:02x} as the reference address, "
+           "the record that settled the UAP carrying its own header and the "
+           "payload whose CRC settled it, that payload's length field and "
+           "CRC-16 agreeing and its transport named ACL, every record at the "
+           f"fixture's {rxreplay.SIGNAL_DBM} dBm with no measured noise, and "
+           f"the file naming LAP {_A} with an empty UAP mask as the address "
+           "it followed"),
         _replay_case("replay-pcapng", "-i -r replays into PCAPNG", (
             _fixture_step(base),
             _replay_step("ubertooth-rx -i <fixture> -r", (),
@@ -1353,7 +1452,13 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
                          files=(("-q", "replay.pcap"),)),
             _capture_packets("verify-capture", "Verify the -q file", "replay.pcap",
                              "pcap", len(lap_a)),
-        ), f"pcap, link type 255, {len(lap_a)} packets"),
+            # The same records in the other format. A PCAP carries no
+            # interface option, so the address followed is the one thing the
+            # PCAPNG case checks and this one cannot.
+            _record_fields("verify-records", "Read every record of the -q file",
+                           "replay.pcap"),
+        ), f"pcap, link type 255, {len(lap_a)} records, every field as in the "
+           "PCAPNG case"),
         _replay_case("replay-empty", "-i of an empty file", (
             _fixture_step(base, "empty"),
             _replay_step("ubertooth-rx -i <empty>", (), check=rxreplay.packets_check([])),

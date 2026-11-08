@@ -52,10 +52,18 @@ Two more tie a record to its own payload and to the run that wrote it:
 
 - the transport nibble names the payload's own logical transport (ACL, SCO,
   or eSCO, as the packet type allows) and names none where the record
-  carries no payload;
+  carries no payload, so a record with a payload and no transport fails;
 - the record times span no more than the run and step backwards no further
   than two packets of one slot bank, which a caller asks for with
   ``--max-span-s`` and ``--max-backward-step-us``.
+
+Three more are for a capture with a known answer, where a floor met by the
+records around a fault would not do (``--settling-record``, ``--signal-dbm``,
+``--no-measured-noise``): the one record that settled the piconet's address
+part, held to its own header and payload; the level every record carries; and
+a capture whose packets carry no background estimate claiming no measured
+noise power. Each of the three fails a change to the figure it is about
+rather than to the room it was measured in.
 
 A record whose header never decoded carries eighteen zero bits where the
 header goes, so it is reported as a NULL packet with address 0 and no flags
@@ -456,28 +464,27 @@ def transport_name(transport: int) -> str:
 def _transport_problems(record: Record) -> list[str]:
     """Whether the transport nibble agrees with this record's own payload.
 
-    Two rules, both of which hold whichever libbtbb wrote the record. A
-    record with no payload names no transport, because the library names one
-    only for a payload it produced and clears it again wherever it drops one
-    (a trial clock it abandons, a packet handed new symbols). A record that
-    does carry a payload names that payload's own transport -- or "any",
-    which is what a libbtbb from before SqueakyFloors/libbtbb#133 records for
-    every packet, so a run against an older ``--libbtbb-ref`` is not failed
-    for a field that library never filled in.
+    Two rules. A record with no payload names no transport, because the
+    library names one only for a payload it produced and clears it again
+    wherever it drops one (a trial clock it abandons, a packet handed new
+    symbols). A record that does carry a payload names that payload's own
+    transport, and "any" on such a record is a field that was not filled in.
 
-    That second escape is a real gap, kept on purpose: at the commit the fork
-    pins, a payload-bearing record always names a transport, so a libbtbb
-    that stopped filling the field in would pass here. What it covers is a
-    run that names a libbtbb from before libbtbb#133 itself. A run that takes
-    the fork's pin, which is what a deployed runner's ``fork-pin`` resolves
-    to, has named transports since that change; the harness's own
-    ``LIBBTBB_PIN`` and the README's example refs named an older one until
-    harness #341 moved them, and those were the runs the escape was written
-    for. A floor on payload-bearing records is no alternative either way,
-    because they are rare on the bench. Dropping the escape is harness #339,
-    whose one precondition, that pin, is now met; it is left to that issue
-    because it changes the rule a live Classic capture is judged by, which is
-    that issue's subject rather than this one's.
+    That second rule used to accept "any" as well, for a run naming a libbtbb
+    from before SqueakyFloors/libbtbb#133, which names no transport at all.
+    The escape also let a libbtbb that stopped filling the field in pass, and
+    the harness's own ``LIBBTBB_PIN`` and the README's example refs were the
+    last refs it was needed for; harness #341 moved both to the commit the
+    fork pins, where a payload-bearing record always names a transport, so
+    the escape went with harness #339.
+
+    What that costs: a run told to build a libbtbb from before that change
+    fails this rule, and no catalog case can turn it off, because nothing in
+    a plan reaches ``--any-transport`` -- the cases that pass it pass it for
+    a capture whose headers do not decode, and the rest build their argv in
+    code. Such a run is not something the harness supports anyway: every
+    other rule here assumes the pinned library's clears. A caller running
+    this module by hand on an older capture has the option.
     """
     named = transport_name(record.transport)
     if not record.payload:
@@ -485,14 +492,64 @@ def _transport_problems(record: Record) -> list[str]:
             return [f"transport {named} with no payload in the record, and a "
                     "transport names the payload the decoder produced"]
         return []
-    if record.transport == TRANSPORT_ANY:
-        return []
     allowed = _TYPE_TRANSPORTS.get(record.packet_type, ())
+    if not allowed:
+        # A type the library decodes no payload for, with payload bytes in
+        # the record: the record holds one packet's header beside another's
+        # payload, whatever its nibble says.
+        return [f"{len(record.payload)} payload bytes in a "
+                f"{record.type_name} record, which carries no payload"]
+    wanted = " or ".join(transport_name(one) for one in allowed)
+    if record.transport == TRANSPORT_ANY:
+        return [f"no transport named on a {record.type_name} record carrying "
+                f"{len(record.payload)} payload bytes, whose transport is "
+                f"{wanted}: the library names one for every payload it "
+                "produces"]
     if record.transport not in allowed:
-        wanted = " or ".join(transport_name(one) for one in allowed) or "none"
         return [f"transport {named} on a {record.type_name} payload, whose "
                 f"transport is {wanted}"]
     return []
+
+
+def _settling_problems(found: list[Record]) -> list[str]:
+    """The record that settled the piconet's address part, checked as itself.
+
+    Three fixes are each about this one record and nothing else: it carries
+    the reference upper address part the capture has just worked out
+    (SqueakyFloors/ubertooth#770, which reads the reference after the decoder
+    rather than before it), its own header decoded at the piconet's clock
+    (SqueakyFloors/libbtbb#99), and the payload it was decoded from
+    (SqueakyFloors/libbtbb#85). Every floor elsewhere in this module is met
+    by the records around it, so reverting any of the three costs one record
+    out of hundreds and passes; this names that record and holds it to what
+    the three put in it.
+
+    The rule is for a capture whose address part was settled by a payload
+    CRC, which is what the replay fixture is built to do and what a caller
+    asks this of. A capture given its UAP on the command line carries one
+    from its first record, so nothing here settles anything, and a sweep that
+    settles one from a header alone has no payload to hold the third rule to.
+    """
+    with_uap = [record for record in found if record.has(REFUAP_VALID)]
+    if not with_uap:
+        return ["no record carries a reference UAP, so none settled the "
+                "piconet's address part"]
+    first = with_uap[0]
+    problems = []
+    if not (first.has(HEC_CHECKED) and first.has(HEC_VALID)):
+        problems.append("its header's HEC is not reported as checked and "
+                        "passing, so the record does not carry the header the "
+                        "address part was settled from")
+    if not first.payload:
+        problems.append("it carries no payload, and the payload whose CRC "
+                        "settled the address part belongs in it")
+    elif not (first.has(CRC_CHECKED) and first.has(CRC_VALID)):
+        problems.append(f"its {len(first.payload)}-byte payload is not "
+                        "reported as passing a CRC, which is what settled the "
+                        "address part")
+    return [f"the record that settled reference UAP {first.ref_uap:02x} "
+            f"(record {first.index}, {first.type_name}): {problem}"
+            for problem in problems]
 
 
 def _consistency(record: Record, *, payload_checks: bool,
@@ -599,6 +656,9 @@ def problems(found: list[Record], *, lap: int | None = None,
              types: tuple[str, ...] = (), require_types: tuple[str, ...] = (),
              payload_checks: bool = True,
              transport_checks: bool = True,
+             settling_record: bool = False,
+             signal_dbm: int | None = None,
+             no_measured_noise: bool = False,
              max_span_s: float | None = None,
              max_backward_step_us: float | None = None) -> list[str]:
     """Everything wrong with these records, worst first; empty when they pass."""
@@ -658,6 +718,22 @@ def problems(found: list[Record], *, lap: int | None = None,
     if len(crc_valid) < min_crc_valid:
         failures.append(f"{len(crc_valid)} records passed a payload CRC, expected "
                         f"at least {min_crc_valid}")
+    if settling_record:
+        failures += _settling_problems(found)
+    if signal_dbm is not None:
+        wrong = [record for record in found if record.signal_power != signal_dbm]
+        if wrong:
+            failures.append(f"{len(wrong)} records carry another signal level, "
+                            f"the first {wrong[0].signal_power} dBm in record "
+                            f"{wrong[0].index}, expected {signal_dbm} dBm")
+    if no_measured_noise:
+        measured = [record for record in found if record.has(NOISEPOWER_VALID)]
+        if measured:
+            failures.append(
+                f"{len(measured)} records claim a measured noise power, the "
+                f"first {measured[0].noise_power} dBm in record "
+                f"{measured[0].index}, where this capture's packets carry no "
+                "background estimate")
     if max_access_code_errors is not None:
         worst = max((record.access_code_offenses for record in found),
                     default=0)
@@ -847,6 +923,13 @@ def _uap(value: str) -> int:
     return number
 
 
+def _dbm(value: str) -> int:
+    number = int(value)
+    if not MIN_DBM <= number <= MAX_DBM:
+        raise ValueError(value)
+    return number
+
+
 def _type_name(value: str) -> str:
     if value not in TYPE_NUMBERS:
         raise ValueError(value)
@@ -886,6 +969,23 @@ def main(argv: list[str] | None = None) -> int:
              "fixes the ceiling for a run, and allows two by default")
     parser.add_argument("--min-crc-valid", type=int, default=0)
     parser.add_argument("--min-channels", type=int, default=0)
+    parser.add_argument(
+        "--settling-record", action="store_true",
+        help="hold the first record carrying a reference UAP -- the one that "
+             "settled the piconet's address part -- to its own header and "
+             "the payload whose CRC settled it; for a capture that recovers "
+             "a UAP from the air rather than being given one")
+    parser.add_argument(
+        "--signal-dbm", type=_dbm,
+        help="the signal level, in dBm, every record must carry; for a "
+             "capture whose packets all came from one recorded reading, "
+             "where a level worked out from anything but the packet itself "
+             "reads as another figure")
+    parser.add_argument(
+        "--no-measured-noise", action="store_true",
+        help="no record may claim a measured noise power, for a capture "
+             "whose packets carry no background estimate: the figure is then "
+             "a sentinel no receiver reports and the flag stays clear")
     parser.add_argument("--types", default="",
                         help="comma list of the only packet type names allowed")
     parser.add_argument("--require-types", default="",
@@ -897,8 +997,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--any-transport", action="store_true",
         help="accept any transport nibble, for a capture whose headers do "
-             "not decode: the type the nibble is checked against comes from "
-             "the header")
+             "not decode -- the type the nibble is checked against comes "
+             "from the header -- or for a capture written by a libbtbb from "
+             "before it named transports at all")
     parser.add_argument(
         "--max-span-s", type=float,
         help="the longest the records may span, which is the run that "
@@ -944,6 +1045,9 @@ def main(argv: list[str] | None = None) -> int:
         types=types, require_types=require_types,
         payload_checks=not args.no_payload_checks,
         transport_checks=not args.any_transport,
+        settling_record=args.settling_record,
+        signal_dbm=args.signal_dbm,
+        no_measured_noise=args.no_measured_noise,
         max_span_s=args.max_span_s,
         max_backward_step_us=args.max_backward_step_us)
     wanted = (("LAP", "lap", args.following_lap),

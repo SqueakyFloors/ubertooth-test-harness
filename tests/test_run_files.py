@@ -368,7 +368,9 @@ class WebAssetTests(unittest.TestCase):
         # Refreshed as commands save their output, not only on selection.
         self.assertIn('kind === "command_finished" || kind === "output_files"',
                       self.js)
-        self.assertIn("Build and preflight output: ", self.js)
+        # Named with the host they were saved on, since a group has one such
+        # list per host (#154).
+        self.assertIn("`Build and preflight output on ${member.host}: `", self.js)
         self.assertIn("runFiles(", self.js)
 
     def test_choosing_another_run_closes_the_open_file(self):

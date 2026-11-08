@@ -42,11 +42,25 @@
     error: ["✗", "error"],
     lost: ["?", "lost"],
     "not run": ["○", "not run"],
+    "not reached": ["–", "not reached"],
+    // A host of a group whose run has been asked for and not yet accepted.
+    starting: ["…", "starting"],
     "did not finish": ["✗", "did not finish"],
     online: ["●", "online"],
     offline: ["○", "offline"],
     busy: ["◆", "busy"],
   };
+  // The statuses the group API reports with an underscore, as a reader reads
+  // them. Everything else arrives as one word already.
+  const STATUS_WORDS = {
+    not_reached: "not reached",
+    not_applicable: "not applicable",
+  };
+  // How often the group's own step rows are fetched again while it runs.
+  // The pills' fill is animated from each cell's start time between
+  // fetches, so this is about statuses changing, not about smoothness.
+  const GROUP_POLL_MS = 1500;
+
   // The symbol beside a registered board's status word.
   const BOARD_ICON = {
     ready: ["●"],
@@ -60,25 +74,73 @@
     // The Manage boards panel, when it is open: see manageState().
     manage: null,
     runs: new Map(),
+    // group_id -> the group view the history row is drawn from.
+    groups: new Map(),
+    // The plan list fetched for no target at all: what the plan and suite
+    // selects are filled from, so they work before a runner registers.
+    // The history: the group IDs the loaded pages hold (the rows), the
+    // filters those pages were asked for, the cursor the next page starts
+    // after (null once the oldest group is on the page), the counts the last
+    // page reported, and a token so a slower answer for filters already
+    // left, or an older page asked for before them, cannot replace or be
+    // appended to a newer one.
+    historyIds: new Set(),
+    historyFilters: { target: "", status: "", ref: "" },
+    historyCursor: null,
+    historyMatching: 0,
+    historyTotal: 0,
+    historyToken: 0,
+    // Rows added since that page was fetched, and rows it counted that no
+    // longer match: what the count line adds to and takes off the page's
+    // own figure. The next page's figure is current, so both are cleared
+    // whenever one arrives.
+    historyAdded: new Set(),
+    historyGone: new Set(),
     plans: [],
-    // The target the plan list on display was loaded for, the one a load is
-    // under way for, and a token so a slower answer for a target already
-    // left cannot replace a newer list.
-    plansTarget: "",
+    // What each listed test is for, keyed by catalog name, as /api/plans
+    // sends it once per response (#315). Empty until the plans load.
+    testInfo: {},
+    // The info button the open dialog was opened from, so Escape and Close
+    // put focus back where it was.
+    infoInvoker: null,
+    // host -> that host's own plan list. The estimates are what that host's
+    // finished runs measured, and `runs_on_target` says which steps it runs
+    // at all, which is what makes a host eligible for the chosen suite.
+    plansByHost: new Map(),
+    // host -> why its list could not be read, so its row says that instead
+    // of going on claiming to be loading.
+    plansErrors: new Map(),
+    // The hosts a load is under way for, and their platforms, so an update
+    // that changes neither does not start another load; and a token, so a
+    // slower answer for hosts already left cannot replace a newer list.
     plansWanted: "",
-    // The platform that list was judged by, so a target that registers
-    // after it was fetched is noticed.
-    plansPlatform: null,
+    plansPlatforms: "",
     plansToken: 0,
+    // The hosts the operator has ticked, whether or not they are registered
+    // now: a host that drops out and comes back keeps its tick.
+    chosen: new Set(),
+    // True while the only tick is the one the page made itself (the first
+    // host to register), so it may be moved to a host that can run the
+    // chosen suite. The operator's own tick is never moved.
+    autoChosen: false,
+    // Whether that first tick has been made at all. Without it a host the
+    // operator unticked would be ticked again by the next heartbeat, so
+    // they could never leave the set empty.
+    autoTicked: false,
     // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
     refOptions: new Map(),
-    selected: null, // run_id shown in the live view
+    selected: null, // group_id shown in the live view
+    // Whether that ID came from a /ui/#run= fragment, which names one host's
+    // run rather than its group.
+    selectedIsRun: false,
     // run_id -> [{path, stream, bytes, lines, sha256, owner, checks}] as the
     // run recorded them, and the page of the file open in the viewer.
     files: new Map(),
     openFile: null, // {run_id, path, page}
     wantedFile: null, // a file named in the URL fragment, opened once loaded
-    live: null, // {run_id, seen:Set, events:[], items:[], byInvocation:Map, log:[], partial, stage}
+    // The group on display: its id, the last detail fetched for it, one
+    // transcript per host, and which host's transcript is on show.
+    group: null,
     socket: null,
     retry: 1000,
   };
@@ -103,11 +165,27 @@
   }
 
   function statusBadge(status) {
-    const known = STATUS_TEXT[status];
+    const known = STATUS_TEXT[statusWord(status)];
     const [icon, label] = known || ["•", String(status || "unknown")];
-    const key = known ? status.replace(/ /g, "-") : "unknown";
+    const key = known ? statusWord(status).replace(/ /g, "-") : "unknown";
     return el("span", { className: `status status-${key}` },
       el("span", { "aria-hidden": "true", text: icon + " " }), label);
+  }
+
+  // One status as a reader reads it: the group API writes two of them with
+  // an underscore, and nothing else here has to know that.
+  function statusWord(status) {
+    const text = String(status || "");
+    return STATUS_WORDS[text] || text;
+  }
+
+  // The short name a per-host pill carries. A registry host is usually
+  // `Host_Linux` or `Host_Mac`, and the pill is read beside its row, so the
+  // prefix every host shares is dropped; the full name is in the pill's
+  // own label and title.
+  function hostLabel(host) {
+    const name = String(host || "");
+    return name.replace(/^Host[_-]/, "") || name;
   }
 
   // A board's status as the controller derived it (boardstatus.py): the word
@@ -161,6 +239,7 @@
   }
 
   const runPath = (runId) => `/api/runs/${encodeURIComponent(runId)}`;
+  const groupPath = (groupId) => `/api/run-groups/${encodeURIComponent(groupId)}`;
 
   // ----- targets -----------------------------------------------------------
 
@@ -211,7 +290,18 @@
               onclick: () => openManage(target.host),
             }))));
     }));
-    renderTargetSelect();
+    // The first runner to register is ticked once, so the page is ready to
+    // run on one host without a choice; after that the ticks are the
+    // operator's, including a deliberately empty set (autoTicked).
+    if (!state.autoTicked && !state.chosen.size && targets.length) {
+      state.chosen.add(targets[0].host);
+      state.autoTicked = true;
+      state.autoChosen = true;
+    }
+    renderHostChoices();
+    maybeLoadPlans();
+    // A newly registered target is a history filter choice too.
+    renderHistoryChoices();
     if (state.manage) renderManage();
   }
 
@@ -229,31 +319,138 @@
       el("p", { className: "reason", text: String(board.status_detail || "") }));
   }
 
-  function renderTargetSelect() {
-    const select = $("target");
-    const current = select.value;
-    const targets = [...state.targets.values()].sort((a, b) => a.host.localeCompare(b.host));
-    if (!targets.length) {
-      select.replaceChildren(el("option", { value: "", text: "(no targets registered)" }));
-    } else {
-      select.replaceChildren(...targets.map((target) => {
-        const notes = [target.status];
-        if (target.active_run_id) notes.push("busy");
-        return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
-      }));
-      if (targets.some((target) => target.host === current)) select.value = current;
-    }
-    // The first target to register, or a selection this update replaced,
-    // changes which host the plans belong to; the estimates, the build
-    // options and whether the suite can be measured there are that host's.
-    // A target that registers while already chosen gains a platform, which
-    // changes the same answers, so that is a reload too. Both are compared
-    // with what a load is under way for, so an update while one is in
-    // flight does not start another.
-    if (select.value !== state.plansWanted
-        || targetPlatform(select.value) !== state.plansPlatform) {
+  // The hosts a plan listing belongs to, and the platforms it was judged
+  // by: a change in either is a reload, and both are compared with what a
+  // load is under way for, so an update while one is in flight does not
+  // start another.
+  const plansKey = () => groupPlanHosts().join(" ");
+  const plansPlatformsKey = () =>
+    groupPlanHosts().map((host) => String(targetPlatform(host))).join(" ");
+
+  // Every host that is registered: a plan listing is fetched for each, so
+  // the row of a host says what the chosen suite would do there before it
+  // is ticked, and a host the suite runs nothing on can be held out of the
+  // group rather than refused after Run.
+  function groupPlanHosts() {
+    return [...state.targets.keys()].sort();
+  }
+
+  function maybeLoadPlans() {
+    if (plansKey() !== state.plansWanted
+        || plansPlatformsKey() !== state.plansPlatforms) {
       loadPlans();
     }
+  }
+
+  function renderHostChoices() {
+    const list = $("host-choices");
+    const targets = [...state.targets.values()].sort((a, b) => a.host.localeCompare(b.host));
+    // A host that is not registered now but is ticked (it dropped out while
+    // chosen) keeps its row, so the tick is visible rather than silently
+    // dropped; starting a group on it is refused by the controller.
+    const names = [...new Set([...targets.map((t) => t.host), ...state.chosen])].sort();
+    if (!names.length) {
+      list.replaceChildren(el("li", { className: "empty", text: "No target runner has registered yet." }));
+      $("hosts-status").textContent = "";
+      syncRunButton();
+      return;
+    }
+    list.replaceChildren(...names.map((host) => {
+      const target = state.targets.get(host);
+      const id = `host-${host}`;
+      const blocked = hostRefusal(host);
+      const box = el("input", {
+        type: "checkbox", id, name: "hosts", value: host,
+        checked: state.chosen.has(host),
+        // A host the chosen suite does not run anything on cannot be part
+        // of this group: the row says so instead of the run finding out.
+        disabled: Boolean(blocked),
+        "aria-describedby": `${id}-note`,
+        onchange: () => {
+          // The operator's own choice from here on: nothing ticks or
+          // unticks a box for them again.
+          state.autoChosen = false;
+          if (box.checked) state.chosen.add(host);
+          else state.chosen.delete(host);
+          // Another host is another plan listing: its own estimates, and
+          // its own answer to what the suite leaves out and must build.
+          renderHostChoices();
+          renderSuiteTests();
+        },
+      });
+      return el("li", { className: blocked ? "host-choice host-choice-out" : "host-choice" },
+        box,
+        el("label", { for: id },
+          el("span", { className: "host-choice-name", text: host }),
+          target
+            ? el("span", { className: "badges" }, statusBadge(target.status),
+              target.active_run_id ? statusBadge("busy") : null,
+              target.platform
+                ? el("span", { className: "status status-platform", text: target.platform })
+                : null)
+            : el("span", { className: "badges" }, statusBadge("offline"))),
+        el("p", { id: `${id}-note`, className: blocked ? "hint warn" : "hint", text: hostNote(host) }));
+    }));
+    $("hosts-status").textContent = chosenText();
+    syncRunButton();
+  }
+
+  // The hosts the group would be started on: ticked, registered, and able to
+  // run something of the chosen suite.
+  function groupHosts() {
+    return [...state.chosen].filter(
+      (host) => state.targets.has(host) && !hostRefusal(host)).sort();
+  }
+
+  // Why this host cannot be part of a group of the chosen suite, or "". The
+  // controller's own sentence where it has one, so pressing Run is never
+  // how the operator finds out (#285).
+  function hostRefusal(host) {
+    const suite = suiteFor(host);
+    if (!suite) return "";
+    return suite.runnable_on_target === false
+      ? String(suite.not_runnable_reason || "This host cannot run this suite.")
+      : "";
+  }
+
+  // What this host would do with the chosen suite: how many of its tests
+  // run there, what they are estimated to take, and what is left out.
+  function hostNote(host) {
+    if (!state.targets.has(host)) {
+      return "Not registered now; its runner has to be connected to be part of a group.";
+    }
+    const failed = state.plansErrors.get(host);
+    if (failed) {
+      // Nothing is known about what the suite would do here, so the row
+      // says that rather than a figure or a reason it has not got. The
+      // next target update tries again (loadPlans).
+      return `Could not read this host's plans: ${failed}. It is read again`
+        + " as soon as the host reports in.";
+    }
+    const blocked = hostRefusal(host);
+    if (blocked) return blocked;
+    const suite = suiteFor(host);
+    if (!suite) {
+      return state.plansByHost.has(host)
+        ? "" : "Reading this host's plans…";
+    }
+    const running = suite.tests.filter((test) => test.runs_on_target !== false);
+    const left = (suite.omitted_tests || []).length;
+    return `${running.length} of ${suite.tests.length} tests run here`
+      + (suite.estimated_s === null || suite.estimated_s === undefined
+        ? ", with no time estimate"
+        : `, about ${formatSeconds(suite.estimated_s)}`)
+      + (left ? `; ${left} not applicable here.` : ".");
+  }
+
+  function chosenText() {
+    const hosts = groupHosts();
+    if (!hosts.length) return "Tick at least one host to run on.";
+    if (hosts.length === 1) {
+      return `One host: ${hosts[0]}. A single-host run is a group of one.`;
+    }
+    return `${hosts.length} hosts: ${hosts.join(", ")}. Each gets its own run,`
+      + " started together; the group passes only if all of them pass.";
   }
 
   // The registry platform a target registered with, or null for one that
@@ -535,6 +732,8 @@
         .find((value) => value && state.refOptions.has(value));
       if (preferred) select.value = preferred;
       status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}.`;
+      // The listed refs are the history ref filter's suggestions too.
+      renderHistoryChoices();
     } catch (error) {
       state.refOptions = new Map();
       select.replaceChildren(el("option", { value: "", text: "(refs unavailable)" }));
@@ -542,36 +741,52 @@
     }
   }
 
-  // The plan list belongs to the chosen target: the estimates are what that
-  // host's own runs measured, and a step that names other hosts is not run
-  // there, so it is left out of the suite's estimate and of the build
-  // options the suite asks for. Called at start and whenever the target
-  // changes.
+  // The plan lists belong to the hosts the group would run on: the
+  // estimates are what each host's own runs measured, and a step that
+  // names other hosts, or another platform, is not run there, so it is
+  // left out of that host's estimate and of the build options its suite
+  // asks for. One list per ticked host, and one for no host at all, which
+  // is what the plan and suite selects are filled from before any runner
+  // has registered. Called at start and whenever the ticks change.
   async function loadPlans() {
-    const target = $("target").value;
+    const hosts = groupPlanHosts();
     const token = ++state.plansToken;
-    state.plansWanted = target;
-    // The platform the controller would judge the steps by: a target that
-    // registers after this list was fetched gains one, which is a reload.
-    const platform = targetPlatform(target);
-    const query = target ? `?target=${encodeURIComponent(target)}` : "";
-    try {
-      const data = await api("GET", `/api/plans${query}`);
-      if (token !== state.plansToken) return;  // a later target owns the list
-      state.plans = data.plans;
-      state.plansTarget = target;
-      state.plansPlatform = platform;
-      // A failure from an earlier load is not this list's status.
-      $("plan-status").textContent = "";
-    } catch (error) {
-      if (token !== state.plansToken) return;
+    state.plansWanted = hosts.join(" ");
+    state.plansPlatforms = hosts.map((host) => String(targetPlatform(host))).join(" ");
+    const problems = [];
+    const lists = await Promise.all([
+      api("GET", "/api/plans").catch((error) => ({ error })),
+      ...hosts.map((host) => api(
+        "GET", `/api/plans?target=${encodeURIComponent(host)}`,
+      ).then((data) => ({ host, data })).catch((error) => ({ host, error }))),
+    ]);
+    if (token !== state.plansToken) return;  // a later set of hosts owns these
+    const [any, ...perHost] = lists;
+    if (any.error) {
       state.plans = [];
-      state.plansTarget = target;
-      state.plansPlatform = platform;
-      $("plan-status").textContent = `Cannot list plans: ${error.message}`;
+      state.testInfo = {};
+      problems.push(`Cannot list plans: ${any.error.message}`);
+    } else {
+      state.plans = any.plans;
+      // The prose comes down with the plans, keyed by the catalog name the
+      // rows carry, so the info dialog needs no request of its own.
+      state.testInfo = any.test_information || {};
+    }
+    state.plansByHost = new Map();
+    state.plansErrors = new Map();
+    for (const answer of perHost) {
+      if (answer.error) {
+        // Kept per host as well as in the status line: that host's own row
+        // is where a reader looks, and it must not go on saying it is still
+        // reading the plans.
+        state.plansErrors.set(answer.host, answer.error.message);
+        problems.push(`Cannot list plans for ${answer.host}: ${answer.error.message}`);
+        continue;
+      }
+      state.plansByHost.set(answer.host, answer.data.plans);
     }
     const select = $("plan");
-    // What the operator chose is kept across a reload for another target.
+    // What the operator chose is kept across a reload for other hosts.
     const current = select.value;
     // Only plans that load and are runnable can be started; a plan of
     // planned tests (runnable: false, e.g. backlog) is listed, not offered.
@@ -580,28 +795,51 @@
       el("option", { value: plan.name, text: `${plan.name} — ${plan.title}` })));
     const broken = state.plans.filter((plan) => plan.error);
     const planned = state.plans.filter((plan) => !plan.error && plan.runnable !== true);
-    const notes = [];
     if (broken.length) {
-      notes.push(`Not loadable: ${broken.map((plan) => `${plan.name} (${plan.error})`).join("; ")}`);
+      problems.push(`Not loadable: ${broken.map((plan) => `${plan.name} (${plan.error})`).join("; ")}`);
     }
     if (planned.length) {
-      notes.push(`Not runnable (planned tests): ${planned.map((plan) => plan.name).join(", ")}`);
+      problems.push(`Not runnable (planned tests): ${planned.map((plan) => plan.name).join(", ")}`);
     }
-    if (notes.length) $("plan-status").textContent = notes.join(". ");
+    // A failure from an earlier load is not this list's status.
+    $("plan-status").textContent = problems.join(". ");
+    // A host whose own list could not be read is tried again on the next
+    // target update (a heartbeat is enough), by forgetting what this load
+    // was for: nothing else would ask for that host again.
+    if (state.plansErrors.size) state.plansWanted = "";
     const keep = [current, "fast"].find(
       (name) => name && usable.some((plan) => plan.name === name));
     if (keep) select.value = keep;
-    // A reload for another target keeps the chosen suite as well.
+    // A reload for other hosts keeps the chosen suite as well.
     renderSuites(true);
-    if (state.live) rebuildChecklist();
+    // A tick nobody chose, on a host that cannot run this suite, moves to
+    // one that can: the page is ready to run without a choice, and the
+    // operator's own ticks are never moved (autoChosen).
+    if (state.autoChosen && !groupHosts().length) {
+      const usable = groupPlanHosts().find((host) => !hostRefusal(host));
+      if (usable) {
+        state.chosen = new Set([usable]);
+      }
+    }
+    renderHostChoices();
+    if (state.group) renderChecklist();
   }
 
-  function findSuite(planName, suiteName) {
-    const plan = state.plans.find((item) => item.name === planName && !item.error);
+  // The chosen suite out of the plan list with no host, which is the same
+  // plan file every host reads: the test names and what the suite is.
+  function findSuite(planName, suiteName, plans = state.plans) {
+    const plan = plans.find((item) => item.name === planName && !item.error);
     return plan ? plan.suites.find((suite) => suite.name === suiteName) || null : null;
   }
 
-  // `keepChoice` is for a reload of the same plan (another target): the
+  // The chosen suite as one host's own plan list reports it: that host's
+  // estimates, and which of the suite's steps it runs at all.
+  function suiteFor(host) {
+    const plans = state.plansByHost.get(host);
+    return plans ? findSuite($("plan").value, $("suite").value, plans) : null;
+  }
+
+  // `keepChoice` is for a reload of the same plan (other hosts): the
   // chosen suite stays chosen. When the operator picks a plan, the suite
   // named after it wins, as it did before.
   function renderSuites(keepChoice = false) {
@@ -619,29 +857,37 @@
 
   function renderSuiteTests() {
     const suite = findSuite($("plan").value, $("suite").value);
+    // One row per test, each with its own info button. The names used to be
+    // one sentence of text, which left nowhere to put one (#315); the
+    // estimate and the artifact note stay in the hint below them, which is
+    // what the suite select describes itself by.
+    $("suite-test-list").replaceChildren(...(suite ? suite.tests : []).map(
+      (test) => el("li", {},
+        el("span", { className: "test-name", text: test.name }),
+        infoButton(test.name))));
     $("suite-tests").textContent = suite
-      ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
-        + artifactWarning(suite)
+      ? estimateText(suite) + artifactWarning(suite)
       : "";
-    // This suite may need build options the last one did not, and this
-    // target may not be able to measure it at all.
+    // This suite may need build options the last one did not, and some
+    // ticked host may not be able to run it at all.
     syncBuildOptions();
-    syncRunButton();
+    renderHostChoices();
   }
 
-  // A run the controller would refuse is not offered: a suite no step of
-  // which runs on the chosen target, and one holding a step whose own
-  // hardware is what it measures (`required hardware:`) that names no host
-  // of this run. `/api/plans` answers both for the chosen target, in the
-  // same sentence the controller refuses with, so pressing Run cannot be
-  // the way to find out. Everything else about the bench is the run's to
-  // report: hardware it has not got blocks that step and fails the run,
-  // and the other tests still run (#265, #269).
+  // A group the controller would refuse is not offered: no host ticked, and
+  // a suite none of the ticked hosts can run (each host's own reason is in
+  // its row). Everything else about the bench is the run's to report:
+  // hardware it has not got blocks that step and fails the run, and the
+  // other tests still run (#265, #269).
   function syncRunButton() {
-    const suite = findSuite($("plan").value, $("suite").value);
-    const reason = suite && suite.runnable_on_target === false
-      ? String(suite.not_runnable_reason || "This target cannot run this suite.")
-      : "";
+    const hosts = groupHosts();
+    const ticked = [...state.chosen];
+    let reason = "";
+    if (!hosts.length) {
+      reason = !ticked.length
+        ? "Tick the host, or hosts, to run the plan on."
+        : "No ticked host can run this suite: see each host's reason above.";
+    }
     const note = $("run-blocked");
     // Shown before it is filled: a status region that changes while it is
     // hidden announces nothing, and a disabled button cannot be focused to
@@ -660,12 +906,16 @@
   function artifactWarning(suite) {
     const wanted = Array.isArray(suite.needs_artifacts) ? suite.needs_artifacts : [];
     if (!wanted.length) return "";
-    // The steps the chosen target runs, as `suite.needs_artifacts` itself
-    // counts them: a step it does not run needs this run no image.
-    const tests = suite.tests
+    // The steps the group's hosts run, as each host's own needs_artifacts
+    // counts them: a step no host of the group runs needs it no image. With
+    // no host chosen yet, every step of the suite counts.
+    const pairs = groupSuites();
+    const views = pairs.length ? pairs.map(([, view]) => view) : [suite];
+    const tests = [...new Set(views.flatMap((view) => view.tests
       .filter((test) => (test.needs_artifacts || []).length
         && test.runs_on_target !== false)
-      .map((test) => test.name);
+      .map((test) => test.name)))];
+    if (!tests.length) return "";
     const artifacts = wanted.map((label) => `--artifact "${label}=PATH"`).join(" ");
     return ` This suite also needs ${wanted.join(", ")},`
       + ` ${wanted.length > 1 ? "images" : "an image"} no build makes,`
@@ -674,43 +924,72 @@
       + " it would flash, before it is refused without running a test.";
   }
 
-  // The time the chosen target is expected to spend on the chosen suite,
-  // which counts only the steps that target runs, and then what it does not
-  // run. `learned` says the figure came from that host's own finished runs
-  // rather than the catalog's hand-calibrated estimates.
+  // The chosen suite as each host of the group reports it: that host's own
+  // estimates and its own answer to what it runs.
+  function groupSuites() {
+    return groupHosts()
+      .map((host) => [host, suiteFor(host)])
+      .filter(([, suite]) => Boolean(suite));
+  }
+
+  // The time the group is expected to take: one line per host, counting only
+  // the steps that host runs, and then the group's own figure, which is the
+  // longest host's rather than the sum, because the hosts run at the same
+  // time.
   function estimateText(suite) {
-    const target = state.plansTarget;
-    const on = target ? ` on ${target}` : "";
+    const pairs = groupSuites();
+    if (!pairs.length) {
+      return suite.estimated_s === null || suite.estimated_s === undefined
+        ? "No time estimate: no host is chosen yet."
+        : `Estimated test time ${formatSeconds(suite.estimated_s)} from the`
+          + " catalog's per-test estimates, before a host is chosen.";
+    }
+    const parts = pairs.map(([host, view]) => hostEstimateText(host, view));
+    const seconds = pairs.map(([, view]) => view.estimated_s);
+    if (pairs.length > 1) {
+      parts.push(seconds.every((value) => value !== null && value !== undefined)
+        ? `The group takes the longest host's time, about`
+          + ` ${formatSeconds(Math.max(...seconds))}: its hosts run at the same time.`
+        : "No countdown for the group: a host of it has no estimated duration.");
+    }
+    return parts.join(" ");
+  }
+
+  // What one host is expected to spend on the chosen suite, which counts
+  // only the steps that host runs, and then what it does not run.
+  // `learned` says the figure came from that host's own finished runs
+  // rather than the catalog's hand-calibrated estimates.
+  function hostEstimateText(host, suite) {
     const running = suite.tests.filter((test) => test.runs_on_target !== false);
     const parts = [];
     if (suite.estimated_s !== null && suite.estimated_s !== undefined) {
       const learned = running.filter((test) => test.estimate_source === "learned").length;
       const source = learned
-        ? `${learned} of ${running.length} from this target's own finished runs, the rest from the catalog`
+        ? `${learned} of ${running.length} from this host's own finished runs, the rest from the catalog`
         : "from the catalog's per-test estimates";
-      parts.push(`Estimated test time${on} ${formatSeconds(suite.estimated_s)}`
+      parts.push(`Estimated test time on ${host} ${formatSeconds(suite.estimated_s)}`
         + ` (${source}; build and preflight not included).`);
       if (suite.per_board_tests) {
         parts.push(`${suite.per_board_tests} test(s) run once per selected Ubertooth`
           + " and are counted once here; the live countdown counts every board the run selects.");
       }
     } else if (!running.length) {
-      parts.push(`No test of this suite runs${on}, so there is nothing for it to run.`);
+      parts.push(`No test of this suite runs on ${host}, so there is nothing for it to run.`);
     } else {
-      parts.push(`No time estimate${on}: ${suite.unestimated_tests} of the`
+      parts.push(`No time estimate on ${host}: ${suite.unestimated_tests} of the`
         + ` ${running.length} tests it would run have no estimated duration,`
         + " so the live view shows elapsed time only.");
     }
-    const omittedNote = omittedText(suite);
+    const omittedNote = omittedText(host, suite);
     if (omittedNote) parts.push(omittedNote);
     return parts.join(" ");
   }
 
-  // The steps the chosen target does not run, because the plan names other
-  // hosts for them. Named with the time they take where they do run, so an
-  // estimate smaller than the whole suite's is accounted for rather than
-  // just smaller.
-  function omittedText(suite) {
+  // The steps a host does not run, because the plan names other hosts for
+  // them or its platform does not run them. Named with the time they take
+  // where they do run, so an estimate smaller than the whole suite's is
+  // accounted for rather than just smaller.
+  function omittedText(host, suite) {
     const omitted = Array.isArray(suite.omitted_tests) ? suite.omitted_tests : [];
     if (!omitted.length) return "";
     // The known estimates among them, so one step without an estimate does
@@ -734,16 +1013,19 @@
     }
     const named = [...groups.entries()]
       .map(([reason, names]) => `${names.join(", ")} — ${reason}`).join("; ");
-    return `${omitted.length} test(s) of this suite are not run there${adds}`
-      + ` and are not counted above: ${named}.`;
+    return `${omitted.length} test(s) of this suite are not applicable on ${host}`
+      + `${adds} and are not counted above: ${named}.`;
   }
 
   async function submitRun(event) {
     event.preventDefault();
     const status = $("run-status");
-    const host = $("target").value;
+    const hosts = groupHosts();
     const chosen = state.refOptions.get($("ref").value);
     const body = {
+      // Every host of the group gets this same request, each as its own
+      // child run (POST /api/run-groups).
+      hosts,
       ref: chosen ? chosen.name : "",
       // The commit this page listed: the controller refuses the run if the
       // ref has moved since, and the runner runs exactly this commit.
@@ -769,18 +1051,22 @@
           ? $("bootloader").value
           : "record",
     };
-    if (!host || !body.ref || !body.plan || !body.suite) {
-      status.textContent = "Choose a ref, plan, suite and target first.";
+    if (!hosts.length || !body.ref || !body.plan || !body.suite) {
+      status.textContent = "Choose a ref, plan, suite and at least one host first.";
       return;
     }
     const button = $("run-button");
     button.disabled = true;
-    status.textContent = `Starting ${body.plan}/${body.suite} at ${refLabel(body)} on ${host}…`;
+    status.textContent = `Starting ${body.plan}/${body.suite} at ${refLabel(body)}`
+      + ` on ${hosts.join(", ")}…`;
     try {
-      const data = await api("POST", `/api/targets/${encodeURIComponent(host)}/runs`, body);
-      upsertRun(data.run);
-      status.textContent = `Started run ${data.run.run_id}.`;
-      selectRun(data.run.run_id);
+      const data = await api("POST", "/api/run-groups", body);
+      upsertGroup(data.group);
+      status.textContent = hosts.length > 1
+        ? `Started ${data.group.hosts_started} of ${hosts.length} runs as group`
+          + ` ${data.group.group_id}.`
+        : `Started run ${data.group.members[0].run_id || data.group.group_id}.`;
+      selectGroup(data.group.group_id);
     } catch (error) {
       status.textContent = `Not started: ${error.message}`;
       if (error.status === 409 && !error.message.startsWith("runner rejected the run")) {
@@ -790,8 +1076,8 @@
         status.textContent = `Not started: ${error.message}. The ref list has been reloaded; check the ref and press Run again.`;
       }
     } finally {
-      // Not simply enabled again: the suite may be one this target cannot
-      // measure, which holds the button.
+      // Not simply enabled again: the ticked hosts may not be able to run
+      // the suite, which holds the button.
       syncRunButton();
     }
   }
@@ -808,134 +1094,488 @@
     return `${String(identity.detail ?? identity.generation ?? "")}, CRC32:${crc}`;
   }
 
-  // ----- live run ----------------------------------------------------------
+  // ----- test information --------------------------------------------------
+  //
+  // Why a test exists, how it produces a known answer, what it drives, and
+  // what a pass does not prove, beside the test's name wherever the page
+  // lists one: Run setup, the live checklist, and a failure summary
+  // (#315). The prose is ubertooth_harness/test_info.yaml, which
+  // /api/plans sends once per response keyed by the catalog name the rows
+  // carry; the facts the catalog owns -- the hardware roles, the arguments,
+  // the estimate and the profile it was read at -- stay on the test row, so
+  // the dialog shows both and neither has two sources.
+  //
+  // Nothing here can stop a run. A file the controller could not read, a
+  // test with no entry, a plan listing that failed to load, and a name no
+  // listing has all end at a dialog that says so; the Run button never
+  // reads any of it.
 
-  function newLive(runId) {
+  // The entry for a test, or one that says why there is none. The server
+  // sends `available` false with its own reason for a missing or malformed
+  // file; this adds the two cases only the page can be in.
+  function testInfoFor(name) {
+    const entry = state.testInfo[name];
+    if (entry) return entry;
     return {
-      run_id: runId, seen: new Set(), events: [], items: [],
-      byInvocation: new Map(), log: [], partial: "", stage: "waiting",
-      invocations: null, boards: new Map(), queued: [], pairings: [],
-      bootloaderExpected: "",
+      available: false,
+      unavailable_reason: state.plans.length
+        ? "No plan the controller lists holds this test, so there is no"
+          + " information for it here."
+        : "The plan listing has not loaded, so no test information is"
+          + " available yet.",
+      purpose: "", theory: "", hardware: "", expected: "", limitations: "",
+      related: [], documentation: null,
+    };
+  }
+
+  // The catalog's own facts for this test, and the listing they were read
+  // from. The roles the catalog binds and the arguments it accepts are the
+  // same wherever a test is listed, but its estimate and the coverage
+  // profile that estimate was read at are the *step's*: `fast` lists
+  // Argument validation at smoke coverage and `release` at comprehensive,
+  // so a figure from the wrong listing would be the wrong figure.
+  //
+  // So the caller says which listing it is asking about: the run's plan and
+  // suite in the live checklist and in a failure summary, and Run setup's
+  // own choice there. The chosen suite is the fallback, and then any
+  // listing that holds the test, which is all there is for a run whose plan
+  // the controller does not have; the Runtime line names whichever it used.
+  function catalogRow(name, context) {
+    const wanted = [];
+    if (context && context.plan) wanted.push([context.plan, context.suite]);
+    wanted.push([$("plan").value, $("suite").value]);
+    for (const [plan, suite] of wanted) {
+      const listing = findSuite(plan, suite);
+      const row = listing && listing.tests.find((test) => test.name === name);
+      if (row) return { row, plan, suite };
+    }
+    for (const plan of state.plans) {
+      for (const suite of plan.suites || []) {
+        const row = suite.tests.find((test) => test.name === name);
+        if (row) return { row, plan: plan.name, suite: suite.name };
+      }
+    }
+    return { row: null, plan: "", suite: "" };
+  }
+
+  // Every plan and suite that lists this test, so a longer or soak form of
+  // it is visible from the dialog rather than only from the plan files. A
+  // plan the GUI cannot start (runnable false, such as backlog) is marked,
+  // because listing it there is not the same as being able to run it.
+  function testAppearances(name) {
+    const places = [];
+    for (const plan of state.plans) {
+      for (const suite of plan.suites || []) {
+        if (!suite.tests.some((test) => test.name === name)) continue;
+        places.push(`${plan.name} / ${suite.name}`
+          + (plan.runnable === true ? "" : " (planned, not runnable)"));
+      }
+    }
+    return places;
+  }
+
+  // What the catalog times this test at, and what this target has measured.
+  // The catalog estimate and its profile are what the issue asks for; a
+  // learned figure is said beside it rather than instead of it, so the two
+  // are never confused. Both belong to one listing of the test, which the
+  // line names, because another plan may list the same test at another
+  // coverage and so another estimate (see `catalogRow`).
+  function runtimeText(found) {
+    const row = found.row;
+    if (!row) {
+      return "No plan the controller lists holds this test, so its estimate"
+        + " and profile are not known here.";
+    }
+    const listing = `as ${found.plan} / ${found.suite} lists it`;
+    const parts = [];
+    const catalogSeconds = row.catalog_estimated_s;
+    const profile = row.estimate_profile
+      ? `, profile "${row.estimate_profile}"` : "";
+    if (catalogSeconds === null || catalogSeconds === undefined) {
+      parts.push(`The catalog gives it no duration estimate (${listing}), so`
+        + " a run of it shows elapsed time only.");
+    } else {
+      parts.push(`Catalog estimate about ${formatSeconds(catalogSeconds)} per`
+        + ` invocation (${listing}${profile}).`);
+    }
+    if (row.estimate_source === "learned"
+        && row.estimated_s !== null && row.estimated_s !== undefined) {
+      const samples = row.estimate_samples;
+      parts.push(`Finished runs measure ${formatSeconds(row.estimated_s)}`
+        + (typeof samples === "number" ? ` (${samples} sample(s)` : " (")
+        + (row.estimate_scaled ? ", from its per-unit rate" : "")
+        + "), which is what this page counts.");
+    }
+    if (row.per_board) {
+      parts.push("It runs once for every Ubertooth the run selects, and the"
+        + " estimate above is one of those invocations.");
+    }
+    return parts.join(" ");
+  }
+
+  // A link only where the server gave an https URL. The entries and the
+  // documentation link are built by the controller from fixed text, so this
+  // can only ever refuse something that is not what it says it is -- and
+  // then the reference is still shown, as text.
+  function safeHref(url) {
+    const text = String(url || "");
+    return text.startsWith("https://") ? text : "";
+  }
+
+  function infoSection(heading, ...children) {
+    return el("section", { className: "info-section" },
+      el("h3", { text: heading }), ...children);
+  }
+
+  // The hardware prose with the roles the catalog binds and the arguments
+  // it accepts under it, named rather than described: what each role does
+  // is the prose's job.
+  function hardwareSection(info, row) {
+    const roles = row && Array.isArray(row.hardware_roles) ? row.hardware_roles : [];
+    const args = row && Array.isArray(row.arguments) ? row.arguments : [];
+    return infoSection("Hardware and traffic",
+      info.hardware ? el("p", { text: info.hardware }) : null,
+      roles.length
+        ? el("p", {
+            className: "info-facts",
+            text: "Catalog roles: " + roles
+              .map((item) => `${item.role} (${item.device})`).join(", ") + ".",
+          })
+        : el("p", { className: "info-facts", text: "The catalog binds it no device." }),
+      args.length
+        ? el("p", {
+            className: "info-facts",
+            text: "Arguments a plan may set: " + args
+              .map((item) => item.name + (item.required ? " (required)" : ""))
+              .join(", ") + ".",
+          })
+        : null);
+  }
+
+  function relatedSection(info) {
+    const related = Array.isArray(info.related) ? info.related : [];
+    if (!related.length) return null;
+    return infoSection("Related issues", el("ul", { className: "info-links-list" },
+      ...related.map((item) => {
+        const href = safeHref(item && item.url);
+        const reference = String((item && item.reference) || "");
+        return el("li", {}, href
+          ? el("a", { href, target: "_blank", rel: "noreferrer noopener", text: reference })
+          : el("span", { text: reference }));
+      })));
+  }
+
+  // The button that opens it. A real button, so it is reachable by Tab and
+  // works with a touch or a click; nothing here is behind a right-click.
+  // `context` is the plan and suite whose listing of the test the dialog
+  // should read its estimate from (`catalogRow`): the run's, where the
+  // button sits beside a run's own step.
+  function infoButton(name, context) {
+    const label = `What the test ${name} is for`;
+    return el("button", {
+      type: "button", className: "info-button",
+      "aria-label": label, title: label,
+      onclick: (event) => openTestInfo(name, event.currentTarget, context),
+    }, el("span", { "aria-hidden": "true", text: "i" }));
+  }
+
+  function openTestInfo(name, invoker, context) {
+    const info = testInfoFor(name);
+    const found = catalogRow(name, context);
+    const row = found.row;
+    const dialog = $("test-info");
+    // Only a script can ask for a second one (a modal dialog blocks the
+    // page), and showModal() on an open dialog throws.
+    if (dialog.open) dialog.close();
+    state.infoInvoker = invoker || null;
+    $("test-info-title").textContent = name;
+    // The dialog's description: the purpose when there is one, and
+    // otherwise why there is none, which is a reason to read and not an
+    // empty dialog.
+    const purpose = $("test-info-purpose");
+    purpose.className = info.available ? "info-purpose" : "info-purpose hint warn";
+    purpose.textContent = info.available
+      ? String(info.purpose || "")
+      // One sentence, whether or not the reason came with a full stop.
+      : String(info.unavailable_reason || "No information for this test")
+        .replace(/[.\s]*$/, ".")
+        + " What the catalog itself says about it is below.";
+    const places = testAppearances(name);
+    $("test-info-body").replaceChildren(...[
+      info.available ? infoSection("Theory of operation",
+        el("p", { text: info.theory })) : null,
+      hardwareSection(info, row),
+      info.available ? infoSection("Expected outcome",
+        el("p", { text: info.expected })) : null,
+      info.available ? infoSection("What a pass does not prove",
+        el("p", { text: info.limitations })) : null,
+      infoSection("Runtime", el("p", { text: runtimeText(found) })),
+      places.length
+        ? infoSection("Plans that list it",
+            el("p", { text: places.join(", ") + "." }))
+        : null,
+      relatedSection(info),
+    ].filter(Boolean));
+    const documentation = info.documentation || null;
+    const href = documentation ? safeHref(documentation.url) : "";
+    const where = documentation
+      ? `${String(documentation.path)}#${String(documentation.anchor || "")}`
+      : "docs/tests.md";
+    $("test-info-links").replaceChildren(
+      href
+        ? el("a", {
+            className: "button-link", href,
+            target: "_blank", rel: "noreferrer noopener",
+            text: "Open full documentation",
+          })
+        : null,
+      el("span", { className: "hint", text: href ? where : `The full account is ${where}.` }),
+    );
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");  // no <dialog> support: shown in place
+    // The heading, so what was opened is announced with the dialog's own
+    // description; the page's failure summary heading is focused the same way.
+    $("test-info-title").focus();
+  }
+
+  function closeTestInfo() {
+    const dialog = $("test-info");
+    if (typeof dialog.close === "function") dialog.close();  // fires `close`
+    else {
+      dialog.removeAttribute("open");
+      restoreInfoFocus();
+    }
+  }
+
+  // Focus back to the button the dialog was opened from, for Escape and
+  // Close alike. A button that is no longer on the page (the checklist was
+  // redrawn while the dialog was open) leaves focus where the browser puts
+  // it rather than moving it somewhere unrelated.
+  function restoreInfoFocus() {
+    const invoker = state.infoInvoker;
+    state.infoInvoker = null;
+    if (invoker && invoker.isConnected) invoker.focus();
+  }
+
+  // ----- the live run group ------------------------------------------------
+  //
+  // A run on several hosts is a run group: one child run per host, started
+  // together, each with its own runner, boards and leases (rungroups.py).
+  // The controller presents every run as a group, a run of its own being a
+  // group of one, so this view always follows a group.
+  //
+  // GET /api/run-groups/{id} is where the rows come from: one row per
+  // build, flash, preflight and test step, with one cell per host that runs
+  // that step and only those, which is what each per-host pill is drawn
+  // from. The rows are never worked out here, so the pills cannot drift
+  // from the run records; what is worked out here is each pill's fill,
+  // from the cell's own start time and estimate, so it moves between
+  // fetches. Each host's transcript is built from that host's records as
+  // they arrive on the live socket.
+
+  function newTranscript(host, runId) {
+    return {
+      host, run_id: runId, seen: new Set(), log: [], partial: "",
+      stage: "waiting", boards: new Map(), queued: [], pairings: [],
+      bootloaderExpected: "", targets: new Map(),
+    };
+  }
+
+  function newGroupView(groupId) {
+    return {
+      group_id: groupId, detail: null, group: null, tab: null,
+      // One fetch of the rows at a time, with a trailing one when records
+      // arrived while it was in flight.
+      fetching: false, again: false, fetchedAt: 0, timer: null,
+      transcripts: new Map(),
+      // The pills the clock still moves: one per cell that is running with
+      // an estimate, as the last render drew them (tickFills).
+      fills: [],
     };
   }
 
   const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+  // The group a run belongs to: the one it is a child of, or itself (the
+  // controller presents such a run as a group of one whose ID is the run's).
+  function groupIdOf(run) {
+    return (run && (run.group_id || run.run_id)) || null;
+  }
+
+  // Watch the group a run is a host of, with that host's transcript open.
+  // Target cards and older /ui/#run= links name a run, not a group.
   async function selectRun(runId, scroll = true) {
     if (!RUN_ID.test(String(runId))) return;
-    state.selected = runId;
-    // The file open in the viewer belonged to the run being left.
+    let run = state.runs.get(runId);
+    if (!run) {
+      try {
+        run = (await api("GET", runPath(runId))).run;
+        upsertRun(run);
+      } catch (error) {
+        $("live-empty").hidden = false;
+        $("live-empty").textContent = `Cannot load run ${runId}: ${error.message}`;
+        return;
+      }
+    }
+    selectGroup(groupIdOf(run), { tab: run.target, scroll });
+  }
+
+  async function selectGroup(groupId, { tab = null, scroll = true } = {}) {
+    if (!RUN_ID.test(String(groupId))) return;
+    state.selected = groupId;
+    // The file open in the viewer belonged to the group being left.
     state.openFile = null;
-    // A link to this view: /ui/#run=<run_id>.
-    window.history.replaceState(null, "", `#run=${runId}`);
+    renderOutputFile();
+    // A link to this view: /ui/#group=<group_id>.
+    window.history.replaceState(null, "", `#group=${groupId}`);
     const wanted = state.wantedFile;
     state.wantedFile = null;
-    state.live = newLive(runId);
+    if (state.group && state.group.timer) window.clearTimeout(state.group.timer);
+    const view = state.group = newGroupView(groupId);
+    view.tab = tab;
     $("live-empty").hidden = true;
     $("live").hidden = false;
     $("cancel-status").textContent = "";
-    rebuildChecklist();
-    renderLive();
-    try {
-      const data = await api("GET", runPath(runId));
-      if (state.selected !== runId) return;
-      upsertRun(data.run);
-      state.live.invocations = Array.isArray(data.invocations) ? data.invocations : null;
-      for (const record of data.events) addEvent(runId, record, false);
-      // Now that the run's plan is known, lay out its checklist and replay.
-      rebuildChecklist();
-      await loadOutputFiles(runId);
-      if (wanted) await openOutputFile(runId, wanted, 0);
-    } catch (error) {
-      $("cancel-status").textContent = `Cannot load run: ${error.message}`;
+    renderGroup();
+    // Every host's own records come with the first fetch of the group, which
+    // backfills a transcript for each host that has a run (and for a host
+    // that gets one later).
+    await refreshGroup();
+    if (state.selected !== groupId) return;
+    if (wanted && view.tab) {
+      const member = memberOf(view, view.tab);
+      if (member && member.run_id) await openOutputFile(member.run_id, wanted, 0);
     }
     if (scroll) $("live-heading").scrollIntoView({ block: "start" });
   }
 
-  function rebuildChecklist() {
-    const live = state.live;
-    if (!live) return;
-    const run = state.runs.get(live.run_id);
-    const suite = run ? findSuite(run.plan, run.suite) : null;
-    let tests = suite ? suite.tests : [];
-    // The plans were listed for the run-setup target, and a step that names
-    // hosts is run only there, so the flag is read only for a run on that
-    // same target. The run's manifest replaces this list as soon as it
-    // arrives, and a test that starts anyway is added when it starts.
-    if (run && run.target === state.plansTarget) {
-      tests = tests.filter((test) => test.runs_on_target !== false);
-    }
-    if (run && Array.isArray(run.tests) && run.tests.length) {
-      tests = tests.filter((test) => run.tests.includes(test.name));
-    }
-    if (Array.isArray(live.invocations)) {
-      // The run's manifest: one item per invocation on the target, so a test
-      // with Ubertooth: each counts every board it selected.
-      live.items = live.invocations.map((invocation) => ({
-        name: invocation.test_name, invocation_id: invocation.invocation_id,
-        estimated_s: invocation.estimated_s, status: "pending", reason: "",
-      }));
-    } else {
-      live.items = tests.map((test) => ({
-        name: test.name, estimated_s: test.estimated_s, status: "pending", reason: "",
-      }));
-    }
-    live.planned = Array.isArray(live.invocations) || Boolean(suite);
-    live.byInvocation = new Map();
-    live.boards = new Map();
-    live.queued = [];
-    live.pairings = [];
-    live.bootloaderExpected = "";
-    // Records from the socket and from REST may interleave; replay in order.
-    const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
-    live.events = [];
-    live.seen = new Set();
-    live.log = [];
-    live.partial = "";
-    live.stage = "waiting";
-    // The estimate covers tests only, so the countdown starts with the first test.
-    live.testsStarted = null;
-    for (const record of events) addEvent(live.run_id, record, false);
-    renderLive();
+  function memberOf(view, host) {
+    const members = (view.detail && view.detail.members) || [];
+    return members.find((member) => member.host === host) || null;
   }
 
-  async function loadInvocations(runId) {
+  // The group's rows, members and progress, at most one fetch at a time and
+  // at most one every GROUP_POLL_MS; a record that arrives during a fetch
+  // leaves a trailing one behind it.
+  //
+  // A fetch never asks for another by itself: it stores what it read without
+  // scheduling (``storeGroup``), so only a record or an update from the
+  // stream makes the page ask again and a group nothing is happening to is
+  // left alone.
+  async function refreshGroup() {
+    const view = state.group;
+    if (!view) return;
+    if (view.fetching) {
+      view.again = true;
+      return;
+    }
+    view.fetching = true;
+    try {
+      const detail = await api("GET", groupPath(view.group_id));
+      if (state.group !== view) return;
+      view.detail = detail;
+      view.group = detail.group;
+      storeGroup(detail.group);
+      for (const member of detail.members) {
+        if (member.run) storeRun(member.run);
+        if (member.run_id && !view.transcripts.has(member.host)) {
+          // This host's transcript, and its own records from the start: a
+          // child accepted after an earlier fetch would otherwise have the
+          // records that arrived before this moment in no transcript at all.
+          view.transcripts.set(member.host, newTranscript(member.host, member.run_id));
+          loadTranscript(view.group_id, member.host, member.run_id);
+        }
+      }
+      if (!view.tab || !memberOf(view, view.tab)) {
+        // The first host that is not getting on with it, so a failure is
+        // the transcript on show; otherwise the first host of the group.
+        const members = detail.members;
+        const wrong = members.find((member) => !["passed", "running", "pending",
+          "starting"].includes(statusWord(member.status)));
+        view.tab = (wrong || members[0] || {}).host || null;
+      }
+      renderGroup();
+    } catch (error) {
+      if (state.group !== view) return;
+      $("cancel-status").textContent = `Cannot load this run group: ${error.message}`;
+    } finally {
+      view.fetchedAt = Date.now();
+      view.fetching = false;
+      if (view.again) {
+        view.again = false;
+        scheduleRefresh();
+      }
+    }
+  }
+
+  // A record or a run update changed something a row may show: fetch the
+  // rows again, no more often than GROUP_POLL_MS.
+  function scheduleRefresh() {
+    const view = state.group;
+    if (!view || view.timer) return;
+    const wait = Math.max(0, GROUP_POLL_MS - (Date.now() - view.fetchedAt));
+    view.timer = window.setTimeout(() => {
+      view.timer = null;
+      if (state.group === view) refreshGroup();
+    }, wait);
+  }
+
+  async function loadTranscript(groupId, host, runId) {
     try {
       const data = await api("GET", runPath(runId));
-      const live = state.live;
-      if (!live || live.run_id !== runId || !Array.isArray(data.invocations)) return;
-      live.invocations = data.invocations;
+      const view = state.group;
+      if (!view || view.group_id !== groupId) return;
+      upsertRun(data.run);
+      const transcript = view.transcripts.get(host) || newTranscript(host, runId);
+      view.transcripts.set(host, transcript);
+      // Records from the socket and from REST may interleave; the sequence
+      // each record carries is what keeps one of them out twice.
       for (const record of data.events) addEvent(runId, record, false);
-      rebuildChecklist();
+      renderGroup();
+      await loadOutputFiles(runId);
     } catch (error) {
-      // Keep the plan's checklist; the next full load retries.
+      // The transcript stays as the socket has it; the next select retries.
     }
   }
 
-  function pushLog(line) {
-    const live = state.live;
+  // The transcript a run's records belong to, or null for a run this group
+  // has nothing to do with (the live socket carries every run's records).
+  function transcriptOf(runId) {
+    const view = state.group;
+    if (!view) return null;
+    for (const transcript of view.transcripts.values()) {
+      if (transcript.run_id === runId) return transcript;
+    }
+    return null;
+  }
+
+  function pushLog(transcript, line) {
     // Long lines are cut, and say so, so a reader is never left thinking a
     // sentence ended where the log stopped.
     const text = String(line);
-    live.log.push(text.length > LOG_LINE_CHARS
+    transcript.log.push(text.length > LOG_LINE_CHARS
       ? `${text.slice(0, LOG_LINE_CHARS - 4)} ...`
       : text);
-    if (live.log.length > LOG_LINES) live.log.splice(0, live.log.length - LOG_LINES);
-  }
-
-  function flushPartial() {
-    if (state.live.partial) {
-      pushLog(state.live.partial);
-      state.live.partial = "";
+    if (transcript.log.length > LOG_LINES) {
+      transcript.log.splice(0, transcript.log.length - LOG_LINES);
     }
   }
 
+  function flushPartial(transcript) {
+    if (transcript.partial) {
+      pushLog(transcript, transcript.partial);
+      transcript.partial = "";
+    }
+  }
+
+  // One record of one host's run. The rows and their pills come from the
+  // group's own answer, so nothing here decides a status: this builds that
+  // host's transcript, and asks for the rows again.
   function addEvent(runId, record, render = true) {
-    const live = state.live;
-    if (!live || live.run_id !== runId || !record || typeof record !== "object") return;
+    const live = transcriptOf(runId);
+    if (!live || !record || typeof record !== "object") return;
     if (live.seen.has(record.sequence)) return;
     live.seen.add(record.sequence);
-    live.events.push(record);
     const details = record.details && typeof record.details === "object" ? record.details : {};
     const kind = String(record.event_type);
     const status = String(record.status || "");
@@ -943,9 +1583,9 @@
       const text = live.partial + String(details.text ?? "");
       const lines = text.split("\n");
       live.partial = lines.pop();
-      for (const line of lines) pushLog(line);
+      for (const line of lines) pushLog(live, line);
     } else {
-      flushPartial();
+      flushPartial(live);
     }
     if (kind === "command_output_omitted") {
       // Output left out of run.jsonl (in output/); the command's last records follow.
@@ -956,7 +1596,7 @@
       }
       const saved = Array.isArray(details.output_files) ? details.output_files : [];
       const names = saved.map((file) => String((file && file.path) ?? "")).join(", ");
-      pushLog(`[... ${count} output lines left out; full output in ${names} ...]`);
+      pushLog(live, `[... ${count} output lines left out; full output in ${names} ...]`);
     }
     if (kind === "command_finished" || kind === "output_files") {
       // A command just saved its output: refresh the list so the links
@@ -968,20 +1608,16 @@
     else if (kind === "test_started") live.stage = "tests";
     else if (kind === "run_finished") live.stage = "finished";
 
-    if (kind === "manifest" && render && !Array.isArray(live.invocations)) {
-      // Live: fetch the planned invocations (with estimates) and re-lay out.
-      loadInvocations(runId);
-    }
     if (kind === "libbtbb_pin" && status !== "passed") {
       // The libbtbb differs from the fork's install.sh pin, or was not compared.
-      pushLog(`warning: ${String(details.message ?? "")}`);
+      pushLog(live, `warning: ${String(details.message ?? "")}`);
     }
     if (kind === "dfu_part_table" && (status === "warning" || status === "unchecked")) {
       // The flash sizes a DFU read-back is checked against differ from the
       // fork's own part table, or the comparison stopped working. A match,
       // and a commit without a table, leave the report row to say so, as
       // the terminal stream does (events.py).
-      pushLog(`warning: ${String(details.message ?? "")}`);
+      pushLog(live, `warning: ${String(details.message ?? "")}`);
     }
     if (kind === "lease_queued") {
       // A device was free while this run waited, and still not its turn:
@@ -990,7 +1626,7 @@
       const text = String(details.message ?? "");
       if (text) {
         if (!live.queued.includes(text)) live.queued.push(text);
-        pushLog(`note: ${text}`);
+        pushLog(live, `note: ${text}`);
       }
     }
     if (kind === "lease_pairing") {
@@ -1001,7 +1637,7 @@
       const text = String(details.message ?? "");
       if (text) {
         if (!live.pairings.includes(text)) live.pairings.push(text);
-        pushLog(`note: ${text}`);
+        pushLog(live, `note: ${text}`);
       }
     }
     if (kind === "bootloader_identity") {
@@ -1024,10 +1660,12 @@
       if (details.expected) {
         live.bootloaderExpected = bootloaderText(details.expected);
       }
-      if (status === "failed" && details.reason) pushLog(`error: ${String(details.reason)}`);
+      if (status === "failed" && details.reason) {
+        pushLog(live, `error: ${String(details.reason)}`);
+      }
     }
     if (kind === "bootloader_stage_finished" && status === "skipped" && details.reason) {
-      pushLog(`note: bootloader stage skipped: ${String(details.reason)}`);
+      pushLog(live, `note: bootloader stage skipped: ${String(details.reason)}`);
     }
     if (kind === "watchdog") {
       // The firmware reset a board, or did not: a count, never a failure.
@@ -1040,97 +1678,69 @@
       const warnings = Array.isArray(details.warnings) ? details.warnings : [];
       if (warnings.length) board.warning = String(warnings[warnings.length - 1]);
       live.boards.set(serial, board);
-      for (const line of warnings) pushLog(`warning: ${String(line)}`);
+      for (const line of warnings) pushLog(live, `warning: ${String(line)}`);
       for (const line of Array.isArray(details.notes) ? details.notes : []) {
-        pushLog(`note: ${String(line)}`);
+        pushLog(live, `note: ${String(line)}`);
       }
-      if (status === "failed" && details.reason) pushLog(`error: ${String(details.reason)}`);
+      if (status === "failed" && details.reason) {
+        pushLog(live, `error: ${String(details.reason)}`);
+      }
     }
     if (kind === "test_started") {
-      const name = String(details.test_name ?? "");
-      const id = String(details.invocation_id ?? "");
-      let item = live.items.find((entry) => entry.invocation_id === id && entry.status === "pending") ||
-        live.items.find((entry) => entry.name === name && entry.status === "pending");
-      if (!item) {
-        item = { name, estimated_s: null, status: "pending", reason: "" };
-        live.items.push(item);
-      }
-      item.status = "running";
-      item.started = record.timestamp;
-      if (!live.testsStarted && record.timestamp) live.testsStarted = record.timestamp;
-      live.byInvocation.set(String(details.invocation_id), item);
-      pushLog(`=== TEST ${name} on ${details.host ?? ""} ===`);
+      pushLog(live, `=== TEST ${details.test_name ?? ""} on ${details.host ?? ""} ===`);
     } else if (kind === "known_target") {
       // Which device the harness drove for this test, or that it had none;
-      // the controller sends the summary the report shows.
-      // The full line where there is a target; a short one otherwise, so a
-      // suite of plain tests does not repeat a sentence down the column.
+      // the controller sends the summary the report shows. Kept by
+      // invocation, so a row's cell can name it beside that part.
       const found = Array.isArray(details.targets) && details.targets.length > 0;
-      const item = live.byInvocation.get(String(details.invocation_id));
-      if (item) item.target = found ? String(details.summary ?? "") : "no known target";
+      live.targets.set(String(details.invocation_id ?? ""),
+                       found ? String(details.summary ?? "") : "no known target");
     } else if (kind === "not_applicable") {
-      // Left out before the run: the host named cannot run it, or this bench
-      // has not got the hardware it binds (not a skip or a failure).
+      // Left out before the run: the host named cannot run it, its platform
+      // does not, or this bench has not got the hardware it binds (not a
+      // skip and not a failure). Such a test has no cell for this host in
+      // its row, which is what the pills say; the line records it.
       const name = String(details.test_name ?? "");
-      if (!details.invocation_id) {
-        let item = live.items.find((entry) => entry.name === name && entry.status === "pending");
-        if (!item && Array.isArray(live.invocations)) {
-          // Left out at planning: not in the manifest, and takes no time.
-          item = { name, estimated_s: 0, status: "pending", reason: "" };
-          live.items.push(item);
-        }
-        if (item) {
-          item.status = "not applicable";
-          item.reason = String(details.reason || "");
-        }
-      }
       const what = details.case_name ? `${name} / ${details.case_name}` : name;
-      pushLog(`[not applicable on ${details.host ?? ""}] ${what}: ${details.reason ?? ""}`);
+      pushLog(live, `[not applicable on ${details.host ?? ""}] ${what}: ${details.reason ?? ""}`);
     } else if (kind === "blocked") {
       // Also left out before the run, but the hardware it is about is what
-      // is missing, so the run fails: shown as blocked, not as a skip.
-      const name = String(details.test_name ?? "");
-      // A test this run also runs keeps its own row: with `Ubertooth: each`
-      // on a partly switchable bench the step runs for some boards and is
-      // blocked for the rest, and a row cannot say both. The log line and
-      // the failure summary carry the record instead.
-      const running = Array.isArray(live.invocations)
-        && live.invocations.some((invocation) => invocation.test_name === name);
-      if (!running) {
-        let item = live.items.find((entry) => entry.name === name && entry.status === "pending");
-        if (!item && Array.isArray(live.invocations)) {
-          // Not in the manifest, and it takes no time.
-          item = { name, estimated_s: 0, status: "pending", reason: "" };
-          live.items.push(item);
-        }
-        if (item) {
-          item.status = "blocked";
-          item.reason = String(details.reason || "");
-        }
-      }
-      pushLog(`[blocked on ${details.host ?? ""}] ${name}: ${details.reason ?? ""}`);
+      // is missing, so the run fails: the group's own answer gives such a
+      // test a step of its own, whose cell for this host reads blocked.
+      pushLog(live, `[blocked on ${details.host ?? ""}] ${details.test_name ?? ""}: ${details.reason ?? ""}`);
     } else if (kind === "test_finished") {
-      const item = live.byInvocation.get(String(details.invocation_id));
-      if (item) {
-        item.status = status === "not_applicable" ? "not applicable" : status;
-        item.reason = String(details.reason || "");
-      }
-      pushLog(`=== TEST ${details.test_name ?? ""}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
+      pushLog(live, `=== TEST ${details.test_name ?? ""}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "build_step_started") {
-      pushLog(`+++ ${details.step_name || details.step_id || ""} +++`);
+      pushLog(live, `+++ ${details.step_name || details.step_id || ""} +++`);
     } else if (kind === "build_step_finished") {
       // The step's own outcome: it may have accepted a command that exited
       // non-zero, so this is not the status of its last command.
-      pushLog(`--- ${details.step_name || details.step_id || ""} EXIT: ${status}${details.reason ? ": " + details.reason : ""} ---`);
+      pushLog(live, `--- ${details.step_name || details.step_id || ""} EXIT: ${status}${details.reason ? ": " + details.reason : ""} ---`);
     } else if (kind === "build_finished" || kind === "preflight_finished") {
-      pushLog(`=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
+      pushLog(live, `=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "run_started") {
-      pushLog(`=== RUN ${record.run_id}: ${details.plan_name ?? ""} / ${details.suite ?? ""} on ${details.host ?? ""} ===`);
+      pushLog(live, `=== RUN ${record.run_id}: ${details.plan_name ?? ""} / ${details.suite ?? ""} on ${details.host ?? ""} ===`);
     } else if (kind === "run_finished") {
-      pushLog(`=== RUN ${status}${details.failure_reason ? ": " + details.failure_reason : ""} ===`);
+      pushLog(live, `=== RUN ${status}${details.failure_reason ? ": " + details.failure_reason : ""} ===`);
     }
-    if (render) renderLive();
+    if (render) {
+      renderTranscript();
+      // The rows are the group's own answer, so a record that may have
+      // moved a step asks for them again rather than being read here.
+      if (STEP_RECORDS.has(kind)) scheduleRefresh();
+    }
   }
+
+  // The records that can move a step, and so a pill: every stage boundary,
+  // the manifest the test rows come from, a test starting or ending, and the
+  // two planning records that leave a test out or block it.
+  const STEP_RECORDS = new Set([
+    "manifest", "build_started", "build_finished", "build_flash_started",
+    "build_flash_finished", "build_flash_board_started",
+    "build_flash_board_finished", "preflight_started", "preflight_finished",
+    "test_started", "test_finished", "not_applicable", "blocked",
+    "run_started", "run_finished",
+  ]);
 
   // ----- saved output files ----------------------------------------------
   //
@@ -1153,7 +1763,7 @@
       const data = await api("GET", `${runPath(runId)}/files`);
       if (!Array.isArray(data.files)) return;
       state.files.set(runId, data.files);
-      renderLive();
+      renderGroup();
     } catch (error) {
       // An older run, or a controller that has no files for it: the
       // checklist simply shows no links.
@@ -1175,15 +1785,12 @@
     return files.filter((file) => !((file && file.owner) || {}).invocation_id);
   }
 
-  // One link per file this test saved. A file a check failed on is marked,
-  // so a reader looking at a failed test knows which one to open.
-  function fileList(item) {
-    const live = state.live;
-    if (!live) return null;
-    const files = item.invocation_id
-      ? filesOf(live.run_id, item.invocation_id) : [];
+  // One link per file this invocation saved. A file a check failed on is
+  // marked, so a reader looking at a failed test knows which one to open.
+  function fileList(runId, invocationId) {
+    const files = invocationId ? filesOf(runId, invocationId) : [];
     if (!files.length) return null;
-    return fileLinks(live.run_id, files);
+    return fileLinks(runId, files);
   }
 
   // A run a target runner carried out keeps its output files in that
@@ -1282,35 +1889,309 @@
     openOutputFile(open.run_id, open.path, offset);
   }
 
-  function itemStatus(item, run) {
-    if (!run || run.status === "running") return item.status;
-    if (item.status === "pending") return "not run";
-    if (item.status === "running") return "did not finish";
-    return item.status;
+  // ----- drawing the group -------------------------------------------------
+
+  function renderGroup() {
+    const view = state.group;
+    if (!view) return;
+    const group = view.group;
+    const progress = (view.detail && view.detail.progress) || null;
+    const fields = [
+      ["Group", el("code", { text: group && group.implicit === false
+        ? group.group_id : (groupRunId(group) || view.group_id) })],
+      ["Status", statusBadge(group ? group.status : "running")],
+      ["Hosts", group ? hostsText(group) : "–"],
+      ["Ref", group ? refLabel(group) : "–"],
+      ["Plan / suite", group ? `${group.plan ?? "–"} / ${group.suite ?? "–"}` : "–"],
+      ["Started", timeElement(group && group.created_at)],
+      ["Finished", timeElement(group && group.finished_at)],
+      ["Steps done", progress ? `${progress.completed} of ${progress.planned}` : "–"],
+    ];
+    if (group && group.cancel_requested) {
+      fields.push(["Cancel asked for", group.cancel_reason || "yes"]);
+    }
+    $("live-summary").replaceChildren(...fields.flatMap(([term, value]) =>
+      [el("dt", { text: term }), el("dd", {}, typeof value === "string"
+        ? document.createTextNode(value) : value)]));
+    $("cancel-button").hidden = !group || group.status !== "running";
+    renderChecklist();
+    renderHostTabs();
+    renderTranscript();
+    renderClock();
   }
 
-  function renderLive() {
-    const live = state.live;
-    if (!live) return;
-    const run = state.runs.get(live.run_id) || { run_id: live.run_id, status: "running" };
-    const fields = [
-      ["Run", el("code", { text: run.run_id })],
-      ["Status", statusBadge(run.status)],
-      ["Stage", live.stage],
-      ["Ref", refLabel(run)],
-      ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
-      ["Target", run.target ?? "–"],
-      ["Started", timeElement(run.created_at)],
-      ["Finished", timeElement(run.finished_at)],
-    ];
-    if (run.reason) fields.push(["Reason", run.reason]);
-    $("live-summary").replaceChildren(...fields.flatMap(([term, value]) =>
-      [el("dt", { text: term }), el("dd", {}, value)]));
-    $("cancel-button").hidden = run.status !== "running";
+  // The run of a group of one, which is what its own ID is.
+  function groupRunId(group) {
+    const member = group && group.members && group.members[0];
+    return member ? member.run_id : null;
+  }
 
-    // Per board: how many times the firmware's watchdog reset it during this
-    // run, and the last warning if there was one. Hidden until a board is read.
-    const boards = [...live.boards.values()];
+  function hostsText(group) {
+    const hosts = (group.members || []).map((member) => member.host);
+    return hosts.length === 1 ? hosts[0]
+      : `${hosts.join(", ")} (${group.hosts_started} of ${group.hosts_asked} started)`;
+  }
+
+  // One row per step, with one pill per host that runs that step and only
+  // those: the rows and cells of GET /api/run-groups/{id}, drawn in the
+  // order a run reaches them (build, flash, preflight, then the tests).
+  function renderChecklist() {
+    const view = state.group;
+    const steps = (view && view.detail && view.detail.steps) || [];
+    const note = $("checklist-note");
+    const hosts = ((view && view.group && view.group.members) || [])
+      .map((member) => member.host);
+    // The fills of the pills this render draws, so the clock can move them
+    // without the rows being rebuilt: a checklist rebuilt every second
+    // would announce itself to a screen reader and take the focus out of
+    // whatever pill or link a reader was on.
+    if (view) view.fills = [];
+    note.textContent = steps.length
+      ? `One pill per host that runs the step, and only those: ${hosts.join(", ")}.`
+        + " A test no host has reached yet has pending pills; a test a host"
+        + " does not run has no pill for it."
+      : "Nothing to show yet: each host's steps appear as its run starts and"
+        + " its plan arrives.";
+    $("checklist").replaceChildren(...steps.map((step) => {
+      const shown = statusWord(step.status);
+      // The row's cells in the group's own host order, which is the order
+      // the hosts were asked for, rather than whatever order the answer's
+      // own object keys come in.
+      const cells = hosts.map((host) => step.hosts[host])
+        .filter(Boolean)
+        .concat(Object.values(step.hosts).filter((cell) => !hosts.includes(cell.host)));
+      return el("li", {
+        className: `check check-${shown.replace(/ /g, "-")}`,
+        "aria-current": shown === "running" ? "step" : null,
+      },
+        // The name and its info button together, so the button stays beside
+        // the name rather than drifting to the pills at the far right. Only
+        // a test has information to show; build, flash and preflight are
+        // stages, not tests. The dialog reads this group's own listing of
+        // the test, which is the one whose coverage and estimate it uses.
+        el("span", { className: "check-name" },
+          el("span", { className: "check-name-text", text: step.name }),
+          step.kind === "test"
+            ? infoButton(step.name, {
+                plan: view.group && view.group.plan,
+                suite: view.group && view.group.suite,
+              })
+            : null),
+        el("span", { className: "pills" },
+          ...cells.map((cell) => stepPill(step, cell))),
+        ...cells.filter((cell) => cell.reason).map((cell) => el("span", {
+          className: "reason",
+          text: `${cell.host}: ${cell.reason}`,
+        })),
+        ...cells.flatMap((cell) => cellFiles(cell)));
+    }));
+    const extra = [];
+    for (const member of (view && view.detail ? view.detail.members : [])) {
+      const owned = member.run_id ? runFiles(member.run_id) : [];
+      if (owned.length) {
+        extra.push(el("li", { className: "check-note" },
+          `Build and preflight output on ${member.host}: `,
+          fileLinks(member.run_id, owned)));
+      }
+      if (!member.run_id && member.error) {
+        extra.push(el("li", { className: "check-note" },
+          `No run on ${member.host}: ${member.error}`));
+      }
+    }
+    if (extra.length) $("checklist").append(...extra);
+  }
+
+  // One per-host pill: the host, its status, and, while the step runs there,
+  // a fill from the time it has taken against what it is estimated to take.
+  // The fill is decorative, so the pill's own text still says the status and
+  // the fill carries a progressbar role for a screen reader.
+  function stepPill(step, cell) {
+    const fill = cellFill(cell);
+    const about = `${step.name} on ${cell.host}: ${statusWord(cell.status)}`
+      + (cell.elapsed_s !== null && cell.elapsed_s !== undefined
+        ? `, took ${formatSeconds(cell.elapsed_s)}` : "")
+      + (cell.estimated_s ? `, estimated ${formatSeconds(cell.estimated_s)}` : "")
+      + (cell.reason ? ` — ${cell.reason}` : "");
+    const pill = hostPill(cell.host, cell.status, {
+      title: about,
+      // Each pill's own button opens that host's transcript of this step.
+      label: `Transcript of ${cell.host}: ${about}`,
+      onclick: () => showHost(cell.host),
+      fill: fill ? { ...fill, what: `${step.name} on ${cell.host}` } : null,
+    });
+    if (fill && state.group) {
+      // Followed for as long as this render stands, so the clock can move
+      // this one pill (see tickFills).
+      state.group.fills.push({ pill, cell, what: `${step.name} on ${cell.host}` });
+    }
+    return pill;
+  }
+
+  // Move the fill of every pill that is still running, from the clock
+  // rather than the network, without touching anything else on the page.
+  function tickFills() {
+    const view = state.group;
+    if (!view || !view.fills || !view.fills.length) return;
+    for (const followed of view.fills) {
+      const fill = cellFill(followed.cell);
+      const node = followed.pill.querySelector(".pill-fill");
+      if (!fill || !node) continue;
+      setFill(followed.pill, node, { ...fill, what: followed.what });
+    }
+  }
+
+  // The one place a fill's width and its value for a screen reader are set.
+  function setFill(pill, node, fill) {
+    node.setAttribute("aria-label", fill.what);
+    node.setAttribute("aria-valuenow", String(fill.percent));
+    node.setAttribute("aria-valuetext", fill.over
+      ? "over the estimate" : `${fill.percent}% of the estimate`);
+    // A width is never set from script: the page sets no style attribute at
+    // all, so the fill is one of the stylesheet's own steps, named in a
+    // data attribute.
+    node.setAttribute("data-fill", String(Math.round(fill.percent / 5) * 5));
+    pill.classList.toggle("pill-over", Boolean(fill.over));
+  }
+
+  // The pill both the checklist and the history list are drawn with: the
+  // host's short name, the status as a symbol and a word, and a button that
+  // opens that host's transcript.
+  function hostPill(host, status, { title, label, onclick, fill = null } = {}) {
+    const shown = statusWord(status);
+    const known = STATUS_TEXT[shown];
+    const [icon, word] = known || ["•", shown];
+    // A status this page has no entry for is styled as unknown rather than
+    // put into a class of its own, as statusBadge does with one.
+    const kind = known ? shown.replace(/ /g, "-") : "unknown";
+    const node = fill ? el("span", {
+      className: "pill-fill", role: "progressbar",
+      "aria-valuemin": "0", "aria-valuemax": "100",
+    }) : null;
+    const pill = el("span", {
+      className: `pill pill-${kind}`,
+      title: title || `${host}: ${shown}`,
+    },
+      node,
+      el("button", {
+        type: "button", className: "pill-text",
+        "aria-label": label || `${host}: ${shown}`,
+        onclick,
+      },
+        el("span", { className: "pill-host", text: hostLabel(host) }),
+        el("span", { "aria-hidden": "true", text: icon }),
+        el("span", { className: "pill-status", text: word })));
+    if (node) setFill(pill, node, fill);
+    return pill;
+  }
+
+  // How far a running step is through its estimate, or null when nothing can
+  // be said: a step that has not started, has finished, or has no estimate.
+  function cellFill(cell) {
+    if (statusWord(cell.status) !== "running" || !cell.started_at) return null;
+    const estimate = cell.estimated_s;
+    if (!estimate) return null;
+    const elapsed = Math.max(0, (Date.now() - Date.parse(cell.started_at)) / 1000);
+    if (Number.isNaN(elapsed)) return null;
+    return {
+      percent: Math.min(100, Math.round((elapsed / estimate) * 100)),
+      over: elapsed > estimate,
+    };
+  }
+
+  // The output files each invocation of this cell saved, named with the host
+  // and the invocation they belong to.
+  function cellFiles(cell) {
+    const view = state.group;
+    const member = view ? memberOf(view, cell.host) : null;
+    if (!member || !member.run_id) return [];
+    const nodes = [];
+    for (const item of cell.items || []) {
+      const links = fileList(member.run_id, item.id);
+      if (links) {
+        nodes.push(el("span", { className: "reason", text: `${cell.host}:` }), links);
+      }
+      const known = transcriptTargets(cell.host).get(item.id);
+      if (known) {
+        nodes.push(el("span", {
+          className: "reason check-target", text: `${cell.host}: ${known}`,
+        }));
+      }
+    }
+    return nodes;
+  }
+
+  function transcriptTargets(host) {
+    const view = state.group;
+    const transcript = view ? view.transcripts.get(host) : null;
+    return transcript ? transcript.targets : new Map();
+  }
+
+  // One tab per host of the group, each opening that host's own transcript.
+  // The tabs follow the ARIA tabs pattern: one stop in the tab order, and
+  // the arrow keys move between hosts (onTabKey).
+  function renderHostTabs() {
+    const view = state.group;
+    const members = (view && view.detail && view.detail.members) || [];
+    $("host-tabs").replaceChildren(...members.map((member) => {
+      const chosen = member.host === view.tab;
+      const transcript = view.transcripts.get(member.host);
+      return el("button", {
+        type: "button", role: "tab", id: `host-tab-${member.host}`,
+        className: chosen ? "host-tab host-tab-current" : "host-tab",
+        "aria-selected": chosen ? "true" : "false",
+        "aria-controls": "log",
+        tabindex: chosen ? "0" : "-1",
+        onclick: () => showHost(member.host),
+      },
+        el("span", { className: "host-tab-name", text: member.host }),
+        " ", statusBadge(member.status),
+        transcript && transcript.stage
+          ? el("span", { className: "hint", text: transcript.stage }) : null);
+    }));
+  }
+
+  // Arrow keys along the host tabs, as the tabs pattern asks: the tab that
+  // becomes current is the one focus moves to, so a keyboard reader can
+  // reach every host's transcript.
+  function onTabKey(event) {
+    const view = state.group;
+    const members = (view && view.detail && view.detail.members) || [];
+    if (!members.length) return;
+    const hosts = members.map((member) => member.host);
+    const at = Math.max(0, hosts.indexOf(view.tab));
+    const steps = {
+      ArrowRight: at + 1, ArrowDown: at + 1, ArrowLeft: at - 1, ArrowUp: at - 1,
+      Home: 0, End: hosts.length - 1,
+    };
+    if (!(event.key in steps)) return;
+    event.preventDefault();
+    const wanted = (steps[event.key] + hosts.length) % hosts.length;
+    showHost(hosts[wanted], { focus: true });
+  }
+
+  function showHost(host, { focus = false } = {}) {
+    const view = state.group;
+    if (!view || !memberOf(view, host)) return;
+    view.tab = host;
+    renderGroup();
+    if (focus) {
+      const tab = $(`host-tab-${host}`);
+      if (tab) tab.focus();
+    } else {
+      $("log-heading").scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  // The host whose transcript is on show: its log tail, its boards, and the
+  // leases it waited for or held.
+  function renderTranscript() {
+    const view = state.group;
+    if (!view) return;
+    const transcript = view.tab ? view.transcripts.get(view.tab) : null;
+    const member = view.tab ? memberOf(view, view.tab) : null;
+    $("log").setAttribute("aria-labelledby",
+      view.tab ? `host-tab-${view.tab}` : "log-heading");
+    const boards = transcript ? [...transcript.boards.values()] : [];
     $("live-boards").hidden = boards.length === 0;
     $("boards").replaceChildren(...boards.map((board) => el("li", {
       className: board.resets ? "board board-reset" : "board",
@@ -1333,99 +2214,124 @@
       }) : null,
       board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
     const expectedNote = $("bootloader-expected");
-    expectedNote.hidden = !live.bootloaderExpected || boards.length === 0;
-    expectedNote.textContent = live.bootloaderExpected
-      ? `This run expects bootloader ${live.bootloaderExpected}.` : "";
+    const expected = transcript ? transcript.bootloaderExpected : "";
+    expectedNote.hidden = !expected || boards.length === 0;
+    expectedNote.textContent = expected
+      ? `This run expects bootloader ${expected}.` : "";
 
     // Devices that were free while this run waited for its turn, and the
     // command that had the turn: why a run can start late with the bench
     // looking idle. Hidden unless the run waited behind somebody.
-    $("live-queued").hidden = live.queued.length === 0;
-    $("queued").replaceChildren(
-      ...live.queued.map((text) => el("li", { text })));
+    const queued = transcript ? transcript.queued : [];
+    $("live-queued").hidden = queued.length === 0;
+    $("queued").replaceChildren(...queued.map((text) => el("li", { text })));
 
     // Devices the run never named and holds because they are wired to ones
     // it did. Hidden on every bench that registers no such pairing.
-    $("live-pairings").hidden = live.pairings.length === 0;
-    $("pairings").replaceChildren(
-      ...live.pairings.map((text) => el("li", { text })));
+    const pairings = transcript ? transcript.pairings : [];
+    $("live-pairings").hidden = pairings.length === 0;
+    $("pairings").replaceChildren(...pairings.map((text) => el("li", { text })));
 
-    $("checklist").replaceChildren(...live.items.map((item) => {
-      const shown = itemStatus(item, run);
-      return el("li", {
-        className: `check check-${shown.replace(/ /g, "-")}`,
-        "aria-current": shown === "running" ? "step" : null,
-      },
-        statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
-        item.estimated_s !== null && item.estimated_s !== undefined
-          ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
-        item.target ? el("span", { className: "reason check-target", text: item.target }) : null,
-        item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null,
-        fileList(item));
-    }));
-    const runOwned = runFiles(live.run_id);
-    if (runOwned.length) {
-      $("checklist").append(el("li", { className: "check-note" },
-        "Build and preflight output: ", fileLinks(live.run_id, runOwned)));
-    }
-    if (!live.items.length) {
-      $("checklist").replaceChildren(el("li", {
-        className: "check-note",
-        text: "Tests appear here as they start (this run's plan is not in the controller's plans directory).",
-      }));
-    }
     const logNode = $("log");
-    const lines = live.partial ? [...live.log, live.partial] : live.log;
-    logNode.textContent = lines.join("\n");
-    logNode.scrollTop = logNode.scrollHeight;
-    renderClock();
+    const lines = transcript
+      ? (transcript.partial ? [...transcript.log, transcript.partial] : transcript.log)
+      : [];
+    // Pinned to the end only for a reader who is already there, so a render
+    // for something else (another host's record, a heartbeat) does not pull
+    // somebody reading further up back to the bottom.
+    const atEnd = logNode.scrollHeight - logNode.scrollTop - logNode.clientHeight < 40;
+    logNode.textContent = lines.length ? lines.join("\n")
+      : member && !member.run_id
+        ? `No run on ${member.host}: ${member.error || "it was never started"}.`
+        : "Nothing recorded yet.";
+    if (atEnd) logNode.scrollTop = logNode.scrollHeight;
+    $("host-files").textContent = member && member.run_id
+      ? `Run ${member.run_id} on ${member.host}.` : "";
   }
 
+  // The whole group's clock: elapsed against the longest host's estimate,
+  // because the hosts run at the same time. Every cell of every host has to
+  // have an estimate for there to be a countdown, as the group's own
+  // progress figure requires (group_progress).
   function renderClock() {
-    const live = state.live;
-    if (!live) return;
-    const run = state.runs.get(live.run_id);
-    if (!run || !run.created_at) {
+    const view = state.group;
+    if (!view) return;
+    const group = view.group;
+    if (!group || !group.created_at) {
       $("live-clock").textContent = "";
+      renderTitleProgress(null);
       return;
     }
-    const start = Date.parse(run.created_at);
-    const end = run.finished_at ? Date.parse(run.finished_at) : Date.now();
+    const start = Date.parse(group.created_at);
+    const end = group.finished_at ? Date.parse(group.finished_at) : Date.now();
     const elapsed = Math.max(0, (end - start) / 1000);
-    const estimates = live.items.map((item) => item.estimated_s);
-    const known = live.planned && estimates.length > 0 &&
-      estimates.every((value) => value !== null && value !== undefined);
-    if (!known) {
-      $("live-clock").textContent = `Elapsed ${formatSeconds(elapsed)}`;
-      const missing = estimates.filter((value) => value === null || value === undefined).length;
-      $("live-estimate").textContent = live.planned
-        ? `No countdown: ${missing} of ${estimates.length} tests have no estimated duration, so only elapsed time is shown.`
-        : "No countdown: this run's plan is unknown here, so only elapsed time is shown.";
+    const steps = (view.detail && view.detail.steps) || [];
+    const cells = steps.flatMap((step) => Object.values(step.hosts));
+    const perHost = new Map();
+    let missing = 0;
+    for (const cell of cells) {
+      if (cell.estimated_s === null || cell.estimated_s === undefined) missing += 1;
+      perHost.set(cell.host, (perHost.get(cell.host) || 0) + (cell.estimated_s || 0));
+    }
+    const total = perHost.size ? Math.max(...perHost.values()) : 0;
+    renderTitleProgress(view.detail ? view.detail.progress : null);
+    if (!cells.length || missing) {
+      $("live-clock").textContent = group.status === "running"
+        ? `Elapsed ${formatSeconds(elapsed)}`
+        : `Finished after ${formatSeconds(elapsed)}`;
+      $("live-estimate").textContent = !cells.length
+        ? "No countdown yet: the hosts have not reported their steps."
+        : `No countdown: ${missing} of ${cells.length} steps across the group`
+          + " have no estimated duration, so only elapsed time is shown.";
       return;
     }
-    const total = estimates.reduce((sum, value) => sum + value, 0);
-    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the catalog's per-test estimates; build and preflight are not included.`;
-    const testsStart = live.testsStarted ? Date.parse(live.testsStarted) : NaN;
-    const testsElapsed = Number.isNaN(testsStart) ? null : Math.max(0, (end - testsStart) / 1000);
-    if (run.status !== "running") {
+    $("live-estimate").textContent = `Estimate ${formatSeconds(total)}: the`
+      + ` longest of the group's ${perHost.size} host(s), which run at the`
+      + " same time.";
+    if (group.status !== "running") {
       $("live-clock").textContent = `Finished after ${formatSeconds(elapsed)}`;
-    } else if (testsElapsed === null) {
-      $("live-clock").textContent = `Countdown starts with the first test (elapsed ${formatSeconds(elapsed)})`;
-    } else if (testsElapsed <= total) {
-      $("live-clock").textContent = `About ${formatSeconds(total - testsElapsed)} remaining (elapsed ${formatSeconds(elapsed)})`;
+    } else if (elapsed <= total) {
+      $("live-clock").textContent = `About ${formatSeconds(total - elapsed)} remaining`
+        + ` (elapsed ${formatSeconds(elapsed)})`;
     } else {
-      $("live-clock").textContent = `Over the estimate by ${formatSeconds(testsElapsed - total)} (elapsed ${formatSeconds(elapsed)})`;
+      $("live-clock").textContent = `Over the estimate by ${formatSeconds(elapsed - total)}`
+        + ` (elapsed ${formatSeconds(elapsed)})`;
     }
   }
 
-  async function cancelRun() {
-    const live = state.live;
-    if (!live) return;
+  // The card's own title bar is the group's progress: the steps its hosts
+  // have finished against the steps they are planned to take.
+  function renderTitleProgress(progress) {
+    const bar = $("group-progress");
+    const text = $("group-progress-text");
+    if (!progress || !progress.planned) {
+      bar.hidden = true;
+      text.textContent = "";
+      return;
+    }
+    const percent = Math.min(100, Math.round(
+      (progress.completed / progress.planned) * 100));
+    bar.hidden = false;
+    bar.setAttribute("aria-valuenow", String(percent));
+    bar.setAttribute("aria-valuetext",
+      `${progress.completed} of ${progress.planned} steps done`);
+    bar.setAttribute("data-fill", String(Math.round(percent / 5) * 5));
+    text.textContent = `${progress.completed} of ${progress.planned} steps done`;
+  }
+
+  async function cancelGroup() {
+    const view = state.group;
+    if (!view) return;
     const status = $("cancel-status");
-    status.textContent = "Asking the runner to cancel…";
+    status.textContent = "Asking every host of the group to cancel…";
     try {
-      await api("POST", `${runPath(live.run_id)}/cancel`, { reason: "canceled from the web GUI" });
-      status.textContent = "Cancel accepted; the run stops at its next safe point.";
+      const data = await api("POST", `${groupPath(view.group_id)}/cancel`,
+                             { reason: "canceled from the web GUI" });
+      upsertGroup(data.group);
+      const hosts = (data.canceled || []).join(", ");
+      status.textContent = `Cancel accepted for ${hosts || "no host"};`
+        + " each run stops at its next safe point.";
+      scheduleRefresh();
     } catch (error) {
       status.textContent = `Cancel refused: ${error.message}`;
     }
@@ -1433,89 +2339,361 @@
 
   // ----- history -----------------------------------------------------------
 
-  function upsertRun(run) {
-    if (!run || typeof run.run_id !== "string") return;
-    state.runs.set(run.run_id, run);
-    renderHistory();
-    if (state.live && state.live.run_id === run.run_id) renderLive();
+  // The history is paged newest first: the latest HISTORY_PAGE groups, then a
+  // page at a time behind the cursor the controller returns, so a bench with
+  // months of runs neither sends nor draws all of them.
+  const HISTORY_PAGE = 50;
+
+  function chosenFilters() {
+    return {
+      target: $("history-target").value,
+      status: $("history-status").value,
+      ref: $("history-ref").value.trim(),
+    };
   }
 
-  function renderHistory() {
-    const runs = [...state.runs.values()].sort((a, b) =>
-      String(b.created_at).localeCompare(String(a.created_at)) || b.run_id.localeCompare(a.run_id));
-    $("history-empty").hidden = runs.length > 0;
-    $("history").replaceChildren(...runs.map((run) => {
-      const actions = el("td", { className: "actions" },
-        el("button", {
-          type: "button", text: "Watch", "aria-label": `Watch run ${run.run_id}`,
-          onclick: () => selectRun(run.run_id),
-        }));
-      if (run.report) {
-        actions.append(" ", el("a", {
-          className: "button-link",
-          href: `${runPath(run.run_id)}/report.md`, text: "report.md",
-          "aria-label": `report.md of run ${run.run_id}`,
-        }));
-      }
-      if (run.status !== "running" && run.status !== "passed") {
-        actions.append(" ", el("button", {
-          type: "button", text: "Failures", "aria-label": `Failure summary of run ${run.run_id}`,
-          onclick: () => showFailures(run.run_id),
-        }));
-      }
-      return el("tr", {},
-        el("td", { className: "time" }, timeElement(run.created_at)),
-        el("td", { className: "time" }, timeElement(run.finished_at)),
-        el("td", {}, el("code", { text: run.run_id })),
-        el("td", { text: refLabel(run) }),
-        el("td", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
-        el("td", { text: run.target }),
-        el("td", {}, statusBadge(run.status)),
-        actions);
-    }));
+  function filtering() {
+    const filters = state.historyFilters;
+    return Boolean(filters.target || filters.status || filters.ref);
   }
 
-  async function loadRuns() {
-    try {
-      const data = await api("GET", "/api/runs");
-      state.runs = new Map(data.runs.map((run) => [run.run_id, run]));
-      renderHistory();
-      if (state.live) rebuildChecklist();
-    } catch (error) {
-      $("history-empty").textContent = `Cannot list runs: ${error.message}`;
+  // The same three comparisons the controller makes, so a live update lands
+  // in the rows exactly where the next page would have put it. A group
+  // matches a target when it asked that host to run, which is the host the
+  // row draws a pill for.
+  function matchesFilters(group) {
+    const filters = state.historyFilters;
+    const hosts = group.hosts || [];
+    if (filters.target && !hosts.includes(filters.target)) return false;
+    if (filters.status && group.status !== filters.status) return false;
+    if (filters.ref && group.ref !== filters.ref) return false;
+    return true;
+  }
+
+  function historyQuery(cursor) {
+    const query = new URLSearchParams({ limit: String(HISTORY_PAGE) });
+    const filters = state.historyFilters;
+    for (const name of ["target", "status", "ref"]) {
+      if (filters[name]) query.set(name, filters[name]);
+    }
+    if (cursor) {
+      query.set("before", cursor.created_at);
+      // The group of that instant the page ended on: two groups stamped
+      // alike are then neither repeated nor lost at a page boundary.
+      if (cursor.group_id) query.set("before_group_id", cursor.group_id);
+    }
+    return `/api/run-groups?${query.toString()}`;
+  }
+
+  // One page into the rows. state.groups is the page's cache of group views
+  // and state.runs of the member runs, which the live view reads too, so
+  // nothing is dropped from either; the rows are state.historyIds, the
+  // groups the loaded pages hold.
+  function takeGroupPage(data, append) {
+    if (!append) state.historyIds = new Set();
+    for (const group of data.groups || []) {
+      storeGroup(group);
+      state.historyIds.add(group.group_id);
+    }
+    state.historyCursor = data.has_more
+      ? { created_at: data.next_before, group_id: data.next_before_group_id }
+      : null;
+    state.historyMatching = Number.isInteger(data.matching)
+      ? data.matching : state.historyIds.size;
+    state.historyTotal = Number.isInteger(data.total)
+      ? data.total : state.historyMatching;
+    // This figure counts every stored group the filters match now, so it
+    // already counts the rows added since the last page and leaves out the
+    // ones that stopped matching.
+    state.historyAdded = new Set();
+    state.historyGone = new Set();
+  }
+
+  // A group the live stream reports, or one this page has just started: it
+  // joins the rows when the filters match it, and leaves them when they no
+  // longer do. A group read by ID (watching one, a #group= link) goes to the
+  // cache through storeGroup and never makes a row of its own: the rows are
+  // the pages the controller served.
+  function joinOrLeaveRows(group) {
+    const known = state.groups.has(group.group_id);
+    if (matchesFilters(group)) {
+      state.historyGone.delete(group.group_id);
+      if (!state.historyIds.has(group.group_id)) {
+        state.historyIds.add(group.group_id);
+        // A group no page has held: it has just started, so it is newer than
+        // any page, and it belongs at the top of the rows and in the count.
+        if (!known) state.historyAdded.add(group.group_id);
+      }
+    } else if (state.historyIds.delete(group.group_id)) {
+      // A group the filters no longer match (one that was running and has
+      // finished, with "running" chosen) leaves the rows; its view stays in
+      // the cache, so watching it still works.
+      if (!state.historyAdded.delete(group.group_id)) {
+        state.historyGone.add(group.group_id);
+      }
     }
   }
 
-  async function showFailures(runId) {
+  function upsertRun(run) {
+    storeRun(run);
+    // A run moved, so a cell of it may have: the rows are the group's own
+    // answer, so they are asked for again rather than worked out here.
+    if (state.group && transcriptOf((run || {}).run_id)) scheduleRefresh();
+  }
+
+  // What a run update changes on the page, without asking for anything.
+  function storeRun(run) {
+    if (!run || typeof run.run_id !== "string") return;
+    state.runs.set(run.run_id, run);
+    const view = state.group;
+    if (view && transcriptOf(run.run_id)) renderGroup();
+  }
+
+  function upsertGroup(group) {
+    if (group && typeof group.group_id === "string") joinOrLeaveRows(group);
+    storeGroup(group);
+    const view = state.group;
+    if (view && group && view.group_id === group.group_id) {
+      // A host of it may have gained a run, or ended one, which is a cell in
+      // every row.
+      scheduleRefresh();
+    }
+  }
+
+  // What a group update changes on the page, without asking for anything:
+  // this is also how a fetch stores what it just read, so reading the group
+  // can never ask for it again (refreshGroup).
+  function storeGroup(group) {
+    if (!group || typeof group.group_id !== "string") return;
+    state.groups.set(group.group_id, group);
+    for (const member of group.members || []) {
+      if (member.run) state.runs.set(member.run.run_id, member.run);
+    }
+    renderHistory();
+    const view = state.group;
+    if (view && view.group_id === group.group_id) {
+      view.group = group;
+      renderGroup();
+    }
+  }
+
+  function renderHistory() {
+    const groups = [...state.historyIds]
+      .map((groupId) => state.groups.get(groupId))
+      .filter(Boolean)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))
+        || b.group_id.localeCompare(a.group_id));
+    $("history-empty").hidden = groups.length > 0;
+    $("history-empty").textContent = filtering()
+      ? "No run group matches these filters." : "No runs yet.";
+    $("history").replaceChildren(...groups.map((group) => {
+      const members = group.members || [];
+      const actions = el("td", { className: "actions" },
+        el("button", {
+          type: "button", text: "Watch",
+          "aria-label": `Watch run group ${group.group_id}`,
+          onclick: () => selectGroup(group.group_id),
+        }));
+      for (const member of members) {
+        if (member.run && member.run.report) {
+          actions.append(" ", el("a", {
+            className: "button-link",
+            href: `${runPath(member.run_id)}/report.md`,
+            text: members.length > 1 ? `report.md (${hostLabel(member.host)})` : "report.md",
+            "aria-label": `report.md of ${member.host} in group ${group.group_id}`,
+          }));
+        }
+      }
+      if (group.status !== "running" && group.status !== "passed") {
+        actions.append(" ", el("button", {
+          type: "button", text: "Failures",
+          "aria-label": `Failure summary of run group ${group.group_id}`,
+          onclick: () => showFailures(group.group_id),
+        }));
+      }
+      // One pill per host, each opening that host's own transcript, so a
+      // group of two says which host did what without being opened.
+      const hosts = el("td", { className: "host-cell" }, ...members.map((member) =>
+        hostPill(member.host, member.status, {
+          title: member.error || `${member.host}: ${statusWord(member.status)}`,
+          label: `Watch ${member.host} in group ${group.group_id}`
+            + (member.error ? ` — ${member.error}` : ""),
+          onclick: () => selectGroup(group.group_id, { tab: member.host }),
+        })));
+      return el("tr", {},
+        el("td", { className: "time" }, timeElement(group.created_at)),
+        el("td", { className: "time" }, timeElement(group.finished_at)),
+        el("td", {}, el("code", {
+          text: group.implicit ? (groupRunId(group) || group.group_id)
+            : `${group.group_id.slice(0, 12)}…`,
+          title: group.group_id,
+        })),
+        el("td", { text: refLabel(group) }),
+        el("td", { text: `${group.plan ?? "–"} / ${group.suite ?? "–"}` }),
+        hosts,
+        el("td", {}, statusBadge(group.status)),
+        actions);
+    }));
+    renderHistoryCount(groups.length);
+    renderHistoryChoices();
+  }
+
+  function renderHistoryCount(shown) {
+    // The page's own figure, with the rows added since taken on and the
+    // rows that stopped matching taken off, and never fewer groups than are
+    // on display.
+    const matching = Math.max(
+      state.historyMatching + state.historyAdded.size - state.historyGone.size,
+      shown,
+    );
+    const stored = Math.max(state.historyTotal + state.historyAdded.size, matching);
+    $("history-older").hidden = !state.historyCursor;
+    if (!shown) {
+      $("history-count").textContent = "";
+      return;
+    }
+    const sentences = [
+      `Showing ${shown} of ${matching} run group${matching === 1 ? "" : "s"}`
+      + (filtering() ? ` that match these filters, of ${stored} stored.` : "."),
+    ];
+    if (state.historyCursor) {
+      sentences.push(`Load older adds up to ${HISTORY_PAGE} more, oldest last.`);
+    }
+    $("history-count").textContent = sentences.join(" ");
+  }
+
+  // The filter choices: every registered target and every host a loaded row
+  // asked to run, and the listed refs beside the refs those rows name. Both
+  // are rebuilt only when they change, since this runs on every render.
+  function renderHistoryChoices() {
+    const targets = new Set(state.targets.keys());
+    const refs = new Set([...state.refOptions.values()].map((ref) => ref.name));
+    for (const group of state.groups.values()) {
+      for (const host of group.hosts || []) targets.add(host);
+      if (group.ref) refs.add(group.ref);
+    }
+    const select = $("history-target");
+    // A chosen target stays a choice even when no row or target names it,
+    // or choosing it would clear the filter it is there to apply.
+    if (select.value) targets.add(select.value);
+    const hosts = [...targets].sort((a, b) => a.localeCompare(b));
+    if (select.dataset.hosts !== hosts.join("\n")) {
+      select.dataset.hosts = hosts.join("\n");
+      const chosen = select.value;
+      select.replaceChildren(
+        el("option", { value: "", text: "Any target" }),
+        ...hosts.map((host) => el("option", { value: host, text: host })));
+      select.value = chosen;
+    }
+    const names = [...refs].sort((a, b) => a.localeCompare(b));
+    const list = $("history-refs");
+    if (list.dataset.refs !== names.join("\n")) {
+      list.dataset.refs = names.join("\n");
+      list.replaceChildren(...names.map((name) => el("option", { value: name })));
+    }
+  }
+
+  // The newest page, for the filters now chosen: on connect, on reconnect,
+  // and whenever the filters change.
+  async function loadGroups() {
+    state.historyFilters = chosenFilters();
+    const token = ++state.historyToken;
+    try {
+      const data = await api("GET", historyQuery(null));
+      // Filters have changed, or an older page has been asked for, since
+      // this was sent: that request's answer is the page now.
+      if (token !== state.historyToken) return;
+      takeGroupPage(data, false);
+      renderHistory();
+    } catch (error) {
+      if (token !== state.historyToken) return;
+      $("history-empty").hidden = false;
+      $("history-empty").textContent = `Cannot list run groups: ${error.message}`;
+    }
+  }
+
+  async function loadOlderGroups() {
+    const cursor = state.historyCursor;
+    if (!cursor) return;
+    const button = $("history-older");
+    const hadFocus = document.activeElement === button;
+    const token = ++state.historyToken;
+    button.disabled = true;
+    $("history-count").textContent = "Loading older run groups…";
+    try {
+      const data = await api("GET", historyQuery(cursor));
+      // Never appended to rows the filters have changed under: that page
+      // belongs to a query nobody is showing any more.
+      if (token !== state.historyToken) return;
+      takeGroupPage(data, true);
+      renderHistory();
+    } catch (error) {
+      if (token === state.historyToken) {
+        $("history-count").textContent = `Cannot load older run groups: ${error.message}`;
+      }
+    } finally {
+      button.disabled = false;
+    }
+    // The button goes once the oldest group is on the page, so the keyboard
+    // moves to the line that says so rather than back to the document.
+    if (hadFocus) (state.historyCursor ? button : $("history-count")).focus();
+  }
+
+  // The failed steps of a whole group, host by host: each member's own
+  // summary, exactly as a run on its own reports it.
+  async function showFailures(groupId) {
     const box = $("failures");
     const list = $("failures-list");
     box.hidden = false;
-    $("failures-heading").textContent = `Failure summary: ${runId}`;
+    $("failures-heading").textContent = `Failure summary: ${groupId}`;
     list.replaceChildren(el("li", { text: "Loading…" }));
     try {
-      const data = await api("GET", runPath(runId));
-      const run = data.run;
+      const data = await api("GET", groupPath(groupId));
+      const group = data.group;
       $("failures-run").replaceChildren(
-        el("dt", { text: "Target" }), el("dd", { text: run.target }),
-        el("dt", { text: "Ref" }), el("dd", { text: refLabel(run) }),
-        el("dt", { text: "Plan / suite" }), el("dd", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
-        el("dt", { text: "Status" }), el("dd", {}, statusBadge(run.status)));
-      if (!data.failures.length) {
-        list.replaceChildren(el("li", { text: "No failed step recorded." }));
-      } else {
-        list.replaceChildren(...data.failures.map((failure) => el("li", { className: "failure" },
-          statusBadge(failure.status), " ", el("strong", { text: failure.step }),
-          failure.reason ? el("span", { text: `: ${failure.reason}` }) : null,
-          failure.log && failure.log.length
-            ? el("pre", { className: "log", text: failure.log.join("\n") }) : null)));
+        el("dt", { text: "Hosts" }), el("dd", { text: hostsText(group) }),
+        el("dt", { text: "Ref" }), el("dd", { text: refLabel(group) }),
+        el("dt", { text: "Plan / suite" }), el("dd", { text: `${group.plan ?? "–"} / ${group.suite ?? "–"}` }),
+        el("dt", { text: "Status" }), el("dd", {}, statusBadge(group.status)));
+      const items = [];
+      for (const member of data.members) {
+        if (!member.run_id) {
+          items.push(el("li", { className: "failure" },
+            statusBadge(member.status), " ",
+            el("strong", { text: member.host }),
+            el("span", { text: `: ${member.error || "no run was started"}` })));
+          continue;
+        }
+        for (const failure of member.failures) {
+          items.push(el("li", { className: "failure" },
+            statusBadge(failure.status), " ",
+            el("strong", { text: `${member.host} · ${failure.step}` }),
+            // A test gets its information button here too, reading this
+            // group's own listing of it; a build, flash or preflight step
+            // is not a test and has none to show.
+            state.testInfo[failure.step]
+              ? infoButton(failure.step, { plan: group.plan, suite: group.suite })
+              : null,
+            failure.reason ? el("span", { text: `: ${failure.reason}` }) : null,
+            failure.log && failure.log.length
+              ? el("pre", { className: "log", text: failure.log.join("\n") }) : null));
+        }
       }
+      list.replaceChildren(...(items.length ? items
+        : [el("li", { text: "No failed step recorded." })]));
     } catch (error) {
-      list.replaceChildren(el("li", { text: `Cannot load the run: ${error.message}` }));
+      list.replaceChildren(el("li", { text: `Cannot load the run group: ${error.message}` }));
     }
     $("failures-heading").focus();
   }
 
   // ----- live socket -------------------------------------------------------
+  //
+  // One stream, unfiltered: every target, run and group update, and every
+  // run's own records. The controller also offers ?group_id=ID, which
+  // carries one group and nothing else, but the history list is live too,
+  // so this page wants the lot and keeps the records of runs that are not
+  // the group on show out itself (transcriptOf).
 
   function connect() {
     const scheme = window.location.protocol === "https:" ? "wss://" : "ws://";
@@ -1525,8 +2703,18 @@
       state.retry = 1000;
       $("connection").className = "conn conn-up";
       $("connection").textContent = "Connected to the controller (live updates on).";
-      loadRuns();
-      if (state.selected) selectRun(state.selected, false);
+      loadGroups();
+      if (state.selected) {
+        // A fragment may name a run rather than its group; a reconnect
+        // re-reads the group on show without scrolling the page again.
+        const wanted = state.selected;
+        if (state.selectedIsRun) {
+          state.selectedIsRun = false;
+          selectRun(wanted, false);
+        } else {
+          selectGroup(wanted, { scroll: false });
+        }
+      }
     });
     socket.addEventListener("message", (message) => {
       let data;
@@ -1540,13 +2728,15 @@
         renderTargets();
         // A file that stayed on the target is a link only while its runner
         // is connected, so the live view follows the target's status.
-        renderLive();
+        renderGroup();
       } else if (data.type === "target" && data.target) {
         state.targets.set(data.target.host, data.target);
         renderTargets();
-        renderLive();
+        renderGroup();
       } else if (data.type === "run") {
         upsertRun(data.run);
+      } else if (data.type === "group") {
+        upsertGroup(data.group);
       } else if (data.type === "event") {
         addEvent(data.run_id, data.event);
       }
@@ -1561,13 +2751,16 @@
   }
 
   // The tests of the suite that need a build option, counted the way
-  // /api/plans counts the suite's own flags: only the steps the chosen
-  // target runs, since a step it does not run must not make it build.
+  // /api/plans counts the suite's own flags, over every host of the group:
+  // a step no host of it runs must not make it build, and a step one host
+  // runs must.
   function neededBy(suite, need) {
     if (!suite) return [];
-    return suite.tests
+    const pairs = groupSuites();
+    const views = pairs.length ? pairs.map(([, view]) => view) : [suite];
+    return [...new Set(views.flatMap((view) => view.tests
       .filter((test) => test[need] && test.runs_on_target !== false)
-      .map((test) => test.name);
+      .map((test) => test.name)))];
   }
 
   // Flash and the three build options need Build: each is disabled, with a
@@ -1650,9 +2843,6 @@
         syncBuildOptions();
       });
     }
-    // Another target is another plan listing: its own estimates, and its own
-    // answer to what the suite leaves out and what it must build.
-    $("target").addEventListener("change", loadPlans);
     $("build").addEventListener("change", syncBuildOptions);
     // Flashing builds the firmware image anyway, which the note says.
     $("flash-build").addEventListener("change", syncBuildOptions);
@@ -1661,7 +2851,36 @@
     $("refs-reload").addEventListener("click", loadRefs);
     $("plan").addEventListener("change", () => renderSuites());
     $("suite").addEventListener("change", renderSuiteTests);
-    $("cancel-button").addEventListener("click", cancelRun);
+    $("cancel-button").addEventListener("click", cancelGroup);
+    // The history filters: a change applies at once, and the form's own
+    // submit (Enter in the ref box, or Apply) does the same rather than
+    // navigating away.
+    $("history-filters").addEventListener("submit", (submit) => {
+      submit.preventDefault();
+      loadGroups();
+    });
+    $("history-target").addEventListener("change", loadGroups);
+    $("history-status").addEventListener("change", loadGroups);
+    // A ref picked from the suggestions, or typed and left, applies too.
+    $("history-ref").addEventListener("change", loadGroups);
+    $("history-clear").addEventListener("click", () => {
+      $("history-target").value = "";
+      $("history-status").value = "";
+      $("history-ref").value = "";
+      loadGroups();
+      $("history-target").focus();
+    });
+    $("history-older").addEventListener("click", loadOlderGroups);
+    // The information dialog: Close and Escape both close it, and focus
+    // goes back to the button it was opened from however it closed.
+    $("test-info-close").addEventListener("click", closeTestInfo);
+    $("test-info").addEventListener("close", restoreInfoFocus);
+    $("test-info").addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeTestInfo();
+      }
+    });
     $("manage-close").addEventListener("click", closeManage);
     $("manage-detect").addEventListener("click", detectBoards);
     $("add-board").addEventListener("submit", submitAdd);
@@ -1676,18 +2895,29 @@
       state.openFile = null;
       renderOutputFile();
     });
-    renderTargetSelect();
+    // Each host of the group gets its own tick; ticking one is another plan
+    // listing, with that host's own estimates and its own answer to what
+    // the suite leaves out and what it must build (renderHostChoices).
+    renderHostChoices();
     loadRefs();
     loadPlans();
-    // /ui/#run=<run_id> shows that run; &file=<path> also opens that saved
-    // file in the viewer, so a file view can be linked to and reopened.
-    const linked = /^#run=([^&]+)(?:&file=(.+))?$/.exec(window.location.hash);
-    if (linked && RUN_ID.test(linked[1])) {
-      state.selected = linked[1];
-      if (linked[2]) state.wantedFile = decodeURIComponent(linked[2]);
+    // /ui/#group=<group_id> shows that group, /ui/#run=<run_id> the group
+    // that run is a host of; &file=<path> also opens that saved file in the
+    // viewer, so a file view can be linked to and reopened.
+    const linked = /^#(group|run)=([^&]+)(?:&file=(.+))?$/.exec(window.location.hash);
+    if (linked && RUN_ID.test(linked[2])) {
+      state.selected = linked[2];
+      state.selectedIsRun = linked[1] === "run";
+      if (linked[3]) state.wantedFile = decodeURIComponent(linked[3]);
     }
     connect();
     window.setInterval(renderClock, 1000);
+    // The pills' fill moves with the clock: each running cell's share of
+    // its estimate is read from the time it started, so nothing is fetched
+    // and no row is rebuilt (which would announce the checklist to a screen
+    // reader, and take the focus off a pill, once a second).
+    window.setInterval(tickFills, 1000);
+    $("host-tabs").addEventListener("keydown", onTabKey);
   }
 
   document.addEventListener("DOMContentLoaded", start);
