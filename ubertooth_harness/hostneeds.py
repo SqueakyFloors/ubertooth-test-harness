@@ -18,7 +18,11 @@ One declaration, ``Needs``, sits on a case (``CommandCase.needs``,
   or ``--artifact "test build=PATH"``);
 - the alternate btbr image: the run's "btbr build" image (``--build
   --with-btbr``, or ``--artifact "btbr build=PATH"``), which is asked for in
-  its own right rather than read off the firmware build.
+  its own right rather than read off the firmware build;
+- the privilege an HCI connection needs: a case that pages a target from the
+  host's Bluetooth controller needs ``CAP_NET_RAW``, which the run either
+  holds, grants to a private copy of its own tool for the length of the run
+  (``--allow-hci-capability``), or has not got (``hciprivilege.py``, #401).
 
 What a host lacks is not run, and is recorded as "not applicable on <host>:
 <reason>", apart from skips and failures. A required test that lacks the
@@ -83,6 +87,14 @@ class Needs:
     btbr_build: bool = False
     # Host programs it runs that nothing here installs (HOST_TOOLS).
     host_tools: tuple[str, ...] = ()
+    # The case makes an HCI connection: it pages a target from the host's
+    # Bluetooth controller. The kernel's filter on a raw HCI socket keeps
+    # HCI Create Connection outside the subset an unprivileged opener may
+    # send, so this needs CAP_NET_RAW (hciprivilege.py, #401, where the
+    # bench measurement that settled which capability is recorded). Without it
+    # the tool stops in a tenth of a second with its own "Operation not
+    # permitted", which reads like the peers having stopped.
+    hci_connect: bool = False
 
     def __post_init__(self):
         unknown = [item for item in self.platforms if item not in PLATFORMS]
@@ -98,7 +110,7 @@ class Needs:
     def __bool__(self) -> bool:
         return bool(self.platforms or self.bluez_tools or self.python_tools
                     or self.firmware_build or self.btbr_build
-                    or self.host_tools)
+                    or self.host_tools or self.hci_connect)
 
     def describe(self) -> str:
         parts = []
@@ -112,6 +124,8 @@ class Needs:
             parts.append("firmware build")
         if self.btbr_build:
             parts.append("btbr firmware image")
+        if self.hci_connect:
+            parts.append("CAP_NET_RAW (it pages over HCI)")
         return ", ".join(parts) or "nothing"
 
 
@@ -139,6 +153,13 @@ class HostCapabilities:
     btbr_build: bool | None = None
     # The HOST_TOOLS this host has; None: not known yet.
     host_tools: frozenset | None = None
+    # Can this run make an HCI connection (hciprivilege.availability)? None:
+    # not known yet. The reason is carried beside it, because what a reader
+    # needs is not "no" but why: the capability is held, granted to a private
+    # copy for the length of the run, or absent with the option that would
+    # grant it named.
+    hci_connect: bool | None = None
+    hci_connect_reason: str = ""
     # Where the tools come from: "build", "installed tools", or "not known".
     basis: str = "not known"
 
@@ -154,6 +175,8 @@ class HostCapabilities:
             "firmware_build": self.firmware_build,
             "btbr_build": self.btbr_build,
             "host_tools": known(self.host_tools),
+            "hci_connect": self.hci_connect,
+            "hci_connect_reason": self.hci_connect_reason,
         }
 
     def describe(self) -> str:
@@ -167,7 +190,8 @@ class HostCapabilities:
                 f"Python tools build {flag(self.python_tools)}; "
                 f"firmware build {flag(self.firmware_build)}; "
                 f"btbr image {flag(self.btbr_build)}; "
-                f"host tools {host_tools}")
+                f"host tools {host_tools}; "
+                f"HCI connect {flag(self.hci_connect)}")
 
 
 def _platform_name(platform: str) -> str:
@@ -204,6 +228,15 @@ def unmet(needs: Needs, capabilities: HostCapabilities | None) -> str:
         for tool in needs.host_tools:
             if tool not in capabilities.host_tools:
                 return f"{tool} is not installed on {capabilities.host}"
+    if needs.hci_connect and capabilities.hci_connect is False:
+        # Last, so a host that cannot run the tool at all is told that first:
+        # the privilege only matters once the tool is there to need it. The
+        # reason comes from hciprivilege.availability, which names the real
+        # error and the option that would grant the capability (#401).
+        return capabilities.hci_connect_reason or (
+            "it pages over HCI, which needs CAP_NET_RAW, and this run has "
+            "none"
+        )
     return ""
 
 
@@ -228,7 +261,8 @@ def _installed_bluez(platform: str, path: str | None) -> frozenset:
 def planned_capabilities(
     host: str, platform: str, *, build: bool, with_python: bool, with_firmware: bool,
     artifact_labels: Iterable[str] = (), path: str | None = None,
-    with_btbr: bool = False,
+    with_btbr: bool = False, hci_connect: bool | None = None,
+    hci_connect_reason: str = "",
 ) -> HostCapabilities:
     """What a run with these options will have, before it builds anything.
 
@@ -238,6 +272,10 @@ def planned_capabilities(
     ``with_btbr`` is its own option, not read off ``with_firmware``: a
     firmware build makes the application image, and the alternate btbr image
     only when the run asked for it (#279).
+
+    ``hci_connect`` is what hciprivilege.availability decided for this run's
+    options, with its reason beside it: the run's own capability, the one it
+    will grant to a private copy, or none.
     """
     labels = set(artifact_labels)
     if build:
@@ -250,13 +288,16 @@ def planned_capabilities(
         firmware_build=bool(build and with_firmware) or TEST_BUILD_LABEL in labels,
         btbr_build=bool(build and with_btbr) or BTBR_BUILD_LABEL in labels,
         host_tools=_installed_host_tools(),
+        hci_connect=hci_connect,
+        hci_connect_reason=hci_connect_reason,
         basis="build" if build else "installed tools",
     )
 
 
 def run_capabilities(
     host: str, platform: str, build: Mapping | None, artifact_names: Iterable[str],
-    path: str | None = None,
+    path: str | None = None, hci_connect: bool | None = None,
+    hci_connect_reason: str = "",
 ) -> HostCapabilities:
     """What a run has, from its manifest: the build record and artifacts.
 
@@ -276,6 +317,8 @@ def run_capabilities(
         firmware_build=TEST_BUILD_LABEL in labels,
         btbr_build=BTBR_BUILD_LABEL in labels,
         host_tools=_installed_host_tools(),
+        hci_connect=hci_connect,
+        hci_connect_reason=hci_connect_reason,
         basis="build" if build else "installed tools",
     )
 

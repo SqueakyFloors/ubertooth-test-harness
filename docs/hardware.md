@@ -445,13 +445,24 @@ considering once a bench exists to test one on.
 page.** Everything here talks to the controller over a raw Bluetooth HCI
 socket, and opening one is not itself privileged — the kernel's own filter
 on such a socket (`hci_sec_filter` in `net/bluetooth/hci_sock.c`) lets an
-unprivileged opener send a subset of the HCI commands and requires
-`CAP_NET_ADMIN` for the rest. Measured on the bench as an ordinary user with
+unprivileged opener send a subset of the HCI commands and requires a
+capability for the rest. Measured on the bench as an ordinary user with
 no capabilities anywhere: `hciconfig <device>`, `hcitool con`, `hcitool inq`,
 `hcitool name <peer>` and `hcitool clock <peer>` all work, and
 `hcitool cc <peer>` does not — `Can't create connection: Operation not
 permitted`. HCI Create Connection is the command outside the filter's subset,
 where Remote Name Request is inside it.
+
+**Which capability, measured.** `CAP_NET_RAW`, and the bench settled it
+rather than the source: the same private copy of the same build, run against
+the same peer within a minute of itself on a 6.8 Linux kernel, was refused
+with `Operation not permitted` carrying `cap_net_admin+ep`, and paged
+successfully — `Not use AFH`, and on into its capture — carrying
+`cap_net_raw+ep`. `cap_net_raw,cap_net_admin+ep`, which this bench used to
+grant by hand, paged too, so the `CAP_NET_RAW` half of it was what was
+doing the work. `CAP_NET_RAW` alone is therefore both sufficient and the
+smaller set, and it is what the run grants. Why `CAP_NET_ADMIN` is not
+enough on that kernel is **not established**; that it is not is.
 
 So of the four binaries only the two fork tools need anything, and only for
 what they page: `ubertooth-follow` pages its target for the clock offset in
@@ -461,15 +472,53 @@ capability `ubertooth-follow` fails with
 own message, early, before it opens the board. An adapter bench therefore
 needs one of:
 
-- `CAP_NET_ADMIN` on `ubertooth-scan` and `ubertooth-follow`
-  (`sudo setcap cap_net_admin+ep <path>`) — which has to be redone for each
-  build of them, since a `--build` run puts fresh binaries in its own run
-  prefix. The bench granted `cap_net_raw,cap_net_admin+ep`, which also works
-  and is what the runs below were measured with;
-- or the run made by a user or service that already holds it.
+- **the run granting it to itself, which is what a bench should do:**
+  `run-suite --allow-hci-capability` copies the run's own
+  `ubertooth-follow` into a directory of the run's that only its user can
+  reach (0700), gives the **copy** `cap_net_raw+ep`, verifies it, puts the
+  copy first on the run's PATH, and takes the capability back and removes
+  the copy when the run ends. Nothing installed is touched and nothing is
+  left behind; `ubertooth_harness/hciprivilege.py` is the whole of it and
+  the run's `hci_privilege` record says what was granted, to what, and what
+  the removal established. It needs libcap (`setcap`, `getcap`; Debian and
+  Ubuntu: `libcap2-bin`) and the right to run `setcap` under `sudo` without
+  a password, which is the one privileged thing on the bench:
 
-`hostneeds.Needs` has no way to express a capability, so nothing checks this
-before the run.
+  ```text
+  # /etc/sudoers.d/ubertooth-harness-setcap
+  <harness user> ALL=(root) NOPASSWD: /usr/sbin/setcap
+  ```
+
+  A deployed runner is given the option once, at deploy time, like
+  `--allow-power-changes`: `scripts/deploy.sh --allow-hci-capability`. The
+  controller cannot pass it, so no click turns it on;
+- or the run made by a user or service that already holds `CAP_NET_RAW`,
+  which the run records and grants nothing for;
+- or, by hand for a one-off, `sudo setcap cap_net_raw+ep <path>` on the
+  built `ubertooth-follow` — which has to be redone for each build, since a
+  `--build` run puts fresh binaries in its own run prefix, and has to be
+  undone afterwards. The bench granted `cap_net_raw,cap_net_admin+ep` this
+  way for the runs recorded below, which is the same thing with a capability
+  the page does not need.
+
+Without one of them, `run-suite` records
+`Follow Classic piconet over HCI` **blocked**, naming the capability and the
+tool's own error, and the run ends failed with everything else measured: the
+privilege is a need a case declares (`hostneeds.Needs.hci_connect`) and a
+decision taken before anything is leased or built, so it is never three
+cases failing as if the peers had stopped.
+
+Two things about the copy are worth knowing before changing any of it. A file
+capability puts the loader into **secure-execution mode**, which drops
+`LD_LIBRARY_PATH`: the copy reaches the run's own libubertooth and libbtbb
+only through the absolute `DT_RUNPATH` the build records
+(`-DCMAKE_INSTALL_RPATH=<prefix>/lib`, `build.py`). So the copy is run once,
+with nothing in its environment, and must answer with this run's own version
+line — the release and the libbtbb beside it — or the grant fails closed. And
+the copy lives under the run directory rather than in `/tmp`, so it is on the
+same filesystem as the build it came from: a mount that will not carry file
+capabilities (`nosuid`, or no extended attributes) fails at the grant, where
+`getcap` reports nothing, instead of after a successful-looking `setcap`.
 
 One caution belongs here too:
 `ubertooth-scan` pages every piconet its sweep heard to read its name, and

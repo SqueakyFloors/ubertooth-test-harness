@@ -1321,6 +1321,49 @@ def _tee(stream, sinks) -> None:
             sink.flush()
 
 
+class _LastError:
+    """The last ``error:`` line the command wrote, kept as it goes past.
+
+    ``ubertooth-follow`` says why it stopped on standard error, early and in
+    one line -- ``error: connecting to <address> failed: Operation not
+    permitted`` -- and then exits 1. A session that reported only what it
+    measured afterwards said the pair had stopped streaming, which is what
+    cost the diagnosis of #401. So the line is kept here and named in the
+    failure beside the exit status, and the command's own words lead.
+
+    It is a sink of :func:`_tee`, so it is given whole lines and must answer
+    ``write`` and ``flush`` like the streams beside it.
+    """
+
+    LINE = re.compile(r"^(?:error|fatal):\s*\S")
+
+    def __init__(self):
+        self.line = ""
+
+    def write(self, text: str) -> None:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if self.LINE.match(stripped):
+                self.line = stripped
+
+    def flush(self) -> None:
+        return None
+
+    def exit_problem(self, command: Sequence[str], status: int) -> str:
+        """The command's own reason for a non-zero exit, where it gave one.
+
+        Empty unless the command both failed and said why: the exit status
+        on its own is already in the session's report (``command exit: N``)
+        and in the pattern every case that pins it checks, and a tool that
+        was interrupted at the planned end of its capture may exit non-zero
+        without anything having gone wrong. What this adds is the sentence
+        the tool wrote, which nothing else carried into the failure.
+        """
+        if status == 0 or not self.line:
+            return ""
+        return f"{command[0]} exited {status}: {self.line}"
+
+
 def _stop_child(child, grace: float = INTERRUPT_TIMEOUT_S) -> None:
     """End the command, interrupt first, kill if it will not go.
 
@@ -1351,6 +1394,7 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
                          sample_at: float | None = None,
                          sample: Callable[[float], None] | None = None,
                          drain: Callable[[], None] | None = None,
+                         errors: "_LastError | None" = None,
                          out, pass_through=None) -> tuple[int, float]:
     """Run the thing under test, saving its output and stopping it on time.
 
@@ -1360,6 +1404,12 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
     and its exit status is the command's own. ``sample_at`` reads the peer
     while the command runs, which costs a round trip to the board's shell
     and nothing on the air.
+
+    ``errors`` keeps the command's own last ``error:`` line, whichever
+    stream it used, for the caller to name beside a non-zero exit (#401).
+    Passing one is what makes standard error a pipe here; it is passed
+    straight on to this process's standard error either way, so the step's
+    record carries it as before.
 
     The command is never left running. A sample that fails, which is what a
     link going down mid-capture looks like, would otherwise leave a capture
@@ -1371,29 +1421,42 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
              if output_path else None)
     try:
         try:
-            child = subprocess.Popen(list(command), stdout=subprocess.PIPE,
-                                     text=True, errors="replace")
+            child = subprocess.Popen(
+                list(command), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE if errors is not None else None,
+                text=True, errors="replace")
         except OSError as error:
             raise PeerError(f"cannot run {command[0]}: {error}") from error
         sinks = [pass_through if pass_through is not None else sys.stdout]
         if saved:
             sinks.append(saved)
-        pump = threading.Thread(target=_tee, args=(child.stdout, sinks),
-                                daemon=True)
-        pump.start()
+        if errors is not None:
+            # The tool's own words reach the error tracker from both streams:
+            # ubertooth-follow prints its refusals on standard error and some
+            # of the fork's tools print theirs on standard output.
+            sinks.append(errors)
+        pumps = [threading.Thread(target=_tee, args=(child.stdout, sinks),
+                                  daemon=True)]
+        if errors is not None:
+            pumps.append(threading.Thread(
+                target=_tee, args=(child.stderr, [sys.stderr, errors]),
+                daemon=True))
+        for pump in pumps:
+            pump.start()
 
         def drained() -> None:
-            """Wait for the reader, then let go of the pipe.
+            """Wait for the readers, then let go of the pipes.
 
-            The reader is given the same grace to pass on what the command
-            wrote before it exited. One still blocked after that keeps the
+            Each reader is given the same grace to pass on what the command
+            wrote before it exited. One still blocked after that keeps its
             pipe open until this process ends, which is close enough behind
             it; closing the pipe underneath the thread would raise there
-            instead of here, and the thread is a daemon either way.
+            instead of here, and the threads are daemons either way.
             """
-            pump.join(INTERRUPT_TIMEOUT_S)
-            if not pump.is_alive():
-                child.stdout.close()
+            for pump, pipe in zip(pumps, (child.stdout, child.stderr)):
+                pump.join(INTERRUPT_TIMEOUT_S)
+                if not pump.is_alive() and pipe is not None:
+                    pipe.close()
 
         try:
             overran = _watch(child, out, started=started, timeout=timeout,
@@ -1821,6 +1884,11 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                                          SAMPLE_POINTS[0], 0.0))
         print("command: " + " ".join(command), file=out)
         out.flush()
+        # The command's own last `error:` line, which a failure names beside
+        # the exit status. Only the watched path can keep it: the plain one
+        # hands the command this process's own streams, so nothing here sees
+        # what went past (#401).
+        errors = _LastError()
         if wanted_map is None and command_output is None and interrupt_after is None:
             status, seconds = _run_command(command, timeout, drain)
         else:
@@ -1833,7 +1901,7 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 sample_at=None if wanted_map is None else _middle_of(
                     interrupt_after, timeout),
                 sample=None if wanted_map is None else middle, out=out,
-                drain=drain)
+                drain=drain, errors=errors)
         print(f"command exit: {status} after {seconds:.1f} s", file=out)
         # The last of the command's own window: whatever the boards said in
         # it that the drains inside the command have not read yet.
@@ -1865,7 +1933,13 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     # one.
     restarts = _restart_problems(out, boards)
     restarted = bool(restarts)
-    problems = restarts + problems
+    # Then the command's own reason, ahead of anything measured from it: a
+    # tool that refused to start says why in one line, and "it stopped early"
+    # below is the symptom of that rather than a finding of its own. Without
+    # this the reason a step recorded pointed at the peers while the tool had
+    # already said `Operation not permitted` (#401).
+    exited = errors.exit_problem(command, status)
+    problems = restarts + ([exited] if exited else []) + problems
     _report_serial(out, boards)
     if wanted_map is not None and len(samples) == len(SAMPLE_POINTS):
         requested = requested_map(wanted_map)

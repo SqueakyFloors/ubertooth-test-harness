@@ -62,6 +62,13 @@
 #   --no-libbtbb              no libbtbb: the runner cannot build, and refuses
 #                             runs that ask for a build
 #   --allow-power-changes     passed to the runner (lets runs switch USB power)
+#   --allow-hci-capability    passed to the runner: a run may grant
+#                             cap_net_raw+ep to a private copy of its own
+#                             ubertooth-follow for the length of the run, so
+#                             the tests that page a target over HCI can run.
+#                             Needs libcap and a sudoers rule letting the
+#                             runner user run setcap without a password;
+#                             without it those tests are recorded blocked
 #   --with-acroname           bootstrap with the Acroname BrainStem API, for a
 #                             USBHub3+ power controller (proprietary; opt-in)
 #   --external-board-lock TEMPLATE
@@ -120,6 +127,7 @@ libbtbb_source=
 libbtbb_ref=
 no_libbtbb=0
 allow_power_changes=0
+allow_hci_capability=0
 with_acroname=0
 external_board_lock=
 no_start=0
@@ -152,6 +160,7 @@ while [ "$#" -gt 0 ]; do
         --libbtbb-ref) need_value "$@"; libbtbb_ref=$2; shift ;;
         --no-libbtbb) no_libbtbb=1 ;;
         --allow-power-changes) allow_power_changes=1 ;;
+        --allow-hci-capability) allow_hci_capability=1 ;;
         --with-acroname) with_acroname=1 ;;
         --external-board-lock) need_value "$@"; external_board_lock=$2; shift ;;
         --no-start) no_start=1 ;;
@@ -620,6 +629,7 @@ runner_argv=(runner --controller "ws://127.0.0.1:$port/ws/runner"
 [ -z "$libbtbb_source" ] || runner_argv+=(--libbtbb-source "$libbtbb_source")
 [ -z "$libbtbb_ref" ] || runner_argv+=(--libbtbb-ref "$libbtbb_ref")
 [ "$allow_power_changes" = 0 ] || runner_argv+=(--allow-power-changes)
+[ "$allow_hci_capability" = 0 ] || runner_argv+=(--allow-hci-capability)
 [ -z "$external_board_lock" ] || runner_argv+=(--external-board-lock "$external_board_lock")
 runner_args=${runner_argv[*]}
 

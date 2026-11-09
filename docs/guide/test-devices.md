@@ -286,8 +286,10 @@ cases need
 `hciconfig` and `hcitool` on the host, declared as host tools the harness
 does not install. Reading the controller needs no privilege, but paging a
 device does: `ubertooth-follow` pages its target in every case and needs
-`CAP_NET_ADMIN`, which nothing else in the harness does, so an adapter bench
-has to grant it (see [`docs/hardware.md`](../hardware.md)).
+`CAP_NET_RAW`, which nothing else in the harness does. A run grants it to a
+private copy of its own tool when it is given
+`--allow-hci-capability`, and records the test blocked when it has neither
+that nor the capability itself (see [`docs/hardware.md`](../hardware.md)).
 
 [`testplans/hci.yaml`](../../testplans/hci.yaml) holds the two tests that bind it,
 `Bluetooth inquiry scan` and `Follow Classic piconet over HCI`, on the same

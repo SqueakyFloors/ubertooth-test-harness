@@ -26,7 +26,13 @@ a capture case ran, and `output/` when a command printed a lot):
   run -- and `manifest` (sources, plan and registry hashes,
   artifacts, invocations, Python/OS environment, and build toolchain), then
   build commands, preflight, and each test's events, including every command
-  and its output as it arrives. One `watchdog` record per board per read
+  and its output as it arrives. A run whose suite pages a target over HCI
+  carries `hci_privilege` twice: once for what it did about the privilege
+  (`held`, the run's own `CAP_NET_RAW`; or `granted`, naming the private
+  copy, the SHA-256 it was compared with, and the capability `getcap` read
+  back) and once for taking it back (`released`, with what the removal
+  established, or `failed`, which fails the run whatever the tests said).
+  See the adapter in [hardware.md](../hardware.md). One `watchdog` record per board per read
   ([Firmware watchdog](../guide/transitions-guards-watchdog.md#firmware-watchdog)) carries that board's record and
   what changed, and `watchdog_summary` at the end of the run carries the
   per-board self-reset count and any fork issue to file. `run_finished` holds

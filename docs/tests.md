@@ -5444,9 +5444,11 @@ measured `hciconfig`, `hcitool con`, `hcitool inq`, `hcitool name` and
 unprivileged process cannot do on a raw HCI socket is page —
 `hcitool cc <peer>` answers `Operation not permitted`, and so does
 `ubertooth-follow`, which pages its target in every case. So
-`ubertooth-follow` needs `CAP_NET_ADMIN`, and `ubertooth-scan` needs it for
-`-x` only; `hciconfig` and `hcitool` need nothing. See
-[`docs/hardware.md`](hardware.md) for how a bench grants it.
+`ubertooth-follow` needs `CAP_NET_RAW`, and `ubertooth-scan` needs it for
+`-x` only; `hciconfig` and `hcitool` need nothing. Which capability is a
+measurement rather than a reading of the source, and `CAP_NET_ADMIN` alone
+was measured not to be enough; see
+[`docs/hardware.md`](hardware.md) for that and for how a bench grants it.
 `hostneeds.Needs` has no way to express a capability, so nothing checks this
 before the run.
 
@@ -5643,6 +5645,18 @@ the length of the command: the driver adds the setup allowance to the window
 it interrupts at, so a tool whose page was answered at once captures for most
 of that allowance as well. Measured on the bench, a `duration: 25s` follow
 case runs the tool for about 83 seconds and captures for most of them.
+
+**It also needs a privilege, and that is settled before the run.** The page
+is an HCI Create Connection, which the kernel's filter on a raw HCI socket
+keeps outside the subset an unprivileged opener may send, so it needs
+`CAP_NET_RAW`; without it the tool stops in about a tenth of a second with
+`error: connecting to <address> failed: Operation not permitted`, before it
+opens the board. A run holding the capability uses it;
+`run-suite --allow-hci-capability` grants `cap_net_raw+ep` to a private
+copy of the run's own `ubertooth-follow` and takes it back when the run ends;
+a run with neither records this test **blocked**, naming that error, and
+measures the rest of the suite. How the copy is made, verified and removed is
+in [hardware.md](hardware.md), under the adapter.
 
 **Commands.** The same adapter reads, and `ubertooth-follow` pages the
 piconet's leader from it; the driver interrupts it, since its `-t` is the

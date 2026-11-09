@@ -38,6 +38,7 @@ runner (`After=`/`Wants=` the controller) dials
 | `--libbtbb-ref REF` | libbtbb commit the runner builds (default `fork-pin`: the pin of each Ubertooth commit it builds, see below) |
 | `--no-libbtbb` | no libbtbb: the runner cannot build and refuses runs with Build checked |
 | `--allow-power-changes` | passed to the runner |
+| `--allow-hci-capability` | passed to the runner: a run may grant `cap_net_raw+ep` to a private copy of its own `ubertooth-follow` for the length of the run, so the tests that page a target over HCI can run. Needs libcap and a sudoers rule letting the runner user run `setcap` without a password ([hardware.md](../hardware.md)); without it those tests are recorded blocked |
 | `--with-acroname` | bootstrap with the Acroname BrainStem API (`python3 bootstrap.py --with-acroname`), for a USBHub3+ power controller |
 | `--external-board-lock TEMPLATE` | passed to the runner: runs also hold a lab's own per-board lock files ([External board locks](leases.md#external-board-locks)); `~/` is expanded here |
 | `--port N` | controller port on `127.0.0.1` (default 8765); on macOS the port the tunnel forwards at both ends |

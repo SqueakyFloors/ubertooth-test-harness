@@ -171,6 +171,7 @@ Useful options, in the order they come up:
 | `--bootloader record\|check\|update` | record, compare, or install the bootloader under the firmware |
 | `--artifact "KGV=<path>"` | supply a pinned image a test alternates against |
 | `--allow-power-changes` | arm real USB power and data changes |
+| `--allow-hci-capability` | let the run grant `cap_net_raw+ep` to a private copy of its own `ubertooth-follow`, so the tests that page a target over HCI can run; taken back when the run ends ([hardware.md](docs/hardware.md)) |
 | `--allow-destructive` | arm a test that can leave a board needing the bench |
 | `--test "<name>"` | run one test of the suite |
 
