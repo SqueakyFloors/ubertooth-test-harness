@@ -210,18 +210,25 @@ MIN_DISTINCT_NOISE = 4
 # measured the background is asked for four different figures out of three
 # (ubertooth-test-harness#406).
 #
-# Bounded from both sides by figures already measured rather than by a
-# guess. Below, MIN_DISTINCT_NOISE is 4, and a sample of four asks that
-# every one of the four differ, which is the sharp edge this is here to
-# remove; at six, two of the six may repeat and the floor is still a test of
-# variation. Above, a capture cannot carry more measured figures than it has
-# records, and the lowest records floor held to the level floors is
-# MIN_PACKETS -- ten. Of the twenty measured captures, 90 to 326 records of
-# 122 to 373 carried a measured figure, roughly three quarters, so a capture
-# that only just met a ten-record floor would be expected to carry about
-# seven, and six leaves it clear. Against the measurements themselves this
-# is a fifteenth of the thinnest sample any of them collected, so a working
-# receiver clears it on a capture far thinner than any measured one.
+# Bounded below by what makes the count a test at all: MIN_DISTINCT_NOISE is
+# 4, and a sample of four asks that every one of the four differ, which is
+# the sharp edge this is here to remove. At six, two may repeat and the floor
+# still fails a receiver whose figures do not vary. Bounded above by the
+# records floor, since a capture cannot carry more measured figures than it
+# has records, and the lowest floor held to the level floors is MIN_PACKETS
+# -- ten, of which six leaves four free to have measured nothing. Against
+# the measurements themselves this is a fifteenth of the thinnest sample the
+# twenty captures collected (90 to 326 measured figures in 122 to 373
+# records, roughly three quarters), so nothing near a measured size comes
+# near it.
+#
+# Between those bounds is a window this does change: a ten-record capture
+# whose four measured figures all differ meets the count today and fails
+# this floor. That is the intent rather than a cost. Four different figures
+# out of four is the pass the count cannot tell from a receiver with nothing
+# to say, which is what #406 asks to remove, and a capture that produces one
+# is a twelfth of the thinnest window measured -- so it fails naming its
+# sample, the nearest thing to the cause its records can show.
 MIN_MEASURED_NOISE = 6
 # Records the audio capture must hold, its own floor rather than the shared
 # one. The two floors above are derived figures -- how much a sample varies

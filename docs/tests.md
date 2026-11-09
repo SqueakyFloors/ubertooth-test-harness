@@ -4484,14 +4484,20 @@ no receiver can pass, reported as a level fault
 So the capture must first carry at least six records with a measured figure,
 and below that it fails on having measured the background on almost nothing,
 with the floor on variation left unasked rather than added as a second,
-misleading line. Six sits between the two bounds the figure has to: above
-four, so the floor on different figures can be met with a repeat to spare,
-and below ten, the records floor the thinnest of these captures is held to,
-where roughly three quarters of records carrying a measured figure leaves
-about seven. It is a fifteenth of the thinnest sample the twenty captures
-collected. The command line refuses a floor of more different figures than
-the sample it is counted over could hold, so a run cannot ask the impossible
-again.
+misleading line. Six sits between the two bounds the figure has: above four,
+the floor on different figures, so it can be met with a repeat to spare, and
+below ten, the records floor the thinnest of these captures is held to, which
+leaves four of those ten free to have measured nothing. It is a fifteenth of
+the thinnest sample the twenty captures collected, so nothing near a measured
+size comes near it.
+
+There is a window it does change: a ten-record capture whose four measured
+figures all differ meets the count today and fails this floor. That is the
+point. Four different figures out of four is the pass the count cannot tell
+from a receiver with nothing to say, and a capture that produces one is a
+twelfth of the thinnest window measured, so it fails naming its sample. The
+command line refuses a floor of more different figures than the sample it is
+counted over could hold, so a run cannot ask the impossible again.
 
 **A payload longer than the bank it arrived in.** No record may carry more
 payload than one capture bank can hold. An Ubertooth sends a Basic Rate

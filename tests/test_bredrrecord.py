@@ -548,6 +548,29 @@ class Levels(unittest.TestCase):
             ["1 distinct noise figures in the 6 records that carry a measured "
              "one, expected at least 4"], latched)
 
+    def test_the_floor_bites_at_the_lowest_records_floor_it_is_asked_of(self):
+        """The window the sample floor changes, pinned where it is reachable
+        -- the shared records floor of ten rather than the audio capture's
+        fifty. A ten-record capture whose four measured figures all differ
+        meets the count today, and four of four differing is the pass the
+        count cannot tell from a receiver with nothing to say, so it fails
+        on the sample instead (#406). The same ten records with six
+        measurements in them are judged on variation and clear it."""
+        def floors(found):
+            return bredrrecord.problems(found, min_packets=10,
+                                        min_distinct_signal=4,
+                                        min_measured_noise=6,
+                                        min_distinct_noise=4)
+
+        self.assertEqual(
+            ["4 of 10 records carry a measured noise figure, expected at "
+             "least 6: too few for a floor on how much the background varies "
+             "to be a test of anything"],
+            floors(self.levels(4, vary=True) + self.unmeasured(6)))
+        self.assertEqual([], floors(self.levels(4, vary=True)
+                                    + self.levels(2, vary=False)
+                                    + self.unmeasured(4)))
+
     def test_a_capture_short_of_its_records_floor_is_asked_for_no_sample(self):
         """The sample floor is a count over the capture's own records, so it
         goes the way of the variation floors on a thin capture (#399): the
