@@ -71,10 +71,11 @@ MAC = "Host_Mac"
 # the clock is asking one thing of it (#383).
 PATIENT_HEARTBEAT_S = 60
 # The reply timeout a test sets when it means to hold one host's caller
-# waiting and then let it go: the figure itself does not matter, because the
-# wait passes when the manual clock is moved this far and at no other time
-# (#390). It stays well inside the heartbeat allowance above.
-REPLY_TIMEOUT_S = 1
+# waiting and then let it go: the figure itself does not decide the outcome,
+# because the wait passes when the manual clock is moved this far and at no
+# other time (#390). It is short so that a test which lets real time pass to
+# show the caller still waiting need pause only briefly.
+REPLY_TIMEOUT_S = 0.05
 OPERATING_SYSTEMS = {
     "linux": {"system": "Linux", "release": "6.8", "distribution": "Ubuntu 24.04"},
     "macos": {"system": "Darwin", "release": "24.1.0", "macos": "15.1"},
@@ -996,9 +997,14 @@ class GroupStartTests(RunGroupTestCase):
         and then moves the clock past the reply timeout so that the Mac's
         caller gives up. The answer is the 201 of a group one host of which
         is running while the other's request is still outstanding, which is
-        the window the two tests either side of this one read. Nothing here
-        waits on the wall clock for it, so a loaded host cannot turn that
-        answer into the 504 of a group neither host started.
+        the window the two tests either side of this one read.
+
+        Each round first lets several times the reply timeout pass in real
+        time and reads that the caller is still waiting, which is what a
+        reply wait measured on the event loop's clock could not do. So a
+        loaded host cannot turn the 201 into the 504 of a group neither host
+        started, and a reply wait that went back to the loop's clock fails
+        here rather than passing slowly.
         """
         linux, mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
         clock = self.manual_clock()
@@ -1015,8 +1021,10 @@ class GroupStartTests(RunGroupTestCase):
                     run_id=run_id,
                 )
                 await wait_until(lambda: run_id in self.controller.runs)
-                # Held: the Mac's caller is still waiting, because this clock
-                # has not reached its deadline and nothing else moves it.
+                # Held: the Mac's caller is still waiting after real time
+                # enough for several of its deadlines, because this clock has
+                # not reached the one deadline it has.
+                await asyncio.sleep(5 * REPLY_TIMEOUT_S)
                 self.assertFalse(post.done())
                 clock.advance(REPLY_TIMEOUT_S)
                 status, payload, _ = await post

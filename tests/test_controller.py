@@ -209,17 +209,25 @@ class ManualClock:
         """As the real clock's wait, but the deadline is this clock's.
 
         The wait ends when the future is answered or when ``advance`` carries
-        this clock to the deadline. The future is left alone either way, as
-        the real clock leaves it: a caller that gives up never cancels an
-        answer another caller may still be waiting for.
+        this clock to the deadline. A deadline already passed when the wait
+        begins is the real clock's timeout-zero case, and is answered the
+        same way: the reply counts only if it was already here. The future is
+        left alone either way, as the real clock leaves it, so a caller that
+        gives up never cancels an answer another caller may still want.
         """
         deadline = self.now + timeout
-        expired = asyncio.Event()
+        answer = asyncio.shield(future)
         if self.now >= deadline:
-            expired.set()
+            # The deadline had passed before the wait began, so this is the
+            # real clock's own timeout-zero case: the answer counts only if
+            # it was already here, and nothing is waited for.
+            if answer.done():
+                return answer.result()
+            answer.cancel()  # the shield only; the future itself is untouched
+            raise asyncio.TimeoutError
+        expired = asyncio.Event()
         entry = (deadline, expired)
         self._waits.append(entry)
-        answer = asyncio.shield(future)
         release = asyncio.ensure_future(expired.wait())
         try:
             await asyncio.wait(
