@@ -2356,27 +2356,6 @@ def _run_leased(
         raise
     if publisher is None:
         run_dir = create_run_directory(args.output, run_id)
-    privilege = hciprivilege.NOT_GRANTED
-    if hci_tests:
-        try:
-            privilege = _grant_hci_privilege(
-                args, registry, sources, executor, publisher, run_dir, hci_tests
-            )
-        except BaseException as error:
-            _finish_failed_run(
-                publisher, run_dir, str(error) or type(error).__name__
-            )
-            if isolation is not None:
-                isolation.close()
-            raise
-        if privilege.granted:
-            # The copies keep the tools' own names and come first on PATH, so
-            # every command line in the suite is unchanged and only the tools
-            # a case of this suite pages with are privileged at all.
-            executor = SubprocessCommandExecutor(
-                privilege.environment(
-                    getattr(executor, "environment", None) or os.environ)
-            )
     cancellation = CancellationToken()
     previous_handlers = {}
 
@@ -2387,7 +2366,33 @@ def _run_leased(
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         previous_handlers[signum] = signal.getsignal(signum)
         signal.signal(signum, request_cancellation)
+    # The grant goes inside the try below, and after the handlers above, so
+    # that the one window where a capability could be left behind is closed:
+    # a signal arriving while the copy is being made is turned into a
+    # cancellation rather than killing the process, and anything the grant
+    # raises reaches the `finally` that takes the capability back.
+    privilege = hciprivilege.NOT_GRANTED
     try:
+        if hci_tests:
+            try:
+                privilege = _grant_hci_privilege(
+                    args, registry, sources, executor, publisher, run_dir,
+                    hci_tests,
+                )
+            except BaseException as error:
+                _finish_failed_run(
+                    publisher, run_dir, str(error) or type(error).__name__
+                )
+                raise
+            if privilege.granted:
+                # The copies keep the tools' own names and come first on
+                # PATH, so every command line in the suite is unchanged and
+                # only the tools a case of this suite pages with are
+                # privileged at all.
+                executor = SubprocessCommandExecutor(
+                    privilege.environment(
+                        getattr(executor, "environment", None) or os.environ)
+                )
         summary = NamedTestSequencer(
             executor,
             catalog=catalog,

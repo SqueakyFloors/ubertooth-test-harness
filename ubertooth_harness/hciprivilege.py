@@ -44,8 +44,11 @@ works:
   binary is the one under test.
 - **Never left behind.** `release` takes the capability off, requires
   `getcap` to report nothing, and then unlinks the copy and its directory.
-  It runs in the caller's `finally`, and again from `atexit` for a path that
-  did not reach one; what `SIGKILL` leaves is one file under the run
+  It runs in the caller's `finally`, which the grant itself is inside, and
+  again from `atexit` for a path that did not reach one; `run-suite` installs
+  its signal handlers before the grant, so an interrupt while the copy is
+  being made is a cancellation rather than a dead process. What `SIGKILL`
+  leaves is one file under the run
   directory, which the next `grant` for that run would refuse rather than
   reuse.
 - **Verified, not assumed.** The copy is compared with its source by
