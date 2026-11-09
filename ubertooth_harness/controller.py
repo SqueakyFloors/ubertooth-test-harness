@@ -459,6 +459,32 @@ class Run:
         return data
 
 
+class Clock:
+    """Monotonic time, and the waiting the controller measures on it.
+
+    Every period the controller measures is read here: the grace period a
+    request nobody waits for is kept, the heartbeat allowance, the retention
+    interval, and how long a REST caller waits for its runner's answer. The
+    waiting is part of the clock rather than a bare ``asyncio.wait_for``,
+    whose deadline is the event loop's own, so that one clock decides all
+    four. A test that holds this clock still holds an outstanding reply wait
+    with it, and so says which request gives up and when rather than racing
+    a loaded host for the answer (#390).
+    """
+
+    def __call__(self) -> float:
+        return time.monotonic()
+
+    async def wait(self, future: asyncio.Future, timeout: float):
+        """The future's result, or ``TimeoutError`` once ``timeout`` passes.
+
+        The future itself is left alone either way: a caller that gives up
+        never cancels an answer other callers may still be waiting for, and
+        a late answer still takes effect.
+        """
+        return await asyncio.wait_for(asyncio.shield(future), timeout)
+
+
 class Link:
     """One WebSocket as the controller sees it (framework independent)."""
 
@@ -560,7 +586,7 @@ class Controller:
         late_reply_grace_s: float = DEFAULT_LATE_REPLY_GRACE_S,
         monitor_interval_s: float = DEFAULT_MONITOR_INTERVAL_S,
         log: Callable[[str], None] = _log,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Clock | None = None,
         ref_source: GitRefSource | None = None,
         plans_dir: Path | str = DEFAULT_PLANS_DIR,
         notifier: Notifier | None = None,
@@ -579,7 +605,7 @@ class Controller:
         self.prune_interval_s = prune_interval_s
         self._pruned_at: float | None = None
         self.log = log
-        self.clock = clock
+        self.clock = clock if clock is not None else Clock()
         # Lists the refs a run may name; None refuses every run.
         self.ref_source = ref_source
         self.plans_dir = Path(plans_dir).expanduser()
@@ -2136,9 +2162,10 @@ class Controller:
         pending.waiters += 1
         pending.expires_at = None
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(pending.future), self.reply_timeout_s
-            )
+            # Measured on the controller's own clock, like the grace period
+            # below: the two periods that decide what becomes of a request
+            # are then read from one place (#390).
+            return await self.clock.wait(pending.future, self.reply_timeout_s)
         except asyncio.TimeoutError:
             raise ControllerError("runner did not answer in time", 504) from None
         finally:

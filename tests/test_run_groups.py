@@ -70,6 +70,12 @@ MAC = "Host_Mac"
 # a grace period cannot also make a target look overdue: a test that advances
 # the clock is asking one thing of it (#383).
 PATIENT_HEARTBEAT_S = 60
+# The reply timeout a test sets when it means to hold one host's caller
+# waiting and then let it go: the figure itself does not decide the outcome,
+# because the wait passes when the manual clock is moved this far and at no
+# other time (#390). It is short so that a test which lets real time pass to
+# show the caller still waiting need pause only briefly.
+REPLY_TIMEOUT_S = 0.05
 OPERATING_SYSTEMS = {
     "linux": {"system": "Linux", "release": "6.8", "distribution": "Ubuntu 24.04"},
     "macos": {"system": "Darwin", "release": "24.1.0", "macos": "15.1"},
@@ -951,15 +957,23 @@ class GroupStartTests(RunGroupTestCase):
 
     async def test_a_child_accepted_after_the_cancel_is_cancelled_too(self):
         """A host that answered late must not run on by itself."""
-        linux, mac = await self.runners()
-        self.controller.reply_timeout_s = 0.3
+        linux, mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
+        clock = self.manual_clock()
+        self.controller.reply_timeout_s = REPLY_TIMEOUT_S
         post = await self.start_group([LINUX, MAC])
         requests = {runner.host: await runner.recv() for runner in (linux, mac)}
         await linux.send(
             "run_accepted", request_id=requests[LINUX]["request_id"], run_id="run-1"
         )
+        # The Linux host has started, and the Mac's caller gives up only
+        # because the clock was moved past the reply timeout: the 201 below
+        # is the group's answer while the Mac's request is still outstanding,
+        # and no wall clock decides which of the two it is (#390).
+        await wait_until(lambda: "run-1" in self.controller.runs)
+        clock.advance(REPLY_TIMEOUT_S)
         self.assertEqual(201, (await post)[0])
         group_id = self.controller.runs["run-1"].group_id
+        self.assertEqual({MAC}, self.controller._pending_hosts(group_id))
         cancel = asyncio.create_task(self.http(
             "POST", f"/api/run-groups/{group_id}/cancel", {"reason": "bench needed"},
         ))
@@ -975,6 +989,64 @@ class GroupStartTests(RunGroupTestCase):
                          (late["type"], late["run_id"], late["reason"]))
         await mac.send("cancel_accepted", run_id="run-2")
         await wait_until(lambda: self.controller.runs["run-2"].cancel_requested)
+
+    async def test_a_group_answers_while_one_host_is_still_starting(self):
+        """The same window many times over, with the clock in hand (#390).
+
+        Each round starts a group on both hosts, lets the Linux host accept,
+        and then moves the clock past the reply timeout so that the Mac's
+        caller gives up. The answer is the 201 of a group one host of which
+        is running while the other's request is still outstanding, which is
+        the window the two tests either side of this one read.
+
+        Each round first lets several times the reply timeout pass in real
+        time and reads that the caller is still waiting, which is what a
+        reply wait measured on the event loop's clock could not do. So a
+        loaded host cannot turn the 201 into the 504 of a group neither host
+        started, and a reply wait that went back to the loop's clock fails
+        here rather than passing slowly.
+        """
+        linux, mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
+        clock = self.manual_clock()
+        self.controller.reply_timeout_s = REPLY_TIMEOUT_S
+        for round_number in range(20):
+            with self.subTest(round=round_number):
+                run_id = f"run-{round_number + 1}"
+                post = await self.start_group([LINUX, MAC])
+                requests = {
+                    runner.host: await runner.recv() for runner in (linux, mac)
+                }
+                await linux.send(
+                    "run_accepted", request_id=requests[LINUX]["request_id"],
+                    run_id=run_id,
+                )
+                await wait_until(lambda: run_id in self.controller.runs)
+                # Held: the Mac's caller is still waiting after real time
+                # enough for several of its deadlines, because this clock has
+                # not reached the one deadline it has.
+                await asyncio.sleep(5 * REPLY_TIMEOUT_S)
+                self.assertFalse(post.done())
+                clock.advance(REPLY_TIMEOUT_S)
+                status, payload, _ = await post
+                self.assertEqual(201, status, payload)
+                group = payload["group"]
+                self.assertEqual(
+                    ("running", 2, 1, False),
+                    (group["status"], group["hosts_asked"],
+                     group["hosts_started"], group["complete"]),
+                )
+                self.assertEqual(
+                    ["running", "starting"],
+                    [member["status"] for member in group["members"]],
+                )
+                # The Mac's request outlived its caller, so that host may
+                # still arrive: the group says starting rather than why not.
+                self.assertEqual(
+                    {MAC}, self.controller._pending_hosts(group["group_id"])
+                )
+                self.assertIsNone(group["members"][1]["error"])
+                # Free the Linux host for the next round.
+                await self.finish(linux, run_id)
 
     async def test_a_late_refusal_is_recorded_on_the_group(self):
         """The runner's own reason, not "its run was never started"."""
@@ -1196,13 +1268,18 @@ class GroupStartTests(RunGroupTestCase):
 
     async def test_a_group_record_that_cannot_be_written_is_only_a_log_line(self):
         """A runner session must not fall over on a write to a group record."""
-        linux, mac = await self.runners()
-        self.controller.reply_timeout_s = 0.3
+        linux, mac = await self.runners(interval=PATIENT_HEARTBEAT_S)
+        clock = self.manual_clock()
+        self.controller.reply_timeout_s = REPLY_TIMEOUT_S
         post = await self.start_group([LINUX, MAC])
         requests = {runner.host: await runner.recv() for runner in (linux, mac)}
         await linux.send(
             "run_accepted", request_id=requests[LINUX]["request_id"], run_id="run-1"
         )
+        # As above: the Linux host started, and the Mac's caller gives up
+        # because the clock was moved and for no other reason (#390).
+        await wait_until(lambda: "run-1" in self.controller.runs)
+        clock.advance(REPLY_TIMEOUT_S)
         self.assertEqual(201, (await post)[0])
         with patch.object(
             Controller, "_persist_group", side_effect=OSError("read-only")

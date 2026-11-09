@@ -163,29 +163,89 @@ async def wait_until(predicate, timeout=TIMEOUT_S, interval=0.02):
         await asyncio.sleep(interval)
 
 
+# A wait on the manual clock that nothing releases is a test that forgot to
+# move the clock, not a slow controller. This backstop turns that into a
+# failure the test reports rather than a run that hangs; it is far longer
+# than any period a test holds a wait for, so it never decides an outcome.
+STUCK_WAIT_S = 30
+
+
 class ManualClock:
     """The controller's clock, which moves only when a test moves it.
 
-    The controller measures two things on this clock: the grace period a
-    start request stays pending after its caller has gone, and how long a
-    target may go without a heartbeat. On the real clock, a test that looks
-    at what is kept during such a period has only that period to do it in,
-    and a loaded host can close the window first (#383). A test that installs
-    this instead decides when each of those periods passes, so the state it
-    asserts cannot change under it, and the transition it waits for happens
-    because it moved the clock and for no other reason.
+    The controller measures four things on this clock: the grace period a
+    start request stays pending after its caller has gone, how long a target
+    may go without a heartbeat, the retention interval, and how long a REST
+    caller waits for its runner's answer. On the real clock, a test that
+    looks at what is kept during such a period has only that period to do it
+    in, and a loaded host can close the window first (#383, #390). A test
+    that installs this instead decides when each of those periods passes, so
+    the state it asserts cannot change under it, and the transition it waits
+    for happens because it moved the clock and for no other reason.
     """
 
     def __init__(self, now: float = 10_000.0):
         self.now = float(now)
+        # Every reply wait outstanding on this clock: its deadline, and the
+        # event that releases it once the clock reaches that deadline.
+        self._waits: list[tuple[float, asyncio.Event]] = []
 
     def __call__(self) -> float:
         return self.now
 
     def advance(self, seconds: float) -> float:
-        """Move the clock on, as the controller will next read it."""
+        """Move the clock on, as the controller will next read it.
+
+        A wait whose deadline this passes is released here, so the caller
+        gives up because the clock moved and for no other reason.
+        """
         self.now += seconds
+        for deadline, expired in self._waits:
+            if self.now >= deadline:
+                expired.set()
         return self.now
+
+    async def wait(self, future: asyncio.Future, timeout: float):
+        """As the real clock's wait, but the deadline is this clock's.
+
+        The wait ends when the future is answered or when ``advance`` carries
+        this clock to the deadline. A deadline already passed when the wait
+        begins is the real clock's timeout-zero case, and is answered the
+        same way: the reply counts only if it was already here. The future is
+        left alone either way, as the real clock leaves it, so a caller that
+        gives up never cancels an answer another caller may still want.
+        """
+        deadline = self.now + timeout
+        answer = asyncio.shield(future)
+        if self.now >= deadline:
+            # The deadline had passed before the wait began, so this is the
+            # real clock's own timeout-zero case: the answer counts only if
+            # it was already here, and nothing is waited for.
+            if answer.done():
+                return answer.result()
+            answer.cancel()  # the shield only; the future itself is untouched
+            raise asyncio.TimeoutError
+        expired = asyncio.Event()
+        entry = (deadline, expired)
+        self._waits.append(entry)
+        release = asyncio.ensure_future(expired.wait())
+        try:
+            await asyncio.wait(
+                {answer, release}, timeout=STUCK_WAIT_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if answer.done():
+                return answer.result()
+            if not expired.is_set():
+                raise AssertionError(
+                    f"a reply wait of {timeout}s stood for {STUCK_WAIT_S}s of "
+                    "real time: the test never moved the manual clock past it"
+                )
+            raise asyncio.TimeoutError
+        finally:
+            self._waits.remove(entry)
+            release.cancel()
+            answer.cancel()  # the shield only; the future itself is untouched
 
 
 class ControllerTestCase(unittest.IsolatedAsyncioTestCase):
@@ -1417,6 +1477,32 @@ class ReviewFixTests(ControllerTestCase):
                 lambda: self.controller.targets["Host_A"].protocol_errors == errors + 1
             )
             self.assertNotIn("run-2", self.controller.runs)
+
+    async def test_a_caller_gives_up_on_the_controller_clock(self):
+        """The reply timeout is a period of the controller's own clock (#390).
+
+        A test that holds that clock holds an outstanding wait with it,
+        however long this host takes over the rest of the window, which is
+        what lets a group test read the answer a group gives while one of
+        its hosts is still starting.
+        """
+        self.controller.reply_timeout_s = 0.05
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, interval=10)
+            clock = self.manual_clock()
+            post, message = await self.start_run(runner)
+            # Many times the reply timeout in real time, and the caller is
+            # still waiting: nothing but this clock ends that wait.
+            await asyncio.sleep(10 * self.controller.reply_timeout_s)
+            self.assertFalse(post.done())
+            clock.advance(self.controller.reply_timeout_s)
+            self.assertEqual(504, (await post)[0])
+            # The request itself was left alone, as a reply wait on the real
+            # clock leaves it: a late acceptance still creates the run.
+            await runner.send(
+                "run_accepted", request_id=message["request_id"], run_id="run-1"
+            )
+            await wait_until(lambda: "run-1" in self.controller.runs)
 
     async def test_event_after_run_finished_rebuilds_the_report(self):
         async with FakeRunner(self.port) as runner:
