@@ -253,7 +253,8 @@ hosts at once is a **run group**, carried on one stream, and a run of one
 host is a group of one, so the GUI has one thing to draw. A **release gate**
 is the layer above: one named configuration of every bounded release suite,
 each stage a run group of its own, scheduled in waves and answered with one
-verdict ([release-gate.md](docs/guide/release-gate.md)).
+verdict, inside one bounded deadline, with every pending stage saying what it
+is waiting for ([release-gate.md](docs/guide/release-gate.md)).
 
 Two properties matter for the design:
 

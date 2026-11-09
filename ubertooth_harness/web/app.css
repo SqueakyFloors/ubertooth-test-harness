@@ -782,6 +782,9 @@ td.actions button, td.actions .button-link {
 }
 .gate-matrix th[scope="row"] { font-weight: 600; min-width: 11rem; }
 .gate-matrix th[scope="row"] p { margin: 0.2rem 0 0; font-weight: 400; }
+/* What a pending stage is waiting for, set in from its purpose so the two
+   are not read as one sentence. */
+.gate-matrix .gate-waiting { font-style: italic; padding-left: 0.6rem; border-left: 2px solid var(--line); }
 .gate-matrix .time { white-space: nowrap; }
 .gate-run { margin: 0 0 0.25rem; display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; }
 .panel-gate .live-actions { margin: 0.8rem 0; display: flex; gap: 0.8rem; align-items: center; flex-wrap: wrap; }

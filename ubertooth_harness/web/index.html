@@ -113,6 +113,11 @@
             <label for="gate-bootloader">Include the bootloader acceptance stage</label>
           </div>
           <p id="gate-bootloader-note" class="hint">It installs the bootloader built from this ref over the debug programmer the registry pairs with a board, which is the one part of flash an ordinary run cannot put back. Each host's run writes it only on a board its own registry pairs with a programmer, and records what is installed otherwise.</p>
+          <div class="field">
+            <label for="gate-deadline">Deadline, in minutes (optional)</label>
+            <input type="number" id="gate-deadline" name="gate_deadline" min="60" max="720" step="1" inputmode="numeric" aria-describedby="gate-deadline-note">
+          </div>
+          <p id="gate-deadline-note" class="hint">Leave it empty and the deadline is derived from the stages' own estimates, which is what it is for. A gate still going at its deadline is given up on: its running stages are canceled, the stages behind them never run, and the verdict is failed with the deadline as the reason, so a bench nobody frees cannot leave a gate waiting with no end. 60 to 720 minutes.</p>
           <p id="gate-summary" class="hint" role="status"></p>
           <ol id="gate-stages" class="gate-stages" aria-label="The stages of this configuration, in the waves they run in"></ol>
           <ul id="gate-preflight" class="gate-preflight" aria-label="Preflight of the whole graph"></ul>
