@@ -681,7 +681,8 @@ def problems(found: list[Record], *, lap: int | None = None,
              min_packets: int = 0, min_reference_uap: int = 0,
              min_with_payload: int = 0, min_hec_valid: int = 0,
              min_crc_valid: int = 0, min_channels: int = 0,
-             min_distinct_signal: int = 0, min_distinct_noise: int = 0,
+             min_distinct_signal: int = 0,
+             min_measured_noise: int = 0, min_distinct_noise: int = 0,
              max_access_code_errors: int | None = None,
              types: tuple[str, ...] = (), require_types: tuple[str, ...] = (),
              require_transports: tuple[str, ...] = (),
@@ -760,12 +761,12 @@ def problems(found: list[Record], *, lap: int | None = None,
                             f"the first {wrong[0].signal_power} dBm in record "
                             f"{wrong[0].index}, expected {signal_dbm} dBm")
     if no_measured_noise:
-        measured = [record for record in found if record.has(NOISEPOWER_VALID)]
-        if measured:
+        claiming = [record for record in found if record.has(NOISEPOWER_VALID)]
+        if claiming:
             failures.append(
-                f"{len(measured)} records claim a measured noise power, the "
-                f"first {measured[0].noise_power} dBm in record "
-                f"{measured[0].index}, where this capture's packets carry no "
+                f"{len(claiming)} records claim a measured noise power, the "
+                f"first {claiming[0].noise_power} dBm in record "
+                f"{claiming[0].index}, where this capture's packets carry no "
                 "background estimate")
     if max_access_code_errors is not None:
         worst = max((record.access_code_offenses for record in found),
@@ -794,6 +795,28 @@ def problems(found: list[Record], *, lap: int | None = None,
     # four records arrived (ubertooth-test-harness#399). A capture that met
     # its floor is held to both, which is where the regression they guard
     # against would show.
+    #
+    # The two floors stand on different samples, and only one of them is
+    # bounded by the records floor. Every record carries a signal figure, so
+    # the signal floor is a count over ``found``, which ``min_packets``
+    # already holds to a size. A noise figure is a measurement a record
+    # either carries or does not, so the noise floor is a count over a
+    # subset of unknown size, and a capture of fifty records in which three
+    # measured the background would be asked for four different figures out
+    # of three: a test no receiver can pass, reported as a level fault
+    # (ubertooth-test-harness#406). ``min_measured_noise`` is the floor on
+    # that sample, asked first and on its own: below it the capture fails on
+    # measuring the background on almost nothing, which is the cause, and
+    # the floor on how much the background varies is left unasked rather
+    # than added as a second, misleading line.
+    measured = noise_levels(found)
+    sampled = len(measured) >= min_measured_noise
+    if min_measured_noise and not thin and not sampled:
+        failures.append(
+            f"{len(measured)} of {len(found)} records carry a measured noise "
+            f"figure, expected at least {min_measured_noise}: too few for a "
+            "floor on how much the background varies to be a test of "
+            "anything")
     if min_distinct_signal and not thin:
         distinct = len(set(signal_levels(found)))
         if distinct < min_distinct_signal:
@@ -801,8 +824,7 @@ def problems(found: list[Record], *, lap: int | None = None,
                 f"{distinct} distinct signal figures in {len(found)} records, "
                 f"expected at least {min_distinct_signal}: a receiver "
                 "reporting one latched reading for every packet looks like this")
-    if min_distinct_noise and not thin:
-        measured = noise_levels(found)
+    if min_distinct_noise and not thin and sampled:
         distinct = len(set(measured))
         if distinct < min_distinct_noise:
             failures.append(
@@ -1069,10 +1091,18 @@ def main(argv: list[str] | None = None) -> int:
              "packet carries exactly one. Judged only on a capture that met "
              "--min-packets: a capture thinner than that fails on the count")
     parser.add_argument(
+        "--min-measured-noise", type=int, default=0,
+        help="records that must carry a measured background figure, the "
+             "sample --min-distinct-noise is counted over: a capture that "
+             "measured the background on almost nothing fails on that, "
+             "rather than on a floor of different figures its sample is too "
+             "small to hold. Judged only on a capture that met --min-packets")
+    parser.add_argument(
         "--min-distinct-noise", type=int, default=0,
         help="different background figures the records that carry a measured "
              "one must have between them; judged on the same condition as "
-             "--min-distinct-signal")
+             "--min-distinct-signal, and only where --min-measured-noise is "
+             "met, so the sample is known to be big enough to hold them")
     parser.add_argument(
         "--settling-record", action="store_true",
         help="hold the first record carrying a reference UAP -- the one that "
@@ -1126,6 +1156,15 @@ def main(argv: list[str] | None = None) -> int:
              "in either order, a clock move read as time sends a record "
              "whole seconds behind the one ahead of it")
     args = parser.parse_args(argv)
+    # A floor of N different noise figures over a sample of fewer than N
+    # records cannot be met by any receiver, so a run that asks for one has
+    # to say how large a sample it is asking it of
+    # (ubertooth-test-harness#406).
+    if args.min_distinct_noise > args.min_measured_noise:
+        parser.error(
+            f"--min-distinct-noise {args.min_distinct_noise} needs "
+            f"--min-measured-noise of at least {args.min_distinct_noise}: "
+            "that many different figures cannot come out of a smaller sample")
     try:
         types = tuple(_type_name(name)
                       for name in args.types.split(",") if name)
@@ -1162,6 +1201,7 @@ def main(argv: list[str] | None = None) -> int:
         max_access_code_errors=args.max_access_code_errors,
         min_crc_valid=args.min_crc_valid, min_channels=args.min_channels,
         min_distinct_signal=args.min_distinct_signal,
+        min_measured_noise=args.min_measured_noise,
         min_distinct_noise=args.min_distinct_noise,
         types=types, require_types=require_types,
         require_transports=transports,
