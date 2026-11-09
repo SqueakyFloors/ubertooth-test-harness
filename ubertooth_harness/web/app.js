@@ -1235,16 +1235,16 @@
       + (preflight.refusal || "see the preflight above.");
   }
 
-  // The deadline this page is asking for, in seconds, or null for the one
-  // the configuration's own estimates derive. The field is in minutes,
-  // which is how an operator says how long a job may take; the controller
-  // judges the figure either way, so a number outside the bounds comes back
-  // as a refusal in the preflight above Run rather than as a started gate.
+  // The deadline this page is asking for, in seconds, or null when the field
+  // is empty. Any number the operator typed is sent as it is, even one
+  // outside the bounds: the controller judges it, and a refusal an operator
+  // can read above Run is better than a figure this page quietly dropped in
+  // favor of the derived one.
   function gateDeadlineSeconds() {
     const field = $("gate-deadline");
     if (!field || !field.value.trim()) return null;
     const minutes = Number(field.value);
-    if (!Number.isFinite(minutes) || minutes <= 0) return null;
+    if (!Number.isFinite(minutes)) return null;
     return Math.round(minutes * 60);
   }
 
@@ -1362,8 +1362,8 @@
       el("dd", {
         text: `${gate.deadline_hms || "—"} (${gate.deadline_source || "derived"})`
           + (gate.deadline_expired
-            ? " — reached: the gate was given up on and its running stages"
-              + " were canceled"
+            ? " — reached: the gate was given up on and any stage still"
+              + " running was asked to stop"
             : ""),
       }),
       ...(gate.active
@@ -1409,10 +1409,10 @@
     const notes = [];
     if (gate.deadline_expired) {
       notes.push(`This gate reached its whole-gate deadline of ${gate.deadline_hms}`
-        + ` (${gate.deadline_source}), so it was given up on: its running stages`
-        + " were canceled and the stages behind them never ran. The verdict is"
-        + " failed because the gate did not finish, not because a stage"
-        + " measured a failure.");
+        + ` (${gate.deadline_source}), so it was given up on: any stage still`
+        + " running was asked to stop and the stages behind them never ran. The"
+        + " verdict is failed because the gate did not finish, not because a"
+        + " stage measured a failure.");
     }
     for (const entry of gate.manual_gates || []) {
       notes.push(`This gate measures nothing for ${entry.name} (${entry.reference}): `

@@ -814,14 +814,15 @@ def _gate_clock(gate: dict) -> str:
     A running gate counts both ways -- how long it has been going and how
     long it has left -- because the question an operator has while a gate
     sits there is whether anything is still going to happen. A gate that is
-    over says what its deadline was, and says so plainly when that deadline
-    is why it is over.
+    over says what its deadline was, and says plainly when that deadline is
+    why it is over.
     """
     deadline = f"deadline {gate.get('deadline_hms') or '-'}"
     if gate.get("deadline_expired"):
         return (
             f"{deadline} ({gate.get('deadline_source')}): reached, so the "
-            "gate was given up on and its running stages were canceled"
+            "gate was given up on and any stage still running was asked to "
+            "stop"
         )
     if gate.get("status") == releasegate.RUNNING:
         return (
@@ -829,7 +830,7 @@ def _gate_clock(gate: dict) -> str:
             f"{gate.get('elapsed_hms') or '-'} gone, "
             f"{gate.get('remaining_hms') or '-'} left"
         )
-    return f"{deadline} ({gate.get('deadline_source')}), not reached"
+    return f"{deadline} ({gate.get('deadline_source')})"
 
 
 def _release_gate(args: argparse.Namespace) -> int:

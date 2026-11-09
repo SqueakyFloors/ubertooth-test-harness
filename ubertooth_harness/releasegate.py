@@ -214,10 +214,12 @@ WAIT_HOST_LOCK = "host lock"
 WAIT_LEASE = "lease"
 # A board on a host it wants is registered and USB has not got it.
 WAIT_FIXTURE = "fixture"
-# How many reasons one stage reports. Well past a bench of a few hosts with a
-# few boards each, and it keeps a registry nobody here chose from deciding
-# how big an API answer is.
+# How many reasons one stage reports, and how long each one may be. Well past
+# a bench of a few hosts with a few boards each, and they keep a registry
+# nobody here chose from deciding how big an API answer is: every pending
+# stage of every listed gate carries these.
 MAX_WAIT_REASONS = 24
+MAX_WAIT_DETAIL_CHARS = 300
 
 
 # ----- the configuration ---------------------------------------------------
@@ -1325,7 +1327,9 @@ def _plus(moment: str, seconds: float) -> str | None:
 
     None for anything that is not a timestamp: a gate whose ``created_at``
     cannot be read has no deadline moment to name, and the elapsed time says
-    the same thing by being absent.
+    the same thing by being absent. A stored gate cannot be in that state --
+    ``gate_from_record`` refuses a record whose ``created_at`` is not a
+    timestamp -- so this is the belt to that braces.
     """
     begin = _timestamp(moment)
     if begin is None:
@@ -1333,6 +1337,22 @@ def _plus(moment: str, seconds: float) -> str | None:
     return (
         begin + datetime.timedelta(seconds=float(seconds))
     ).isoformat(timespec="milliseconds")
+
+
+def _age(begin: str, moment: str) -> float | None:
+    """How long between two timestamps, never less than zero.
+
+    ``wall_seconds`` answers None for a pair that runs backwards, which is
+    the right answer for a measured duration and the wrong one for a gate's
+    age: a wall clock that went back an hour under a running gate would
+    leave it with no elapsed time, never overdue, and waiting for ever. So a
+    moment before the gate started reads as no time passed, and the gate
+    becomes overdue as the clock catches up again.
+    """
+    start, now = _timestamp(begin), _timestamp(moment)
+    if start is None or now is None:
+        return None
+    return round(max(0.0, (now - start).total_seconds()), 3)
 
 
 @dataclasses.dataclass
@@ -1466,7 +1486,6 @@ def deadline_detail(gate: ReleaseGate) -> str:
         f"{coarse_duration(gate.deadline_s)} ({said}) passed"
     )
 
-
 def gate_from_record(data: Mapping) -> ReleaseGate:
     """One stored gate record, or ValueError if it cannot be read as one."""
     if not isinstance(data, Mapping):
@@ -1480,7 +1499,10 @@ def gate_from_record(data: Mapping) -> ReleaseGate:
         isinstance(host, str) for host in gate.hosts
     ):
         raise ValueError("hosts must be a list of host names")
-    if not isinstance(gate.created_at, str) or not gate.created_at:
+    if not isinstance(gate.created_at, str) or _timestamp(gate.created_at) is None:
+        # Not just a non-empty string: the deadline is counted from this
+        # moment, and one that cannot be read would leave the gate with no
+        # age, never overdue, and waiting for ever (#410).
         raise ValueError("created_at must be a timestamp")
     for name in ("dispatched_at", "ref", "commit", "cancel_reason"):
         if not isinstance(getattr(gate, name), (str, type(None))):
@@ -1706,21 +1728,26 @@ def gate_status(rows: Sequence[Mapping], *, expired: bool = False) -> str:
     reader sees what it came to.
 
     A gate that was given up on for reaching its deadline (``expired``) is
-    at worst ``failed``, whatever its stages came to: a gate that ran out of
-    time did not finish, and cancelling its last running stage must not
-    leave that reading as though somebody had cancelled the gate.
+    over, whatever its stages are doing. A stage still winding down does not
+    keep it ``running``: a child whose runner is away may take as long as
+    that runner does to come back, and a gate that waits for one with no
+    verdict and no notice is the wait #410 is about. Its verdict is at worst
+    ``failed`` -- the gate did not finish, and nobody asked for it to stop --
+    and each stage's own row still says what became of it.
     """
     if not rows:
         return ERROR
     statuses = [str(row.get("status") or ERROR) for row in rows]
-    if any(status in UNFINISHED for status in statuses):
-        return RUNNING
     required = [
         str(row.get("status") or ERROR) for row in rows if not row.get("optional")
     ]
     judged = list(required or statuses)
     if expired:
-        judged.append(FAILED)
+        return worst(
+            [*(status for status in judged if status not in UNFINISHED), FAILED]
+        )
+    if any(status in UNFINISHED for status in statuses):
+        return RUNNING
     return worst(judged)
 
 
@@ -1817,7 +1844,9 @@ def waiting_reasons(
     each of them -- whether a runner is there, the run it is carrying and
     whether that run flashes, and each registered board's lease and whether
     USB has it. A host the caller says nothing about is a host with no
-    runner, which is itself a reason.
+    runner, which is itself a reason. A stage nothing above explains, and
+    that the gate is nonetheless holding, falls back to naming the stage of
+    this gate that is still running on a host it wants.
 
     This is the difference between a stage that is about to start and one
     that never will, which the matrix could not tell an operator before
@@ -1833,7 +1862,7 @@ def waiting_reasons(
 
     def say(kind: str, detail: str) -> None:
         if len(reasons) < MAX_WAIT_REASONS:
-            reasons.append({"kind": kind, "detail": detail[:MAX_REASON_CHARS]})
+            reasons.append({"kind": kind, "detail": detail[:MAX_WAIT_DETAIL_CHARS]})
 
     unsettled = [
         str(name) for name in row.get("requires") or ()
@@ -1899,6 +1928,21 @@ def waiting_reasons(
                     f"{host}: {alias} is leased by "
                     + (holder or "another command")
                     + ", so a run would wait for it")
+    if not reasons:
+        # Nothing above explained it, and the gate may still be holding it:
+        # a stage waits while any stage sharing a host with it is running
+        # (``pending_decisions``), and a stage running on two hosts has
+        # freed one of them while it finishes on the other. A stage the gate
+        # holds must say so rather than reading as one about to start.
+        running = [
+            str(other.get("stage")) for other in rows
+            if str(other.get("status")) == RUNNING
+            and set(mine) & {str(host) for host in other.get("hosts") or ()}
+        ]
+        if running:
+            say(WAIT_HOST,
+                "a stage of this gate is still running on a host it wants: "
+                + ", ".join(running))
     return tuple(reasons)
 
 
@@ -1959,8 +2003,10 @@ def gate_view(
     )
     # Counted from the gate's own created_at, so the figures survive a
     # controller restart: the deadline is a period of a stored record's life,
-    # not of this process's.
-    elapsed_s = wall_seconds(gate.created_at, finished_at or now) if now else None
+    # not of this process's. Never negative: a wall clock that went backwards
+    # under a running gate reads as no time passed rather than as a gate that
+    # can never be overdue (#410).
+    elapsed_s = _age(gate.created_at, finished_at or now) if now else None
     remaining_s = (
         None if elapsed_s is None or status not in UNFINISHED
         else round(max(0.0, gate.deadline_s - elapsed_s), 3)

@@ -38,7 +38,12 @@ from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.cli import main
 from ubertooth_harness.durations import coarse_duration
 from ubertooth_harness.gui import WEB_DIR
-from ubertooth_harness.controller import Clock, Controller, ControllerServer
+from ubertooth_harness.controller import (
+    Clock,
+    Controller,
+    ControllerError,
+    ControllerServer,
+)
 from ubertooth_harness.releasegate import (
     BOOTLOADER_RECORD,
     BOOTLOADER_UPDATE,
@@ -708,6 +713,10 @@ class GateRecordTests(unittest.TestCase):
             ({"deadline_s": DEADLINE_CEILING_S + 1}, "outside the bounds"),
             ({"deadline_source": "guessed"}, "not a deadline source"),
             ({"deadline_expired": "yes"}, "deadline_expired"),
+            # The deadline is counted from created_at, so one that cannot be
+            # read would leave the gate with no age and never overdue.
+            ({"created_at": "whenever"}, "created_at must be a timestamp"),
+            ({"created_at": ""}, "created_at must be a timestamp"),
         ):
             with self.subTest(change):
                 with self.assertRaisesRegex(ValueError, expected):
@@ -997,6 +1006,50 @@ class GateClockTests(unittest.TestCase):
         self.assertEqual(FAILED, view["status"])
         self.assertTrue(view["deadline_expired"])
 
+    def test_an_expired_gate_is_over_even_with_a_stage_still_running(self):
+        # The cancel of a child whose runner is away may take as long as that
+        # runner does. The gate does not wait for it: that is the wait #410
+        # is about. Its row still says the stage was running.
+        record = gate()
+        record.deadline_expired = True
+        record.set_stage_group("fast-only", "grp-1")
+        for name in [entry["stage"] for entry in record.stages
+                     if entry["stage"] != "fast-only"]:
+            record.set_stage_outcome(name, NOT_REACHED, "the deadline passed")
+        view = self.view(
+            record, {"grp-1": running_group("grp-1", [LINUX, MAC])},
+            record.deadline_s + 1,
+        )
+        self.assertEqual(FAILED, view["status"])
+        self.assertFalse(view["active"])
+        rows = {row["stage"]: row for row in view["stages"]}
+        self.assertEqual(RUNNING, rows["fast-only"]["status"])
+
+    def test_an_error_still_shows_through_an_expiry(self):
+        record = gate()
+        record.deadline_expired = True
+        record.set_stage_group("fast-only", "grp-1")
+        for name in [entry["stage"] for entry in record.stages
+                     if entry["stage"] != "fast-only"]:
+            record.set_stage_outcome(name, NOT_REACHED, "the deadline passed")
+        view = self.view(
+            record, {"grp-1": passed_group("grp-1", [LINUX, MAC], status=ERROR)},
+            record.deadline_s + 1,
+        )
+        self.assertEqual(ERROR, view["status"])
+
+    def test_a_clock_that_went_backwards_does_not_stop_a_gate_expiring(self):
+        # No elapsed time at all would mean never overdue, which is a gate
+        # that waits for ever: a moment before the gate started reads as no
+        # time passed instead.
+        record, groups = self.running()
+        view = self.view(record, groups, -3600)
+        self.assertEqual(0.0, view["elapsed_s"])
+        self.assertFalse(view["overdue"])
+        self.assertEqual(record.deadline_s, view["remaining_s"])
+        # And it becomes overdue again as the clock catches up.
+        self.assertTrue(self.view(record, groups, record.deadline_s)["overdue"])
+
 
 class WaitingOnTests(unittest.TestCase):
     """What a pending stage says it is waiting for (``waiting_reasons``)."""
@@ -1107,6 +1160,21 @@ class WaitingOnTests(unittest.TestCase):
     def test_a_stage_with_nothing_in_its_way_says_nothing(self):
         rows = self.rows(("one", PENDING, [LINUX], (), 0, ()))
         self.assertEqual((), waiting_reasons(rows[0], rows, self.free(LINUX)))
+
+    def test_a_stage_the_gate_holds_always_says_something(self):
+        # A stage running on two hosts has freed one of them while it
+        # finishes on the other, so that host reads idle; the gate holds
+        # every stage sharing a host with it all the same
+        # (``pending_decisions``), and a stage it holds must say so rather
+        # than reading as one about to start.
+        rows = self.rows(
+            ("one", RUNNING, [LINUX, MAC], (), 0, ()),
+            ("two", PENDING, [LINUX], (), 0, ()),
+        )
+        self.assertEqual(((), ()), pending_decisions(rows))
+        reasons = waiting_reasons(rows[1], rows, self.free(LINUX))
+        self.assertEqual([WAIT_HOST], self.kinds(reasons))
+        self.assertIn("one", reasons[0]["detail"])
 
     def test_the_matrix_carries_the_reasons_and_one_line_of_them(self):
         record = gate()
@@ -1722,6 +1790,24 @@ class GateDeadlineTests(GateControllerTestCase):
         # for the gate to be given up on, which is the whole point: the
         # monitor's own tick reaches it.
         clock.ahead_s = view["deadline_s"] + 1
+        await wait_until(
+            lambda: self.controller.gates[gate_id].deadline_expired,
+            timeout=TIMEOUT_S,
+        )
+        # Over at its deadline, whatever its children are still doing: the
+        # verdict is in, and the stage that was running says so on its row.
+        given_up = await self.gate(gate_id)
+        self.assertEqual(FAILED, given_up["status"])
+        self.assertFalse(given_up["active"])
+        self.assertFalse(given_up["cancel_requested"])
+        self.assertEqual(0.0, given_up["remaining_s"] or 0.0)
+        rows = self.stage_rows(given_up)
+        self.assertEqual(
+            [NOT_REACHED] * 3,
+            [rows[name]["status"] for name in ("linux", "mac", "writer")],
+        )
+        self.assertIn("deadline", rows["writer"]["reason"])
+        # Its children were asked to stop the ordinary way.
         for runner in (linux, mac):
             message = await runner.recv()
             self.assertEqual("cancel", message["type"])
@@ -1734,25 +1820,13 @@ class GateDeadlineTests(GateControllerTestCase):
                 if entry["host"] == runner.host
             )
             await self.finish(runner, run_id, "canceled")
-        await wait_until(
-            lambda: not self.controller.view_gate(
-                self.controller.gates[gate_id]
-            )["active"],
-            timeout=TIMEOUT_S,
-        )
+        await self.settled(gate_id, "smoke", CANCELED)
         final = await self.gate(gate_id)
         # Failed, not canceled: the gate did not finish, and nobody asked
         # for it to stop.
         self.assertEqual(FAILED, final["status"])
         self.assertTrue(final["deadline_expired"])
-        self.assertFalse(final["cancel_requested"])
-        rows = self.stage_rows(final)
-        self.assertEqual(CANCELED, rows["smoke"]["status"])
-        self.assertEqual(
-            [NOT_REACHED] * 3,
-            [rows[name]["status"] for name in ("linux", "mac", "writer")],
-        )
-        self.assertIn("deadline", rows["writer"]["reason"])
+        self.assertEqual(CANCELED, self.stage_rows(final)["smoke"]["status"])
         # Stored, so a controller that restarts does not start the rest.
         record = json.loads(
             (self.results / GATES_DIR / f"{gate_id}.json").read_text()
@@ -1761,7 +1835,41 @@ class GateDeadlineTests(GateControllerTestCase):
         self.assertEqual(view["deadline_s"], record["deadline_s"])
         # And one notice for the gate, which says the deadline is why.
         await wait_until(lambda: notifier.notices, timeout=TIMEOUT_S)
+        await asyncio.sleep(0.2)
+        self.assertEqual(
+            [f"gate-{gate_id}"], [notice.key for notice in notifier.notices]
+        )
         self.assertIn("Deadline: reached", notifier.notices[0].body)
+
+    async def test_a_cancel_the_expiry_could_not_ask_for_is_asked_again(self):
+        # A runner that is away when the deadline passes: the expiry stands,
+        # and the next look asks its group again rather than leaving a child
+        # running with nothing left to stop it.
+        clock = WallClock()
+        self.controller.clock = clock
+        linux, mac = await self.runners()
+        view = await self.start_gate([linux, mac])
+        gate_id = view["gate_id"]
+        asked = []
+        real = self.controller.cancel_group
+
+        async def once_refused(group_id, reason):
+            asked.append(group_id)
+            if len(asked) == 1:
+                raise ControllerError("target Host_Linux is offline", 409)
+            return await real(group_id, reason)
+
+        self.controller.cancel_group = once_refused
+        clock.ahead_s = view["deadline_s"] + 1
+        await wait_until(lambda: len(asked) >= 2, timeout=TIMEOUT_S)
+        self.assertTrue(self.controller.gates[gate_id].deadline_expired)
+        for runner in (linux, mac):
+            message = await runner.recv()
+            await runner.send("cancel_accepted", run_id=message["run_id"])
+        await asyncio.sleep(0.3)
+        # And once a cancel has been recorded, it is not asked for again
+        # however many times the monitor looks.
+        self.assertEqual(2, len(asked))
 
     async def test_an_operators_deadline_is_the_one_the_gate_keeps_to(self):
         linux, mac = await self.runners()

@@ -132,12 +132,21 @@ the flat margin are for. The committed configuration's deadline is about
 2 h 43 m.
 
 A gate still going at its deadline is **given up on**: the expiry is recorded
-first, so nothing more is started; each running stage is cancelled the
-ordinary way, which stops its runs, releases their leases and writes their
-reports; the stages behind it are recorded as `not_reached` with the deadline
-as the reason; and the verdict is `failed`, because the gate did not finish.
-It is not `canceled`: nobody asked for it to stop. The completion email says
-the deadline is why.
+first, so nothing more is started; the verdict becomes `failed`, because the
+gate did not finish and nobody asked for it to stop; the stages behind it are
+recorded as `not_reached` with the deadline as the reason; and each running
+stage is cancelled the ordinary way, which stops its runs, releases their
+leases and writes their reports. The completion email says the deadline is
+why.
+
+The gate is over at its deadline whether or not those cancels land. A child
+whose runner is away may take as long as that runner does to come back, and a
+gate that waited for one would be the wait this is here to end; its stage's
+own row still says it was running and why it was stopped. The cancel is asked
+for again on each later look, so an expiry interrupted by a controller
+restart still reaches its children. To stop a child that is still winding
+down, cancel that run from its own live card. An operator's cancel that is
+already running decides the gate instead of the deadline, and says who asked.
 
 `--deadline MINUTES` (`deadline_s` in the API and the GUI) asks for another
 budget. It is validated against the same bounds, and a deadline shorter than
@@ -154,8 +163,15 @@ pending row carries one entry per thing in its way, each with a `kind`:
 | `runner` | a host it wants has no runner registered, or that runner is not connected |
 | `host` | a host it wants is carrying a run of its own; a runner runs one run at a time |
 | `host lock` | the same, for a run that flashes a board: such a run holds that host's own power/firmware lock for its whole length |
-| `lease` | a board on that host is leased by somebody else, with the holder as the lease file describes it |
-| `fixture` | a registered board that host needs has left USB, so a run would be refused |
+| `lease` | a registered board on that host is leased by somebody else, with the holder as the lease file describes it |
+| `fixture` | a registered board on that host has left USB, so a run that needs it would be refused |
+
+A stage none of those explains, and that the gate is nonetheless holding,
+names the stage of this gate still running on a host it wants — which is what
+a stage running on two hosts looks like once it has finished on one of them.
+Which board a stage will bind is the target's own answer, so the lease and
+fixture reasons report that host's registered boards rather than only the ones
+this stage would take.
 
 What the controller knows about a bench is what each target reported: its
 runner's connection, the run it is carrying, and each registered board's lease
@@ -229,9 +245,11 @@ A stage the gate decided not to run carries its own reason:
 | `canceled` | the gate was cancelled before this stage started |
 | `failed`, `error` | its start was refused, or its own runs came to that |
 
-A gate that reached its deadline is `failed` whatever its stages came to, with
-`deadline_expired` set and the deadline named in the reason, so cancelling its
-last running stage cannot leave it reading as a gate somebody cancelled.
+A gate that reached its deadline is at worst `failed` whatever its stages came
+to, with `deadline_expired` set and the deadline named in the reason, so
+cancelling its last running stage cannot leave it reading as a gate somebody
+cancelled. A stage that came to an `error` still shows through, because an
+error outranks a failure.
 
 ## Run it from the command line
 

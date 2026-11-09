@@ -3386,37 +3386,67 @@ class Controller:
 
         The record carries the expiry before any runner is asked, as a cancel
         does, so nothing more is started whatever becomes of the runs that
-        are going now. Each running stage is then cancelled the ordinary way
-        -- the child group's own cancel, which stops its runs, releases their
-        leases and writes their reports -- and the stages that were never
-        reached are recorded as such by the advance that follows. The verdict
-        is ``failed``: the gate did not finish
-        (``releasegate.gate_status``).
+        are going now. The verdict is then ``failed`` and the gate is over
+        (``releasegate.gate_status``) -- a child whose runner is away may take
+        as long as that runner does, and waiting for it is the wait this
+        exists to end.
 
-        It never raises, and never expires twice: a stage whose runner is
-        away keeps its own reason, and the gate settles when that run is
-        lost.
+        Each running stage is cancelled the ordinary way: the child group's
+        own cancel, which stops its runs, releases their leases and writes
+        their reports. A group that has already recorded a cancel is left
+        alone, and one whose cancel could not be recorded is asked again on
+        the next advance, so an expiry interrupted by a controller restart
+        still reaches its children. An operator's cancel that is already
+        running decides the gate instead: it stops the same stages and says
+        who asked.
+
+        It never raises.
         """
-        if gate.deadline_expired or not self.view_gate(gate)["overdue"]:
+        if gate.cancel_requested:
             return False
-        gate.deadline_expired = True
-        reason = f"{deadline_detail(gate)}; the gate was given up on"
-        self.log(f"release gate {gate.gate_id}: {reason}")
-        try:
-            self._persist_gate(gate)
-        except Exception as error:  # noqa: BLE001 - the expiry stands
+        view = self.view_gate(gate)
+        if not gate.deadline_expired and not view["overdue"]:
+            return False
+        changed = False
+        if not gate.deadline_expired:
+            gate.deadline_expired = True
+            changed = True
             self.log(
-                f"could not write the expiry of release gate "
-                f"{gate.gate_id}: {error}"
+                f"release gate {gate.gate_id}: {deadline_detail(gate)}; the "
+                "gate was given up on"
             )
-        for row in self.view_gate(gate)["stages"]:
+            # The whole decision is recorded before any runner is asked, in
+            # one step with no await in it: a reader that sees the expiry
+            # sees the stages it took with it, and nothing more is started
+            # whatever becomes of the runs that are going now.
+            for row in view["stages"]:
+                if row["status"] == STAGE_PENDING:
+                    gate.set_stage_outcome(
+                        row["stage"], STAGE_NOT_REACHED,
+                        f"{deadline_detail(gate)}, so this stage was never "
+                        "started",
+                    )
+            try:
+                self._persist_gate(gate)
+            except Exception as error:  # noqa: BLE001 - the expiry stands
+                self.log(
+                    f"could not write the expiry of release gate "
+                    f"{gate.gate_id}: {error}"
+                )
+        reason = f"{deadline_detail(gate)}; the gate was given up on"
+        for row in view["stages"]:
             if row["status"] != GATE_RUNNING or not row["group_id"]:
+                continue
+            group = self.groups.get(row["group_id"])
+            if group is None or group.cancel_requested:
+                # Already asked for: its runs end as any cancelled run does,
+                # and a runner that is away ends them when it is back.
                 continue
             try:
                 await self.cancel_group(row["group_id"], reason)
             except ControllerError as error:
-                # A stage whose runner is away, or whose group settled
-                # between these two reads: the expiry stands either way.
+                # A stage whose group settled between these two reads, or
+                # whose runner is away: the expiry stands either way.
                 self.log(
                     f"release gate {gate.gate_id}: stage {row['stage']} was "
                     f"not canceled: {error.detail}"
@@ -3428,7 +3458,7 @@ class Controller:
                     f"release gate {gate.gate_id}: stage {row['stage']} could "
                     f"not be canceled: {type(error).__name__}: {error}"
                 )
-        return True
+        return changed
 
     async def _start_stage(self, gate: ReleaseGate, name: str) -> bool:
         """Start one stage as a child run group; True if the gate changed."""
@@ -3507,11 +3537,24 @@ class Controller:
         task.add_done_callback(self._tasks.discard)
 
     def _gates_to_advance(self) -> list[ReleaseGate]:
-        """The gates with something left to do: running, or not yet settled."""
-        return [
-            gate for gate in self.gates.values()
-            if not gate.notified or self.view_gate(gate)["active"]
-        ]
+        """The gates with something left to do: running, or not yet settled.
+
+        An expired gate is over and reported, and still here while a child of
+        it is running: its cancel may not have reached that child (a runner
+        that was away, a controller that stopped between recording the expiry
+        and asking), and the next advance asks again.
+        """
+        kept = []
+        for gate in self.gates.values():
+            view = self.view_gate(gate)
+            if (
+                not gate.notified or view["active"]
+                or (gate.deadline_expired and any(
+                    row["status"] == GATE_RUNNING for row in view["stages"]
+                ))
+            ):
+                kept.append(gate)
+        return kept
 
     async def _advance_running_gates(self) -> None:
         async with self._gate_lock:

@@ -948,8 +948,8 @@ def gate_notice(
         # gate ran out of time, so some of its stages never ran at all.
         rows.append(("Deadline", header_text(
             f"reached: the gate was given up on after "
-            f"{gate.get('deadline_hms') or '-'} and its running stages were "
-            "canceled", MAX_REASON_CHARS)))
+            f"{gate.get('deadline_hms') or '-'}, and any stage still running "
+            "was asked to stop", MAX_REASON_CHARS)))
     blocks: list[str] = []
     for stage in stages[:MAX_LISTED_STAGES]:
         name = header_text(stage.get("stage"), 80)
