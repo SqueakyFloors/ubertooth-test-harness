@@ -152,13 +152,22 @@ python -m ubertooth_harness release-gate --controller http://127.0.0.1:8765 \
 
 It covers TC-01 (as the fast-only checks the main suite does not supersede,
 with every host's build, flash and preflight), TC-02, TC-03 and TC-04
-(the comprehensive BLE suite holds both), TC-05, TC-07, TC-08, TC-09, TC-10,
-TC-13, and TC-17 when the bootloader stage is asked for; TC-11's weak-link
-variant is an optional stage. What it does not run, and why, is in that
-document: TC-06, TC-12, TC-14, TC-15 and TC-16 stay the by-hand or
-by-command-line cases they are, and no soak is in it. The order rules below
-are the gate's own scheduling rules, so a gate and a hand-run schedule agree
-on what may overlap.
+(the comprehensive BLE suite holds both), TC-05, TC-07, TC-08, TC-09, TC-10
+and TC-13; TC-11's weak-link variant is an optional stage. What it does not
+run, and why, is in that document: TC-06, TC-12, TC-14, TC-15 and TC-16 stay
+the by-hand or by-command-line cases they are, and no soak is in it.
+
+**TC-17 only in part.** Every stage records the bootloader each board it
+requires firmware of has, which is what a normal run does; the bootloader
+stage installs one over the paired programmer when it is asked for, and then
+only on a board that is behind. The `--bootloader check` arm of TC-17, which
+compares every board against one built from the candidate, is not in the gate,
+because a bench whose boards carry an older bootloader would then fail every
+gate rather than being told to update one board. Run that arm as TC-17 says,
+and record it with `release-evidence --attest`.
+
+The order rules below are the gate's own scheduling rules, so a gate and a
+hand-run schedule agree on what may overlap.
 
 Order rules, in force whatever the bench:
 

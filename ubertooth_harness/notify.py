@@ -718,12 +718,20 @@ def read_publication(
     return url
 
 
-def _gui_link(gui_base: str, run_id: str) -> str:
-    """The loopback GUI's own link to one run (``/ui/#run=<run_id>``)."""
+def _gui_link(gui_base: str, identifier: str, *, kind: str = "run") -> str:
+    """The loopback GUI's own link to one run or release gate.
+
+    ``/ui/#run=<run_id>`` for a run or a run group, and
+    ``/ui/#gate=<gate_id>`` for a release gate, which is the address its own
+    panel opens from (#403). A gate ID in a ``#run=`` link would open the GUI
+    selecting a run that does not exist.
+    """
     base = gui_base.rstrip("/") if gui_base else ""
-    if not base or not _KEY_RE.fullmatch(run_id or ""):
+    if not base or not _KEY_RE.fullmatch(identifier or "") or kind not in (
+        "run", "gate"
+    ):
         return ""
-    return f"{base}/ui/#run={run_id}"
+    return f"{base}/ui/#{kind}={identifier}"
 
 
 _CLOSING = (
@@ -963,7 +971,7 @@ def gate_notice(
     places = []
     if results_dir is not None:
         places.append(f"  controller results: {header_text(results_dir, MAX_VALUE_CHARS)}")
-    link = _gui_link(gui_base, gate_id)
+    link = _gui_link(gui_base, gate_id, kind="gate")
     if link:
         places.append(f"  GUI (through the usual SSH tunnel): {link}")
     if public_url:

@@ -431,7 +431,7 @@ def superseded_tests(
     would quietly lose the Mac's measurement. A test nobody else runs
     everywhere this stage runs it stays, whatever it costs.
     """
-    best: dict[str, dict[str, tuple[int, str]]] = {}
+    best: dict[tuple, dict[str, tuple[int, str]]] = {}
     for stage in stages:
         if stage.drop_superseded:
             continue
@@ -439,7 +439,7 @@ def superseded_tests(
             if stage.tests and step.test_name not in stage.tests:
                 continue
             rank = _coverage_rank(step.arguments)
-            per_host = best.setdefault(step.test_name, {})
+            per_host = best.setdefault(_test_key(step), {})
             for host in _step_hosts(
                 step, hosts_of.get(stage.name, ()), platforms, catalog
             ):
@@ -453,7 +453,7 @@ def superseded_tests(
         entries = []
         for step in suite_steps(plans_dir, stage, catalog):
             rank = _coverage_rank(step.arguments)
-            per_host = best.get(step.test_name, {})
+            per_host = best.get(_test_key(step), {})
             mine = _step_hosts(
                 step, hosts_of.get(stage.name, ()), platforms, catalog
             )
@@ -465,6 +465,32 @@ def superseded_tests(
                 entries.append((step.test_name, sorted(set(covered))[0]))
         dropped[stage.name] = tuple(entries)
     return dropped
+
+
+# The arguments that say where a step runs rather than what it measures, and
+# so are not part of what makes two steps the same measurement. Where a step
+# runs is decided separately, host by host (``superseded_tests``).
+_PLACEMENT_ARGUMENTS = frozenset({
+    COVERAGE_ARGUMENT, "hosts", "host", "platforms", "required hardware",
+})
+
+
+def _test_key(step) -> tuple:
+    """What makes two plan steps the same measurement, bar the coverage.
+
+    The test's name and every argument it was given that decides what it
+    measures, so one stage's case is superseded only by another stage's run
+    of the *same* case at the same coverage or better. Two steps of one test
+    that differ in such an argument -- a different register, a different
+    attenuation -- measure different things, and neither covers the other.
+    """
+    return (
+        step.test_name,
+        tuple(sorted(
+            (name, repr(value)) for name, value in step.arguments.items()
+            if name not in _PLACEMENT_ARGUMENTS
+        )),
+    )
 
 
 def _step_hosts(
@@ -667,6 +693,7 @@ class StagePlan:
             "optional": self.stage.optional,
             "opt_in": self.stage.opt_in,
             "writes_firmware": self.stage.writes_firmware,
+            "restores_application_image": self.stage.restores_application_image,
             "requires": list(self.stage.requires),
             "order": self.stage.order,
             "resources": list(self.resources),
@@ -864,6 +891,7 @@ IMMUTABLE_REVISION = "immutable revision"
 REQUIRED_STAGE_HOSTS = "every required stage has a host"
 NO_PASSED_IN_IMAGE = "no stage needs a passed-in image"
 BOOTLOADER_ACCEPTANCE = "bootloader acceptance"
+BOARD_ON_EVERY_HOST = "a board on every stage's host"
 DISK_BUDGET = "disk budget"
 WALL_TIME = "estimated wall time"
 
@@ -931,6 +959,47 @@ def _disk_check(results_dir: Path | str | None, minimum: int) -> GateCheck:
     )
 
 
+def _board_check(
+    plans: Sequence[StagePlan], boards: Mapping[str, int] | None
+) -> GateCheck:
+    """A registered board on every host a stage of this gate would run on.
+
+    The one piece of a bench the controller itself knows: each target reports
+    the boards its registry holds and whether USB has them. A host with none
+    runs no radio stage at all, and every stage here binds an Ubertooth, so
+    that is worth refusing before a build rather than discovering per stage.
+
+    Everything else a stage needs -- the ESP32 pair, the DKs, the host's
+    Bluetooth adapter, the attenuated board, the debug programmer -- is in
+    the target's own resource registry, which the controller does not hold
+    and does not ask for. Those are the target's answer, and a required
+    stage that cannot be measured for one of them fails the gate rather than
+    passing it unmeasured. ``docs/guide/release-gate.md`` says so where an
+    operator reads it.
+    """
+    if boards is None:
+        return GateCheck(
+            BOARD_ON_EVERY_HOST, True,
+            "not judged here: no target reported its boards", blocking=False,
+        )
+    wanted = sorted({
+        host for plan in plans if plan.runnable and not plan.stage.optional
+        for host in plan.hosts
+    })
+    empty = [host for host in wanted if not boards.get(host)]
+    if empty:
+        return GateCheck(
+            BOARD_ON_EVERY_HOST, False,
+            ", ".join(empty) + " has no registered Ubertooth that USB can "
+            "see, and every stage of this gate binds one",
+        )
+    return GateCheck(
+        BOARD_ON_EVERY_HOST, True,
+        "; ".join(f"{host}: {boards.get(host)} board(s)" for host in wanted)
+        or "no host to judge",
+    )
+
+
 def preflight(
     plans: Sequence[StagePlan],
     waves: Sequence[Sequence[str]],
@@ -940,6 +1009,7 @@ def preflight(
     with_bootloader: bool = False,
     results_dir: Path | str | None = None,
     overhead_s: Mapping[str, float] | None = None,
+    boards: Mapping[str, int] | None = None,
     minimum_free_bytes: int = MIN_FREE_BYTES,
     target_wall_s: float = TARGET_WALL_SECONDS,
 ) -> dict:
@@ -956,14 +1026,17 @@ def preflight(
     that every required stage has a host that runs it, and that no required
     stage would leave a gate unable to measure what its suite requires; that
     no stage needs an image only ``--artifact`` can pass; that the opt-in
-    bootloader stage was asked for before its fixture is relied on; that the
-    records have room; and what the whole gate is estimated to take against
-    the procedure's own target.
+    bootloader stage was asked for before its fixture is relied on; that
+    every host a required stage runs on has a registered board USB can see
+    (``boards``, which is what the targets reported); that the records have
+    room; and what the whole gate is estimated to take against the
+    procedure's own target.
 
-    What is not judged here, because only the target's registry knows it:
-    which boards, peers, adapters and programmers a bench really has. A stage
-    whose fixture is absent is the target's refusal, and a required stage
-    that fails for it fails the gate rather than passing it unmeasured.
+    What is not judged here, because only the target's own resource registry
+    knows it: the peers, the DKs, the host adapter, the attenuated board and
+    the debug programmer. A stage whose fixture is absent is the target's
+    refusal, and a required stage that fails for it fails the gate rather
+    than passing it unmeasured.
     """
     checks: list[GateCheck] = [_commit_check(ref, commit)]
     missing = [plan for plan in plans if not plan.runnable]
@@ -1007,6 +1080,7 @@ def preflight(
         ),
         blocking=False,
     ))
+    checks.append(_board_check(plans, boards))
     checks.append(_disk_check(results_dir, minimum_free_bytes))
     estimated = wall_estimate(plans, waves, overhead_s)
     if estimated is None:
@@ -1095,6 +1169,11 @@ class ReleaseGate:
     stages: list = dataclasses.field(default_factory=list)
     cancel_requested: bool = False
     cancel_reason: str | None = None
+    # Whether this gate's completion notice has been started. Not stored: a
+    # gate that settled while the controller was down is not mailed on
+    # startup, as a run that ended then is not (notify.py), and the ledger
+    # beside the run directories is what keeps one that was sent unique.
+    notified: bool = False
 
     def record(self) -> dict:
         return {name: getattr(self, name) for name in _GATE_FIELDS}
@@ -1193,8 +1272,30 @@ def gate_from_record(data: Mapping) -> ReleaseGate:
                 raise ValueError(f"a stage's {name} must be a string or null")
         if entry.get("outcome") is not None and entry["outcome"] not in STAGE_OUTCOMES:
             raise ValueError(f"not a stage outcome: {entry['outcome']!r}")
-        if not isinstance(entry.get("hosts"), list):
-            raise ValueError("a stage's hosts must be a list")
+        # Every field a dispatch decision or a child request reads, because a
+        # record is a file on disk: a stage whose `order` is a word would be
+        # loaded, drawn, and then raise where the next stage is chosen, and a
+        # `requires` that is a string would be read character by character
+        # and quietly lose the requirement -- which is how a flash writer
+        # could start before the stage it waits for.
+        for name in ("plan", "suite", "bootloader"):
+            if not isinstance(entry.get(name), str) or not entry[name]:
+                raise ValueError(f"a stage's {name} must be a name")
+        for name in ("hosts", "requires", "tests"):
+            if not isinstance(entry.get(name), list) or not all(
+                isinstance(item, str) for item in entry[name]
+            ):
+                raise ValueError(f"a stage's {name} must be a list of names")
+        if isinstance(entry.get("order"), bool) or not isinstance(
+            entry.get("order"), int
+        ):
+            raise ValueError("a stage's order must be a whole number")
+        for name in (
+            "optional", "opt_in", "writes_firmware", "build", "flash_build",
+            "with_firmware", "with_btbr", "with_python",
+        ):
+            if not isinstance(entry.get(name), bool):
+                raise ValueError(f"a stage's {name} must be true or false")
     groups = gate.group_ids()
     if len(set(groups)) != len(groups):
         raise ValueError("two stages must not name the same run group")
@@ -1216,9 +1317,17 @@ def _stage_status(entry: Mapping, group: Mapping | None, *, dispatched: bool) ->
     the measurement. A stage with none reports what the gate recorded about
     it -- skipped, abandoned, cancelled, or a start that failed -- and a
     stage the gate has not reached yet is pending.
+
+    A stage whose group *was* recorded and is no longer stored (its runs fell
+    outside the retention window) is an error of the gate. Never pending: a
+    pending stage is one to start, and this one has already run, on boards a
+    writer stage would then write twice. Never ``not_reached`` either, which
+    would read as a stage nobody got to.
     """
     if group is not None:
         return str(group.get("status") or ERROR)
+    if entry.get("group_id"):
+        return ERROR
     outcome = entry.get("outcome")
     if outcome in STAGE_OUTCOMES:
         return outcome
@@ -1294,7 +1403,8 @@ def stage_views(
             **{
                 name: entry.get(name) for name in (
                     "stage", "purpose", "condition", "optional", "opt_in",
-                    "writes_firmware", "requires", "order", "plan", "suite",
+                    "writes_firmware", "restores_application_image",
+                    "requires", "order", "plan", "suite",
                     "tests", "hosts", "resources", "dropped_tests",
                     "estimated_s", "build", "flash_build", "with_firmware",
                     "with_btbr", "with_python", "bootloader",
@@ -1415,6 +1525,23 @@ def pending_decisions(
     return tuple(ready), tuple(abandoned)
 
 
+def _restore_verified(row: Mapping, rows: Sequence[Mapping]) -> bool:
+    """Did a later stage on this board write and preflight the application image?
+
+    True when a stage of a higher ``order`` that shares a host with this one
+    passed: that stage flashed the run's application firmware and its
+    preflight verified the identity, which is the check this one's own
+    write-back is taken on trust without.
+    """
+    hosts = {str(host) for host in row.get("hosts") or ()}
+    return any(
+        str(other.get("status")) == PASSED
+        and int(other.get("order") or 0) > int(row.get("order") or 0)
+        and hosts & {str(host) for host in other.get("hosts") or ()}
+        for other in rows
+    )
+
+
 def gate_view(
     gate: ReleaseGate, groups: Mapping[str, Mapping],
     *, manual_gates: Sequence[Mapping] = MANUAL_GATES,
@@ -1434,6 +1561,16 @@ def gate_view(
     )
     required = [row for row in rows if not row["optional"]]
     return {
+        # A stage that leaves the alternate image on a board writes the
+        # application image back itself, and the next writer on that board
+        # flashes and preflights it, which is what verifies the restore. When
+        # that stage did not run, the restore is the stage's own word for it.
+        "unverified_restores": [
+            {"stage": row["stage"], "status": row["status"]}
+            for row in rows
+            if row.get("restores_application_image")
+            and not _restore_verified(row, rows)
+        ],
         **{name: getattr(gate, name) for name in _GATE_FIELDS if name != "stages"},
         "status": status,
         "active": status == RUNNING,
@@ -1455,7 +1592,11 @@ def gate_view(
             if row["optional"]
             and row["status"] not in (PASSED, SKIPPED, *UNFINISHED)
         ],
-        "estimated_s": (
+        # Every stage's test time added up, which is not the wall estimate
+        # preflight reports (that one costs a wave its slowest stage and adds
+        # each stage's build): named apart so a reader cannot take one for
+        # the other.
+        "test_seconds_total": (
             None if any(row["estimated_s"] is None for row in rows)
             else round(sum(row["estimated_s"] for row in rows), 1)
         ),

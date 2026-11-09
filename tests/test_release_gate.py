@@ -41,6 +41,7 @@ from ubertooth_harness.releasegate import (
     CANCELED,
     COMPREHENSIVE,
     DISK_BUDGET,
+    ERROR,
     FAILED,
     GATES_DIR,
     IMMUTABLE_REVISION,
@@ -70,14 +71,22 @@ from ubertooth_harness.releasegate import (
 
 try:
     from test_controller import TIMEOUT_S, fake_ref_source, wait_until
-    from test_run_groups import LINUX, MAC, RunGroupTestCase
+    from test_run_groups import LINUX, MAC, RunGroupTestCase, ScriptedRunner
 except ImportError:  # run as tests.test_release_gate
     from tests.test_controller import TIMEOUT_S, fake_ref_source, wait_until
-    from tests.test_run_groups import LINUX, MAC, RunGroupTestCase
+    from tests.test_run_groups import (
+        LINUX, MAC, RunGroupTestCase, ScriptedRunner,
+    )
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 PLANS = REPOSITORY / "testplans"
 BENCH = {LINUX: "linux", MAC: "macos"}
+# The operating systems a scripted runner registers with, as
+# tests/test_run_groups.py writes them.
+OPERATING_SYSTEMS = {
+    "linux": {"system": "Linux", "release": "6.8", "distribution": "Ubuntu 24.04"},
+    "macos": {"system": "Darwin", "release": "24.1.0", "macos": "15.1"},
+}
 
 
 def check(report, name):
@@ -414,6 +423,27 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn("KGV", check(report, NO_PASSED_IN_IMAGE)["detail"])
 
+    def test_a_host_with_no_board_blocks_the_gate(self):
+        # The one piece of a bench the controller itself knows: a host whose
+        # registry holds no board USB can see runs no stage of this gate, and
+        # that is worth refusing before a build.
+        plans, waves = compiled()
+        report = preflight(
+            plans, waves, ref="main", commit="a" * 40,
+            boards={LINUX: 2, MAC: 0},
+        )
+        self.assertFalse(report["passed"])
+        self.assertIn(MAC, check(report, releasegate.BOARD_ON_EVERY_HOST)["detail"])
+        report = preflight(
+            plans, waves, ref="main", commit="a" * 40,
+            boards={LINUX: 2, MAC: 1},
+        )
+        self.assertTrue(report["passed"], report["refusal"])
+        # With nothing reported it is not judged, and does not block.
+        report = preflight(plans, waves, ref="main", commit="a" * 40)
+        check_view = check(report, releasegate.BOARD_ON_EVERY_HOST)
+        self.assertEqual((True, False), (check_view["passed"], check_view["blocking"]))
+
     def test_a_full_disk_blocks_the_gate_and_a_missing_one_does_not(self):
         plans, waves = compiled()
         report = preflight(
@@ -502,6 +532,27 @@ class GateRecordTests(unittest.TestCase):
                 **good,
                 "stages": [{**good["stages"][0], "outcome": "fine"}, *good["stages"][1:]],
             })
+        # Every field a dispatch decision reads: a record whose order is a
+        # word, or whose requires is a string, would be loaded and then raise
+        # (or silently lose the requirement) where the next stage is chosen.
+        for change, expected in (
+            ({"order": "soon"}, "order must be"),
+            ({"order": True}, "order must be"),
+            ({"requires": "fast-only"}, "requires must be"),
+            ({"tests": [7]}, "tests must be"),
+            ({"plan": ""}, "plan must be"),
+            ({"bootloader": None}, "bootloader must be"),
+            ({"optional": "no"}, "optional must be"),
+            ({"build": 1}, "build must be"),
+            ({"hosts": "Host_Linux"}, "hosts must be"),
+        ):
+            with self.subTest(change):
+                with self.assertRaisesRegex(ValueError, expected):
+                    gate_from_record({
+                        **good,
+                        "stages": [{**good["stages"][0], **change},
+                                   *good["stages"][1:]],
+                    })
         with self.assertRaisesRegex(ValueError, "same run group"):
             gate_from_record({
                 **good,
@@ -640,12 +691,53 @@ class MatrixTests(unittest.TestCase):
             "too weak", view["optional_problems"][0]["reason"]
         )
 
-    def test_a_stage_whose_group_is_gone_says_so(self):
+    def test_a_stage_whose_group_is_gone_is_an_error_not_a_stage_to_run(self):
         record = gate()
         record.set_stage_group("fast-only", "grp-1")
         view = gate_view(record, {})
         row = view["stages"][0]
         self.assertEqual(releasegate.GROUP_GONE, row["reason"])
+        # Not pending: a pending stage is one to start, and this one has run
+        # already, on boards a writer stage would then write twice. Not
+        # not_reached either, which would read as a stage nobody got to.
+        self.assertEqual(ERROR, row["status"])
+        self.assertNotIn("fast-only", pending_decisions(view["stages"])[0])
+
+    def test_a_btbr_restore_no_later_stage_verified_is_reported(self):
+        record = gate()
+        groups = {}
+        for index, entry in enumerate(record.stages, start=1):
+            if entry["order"] > 0 and not entry["restores_application_image"]:
+                # The writers after btbr never ran, so nothing wrote and
+                # preflighted the application image after it.
+                record.set_stage_outcome(
+                    entry["stage"], NOT_REACHED, "it was not run")
+                continue
+            group_id = f"grp-{index}"
+            record.set_stage_group(entry["stage"], group_id)
+            groups[group_id] = passed_group(group_id, entry["hosts"])
+        record.dispatched_at = "2026-01-01T00:01:00.000+00:00"
+        view = gate_view(record, groups)
+        self.assertEqual(
+            ["btbr"], [entry["stage"] for entry in view["unverified_restores"]]
+        )
+        # And when a later writer on that board did pass, it is verified.
+        for entry in record.stages:
+            if entry["order"] > 0 and not entry["restores_application_image"]:
+                entry["outcome"] = None
+                record.set_stage_group(entry["stage"], f"grp-w-{entry['stage']}")
+                groups[f"grp-w-{entry['stage']}"] = passed_group(
+                    f"grp-w-{entry['stage']}", entry["hosts"])
+        self.assertEqual([], gate_view(record, groups)["unverified_restores"])
+
+    def test_the_two_totals_are_named_apart(self):
+        # The gate's own figure is every stage's test time added up; the wall
+        # estimate preflight reports costs a wave its slowest stage and adds
+        # each stage's build, so one is not the other.
+        record = gate()
+        view = gate_view(record, {})
+        self.assertIsNotNone(view["test_seconds_total"])
+        self.assertNotIn("estimated_s", view)
 
     def test_the_summary_names_the_gates_it_does_not_measure(self):
         view = gate_view(gate(), {})
@@ -771,8 +863,46 @@ TEST_STAGES = (
 )
 
 
+class BoardRunner(ScriptedRunner):
+    """A scripted runner that registers one board USB can see.
+
+    A gate preflights that every host a required stage runs on has one, so a
+    runner with an empty registry is refused -- which is tested too
+    (``PreflightTests``), with the gate tests driving a bench that has a
+    board.
+    """
+
+    async def register(self, host=None, interval=0.2, active=None):
+        await self.send(
+            "register", host=host or self.host, hostname=f"{self.host}-box",
+            os=OPERATING_SYSTEMS[self.platform], python="3.12.6",
+            ubertooth_serials=[self.serial], enumeration_error=None,
+            boards=[{
+                "alias": f"UT_{self.host}", "serial": self.serial,
+                "present": True, "held": False, "holder": "",
+                "firmware_revision": None, "power_controller": None,
+                "power_port": None,
+            }],
+            heartbeat_interval_s=interval, active_run_id=active,
+        )
+
+
 class GateControllerTestCase(RunGroupTestCase):
     """A controller whose plans and configuration are the test's own."""
+
+    async def runners(self, hosts=(LINUX, MAC), interval=0.2):
+        """Both scripted runners, each with a board, closed with the test."""
+        made = []
+        for host in hosts:
+            runner = BoardRunner(
+                self.port, host, "macos" if host == MAC else "linux",
+                serial=("b" if host == MAC else "a") * 32,
+            )
+            await runner.__aenter__()
+            self.addAsyncCleanup(runner.__aexit__)
+            await self.registered(runner, host, interval=interval)
+            made.append(runner)
+        return made
 
     async def asyncSetUp(self):
         self._plans = tempfile.TemporaryDirectory()
@@ -1116,24 +1246,89 @@ class GateProgressTests(GateControllerTestCase):
         )
 
 
+class Collect:
+    """A notifier that keeps the notices instead of sending them."""
+
+    enabled = True
+    log = staticmethod(lambda message: None)
+
+    class config:
+        subject_prefix = ""
+        gui_base_url = "http://127.0.0.1:8765"
+
+    def __init__(self):
+        self.notices = []
+
+    async def deliver(self, notice):
+        self.notices.append(notice)
+
+
+class GateBusyHostTests(GateControllerTestCase):
+    """A host something else is using is not a stage that failed."""
+
+    async def test_a_busy_host_leaves_the_stage_to_be_tried_again(self):
+        linux, mac = await self.runners()
+        view = await self.start_gate([linux, mac])
+        await self.finish_stage(view, "smoke", [linux, mac])
+        await self.accept([linux, mac], {LINUX: "linux-1", MAC: "mac-1"})
+        await self.settled(view["gate_id"], "linux", RUNNING)
+        # The Mac's own stage ends, and a run of somebody else's starts there
+        # before the writer stage can have it.
+        await self.finish(mac, "mac-1", "passed")
+        post, message = await self.start_run(mac, MAC)
+        await mac.send(
+            "run_accepted", request_id=message["request_id"], run_id="other-1")
+        status, payload, _ = await post
+        self.assertEqual(201, status, payload)
+        await self.finish(linux, "linux-1", "passed")
+        # The writer wants both hosts and one is taken: it waits, pending,
+        # rather than being recorded as a stage that failed.
+        await asyncio.sleep(0.4)
+        rows = self.stage_rows(await self.gate(view["gate_id"]))
+        self.assertEqual(PENDING, rows["writer"]["status"])
+        self.assertEqual(RUNNING, (await self.gate(view["gate_id"]))["status"])
+        # Once that run ends, the stage is tried again and starts.
+        await self.finish(mac, "other-1", "passed")
+        await self.accept([linux, mac], {LINUX: "writer-1", MAC: "writer-2"})
+        await self.settled(view["gate_id"], "writer", RUNNING)
+
+
 class GateNoticeTests(GateControllerTestCase):
     """One completion notice for the gate, and none for its stages (#392)."""
 
+    async def test_a_gate_that_passed_is_reported_when_its_last_stage_ends(self):
+        # The run that ends the last stage leaves the gate terminal, so
+        # nothing but that run's own end would ever reach the gate's notice.
+        notifier = Collect()
+        self.controller.notifier = notifier
+        linux, mac = await self.runners()
+        view = await self.start_gate([linux, mac])
+        await self.finish_stage(view, "smoke", [linux, mac])
+        await self.accept([linux, mac], {LINUX: "linux-1", MAC: "mac-1"})
+        await self.settled(view["gate_id"], "linux", RUNNING)
+        await self.finish(linux, "linux-1", "passed")
+        await self.finish(mac, "mac-1", "passed")
+        await self.settled(view["gate_id"], "writer", RUNNING, PENDING)
+        await self.accept([linux, mac], {LINUX: "writer-1", MAC: "writer-2"})
+        await self.settled(view["gate_id"], "writer", RUNNING)
+        await self.finish(linux, "writer-1", "passed")
+        await self.finish(mac, "writer-2", "passed")
+        await wait_until(lambda: notifier.notices, timeout=TIMEOUT_S)
+        await asyncio.sleep(0.2)
+        self.assertEqual(
+            [f"gate-{view['gate_id']}"],
+            [notice.key for notice in notifier.notices],
+        )
+        notice = notifier.notices[0]
+        self.assertIn("PASSED", notice.subject)
+        self.assertIn("4 of 4 required stages passed", notice.body)
+        # The link opens the gate's own panel, not a run that does not exist.
+        self.assertIn(f"/ui/#gate={view['gate_id']}", notice.body)
+
     async def test_one_notice_for_the_gate_and_none_for_its_stages(self):
-        notices = []
-
-        class Collect:
-            enabled = True
-            log = staticmethod(lambda message: None)
-
-            class config:
-                subject_prefix = ""
-                gui_base_url = ""
-
-            async def deliver(self, notice):
-                notices.append(notice)
-
-        self.controller.notifier = Collect()
+        notifier = Collect()
+        notices = notifier.notices
+        self.controller.notifier = notifier
         linux, mac = await self.runners()
         view = await self.start_gate([linux, mac])
         await self.finish_stage(view, "smoke", [linux, mac], "failed")

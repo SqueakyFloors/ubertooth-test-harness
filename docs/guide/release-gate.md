@@ -30,7 +30,7 @@ the configuration lives in `ubertooth_harness/releasegate.py`.
 | `range-weak-link` | `range` / `range-weak-link` | the two-device range test with the responder behind 20 dB. **Optional** |
 | `btbr` | `classic` / `btbr-comprehensive` | the alternate image, then the application image written back and verified |
 | `application-firmware` | `firmware` / `firmware` | suffixing, read-back, every bad image refused before a write, the image verified at the end |
-| `bootloader` | `fast` / `fast`, one test | the bootloader built from this ref installed over the paired programmer, read back with the application image running again. **Opt-in** |
+| `bootloader` | `fast` / `fast`, one test | the bootloader built from this ref installed over the paired programmer if the board is behind, read back with the application image running again. **Opt-in** |
 
 A stage's build options are not written down in the configuration: they are
 read from what the suite's own tests declare they need, so a suite that starts
@@ -49,7 +49,15 @@ and its suite has not yet judged a result
 bootloader stage writes the one part of flash an ordinary run cannot put back,
 so it runs only when asked for, and then only on a board whose own registry
 pairs it with a debug programmer; a host without one records what is installed
-and writes nothing.
+and writes nothing. A paired board that already carries the bootloader built
+from this ref is compared and left alone, so the stage can pass having written
+nothing — which is the right outcome, and not the same as having exercised the
+write.
+
+The `--bootloader check` arm of TC-17, which compares *every* board against one
+built from the candidate, is not in the gate: a bench whose boards carry an
+older bootloader would then fail every gate rather than being told to update
+one board. The other stages record what each board has.
 
 ### What the gate does not cover
 
@@ -120,6 +128,7 @@ verdict nobody can use. What is judged:
 | immutable revision | yes | the ref resolved to one commit, and every stage of every host is sent that commit, so a branch that moves mid-gate cannot split it |
 | every required stage has a host | yes | a required stage no host of this gate runs blocks the gate; an optional one is skipped and named |
 | no stage needs a passed-in image | yes | an image no build makes can only come from `run-suite --artifact`, which a dispatched run has no way to pass |
+| a board on every stage's host | yes | each target reports its own boards; a host whose registry holds none that USB can see runs no stage of this gate |
 | disk budget | yes | room where the records are kept |
 | bootloader acceptance | no | whether the opt-in stage was asked for |
 | estimated wall time | no | the whole gate's estimate against the two-hour target the procedure sets |
@@ -131,10 +140,22 @@ keeps a release inside six hours
 exceeding it is a procedure failure to correct, which is why it is a warning
 and not a refusal.
 
-What preflight cannot judge is what only the target's registry knows: which
-boards, peers, adapters and programmers a bench really has. A stage whose
-fixture is absent is the target's own refusal, and a required stage that fails
-for it fails the gate rather than passing it unmeasured.
+What preflight cannot judge is the rest of a bench. The controller holds each
+target's **boards**, and checks them; the ESP32 peers, the DKs, the host's
+Bluetooth adapter, the attenuated board and the debug programmer are in the
+target's own resource registry, which the controller does not hold. A stage
+whose fixture is absent is therefore the target's own refusal, in the middle
+of the gate rather than before it: a required stage that fails for it fails
+the gate rather than passing it unmeasured, but the bench has been built and
+flashed by then. Before a long gate on a bench that has been rearranged, a
+`run-suite --dry-run` of the peer suites is still worth the minute
+([release-testing.md](../release-testing.md#3-entry-criteria), entry criterion 7).
+
+Two figures in the answers are both lengths of time and are not the same
+quantity, so they are named apart: `estimated_s` in a preflight is the whole
+gate's wall estimate (each wave costs its slowest stage, with that stage's
+build added), and `test_seconds_total` on a gate is every stage's test time
+added up.
 
 ## The verdict
 
@@ -145,6 +166,12 @@ It is `passed` only when every required stage passed.
 An optional stage does not decide the verdict — a bench without the fixture it
 needs would otherwise never produce a pass — and what became of it is reported
 beside the verdict (`optional_problems`) rather than swallowed.
+
+`unverified_restores` names a stage that writes the application image back
+itself where no later stage on that board flashed and preflighted it — the
+`btbr` stage when the writers behind it were abandoned. The case's own cleanup
+still writes the image back; what is missing is the independent check, and the
+summary says so rather than implying one happened.
 
 A stage the gate decided not to run carries its own reason:
 
@@ -234,7 +261,7 @@ message rather than twelve. It is off unless completion notices are configured
 |---|---|
 | `GET /api/release-configurations?config=NAME&host=HOST&with_bootloader=true` | what a gate would do on those hosts: every stage, the waves, and the preflight. Starts nothing |
 | `POST /api/release-gates` | `{config, hosts, ref, commit, with_bootloader}`; 201 with the gate, or 422 with what preflight refused |
-| `GET /api/release-gates` | every gate, newest first |
+| `GET /api/release-gates` | the newest gates, 50 at most (`?limit=N`), with how many there are in all. A gate carries every stage with every run, so the whole store is not an answer to give |
 | `GET /api/release-gates/{gate_id}` | one gate: its verdict and its stage matrix |
 | `POST /api/release-gates/{gate_id}/cancel` | `{reason}`; every running stage is cancelled and nothing still to come is started |
 

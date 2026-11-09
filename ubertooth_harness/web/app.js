@@ -1362,6 +1362,11 @@
       notes.push(`This gate measures nothing for ${entry.name} (${entry.reference}): `
         + `${entry.reason}. Run it by hand and record it with release-evidence --attest.`);
     }
+    for (const entry of gate.unverified_restores || []) {
+      notes.push(`The ${entry.stage} stage writes the application image back`
+        + " itself, and no later stage on that board flashed and preflighted"
+        + " it, so the restore is that stage's own word for it.");
+    }
     for (const entry of gate.optional_problems || []) {
       notes.push(`The optional stage ${entry.stage} ended ${statusWord(entry.status)}`
         + `${entry.reason ? `: ${entry.reason}` : ""}. An optional stage does not`
