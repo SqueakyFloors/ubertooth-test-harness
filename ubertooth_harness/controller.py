@@ -58,6 +58,7 @@ a verdict.
 import asyncio
 import dataclasses
 import datetime
+import functools
 import ipaddress
 import json
 import os
@@ -129,6 +130,7 @@ from ubertooth_harness.releasegate import (
     ReleaseGateError,
     compile_stages,
     configuration,
+    deadline_detail,
     enabled,
     gate_from_record,
     gate_view,
@@ -503,10 +505,20 @@ class Clock:
     four. A test that holds this clock still holds an outstanding reply wait
     with it, and so says which request gives up and when rather than racing
     a loaded host for the answer (#390).
+
+    ``wall`` is the one period that is not monotonic: a release gate's
+    deadline is counted from the ``created_at`` in its stored record, which
+    outlives the process that wrote it, so it is read against a wall
+    timestamp rather than against a monotonic figure this process started
+    from (#410). It is here so that a test can hold it too.
     """
 
     def __call__(self) -> float:
         return time.monotonic()
+
+    def wall(self) -> str:
+        """This moment, as a record writes a timestamp (UTC, milliseconds)."""
+        return _now()
 
     async def wait(self, future: asyncio.Future, timeout: float):
         """The future's result, or ``TimeoutError`` once ``timeout`` passes.
@@ -2981,12 +2993,64 @@ class Controller:
 
         The stage matrix is built from each stage's child group view, which
         is built from that group's children's own records, so a gate never
-        holds a status of its own that could disagree with a run.
+        holds a status of its own that could disagree with a run. Two things
+        are this controller's own and are handed in: this moment, which the
+        gate's deadline is read against, and what each host is doing, which
+        is where a pending stage's ``waiting_on`` comes from (#410).
         """
-        return gate_view(gate, {
-            group_id: self.view_group(self.groups[group_id])
-            for group_id in gate.group_ids() if group_id in self.groups
-        })
+        return gate_view(
+            gate,
+            {
+                group_id: self.view_group(self.groups[group_id])
+                for group_id in gate.group_ids() if group_id in self.groups
+            },
+            now=self.clock.wall(),
+            hosts=self._host_waits(),
+        )
+
+    def _host_waits(self) -> dict[str, dict]:
+        """What each registered host is doing, for a pending stage's waiting_on.
+
+        Only what this controller already holds: whether the runner is
+        connected, the run that host is carrying and whether that run
+        flashes a board, whether a start request for it is out, and each
+        registered board's lease and whether USB has it, as that target last
+        reported them.
+
+        A run that flashes holds its host's own power/firmware lock for its
+        whole length (``leases``), so a stage waiting on such a run is
+        waiting on the lock and is told so. The lock itself is the target's
+        file and is not reported over the protocol, so a run this controller
+        did not start is named as a run and nothing is claimed about what it
+        holds.
+        """
+        starting = {pending.host for pending in self._pending_runs.values()}
+        states: dict[str, dict] = {}
+        for host, target in self.targets.items():
+            run = (
+                self.runs.get(target.active_run_id)
+                if target.active_run_id else None
+            )
+            states[host] = {
+                "online": bool(target.online and self._links.get(host)),
+                "active_run_id": target.active_run_id,
+                "active_run_flashes": (
+                    None if run is None
+                    else bool(run.flash_build or run.with_firmware or run.with_btbr)
+                ),
+                "starting": host in starting,
+                "boards": [
+                    {
+                        "alias": board.get("alias"),
+                        "held": bool(board.get("held")),
+                        "holder": board.get("holder") or "",
+                        "present": board.get("present"),
+                    }
+                    for board in target.boards or ()
+                    if isinstance(board, Mapping)
+                ],
+            }
+        return states
 
     def gate_views(self, limit: int = MAX_GATE_PAGE) -> dict:
         """The newest gates, and how many there are. Bounded, as history is.
@@ -3076,6 +3140,7 @@ class Controller:
     def _compile_gate(
         self, config: str, hosts: Sequence[str], *, ref: str,
         commit: str | None, with_bootloader: bool,
+        deadline_s: float | None = None,
     ):
         """The stages, the waves and the whole graph's preflight.
 
@@ -3083,6 +3148,9 @@ class Controller:
         thread. Refuses a configuration this harness has not got, and a
         stage naming a plan or suite it has not got, as the caller's
         mistake: the configuration is this repository's own.
+
+        ``deadline_s`` is an operator's override; preflight judges it and
+        derives the gate's own deadline when there is none.
         """
         try:
             stages = enabled(configuration(config), with_bootloader=with_bootloader)
@@ -3103,11 +3171,13 @@ class Controller:
             overhead_s=self._stage_overhead(hosts),
             boards=self._present_boards(hosts),
             minimum_free_bytes=MIN_FREE_BYTES,
+            deadline_s=deadline_s,
         )
         return plans, waves, report
 
     async def configuration_view(
-        self, config: str, hosts, *, with_bootloader: bool = False
+        self, config: str, hosts, *, with_bootloader: bool = False,
+        deadline_s: float | None = None,
     ) -> dict:
         """What a gate of this configuration on these hosts would do.
 
@@ -3124,7 +3194,7 @@ class Controller:
             raise ControllerError(f"unknown target {unknown[0]!r}", 404)
         plans, _waves, report = await asyncio.to_thread(
             self._compile_gate, config, chosen, ref="", commit=None,
-            with_bootloader=with_bootloader,
+            with_bootloader=with_bootloader, deadline_s=deadline_s,
         )
         return {
             "config": config,
@@ -3154,6 +3224,7 @@ class Controller:
     async def start_gate(
         self, *, config: str = COMPREHENSIVE, hosts, ref: str,
         commit: str | None = None, with_bootloader: bool = False,
+        deadline_s: float | None = None,
     ) -> ReleaseGate:
         """Start one release gate: the configuration's stages, in waves.
 
@@ -3166,6 +3237,11 @@ class Controller:
 
         Only what may start now is started; each later stage starts when the
         stages it waits for have settled (``_advance_gate``).
+
+        Every gate also carries a deadline -- the one preflight derived from
+        the stages' estimates, or ``deadline_s`` if an operator asked for one
+        inside the bounds every gate keeps to. A gate that reaches it is
+        given up on rather than left running with no verdict (#410).
         """
         chosen = self._group_hosts(hosts)
         unknown = [host for host in chosen if host not in self.targets]
@@ -3174,21 +3250,21 @@ class Controller:
         resolved = await self.resolve_ref(ref, commit)
         plans, waves, report = await asyncio.to_thread(
             self._compile_gate, config, chosen, ref=ref, commit=resolved,
-            with_bootloader=with_bootloader,
+            with_bootloader=with_bootloader, deadline_s=deadline_s,
         )
         if not report["passed"]:
             raise ControllerError(
                 f"release gate {config} cannot start: {report['refusal']}", 422
             )
-        gate = new_gate(
-            config, chosen, plans, ref=ref, commit=resolved,
+        made = functools.partial(
+            new_gate, config, chosen, plans, ref=ref, commit=resolved,
             with_bootloader=with_bootloader, waves=waves,
+            deadline_s=report["deadline_s"],
+            deadline_source=report["deadline_source"],
         )
+        gate = made()
         while gate.gate_id in self.gates:
-            gate = new_gate(
-                config, chosen, plans, ref=ref, commit=resolved,
-                with_bootloader=with_bootloader, waves=waves,
-            )
+            gate = made()
         for plan in plans:
             if not plan.runnable:
                 # Optional, and this bench has nothing to run it with: a
@@ -3233,20 +3309,37 @@ class Controller:
         stage twice. One stage's start failing is that stage's result: the
         rest of the graph goes on, and a required stage that did not start
         fails the gate at the end rather than in the middle of it.
+
+        A gate that has run past its deadline is given up on here first
+        (``_expire_gate``), so a bench nobody frees ends the gate instead of
+        leaving it running for ever.
         """
-        changed = False
+        changed = await self._expire_gate(gate)
         # Bounded: each pass either starts or settles at least one stage, so
         # one pass per stage and one to find nothing left is every pass there
         # can be.
         for _pass in range(len(gate.stages) + 1):
             rows = self.view_gate(gate)["stages"]
-            if gate.cancel_requested:
+            if gate.cancel_requested or gate.deadline_expired:
+                # Nothing more is started. A stage that had not started is
+                # recorded as never reached when the deadline took the gate,
+                # and as cancelled when somebody did.
+                if gate.deadline_expired:
+                    outcome = STAGE_NOT_REACHED
+                    reason = (
+                        f"{deadline_detail(gate)}, so this stage was never "
+                        "started"
+                    )
+                else:
+                    outcome = STAGE_CANCELED
+                    reason = (
+                        gate.cancel_reason
+                        or f"release gate {gate.gate_id} was canceled"
+                    )
                 for row in rows:
                     if row["status"] == STAGE_PENDING:
                         changed |= gate.set_stage_outcome(
-                            row["stage"], STAGE_CANCELED,
-                            gate.cancel_reason
-                            or f"release gate {gate.gate_id} was canceled",
+                            row["stage"], outcome, reason
                         )
                 break
             ready, abandoned = pending_decisions(
@@ -3282,6 +3375,60 @@ class Controller:
             # Over, and not reported yet: one notice for the whole gate.
             gate.notified = True
             self.notify_gate_settled(gate)
+
+    async def _expire_gate(self, gate: ReleaseGate) -> bool:
+        """Give up on a gate that has run past its deadline; True if it changed.
+
+        Called with the ``_gate_lock`` held, at the top of every advance, so
+        the monitor's own tick reaches it as well as a run ending
+        (``advance_gates``): a gate whose last stage is waiting for a host
+        somebody else keeps busy would otherwise never be looked at again.
+
+        The record carries the expiry before any runner is asked, as a cancel
+        does, so nothing more is started whatever becomes of the runs that
+        are going now. Each running stage is then cancelled the ordinary way
+        -- the child group's own cancel, which stops its runs, releases their
+        leases and writes their reports -- and the stages that were never
+        reached are recorded as such by the advance that follows. The verdict
+        is ``failed``: the gate did not finish
+        (``releasegate.gate_status``).
+
+        It never raises, and never expires twice: a stage whose runner is
+        away keeps its own reason, and the gate settles when that run is
+        lost.
+        """
+        if gate.deadline_expired or not self.view_gate(gate)["overdue"]:
+            return False
+        gate.deadline_expired = True
+        reason = f"{deadline_detail(gate)}; the gate was given up on"
+        self.log(f"release gate {gate.gate_id}: {reason}")
+        try:
+            self._persist_gate(gate)
+        except Exception as error:  # noqa: BLE001 - the expiry stands
+            self.log(
+                f"could not write the expiry of release gate "
+                f"{gate.gate_id}: {error}"
+            )
+        for row in self.view_gate(gate)["stages"]:
+            if row["status"] != GATE_RUNNING or not row["group_id"]:
+                continue
+            try:
+                await self.cancel_group(row["group_id"], reason)
+            except ControllerError as error:
+                # A stage whose runner is away, or whose group settled
+                # between these two reads: the expiry stands either way.
+                self.log(
+                    f"release gate {gate.gate_id}: stage {row['stage']} was "
+                    f"not canceled: {error.detail}"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - the others stand
+                self.log(
+                    f"release gate {gate.gate_id}: stage {row['stage']} could "
+                    f"not be canceled: {type(error).__name__}: {error}"
+                )
+        return True
 
     async def _start_stage(self, gate: ReleaseGate, name: str) -> bool:
         """Start one stage as a child run group; True if the gate changed."""
@@ -3802,15 +3949,18 @@ ENDPOINTS = {
     ),
     "GET /api/release-configurations": (
         "the release gate configurations, and what one of them would do on "
-        "the chosen hosts: ?host=HOST (repeatable), ?config=NAME and "
-        "?with_bootloader=true, answering with every stage, the waves they "
-        "would run in, and the whole graph's preflight"
+        "the chosen hosts: ?host=HOST (repeatable), ?config=NAME, "
+        "?with_bootloader=true and ?deadline_s=SECONDS, answering with every "
+        "stage, the waves they would run in, the whole-gate deadline and the "
+        "whole graph's preflight"
     ),
     "POST /api/release-gates": (
         "start one release gate: {config, hosts, ref, commit, "
-        "with_bootloader}; the whole graph is preflighted first and a "
-        "blocking failure starts nothing (422), the ref is resolved once so "
-        "every stage runs one commit, and each stage is a child run group"
+        "with_bootloader, deadline_s}; the whole graph is preflighted first "
+        "and a blocking failure starts nothing (422), the ref is resolved "
+        "once so every stage runs one commit, each stage is a child run "
+        "group, and the gate is given up on at its deadline -- derived from "
+        "the stages' estimates, or deadline_s inside the same bounds"
     ),
     "GET /api/release-gates": (
         f"the newest release gates, {MAX_GATE_PAGE} at most (?limit=N), with "
@@ -3818,7 +3968,9 @@ ENDPOINTS = {
     ),
     "GET /api/release-gates/{gate_id}": (
         "one gate: its verdict and its stage matrix, each stage with its run "
-        "IDs, commit, device roles, duration and report path"
+        "IDs, commit, device roles, duration and report path, each pending "
+        "stage with what it is waiting on, and the gate with its deadline, "
+        "elapsed and remaining time"
     ),
     "POST /api/release-gates/{gate_id}/cancel": (
         "cancel a release gate: {reason}; every running stage is cancelled "
@@ -3923,6 +4075,12 @@ def create_app(controller: Controller):
         # one part of flash an ordinary run cannot put back. Off unless it is
         # asked for here.
         with_bootloader: bool = False
+        # An operator's whole-gate deadline in seconds, inside the bounds
+        # every gate keeps to (releasegate.validated_deadline); without one,
+        # the deadline is derived from the stages' own estimates. Either way
+        # the gate has one: a gate with no deadline can sit running for ever
+        # with no verdict (#410).
+        deadline_s: float | None = None
 
     class CancelRequest(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
@@ -4050,11 +4208,14 @@ def create_app(controller: Controller):
         config: str = COMPREHENSIVE,
         host: list[str] | None = Query(default=None),
         with_bootloader: bool = False,
+        deadline_s: float | None = None,
     ):
         # What a gate would do, before one is started: the GUI shows the
-        # stages and the preflight from here, and starts nothing by asking.
+        # stages, the deadline and the preflight from here, and starts
+        # nothing by asking.
         return await controller.configuration_view(
-            config, host or [], with_bootloader=with_bootloader
+            config, host or [], with_bootloader=with_bootloader,
+            deadline_s=deadline_s,
         )
 
     @app.post("/api/release-gates", status_code=201)
@@ -4062,6 +4223,7 @@ def create_app(controller: Controller):
         gate = await controller.start_gate(
             config=request.config, hosts=request.hosts, ref=request.ref,
             commit=request.commit, with_bootloader=request.with_bootloader,
+            deadline_s=request.deadline_s,
         )
         return {"gate": controller.view_gate(gate)}
 

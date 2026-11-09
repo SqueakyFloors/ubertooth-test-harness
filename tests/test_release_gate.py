@@ -8,21 +8,24 @@ other stage covers, the waves overlap only what may overlap, and the whole
 graph's preflight refuses what cannot be started.
 
 The record and the matrix, from data alone: a stored gate survives a round
-trip, a malformed one is refused, and one verdict comes out of the stages --
-passing only when every required stage passed.
+trip, a malformed one is refused, one verdict comes out of the stages --
+passing only when every required stage passed -- every gate carries a bounded
+deadline, and a pending stage says what it is waiting for.
 
 And the controller, driven with scripted runners over real loopback
 WebSockets (the fixture ``tests/test_run_groups.py`` uses) against a
 configuration of its own over synthetic plans: a stage starts when the stages
 it waits for have settled, stages on different hosts start together, a failure
 abandons what required it and leaves the rest alone, a cancel stops the
-stages still to come, and the whole gate sends one completion notice instead
-of one per stage.
+stages still to come, a gate that runs past its deadline is given up on (on a
+clock the test moves, not on a real wait), and the whole gate sends one
+completion notice instead of one per stage.
 """
 
 import asyncio
 import contextlib
 import dataclasses
+import datetime
 import io
 import json
 import tempfile
@@ -33,16 +36,24 @@ from unittest.mock import patch
 from ubertooth_harness import releasegate
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.cli import main
+from ubertooth_harness.durations import coarse_duration
 from ubertooth_harness.gui import WEB_DIR
-from ubertooth_harness.controller import Controller, ControllerServer
+from ubertooth_harness.controller import Clock, Controller, ControllerServer
 from ubertooth_harness.releasegate import (
     BOOTLOADER_RECORD,
     BOOTLOADER_UPDATE,
     CANCELED,
     COMPREHENSIVE,
+    DEADLINE_CEILING_S,
+    DEADLINE_DERIVED,
+    DEADLINE_FLOOR_S,
+    DEADLINE_MARGIN_FACTOR,
+    DEADLINE_MARGIN_S,
+    DEADLINE_OVERRIDE,
     DISK_BUDGET,
     ERROR,
     FAILED,
+    GATE_DEADLINE,
     GATES_DIR,
     IMMUTABLE_REVISION,
     NO_PASSED_IN_IMAGE,
@@ -53,9 +64,17 @@ from ubertooth_harness.releasegate import (
     RUNNING,
     SKIPPED,
     Stage,
+    WAIT_FIXTURE,
+    WAIT_HOST,
+    WAIT_HOST_LOCK,
+    WAIT_LEASE,
+    WAIT_ORDER,
+    WAIT_RUNNER,
+    WAIT_STAGE,
     WALL_TIME,
     compile_stages,
     configuration,
+    deadline_seconds,
     enabled,
     gate_from_record,
     gate_view,
@@ -66,6 +85,8 @@ from ubertooth_harness.releasegate import (
     stage_tests,
     suite_steps,
     superseded_tests,
+    validated_deadline,
+    waiting_reasons,
     wall_estimate,
 )
 
@@ -478,8 +499,95 @@ class PreflightTests(unittest.TestCase):
         self.assertLess(report["estimated_s"], releasegate.TARGET_WALL_SECONDS)
 
 
-# ----- the record and the matrix -------------------------------------------
+class DeadlineTests(unittest.TestCase):
+    """The budget every gate is given, and the override an operator may ask for."""
 
+    def test_the_budget_is_derived_from_the_estimate_with_a_margin(self):
+        self.assertEqual(
+            round(3600.0 * DEADLINE_MARGIN_FACTOR + DEADLINE_MARGIN_S, 1),
+            deadline_seconds(3600.0),
+        )
+        # The committed configuration's own figure, so the one a release
+        # really gets is the one this test reads.
+        plans, waves = compiled()
+        budget = deadline_seconds(wall_estimate(plans, waves))
+        self.assertGreater(budget, wall_estimate(plans, waves))
+        self.assertLessEqual(budget, DEADLINE_CEILING_S)
+
+    def test_the_budget_is_bounded_at_both_ends(self):
+        self.assertEqual(DEADLINE_FLOOR_S, deadline_seconds(0.0))
+        self.assertEqual(DEADLINE_CEILING_S, deadline_seconds(100 * 3600.0))
+        # A configuration with no estimate still gets one, derived from the
+        # procedure's own target rather than left open.
+        self.assertEqual(
+            deadline_seconds(releasegate.TARGET_WALL_SECONDS),
+            deadline_seconds(None),
+        )
+        for nonsense in (float("inf"), float("nan"), -5.0):
+            with self.subTest(nonsense):
+                self.assertEqual(
+                    deadline_seconds(releasegate.TARGET_WALL_SECONDS),
+                    deadline_seconds(nonsense),
+                )
+
+    def test_an_override_is_validated_against_the_same_bounds(self):
+        self.assertEqual(DEADLINE_FLOOR_S, validated_deadline(DEADLINE_FLOOR_S))
+        self.assertEqual(7200.0, validated_deadline(7200))
+        for refused in (
+            0, -1, 60, DEADLINE_FLOOR_S - 1, DEADLINE_CEILING_S + 1,
+            float("inf"), float("nan"), "soon", None, [3600],
+        ):
+            with self.subTest(refused):
+                with self.assertRaises(releasegate.ReleaseGateError):
+                    validated_deadline(refused)
+
+    def test_the_preflight_reports_the_deadline_it_would_use(self):
+        plans, waves = compiled()
+        report = preflight(plans, waves, ref="main", commit="a" * 40)
+        self.assertEqual(DEADLINE_DERIVED, report["deadline_source"])
+        self.assertEqual(
+            deadline_seconds(report["estimated_s"]), report["deadline_s"]
+        )
+        self.assertTrue(check(report, GATE_DEADLINE)["passed"])
+        self.assertFalse(check(report, GATE_DEADLINE)["blocking"])
+        self.assertIn("given up on", check(report, GATE_DEADLINE)["detail"])
+
+    def test_an_override_the_gate_could_not_finish_in_blocks_it(self):
+        plans, waves = compiled()
+        # Inside the bounds, and still less than these stages need: starting
+        # a bench on that would fail the gate for time it was never given.
+        report = preflight(
+            plans, waves, ref="main", commit="a" * 40,
+            deadline_s=DEADLINE_FLOOR_S,
+        )
+        self.assertFalse(report["passed"])
+        self.assertIn("less than", check(report, GATE_DEADLINE)["detail"])
+        self.assertIn(GATE_DEADLINE, report["refusal"])
+
+    def test_an_override_outside_the_bounds_blocks_it(self):
+        plans, waves = compiled()
+        report = preflight(
+            plans, waves, ref="main", commit="a" * 40, deadline_s=5.0,
+        )
+        self.assertFalse(report["passed"])
+        self.assertIn("outside the bounds", report["refusal"])
+        # And the gate it would have started still has a derived deadline
+        # rather than the refused figure.
+        self.assertEqual(DEADLINE_DERIVED, report["deadline_source"])
+
+    def test_an_override_the_stages_fit_inside_is_the_gates_deadline(self):
+        plans, waves = compiled()
+        report = preflight(
+            plans, waves, ref="main", commit="a" * 40,
+            deadline_s=4 * 3600.0,
+        )
+        self.assertTrue(report["passed"], report["refusal"])
+        self.assertEqual(4 * 3600.0, report["deadline_s"])
+        self.assertEqual(DEADLINE_OVERRIDE, report["deadline_source"])
+        self.assertIn("as asked for", check(report, GATE_DEADLINE)["detail"])
+
+
+# ----- the record and the matrix -------------------------------------------
 
 # The matrix tests read durations off their own records, so the gate they
 # build starts before the child groups they script.
@@ -561,6 +669,50 @@ class GateRecordTests(unittest.TestCase):
                 ] + list(good["stages"][2:]),
             })
 
+    def test_every_gate_carries_a_deadline_the_record_keeps(self):
+        record = gate()
+        plans, waves = compiled()
+        self.assertEqual(
+            deadline_seconds(wall_estimate(plans, waves)), record.deadline_s
+        )
+        self.assertEqual(DEADLINE_DERIVED, record.deadline_source)
+        self.assertFalse(record.deadline_expired)
+        again = gate_from_record(json.loads(json.dumps(record.record())))
+        self.assertEqual(record.deadline_s, again.deadline_s)
+        # An override is kept as one, so a reader of the matrix is told which
+        # figure the gate was started with.
+        asked = new_gate(
+            COMPREHENSIVE, (LINUX, MAC), plans, ref="main", commit="a" * 40,
+            waves=waves, deadline_s=4 * 3600.0,
+            deadline_source=DEADLINE_OVERRIDE,
+        )
+        self.assertEqual((4 * 3600.0, DEADLINE_OVERRIDE),
+                         (asked.deadline_s, asked.deadline_source))
+
+    def test_a_record_is_never_read_as_having_no_deadline(self):
+        good = gate().record()
+        # One written before gates had a deadline (#410) is read with the
+        # budget a configuration of unknown length gets, not with none: a
+        # stored gate still running then ends like any other.
+        legacy = {name: value for name, value in good.items()
+                  if not name.startswith("deadline")}
+        read = gate_from_record(legacy)
+        self.assertEqual(deadline_seconds(None), read.deadline_s)
+        self.assertEqual(DEADLINE_DERIVED, read.deadline_source)
+        # A deadline that is there and cannot be read is refused instead,
+        # rather than quietly replaced by a figure nobody chose.
+        for change, expected in (
+            ({"deadline_s": "soon"}, "number of seconds"),
+            ({"deadline_s": True}, "number of seconds"),
+            ({"deadline_s": 5}, "outside the bounds"),
+            ({"deadline_s": DEADLINE_CEILING_S + 1}, "outside the bounds"),
+            ({"deadline_source": "guessed"}, "not a deadline source"),
+            ({"deadline_expired": "yes"}, "deadline_expired"),
+        ):
+            with self.subTest(change):
+                with self.assertRaisesRegex(ValueError, expected):
+                    gate_from_record({**good, **change})
+
     def test_an_outcome_never_overwrites_a_stage_that_has_a_group(self):
         record = gate()
         self.assertTrue(record.set_stage_group("ble", "grp-1"))
@@ -590,6 +742,27 @@ def passed_group(group_id, hosts, *, status=PASSED, start=0, end=30, reason=None
                     "duration_s": float(end - start),
                     "duration_hms": f"{end - start}.000s",
                     "reason": reason,
+                    "runner_run_directory": f"/runs/{group_id}-{host}",
+                },
+            }
+            for host in hosts
+        ],
+    }
+
+
+def running_group(group_id, hosts):
+    """A child group's view while its runs are still going."""
+    return {
+        "group_id": group_id, "status": RUNNING,
+        "members": [
+            {
+                "host": host, "run_id": f"{group_id}-{host}",
+                "status": RUNNING, "error": None,
+                "run": {
+                    "run_id": f"{group_id}-{host}", "status": RUNNING,
+                    "commit": "a" * 40, "created_at": EPOCH,
+                    "finished_at": None, "duration_s": None,
+                    "duration_hms": None, "reason": None,
                     "runner_run_directory": f"/runs/{group_id}-{host}",
                 },
             }
@@ -749,6 +922,212 @@ class MatrixTests(unittest.TestCase):
         self.assertIn(
             "soak", " ".join(entry["name"] for entry in view["excluded"])
         )
+
+
+class GateClockTests(unittest.TestCase):
+    """Where a gate stands against its deadline, read off a clock it is given."""
+
+    def view(self, record, groups, seconds):
+        """The gate as it reads ``seconds`` after it was created."""
+        moment = (
+            datetime.datetime.fromisoformat(EPOCH)
+            + datetime.timedelta(seconds=seconds)
+        ).isoformat(timespec="milliseconds")
+        return gate_view(record, groups, now=moment)
+
+    def running(self):
+        record = gate()
+        record.set_stage_group("fast-only", "grp-1")
+        return record, {"grp-1": running_group("grp-1", [LINUX, MAC])}
+
+    def test_a_running_gate_counts_both_ways(self):
+        record, groups = self.running()
+        view = self.view(record, groups, 600)
+        self.assertEqual(RUNNING, view["status"])
+        self.assertEqual(600.0, view["elapsed_s"])
+        self.assertEqual("10m 00s", view["elapsed_hms"])
+        self.assertEqual(record.deadline_s - 600.0, view["remaining_s"])
+        self.assertEqual(
+            coarse_duration(record.deadline_s - 600.0), view["remaining_hms"]
+        )
+        self.assertFalse(view["overdue"])
+
+    def test_a_gate_past_its_deadline_is_overdue_with_nothing_left(self):
+        record, groups = self.running()
+        view = self.view(record, groups, record.deadline_s + 5)
+        self.assertTrue(view["overdue"])
+        self.assertEqual(0.0, view["remaining_s"])
+        self.assertEqual("0s", view["remaining_hms"])
+
+    def test_a_caller_that_names_no_moment_is_given_no_figures(self):
+        # Nothing is worked out from a clock nobody named, and a gate is
+        # never overdue by default: the caller holds the clock.
+        record, groups = self.running()
+        view = gate_view(record, groups)
+        self.assertIsNone(view["elapsed_s"])
+        self.assertIsNone(view["remaining_s"])
+        self.assertFalse(view["overdue"])
+        self.assertEqual(
+            coarse_duration(record.deadline_s), view["deadline_hms"]
+        )
+
+    def test_a_settled_gate_stops_counting_and_is_not_overdue(self):
+        record = gate()
+        for name in [entry["stage"] for entry in record.stages]:
+            record.set_stage_outcome(name, SKIPPED, "nothing to run it with")
+        record.dispatched_at = EPOCH
+        view = self.view(record, {}, record.deadline_s + 60)
+        self.assertNotEqual(RUNNING, view["status"])
+        self.assertFalse(view["overdue"])
+        self.assertIsNone(view["remaining_s"])
+
+    def test_an_expired_gate_is_failed_whatever_its_stages_came_to(self):
+        # Its last running stage was canceled by the expiry, and a gate that
+        # ran out of time must not read as one somebody canceled.
+        record = gate()
+        record.deadline_expired = True
+        record.set_stage_group("fast-only", "grp-1")
+        for name in [entry["stage"] for entry in record.stages
+                     if entry["stage"] != "fast-only"]:
+            record.set_stage_outcome(name, NOT_REACHED, "the deadline passed")
+        view = self.view(
+            record, {"grp-1": passed_group("grp-1", [LINUX, MAC], status=CANCELED)},
+            record.deadline_s + 1,
+        )
+        self.assertEqual(FAILED, view["status"])
+        self.assertTrue(view["deadline_expired"])
+
+
+class WaitingOnTests(unittest.TestCase):
+    """What a pending stage says it is waiting for (``waiting_reasons``)."""
+
+    def rows(self, *entries):
+        return [
+            {
+                "stage": name, "status": status, "hosts": list(hosts),
+                "requires": list(requires), "order": order, "runs": list(runs),
+            }
+            for name, status, hosts, requires, order, runs in entries
+        ]
+
+    def free(self, host, **fields):
+        return {host: {
+            "online": True, "active_run_id": None, "active_run_flashes": None,
+            "starting": False,
+            "boards": [{
+                "alias": "UT_1", "held": False, "holder": "", "present": True,
+            }],
+            **fields,
+        }}
+
+    def kinds(self, reasons):
+        return [entry["kind"] for entry in reasons]
+
+    def test_a_stage_that_is_not_pending_waits_for_nothing(self):
+        rows = self.rows(
+            ("one", RUNNING, [LINUX], (), 0, ()),
+            ("two", PASSED, [LINUX], (), 0, ()),
+        )
+        for row in rows:
+            self.assertEqual((), waiting_reasons(row, rows, self.free(LINUX)))
+
+    def test_it_names_the_stages_it_is_behind(self):
+        rows = self.rows(
+            ("one", RUNNING, [MAC], (), 0, ()),
+            ("two", PENDING, [LINUX], ("one",), 0, ()),
+        )
+        reasons = waiting_reasons(rows[1], rows, {**self.free(LINUX), **self.free(MAC)})
+        self.assertEqual([WAIT_STAGE], self.kinds(reasons))
+        self.assertIn("one", reasons[0]["detail"])
+
+    def test_a_writer_names_the_earlier_stage_on_its_own_board(self):
+        rows = self.rows(
+            ("capture", PENDING, [LINUX], (), 0, ()),
+            ("writer", PENDING, [LINUX], (), 1, ()),
+        )
+        reasons = waiting_reasons(rows[1], rows, self.free(LINUX))
+        self.assertEqual([WAIT_ORDER], self.kinds(reasons))
+        self.assertIn("capture", reasons[0]["detail"])
+
+    def test_a_host_with_no_runner_and_one_that_is_away_are_both_named(self):
+        rows = self.rows(("one", PENDING, [LINUX], (), 0, ()))
+        reasons = waiting_reasons(rows[0], rows, {})
+        self.assertEqual([WAIT_RUNNER], self.kinds(reasons))
+        self.assertIn("no runner registered", reasons[0]["detail"])
+        reasons = waiting_reasons(
+            rows[0], rows, self.free(LINUX, online=False)
+        )
+        self.assertEqual([WAIT_RUNNER], self.kinds(reasons))
+        self.assertIn("not connected", reasons[0]["detail"])
+
+    def test_a_busy_host_names_the_run_and_a_flashing_run_names_the_lock(self):
+        rows = self.rows(("one", PENDING, [LINUX], (), 0, ()))
+        reasons = waiting_reasons(
+            rows[0], rows,
+            self.free(LINUX, active_run_id="other-1", active_run_flashes=False),
+        )
+        self.assertEqual([WAIT_HOST], self.kinds(reasons))
+        self.assertIn("other-1", reasons[0]["detail"])
+        reasons = waiting_reasons(
+            rows[0], rows,
+            self.free(LINUX, active_run_id="other-1", active_run_flashes=True),
+        )
+        self.assertEqual([WAIT_HOST_LOCK], self.kinds(reasons))
+        self.assertIn("power/firmware lock", reasons[0]["detail"])
+
+    def test_a_host_carrying_another_stage_of_this_gate_says_so(self):
+        rows = self.rows(
+            ("one", RUNNING, [LINUX], (), 0,
+             ({"host": LINUX, "run_id": "mine-1"},)),
+            ("two", PENDING, [LINUX], (), 0, ()),
+        )
+        reasons = waiting_reasons(
+            rows[1], rows, self.free(LINUX, active_run_id="mine-1"),
+        )
+        self.assertIn("the one stage of this gate", reasons[0]["detail"])
+
+    def test_a_leased_board_and_one_off_usb_are_told_apart(self):
+        rows = self.rows(("one", PENDING, [LINUX], (), 0, ()))
+        leased = self.free(LINUX)
+        leased[LINUX]["boards"] = [{
+            "alias": "UT_1", "held": True, "holder": "someone pid 42",
+            "present": True,
+        }]
+        reasons = waiting_reasons(rows[0], rows, leased)
+        self.assertEqual([WAIT_LEASE], self.kinds(reasons))
+        self.assertIn("someone pid 42", reasons[0]["detail"])
+        gone = self.free(LINUX)
+        gone[LINUX]["boards"] = [{
+            "alias": "UT_1", "held": False, "holder": "", "present": False,
+        }]
+        reasons = waiting_reasons(rows[0], rows, gone)
+        self.assertEqual([WAIT_FIXTURE], self.kinds(reasons))
+        self.assertIn("USB has not got it", reasons[0]["detail"])
+
+    def test_a_stage_with_nothing_in_its_way_says_nothing(self):
+        rows = self.rows(("one", PENDING, [LINUX], (), 0, ()))
+        self.assertEqual((), waiting_reasons(rows[0], rows, self.free(LINUX)))
+
+    def test_the_matrix_carries_the_reasons_and_one_line_of_them(self):
+        record = gate()
+        record.set_stage_group("fast-only", "grp-1")
+        view = gate_view(
+            record, {"grp-1": running_group("grp-1", [LINUX, MAC])},
+            hosts={LINUX: {"online": True, "active_run_id": "grp-1-" + LINUX,
+                           "active_run_flashes": True, "starting": False,
+                           "boards": []},
+                   MAC: {"online": True, "active_run_id": None,
+                         "active_run_flashes": None, "starting": False,
+                         "boards": []}},
+        )
+        rows = {row["stage"]: row for row in view["stages"]}
+        self.assertEqual([], rows["fast-only"]["waiting_on"])
+        waiting = rows["classic"]
+        self.assertEqual(
+            [WAIT_STAGE, WAIT_HOST_LOCK], self.kinds(waiting["waiting_on"])
+        )
+        self.assertIn("fast-only", waiting["waiting_on_summary"])
+        self.assertIn("power/firmware lock", waiting["waiting_on_summary"])
 
 
 class DecisionTests(unittest.TestCase):
@@ -1293,6 +1672,120 @@ class GateBusyHostTests(GateControllerTestCase):
         await self.settled(view["gate_id"], "writer", RUNNING)
 
 
+class WallClock(Clock):
+    """The controller's clock with only the gate's wall clock moved by hand.
+
+    A release gate's deadline is counted from the ``created_at`` in its
+    stored record, so it is the one period the controller reads off a wall
+    timestamp (``Clock.wall``). Moving that alone carries a gate past its
+    deadline at once, while the heartbeat allowance and the reply timeout
+    stay on real monotonic time -- so the runners stay connected and the
+    gate ends because this clock moved and for no other reason.
+    """
+
+    def __init__(self):
+        self.ahead_s = 0.0
+
+    def wall(self) -> str:
+        return (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(seconds=self.ahead_s)
+        ).isoformat(timespec="milliseconds")
+
+
+class GateDeadlineTests(GateControllerTestCase):
+    """A gate that cannot finish ends, with the deadline as the reason (#410)."""
+
+    async def test_a_gate_that_runs_past_its_deadline_is_given_up_on(self):
+        notifier = Collect()
+        self.controller.notifier = notifier
+        clock = WallClock()
+        self.controller.clock = clock
+        linux, mac = await self.runners()
+        view = await self.start_gate([linux, mac])
+        gate_id = view["gate_id"]
+        self.assertFalse(view["deadline_expired"])
+        self.assertGreater(view["deadline_s"], 0.0)
+        self.assertIsNotNone(view["remaining_s"])
+        # While it is running, a pending stage says what it is waiting for:
+        # the stage it requires, and the host that stage is flashing.
+        rows = self.stage_rows(await self.gate(gate_id))
+        kinds = [entry["kind"] for entry in rows["writer"]["waiting_on"]]
+        # It requires the smoke stage, it writes flash so it is behind every
+        # earlier stage on its boards, and both of its hosts are carrying a
+        # run that flashes, which holds each host's own firmware lock.
+        self.assertEqual(
+            [WAIT_STAGE, WAIT_ORDER, WAIT_HOST_LOCK, WAIT_HOST_LOCK], kinds
+        )
+        self.assertIn("smoke", rows["writer"]["waiting_on_summary"])
+        # The deadline passes with that stage still going. No run has to end
+        # for the gate to be given up on, which is the whole point: the
+        # monitor's own tick reaches it.
+        clock.ahead_s = view["deadline_s"] + 1
+        for runner in (linux, mac):
+            message = await runner.recv()
+            self.assertEqual("cancel", message["type"])
+            self.assertIn("deadline", message["reason"])
+            await runner.send("cancel_accepted", run_id=message["run_id"])
+        group = self.controller.groups[rows["smoke"]["group_id"]]
+        for runner in (linux, mac):
+            run_id = next(
+                entry["run_id"] for entry in group.members
+                if entry["host"] == runner.host
+            )
+            await self.finish(runner, run_id, "canceled")
+        await wait_until(
+            lambda: not self.controller.view_gate(
+                self.controller.gates[gate_id]
+            )["active"],
+            timeout=TIMEOUT_S,
+        )
+        final = await self.gate(gate_id)
+        # Failed, not canceled: the gate did not finish, and nobody asked
+        # for it to stop.
+        self.assertEqual(FAILED, final["status"])
+        self.assertTrue(final["deadline_expired"])
+        self.assertFalse(final["cancel_requested"])
+        rows = self.stage_rows(final)
+        self.assertEqual(CANCELED, rows["smoke"]["status"])
+        self.assertEqual(
+            [NOT_REACHED] * 3,
+            [rows[name]["status"] for name in ("linux", "mac", "writer")],
+        )
+        self.assertIn("deadline", rows["writer"]["reason"])
+        # Stored, so a controller that restarts does not start the rest.
+        record = json.loads(
+            (self.results / GATES_DIR / f"{gate_id}.json").read_text()
+        )
+        self.assertTrue(record["deadline_expired"])
+        self.assertEqual(view["deadline_s"], record["deadline_s"])
+        # And one notice for the gate, which says the deadline is why.
+        await wait_until(lambda: notifier.notices, timeout=TIMEOUT_S)
+        self.assertIn("Deadline: reached", notifier.notices[0].body)
+
+    async def test_an_operators_deadline_is_the_one_the_gate_keeps_to(self):
+        linux, mac = await self.runners()
+        view = await self.start_gate([linux, mac], deadline_s=4 * 3600.0)
+        self.assertEqual(4 * 3600.0, view["deadline_s"])
+        self.assertEqual(DEADLINE_OVERRIDE, view["deadline_source"])
+
+    async def test_a_deadline_outside_the_bounds_starts_nothing(self):
+        linux, mac = await self.runners()
+        for refused in (5.0, DEADLINE_CEILING_S + 1, -1.0):
+            with self.subTest(refused):
+                status, payload, _ = await self.http(
+                    "POST", "/api/release-gates",
+                    {
+                        "config": TEST_CONFIG, "ref": "main",
+                        "hosts": [linux.host, mac.host],
+                        "deadline_s": refused,
+                    },
+                )
+                self.assertEqual(422, status, payload)
+                self.assertIn("outside the bounds", payload["detail"])
+        self.assertEqual({}, self.controller.gates)
+
+
 class GateNoticeTests(GateControllerTestCase):
     """One completion notice for the gate, and none for its stages (#392)."""
 
@@ -1403,8 +1896,37 @@ class GuiWiringTests(unittest.TestCase):
         for name in (
             "403-run-setup-before.png", "403-run-setup-after.png",
             "403-gate-after.png",
+            # The deadline and the waiting reasons, as #410 added them.
+            "410-gate-before.png", "410-gate-after.png",
         ):
             self.assertTrue((shots / name).is_file(), name)
+
+    def test_the_panel_shows_the_deadline_and_what_it_counts(self):
+        for text in (
+            'el("dt", { text: "Deadline" })',
+            'el("dt", { text: "Elapsed" })',
+            'el("dt", { text: "Remaining" })',
+            "gate.deadline_expired",
+            "gate.remaining_hms",
+        ):
+            self.assertIn(text, self.js)
+
+    def test_a_pending_stage_shows_what_it_is_waiting_for(self):
+        self.assertIn("(stage.waiting_on || []).map", self.js)
+        self.assertIn("`Waiting on ${entry.kind}: ${entry.detail}`", self.js)
+        self.assertIn(".gate-matrix .gate-waiting", self.css)
+
+    def test_run_setup_offers_the_deadline_and_asks_the_controller_to_judge_it(self):
+        self.assertIn('id="gate-deadline"', self.html)
+        self.assertIn('id="gate-deadline-note"', self.html)
+        # The field is sent with the gate and with the listing above Run, so
+        # the preflight an operator reads is the one the gate would get.
+        self.assertIn("deadline_s: gateDeadlineSeconds()", self.js)
+        self.assertIn('query.set("deadline_s", String(deadline));', self.js)
+        self.assertIn(
+            '$("gate-deadline").addEventListener("change", loadGateConfiguration);',
+            self.js,
+        )
 
 
 class CommandLineTests(unittest.TestCase):
@@ -1479,6 +2001,40 @@ class CommandLineTests(unittest.TestCase):
             "--host", "Host_Mac")
         self.assertEqual(1, code)
         self.assertIn("FAIL every required stage has a host", out)
+
+    def test_it_prints_the_deadline_the_gate_would_be_given(self):
+        code, out, _err = self.show(
+            "--hardware", str(REPOSITORY / "hardware.example.yaml"))
+        self.assertEqual(0, code, out)
+        self.assertIn("given up on after", out)
+        self.assertIn("(derived)", out)
+        self.assertIn(GATE_DEADLINE, out)
+        # And an operator's own deadline, in minutes, is the one reported.
+        code, out, _err = self.show(
+            "--hardware", str(REPOSITORY / "hardware.example.yaml"),
+            "--deadline", "240")
+        self.assertEqual(0, code, out)
+        self.assertIn("given up on after 4h 00m 00s (override)", out)
+
+    def test_a_deadline_outside_the_bounds_is_refused_here(self):
+        for minutes in ("5", "1500", "0", "-30"):
+            with self.subTest(minutes):
+                code, _out, err = self.show(
+                    "--hardware", str(REPOSITORY / "hardware.example.yaml"),
+                    "--deadline", minutes)
+                self.assertEqual(2, code)
+                self.assertIn("--deadline", err)
+                self.assertIn("outside the bounds", err)
+
+    def test_a_deadline_the_stages_do_not_fit_inside_is_refused(self):
+        # Inside the bounds and still shorter than the configuration needs:
+        # the gate would fail for time it was never given.
+        code, out, _err = self.show(
+            "--hardware", str(REPOSITORY / "hardware.example.yaml"),
+            "--deadline", "60")
+        self.assertEqual(1, code)
+        self.assertIn(f"FAIL {GATE_DEADLINE}", out)
+        self.assertIn("less than", out)
 
 
 if __name__ == "__main__":

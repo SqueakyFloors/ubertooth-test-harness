@@ -63,6 +63,21 @@ seconds and in words, its verdict, its reason, and where its report and
 records are -- and one overall verdict, which is ``passed`` only when every
 required stage passed.
 
+**An end to every wait.** A stage waits while a host it needs is busy, and
+the gate is asked to look again whenever a run ends. Two things keep that
+from becoming a wait with no end (#410). Every gate carries a **deadline**
+(``deadline_seconds``): a bounded budget derived from the stages' own
+estimates plus an explicit margin, or an operator's override inside the same
+bounds (``validated_deadline``). A gate that reaches it is given up on -- its
+running stages are cancelled, the stages it never reached are recorded as
+such, and the verdict is ``failed`` with the deadline as the reason -- rather
+than staying ``running`` for ever with no verdict and no notice. And every
+pending stage carries ``waiting_on`` (``waiting_reasons``): the stages it is
+behind, the hosts it wants with what is using them, a runner that is away, a
+board another holder has leased, and a board that has left USB, so an
+operator reading the matrix can tell a stage that is about to start from one
+that will never start.
+
 What this module does not decide: a stage's own result (its run does), what a
 bench has (the target's registry does), and whether to start at all
 (``preflight`` reports what it can decide before anything is leased or built,
@@ -73,14 +88,16 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import math
 from pathlib import Path
 import shutil
 from typing import Mapping, Sequence
 import uuid
 
 from ubertooth_harness.catalog import CatalogError, TestCatalog, builtin_catalog
-from ubertooth_harness.durations import human_duration_or_none
+from ubertooth_harness.durations import coarse_duration, human_duration_or_none
 from ubertooth_harness.gui import _build_needs, omitted_reason, run_plan_check
+from ubertooth_harness.learned import _timestamp
 from ubertooth_harness.plan import PlanError, load_plan
 from ubertooth_harness.protocol import _identifier
 from ubertooth_harness.rungroups import (
@@ -125,6 +142,34 @@ TARGET_WALL_SECONDS = 2 * 60 * 60.0
 # report per stage per host, with room to spare.
 MIN_FREE_BYTES = 512 * 1024 * 1024
 
+# ----- the whole-gate deadline ---------------------------------------------
+#
+# A gate is given up on once it has been going this long. The budget is
+# derived from what the stages are estimated to take, because a gate of two
+# stages and a gate of twelve are not the same length of job, and no figure
+# written down here could be right for both.
+#
+# The estimate is a floor: it counts each stage's tests and each host's
+# learned build, and not that host's flash or its preflight
+# (``wall_estimate``). So the budget doubles it and adds a flat margin, which
+# leaves room for the parts the estimate does not count and for a bench
+# that is slower than the figures it has learned, without leaving room for a
+# gate that is never going to finish.
+DEADLINE_MARGIN_FACTOR = 2.0
+DEADLINE_MARGIN_S = 30 * 60.0
+# And the budget is bounded either way, so neither a configuration whose
+# estimate is minutes nor one whose estimate is a day can produce a deadline
+# nobody would have asked for. The floor is above the longest single stage a
+# release configuration has; the ceiling is well past the six hours the
+# release procedure allows for a gate and a soak together
+# (docs/release-testing.md section 6), so reaching it means something is
+# wrong rather than slow.
+DEADLINE_FLOOR_S = 60 * 60.0
+DEADLINE_CEILING_S = 12 * 60 * 60.0
+# Where a gate's deadline came from, as the record and the matrix report it.
+DEADLINE_DERIVED = "derived"
+DEADLINE_OVERRIDE = "override"
+
 # How a stage asks for its boards' bootloaders, as ``run-suite --bootloader``
 # names it. Only the bootloader stage asks for anything but the first.
 BOOTLOADER_RECORD = "record"
@@ -148,6 +193,31 @@ COVERAGE_ARGUMENT = "coverage"
 BAD = (FAILED, BLOCKED, CANCELED, ERROR, NOT_REACHED)
 # The statuses a gate is still working through.
 UNFINISHED = (PENDING, RUNNING)
+
+# Why a pending stage has not started, as ``waiting_reasons`` names it. The
+# first two are the gate's own graph; the rest are the bench, as the
+# controller knows it from what each target reported.
+# A stage this one requires has not settled.
+WAIT_STAGE = "stage"
+# A stage of a lower ``order`` on a host they share has not settled, which is
+# what keeps a flash writer behind the stages that need the run's firmware.
+WAIT_ORDER = "order"
+# No runner for a host it wants: none registered, or one that is away.
+WAIT_RUNNER = "runner"
+# A host it wants is carrying a run of its own. A runner runs one run at a
+# time, so nothing of this gate can start there until that run ends.
+WAIT_HOST = "host"
+# The same, for a run that flashes a board: such a run holds that host's own
+# power/firmware lock for its whole length, so it is named apart.
+WAIT_HOST_LOCK = "host lock"
+# A board on a host it wants is leased by somebody else.
+WAIT_LEASE = "lease"
+# A board on a host it wants is registered and USB has not got it.
+WAIT_FIXTURE = "fixture"
+# How many reasons one stage reports. Well past a bench of a few hosts with a
+# few boards each, and it keeps a registry nobody here chose from deciding
+# how big an API answer is.
+MAX_WAIT_REASONS = 24
 
 
 # ----- the configuration ---------------------------------------------------
@@ -883,6 +953,66 @@ def wall_estimate(
     return round(total, 1)
 
 
+# ----- the whole-gate deadline --------------------------------------------
+
+
+def deadline_seconds(estimated_s: float | None) -> float:
+    """The budget a gate of this estimated length is given, in seconds.
+
+    Twice the estimate plus ``DEADLINE_MARGIN_S``, held between
+    ``DEADLINE_FLOOR_S`` and ``DEADLINE_CEILING_S``. Never ``None`` and never
+    unbounded: a gate with no deadline is a gate that can sit ``running`` for
+    ever with no verdict and nobody told, which is what #410 is about.
+
+    A configuration one of whose stages the catalog has no estimate for has
+    no estimate either (``wall_estimate`` returns None rather than a total
+    with a test left out). The budget is then derived from the wall time the
+    release procedure itself allows a gate (``TARGET_WALL_SECONDS``), which
+    is a figure somebody chose rather than a guess about this bench, and the
+    matrix says where it came from.
+    """
+    estimate = TARGET_WALL_SECONDS if estimated_s is None else float(estimated_s)
+    if not math.isfinite(estimate) or estimate < 0:
+        estimate = TARGET_WALL_SECONDS
+    budget = estimate * DEADLINE_MARGIN_FACTOR + DEADLINE_MARGIN_S
+    return round(min(max(budget, DEADLINE_FLOOR_S), DEADLINE_CEILING_S), 1)
+
+
+def validated_deadline(value) -> float:
+    """One operator's deadline override in seconds, or ReleaseGateError.
+
+    Inside the same bounds as a derived one, for the same reason: an override
+    of a few seconds would fail every gate before it started, and one of a
+    week would be the indefinite wait with extra steps. Anything that is not
+    a finite number of seconds is refused rather than read as "no deadline".
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise ReleaseGateError(
+            f"the gate deadline must be a number of seconds, not {value!r}"
+        ) from None
+    if not math.isfinite(seconds):
+        raise ReleaseGateError(
+            f"the gate deadline must be a finite number of seconds, not {value!r}"
+        )
+    if not DEADLINE_FLOOR_S <= seconds <= DEADLINE_CEILING_S:
+        raise ReleaseGateError(
+            f"a gate deadline of {coarse_duration(round(seconds, 1))} is "
+            f"outside the bounds every gate keeps to: "
+            f"{coarse_duration(DEADLINE_FLOOR_S)} to "
+            f"{coarse_duration(DEADLINE_CEILING_S)}"
+        )
+    return round(seconds, 1)
+
+
+def deadline_for(estimated_s: float | None, override) -> tuple[float, str]:
+    """``(seconds, source)``: the override if there is one, else the derived budget."""
+    if override is None:
+        return deadline_seconds(estimated_s), DEADLINE_DERIVED
+    return validated_deadline(override), DEADLINE_OVERRIDE
+
+
 # ----- preflighting the whole graph ----------------------------------------
 
 
@@ -894,6 +1024,7 @@ BOOTLOADER_ACCEPTANCE = "bootloader acceptance"
 BOARD_ON_EVERY_HOST = "a board on every stage's host"
 DISK_BUDGET = "disk budget"
 WALL_TIME = "estimated wall time"
+GATE_DEADLINE = "whole-gate deadline"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1012,6 +1143,7 @@ def preflight(
     boards: Mapping[str, int] | None = None,
     minimum_free_bytes: int = MIN_FREE_BYTES,
     target_wall_s: float = TARGET_WALL_SECONDS,
+    deadline_s: float | None = None,
 ) -> dict:
     """Judge the complete graph before any part of it runs.
 
@@ -1029,8 +1161,9 @@ def preflight(
     bootloader stage was asked for before its fixture is relied on; that
     every host a required stage runs on has a registered board USB can see
     (``boards``, which is what the targets reported); that the records have
-    room; and what the whole gate is estimated to take against the
-    procedure's own target.
+    room; what the whole gate is estimated to take against the procedure's
+    own target; and the deadline the whole gate is given, which is refused
+    when it is shorter than the estimate it would have to cover.
 
     What is not judged here, because only the target's own resource registry
     knows it: the peers, the DKs, the host adapter, the attenuated board and
@@ -1097,11 +1230,23 @@ def preflight(
             f"{human_duration_or_none(target_wall_s)}",
             blocking=False,
         ))
+    try:
+        deadline, source = deadline_for(estimated, deadline_s)
+    except ReleaseGateError as error:
+        # An override outside the bounds: the caller is refused rather than
+        # started with a deadline nobody asked for.
+        deadline, source = deadline_seconds(estimated), DEADLINE_DERIVED
+        checks.append(GateCheck(GATE_DEADLINE, False, str(error)))
+    else:
+        checks.append(_deadline_check(deadline, source, estimated))
     failures = [check for check in checks if not check.passed and check.blocking]
     return {
         "checks": [check.view() for check in checks],
         "estimated_s": estimated,
         "estimated_hms": human_duration_or_none(estimated),
+        "deadline_s": deadline,
+        "deadline_hms": coarse_duration(deadline),
+        "deadline_source": source,
         "waves": [list(wave) for wave in waves],
         "passed": not failures,
         "refusal": "; ".join(f"{check.name}: {check.detail}" for check in failures),
@@ -1112,13 +1257,48 @@ def preflight(
     }
 
 
+def _deadline_check(
+    deadline: float, source: str, estimated: float | None
+) -> GateCheck:
+    """The gate is given up on at the deadline, and can finish inside it.
+
+    Blocking only when the two figures contradict each other: a deadline
+    shorter than what the stages are estimated to take would fail a gate for
+    running out of time it was never given, and starting a bench on that is
+    worse than refusing it. Otherwise this check reports the budget, which
+    is a figure an operator wants to see before a gate of hours starts.
+    """
+    said = (
+        "as asked for (--deadline)" if source == DEADLINE_OVERRIDE
+        else "derived from the estimate"
+        if estimated is not None else
+        "derived from the procedure's own target, since this configuration "
+        "has no estimate"
+    )
+    if estimated is not None and deadline < estimated:
+        return GateCheck(
+            GATE_DEADLINE, False,
+            f"the deadline {said} is {coarse_duration(deadline)}, "
+            f"which is less than the {human_duration_or_none(estimated)} "
+            "these stages are estimated to take; the gate could not finish "
+            "inside it",
+        )
+    return GateCheck(
+        GATE_DEADLINE, True,
+        f"the gate is given up on after {coarse_duration(deadline)} "
+        f"({said}): its running stages are cancelled and the verdict is "
+        "failed, rather than a gate that waits with no end",
+        blocking=False,
+    )
+
+
 # ----- the gate record -----------------------------------------------------
 
 
 _GATE_FIELDS = (
     "gate_id", "config", "hosts", "ref", "commit", "with_bootloader",
     "created_at", "dispatched_at", "waves", "stages", "cancel_requested",
-    "cancel_reason",
+    "cancel_reason", "deadline_s", "deadline_source", "deadline_expired",
 )
 
 # What a gate may record about a stage it decided not to run, beside a
@@ -1138,6 +1318,21 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="milliseconds"
     )
+
+
+def _plus(moment: str, seconds: float) -> str | None:
+    """``moment`` plus ``seconds``, as a record writes a timestamp.
+
+    None for anything that is not a timestamp: a gate whose ``created_at``
+    cannot be read has no deadline moment to name, and the elapsed time says
+    the same thing by being absent.
+    """
+    begin = _timestamp(moment)
+    if begin is None:
+        return None
+    return (
+        begin + datetime.timedelta(seconds=float(seconds))
+    ).isoformat(timespec="milliseconds")
 
 
 @dataclasses.dataclass
@@ -1169,6 +1364,18 @@ class ReleaseGate:
     stages: list = dataclasses.field(default_factory=list)
     cancel_requested: bool = False
     cancel_reason: str | None = None
+    # The whole-gate deadline: how long, in seconds from ``created_at``, this
+    # gate may take before it is given up on (``deadline_seconds``), and
+    # where that figure came from. Stored, because the deadline a gate was
+    # started with is the one it keeps even if the configuration, a plan or
+    # the hosts' learned durations change under it -- and because it is
+    # counted from a timestamp in this file, which outlives the process that
+    # wrote it, rather than from a monotonic clock that does not.
+    deadline_s: float = 0.0
+    deadline_source: str = DEADLINE_DERIVED
+    # Set once the gate has been given up on for reaching it. The verdict is
+    # then ``failed`` whatever its stages came to: the gate did not finish.
+    deadline_expired: bool = False
     # Whether this gate's completion notice has been started. Not stored: a
     # gate that settled while the controller was down is not mailed on
     # startup, as a run that ended then is not (notify.py), and the ledger
@@ -1219,16 +1426,44 @@ def new_gate(
     config: str, hosts: Sequence[str], plans: Sequence[StagePlan], *,
     ref: str, commit: str | None, with_bootloader: bool = False,
     waves: Sequence[Sequence[str]] = (),
+    deadline_s: float | None = None,
+    deadline_source: str = DEADLINE_DERIVED,
 ) -> ReleaseGate:
-    """A gate for these compiled stages, with one entry each, in order."""
+    """A gate for these compiled stages, with one entry each, in order.
+
+    ``deadline_s`` is the budget the caller preflighted; with none, it is
+    derived here from the stages' own estimates, so no gate can be created
+    without a deadline.
+    """
+    if deadline_s is None:
+        deadline_s, deadline_source = (
+            deadline_seconds(wall_estimate(plans, waves)), DEADLINE_DERIVED
+        )
     return ReleaseGate(
         gate_id=new_gate_id(), config=config, hosts=list(hosts), ref=ref,
         commit=commit, with_bootloader=bool(with_bootloader),
         waves=[list(wave) for wave in waves],
+        deadline_s=validated_deadline(deadline_s),
+        deadline_source=(
+            deadline_source if deadline_source in
+            (DEADLINE_DERIVED, DEADLINE_OVERRIDE) else DEADLINE_DERIVED
+        ),
         stages=[
             {**plan.record(), "group_id": None, "error": None, "outcome": None}
             for plan in plans
         ],
+    )
+
+
+def deadline_detail(gate: ReleaseGate) -> str:
+    """The deadline in words, for the reason an expiry leaves on a stage."""
+    said = (
+        "asked for with this gate" if gate.deadline_source == DEADLINE_OVERRIDE
+        else "derived from the stages' own estimates"
+    )
+    return (
+        "the whole-gate deadline of "
+        f"{coarse_duration(gate.deadline_s)} ({said}) passed"
     )
 
 
@@ -1253,6 +1488,30 @@ def gate_from_record(data: Mapping) -> ReleaseGate:
     for name in ("with_bootloader", "cancel_requested"):
         if not isinstance(getattr(gate, name), bool):
             raise ValueError(f"{name} must be true or false")
+    if not isinstance(gate.deadline_expired, bool):
+        raise ValueError("deadline_expired must be true or false")
+    if data.get("deadline_s") is None:
+        # A record written before a gate carried a deadline (#410). Read with
+        # the budget a configuration of unknown length gets, rather than with
+        # none: a stored gate that is still running then ends like any other
+        # instead of being the one gate that waits for ever.
+        gate.deadline_s = deadline_seconds(None)
+        gate.deadline_source = DEADLINE_DERIVED
+    # A deadline that is there and cannot be read is refused rather than
+    # replaced: the record says something about this gate that nothing here
+    # can interpret, and guessing at it is how a budget nobody chose ends up
+    # deciding when a bench is given up on.
+    elif isinstance(gate.deadline_s, bool) or not isinstance(
+        gate.deadline_s, (int, float)
+    ):
+        raise ValueError("deadline_s must be a number of seconds")
+    else:
+        try:
+            gate.deadline_s = validated_deadline(gate.deadline_s)
+        except ReleaseGateError as error:
+            raise ValueError(str(error)) from None
+    if gate.deadline_source not in (DEADLINE_DERIVED, DEADLINE_OVERRIDE):
+        raise ValueError(f"not a deadline source: {gate.deadline_source!r}")
     if not isinstance(gate.stages, list) or not gate.stages or not all(
         isinstance(entry, dict) and isinstance(entry.get("stage"), str)
         for entry in gate.stages
@@ -1339,7 +1598,8 @@ def _stage_status(entry: Mapping, group: Mapping | None, *, dispatched: bool) ->
 
 
 def stage_views(
-    gate: ReleaseGate, groups: Mapping[str, Mapping]
+    gate: ReleaseGate, groups: Mapping[str, Mapping],
+    hosts: Mapping[str, Mapping] | None = None,
 ) -> list[dict]:
     """One row per stage: what was asked for, what happened, and where it is.
 
@@ -1349,6 +1609,12 @@ def stage_views(
     roles it bound, its start and end, its duration in seconds and in words,
     its verdict, the reason it has one, and the API paths of each child's
     report and records.
+
+    A pending row also carries ``waiting_on`` and ``waiting_on_summary``:
+    what that stage is waiting for, given ``hosts`` -- what the caller knows
+    about each host of this bench (``waiting_reasons``). Worked out once
+    every row is built, because what one stage waits for includes what the
+    others are doing.
     """
     rows = []
     for entry in gate.stages:
@@ -1419,10 +1685,14 @@ def stage_views(
             "reason": reason,
             "runs": runs,
         })
+    for row in rows:
+        reasons = waiting_reasons(row, rows, hosts)
+        row["waiting_on"] = [dict(entry) for entry in reasons]
+        row["waiting_on_summary"] = waiting_summary(reasons)
     return rows
 
 
-def gate_status(rows: Sequence[Mapping]) -> str:
+def gate_status(rows: Sequence[Mapping], *, expired: bool = False) -> str:
     """One verdict for the gate: passed only when every required stage passed.
 
     ``running`` while any stage is still to come or still going; otherwise
@@ -1434,6 +1704,11 @@ def gate_status(rows: Sequence[Mapping]) -> str:
     optional: a bench without the fixture it needs would otherwise never
     produce a pass, and its own row and ``optional_problems`` are where a
     reader sees what it came to.
+
+    A gate that was given up on for reaching its deadline (``expired``) is
+    at worst ``failed``, whatever its stages came to: a gate that ran out of
+    time did not finish, and cancelling its last running stage must not
+    leave that reading as though somebody had cancelled the gate.
     """
     if not rows:
         return ERROR
@@ -1443,9 +1718,10 @@ def gate_status(rows: Sequence[Mapping]) -> str:
     required = [
         str(row.get("status") or ERROR) for row in rows if not row.get("optional")
     ]
-    if not required:
-        return worst(statuses)
-    return worst(required)
+    judged = list(required or statuses)
+    if expired:
+        judged.append(FAILED)
+    return worst(judged)
 
 
 def pending_decisions(
@@ -1525,6 +1801,115 @@ def pending_decisions(
     return tuple(ready), tuple(abandoned)
 
 
+def waiting_reasons(
+    row: Mapping, rows: Sequence[Mapping],
+    hosts: Mapping[str, Mapping] | None = None,
+) -> tuple[dict, ...]:
+    """Why this pending stage has not started: one entry per thing it waits on.
+
+    Empty for a stage that is not pending -- a stage that is running, or over,
+    is not waiting for anything. Otherwise, in this order, and each as
+    ``{"kind": one of the WAIT_ constants, "detail": a sentence}``:
+
+    the stages it requires that have not settled; the stages of a lower
+    ``order`` sharing a host with it that have not settled; and then, host by
+    host, what that host is doing. ``hosts`` is what the caller knows about
+    each of them -- whether a runner is there, the run it is carrying and
+    whether that run flashes, and each registered board's lease and whether
+    USB has it. A host the caller says nothing about is a host with no
+    runner, which is itself a reason.
+
+    This is the difference between a stage that is about to start and one
+    that never will, which the matrix could not tell an operator before
+    (#410). It is a reading of what is known now, not a decision: what may
+    start is ``pending_decisions``, and the two read the same rows.
+    """
+    if str(row.get("status")) != PENDING:
+        return ()
+    hosts = dict(hosts or {})
+    by_name = {str(other.get("stage")): other for other in rows}
+    mine = [str(host) for host in row.get("hosts") or ()]
+    reasons: list[dict] = []
+
+    def say(kind: str, detail: str) -> None:
+        if len(reasons) < MAX_WAIT_REASONS:
+            reasons.append({"kind": kind, "detail": detail[:MAX_REASON_CHARS]})
+
+    unsettled = [
+        str(name) for name in row.get("requires") or ()
+        if str(name) in by_name
+        and str(by_name[str(name)].get("status")) in UNFINISHED
+    ]
+    if unsettled:
+        say(WAIT_STAGE, "the stage(s) it requires have not settled: "
+                        + ", ".join(unsettled))
+    earlier = [
+        str(other.get("stage")) for other in rows
+        if str(other.get("status")) in UNFINISHED
+        and int(other.get("order") or 0) < int(row.get("order") or 0)
+        and set(mine) & {str(host) for host in other.get("hosts") or ()}
+    ]
+    if earlier:
+        say(WAIT_ORDER, "it writes flash, so it waits for the stage(s) that "
+                        "need this run's firmware on the same board(s): "
+                        + ", ".join(earlier))
+    # The run IDs of this gate's own stages, so a host carrying one of them
+    # is reported as the stage it is, not as an unknown run.
+    ours = {
+        str(run.get("run_id")): str(other.get("stage"))
+        for other in rows for run in other.get("runs") or ()
+        if isinstance(run, Mapping) and run.get("run_id")
+    }
+    for host in mine:
+        state = hosts.get(host)
+        if state is None:
+            say(WAIT_RUNNER, f"{host} has no runner registered with the "
+                             "controller, so no stage can be started on it")
+            continue
+        if not state.get("online"):
+            say(WAIT_RUNNER, f"{host}'s runner is not connected; a stage is "
+                             "started on it as soon as it is back")
+            continue
+        active = state.get("active_run_id")
+        if active:
+            stage = ours.get(str(active))
+            what = f"the {stage} stage of this gate" if stage else f"run {active}"
+            if state.get("active_run_flashes"):
+                say(WAIT_HOST_LOCK,
+                    f"{host} is carrying {what}, which flashes a board and so "
+                    "holds that host's power/firmware lock for its whole "
+                    "length")
+            else:
+                say(WAIT_HOST, f"{host} is carrying {what}; a runner runs one "
+                               "run at a time")
+        elif state.get("starting"):
+            say(WAIT_HOST, f"a run is being started on {host}; a runner runs "
+                           "one run at a time")
+        for board in state.get("boards") or ():
+            if not isinstance(board, Mapping):
+                continue
+            alias = str(board.get("alias") or "a board")
+            if board.get("present") is False:
+                say(WAIT_FIXTURE,
+                    f"{host}: {alias} is registered and USB has not got it, "
+                    "so a run that needs it would be refused")
+            elif board.get("held") and not active:
+                holder = str(board.get("holder") or "").strip()
+                say(WAIT_LEASE,
+                    f"{host}: {alias} is leased by "
+                    + (holder or "another command")
+                    + ", so a run would wait for it")
+    return tuple(reasons)
+
+
+def waiting_summary(reasons: Sequence[Mapping]) -> str:
+    """One line for a reader: every reason's own words, in order."""
+    return "; ".join(
+        str(reason.get("detail") or "") for reason in reasons
+        if reason.get("detail")
+    )[:MAX_REASON_CHARS]
+
+
 def _restore_verified(row: Mapping, rows: Sequence[Mapping]) -> bool:
     """Did a later stage on this board write and preflight the application image?
 
@@ -1545,10 +1930,23 @@ def _restore_verified(row: Mapping, rows: Sequence[Mapping]) -> bool:
 def gate_view(
     gate: ReleaseGate, groups: Mapping[str, Mapping],
     *, manual_gates: Sequence[Mapping] = MANUAL_GATES,
+    now: str | None = None, hosts: Mapping[str, Mapping] | None = None,
 ) -> dict:
-    """The gate as its card, its summary and its notice read it."""
-    rows = stage_views(gate, groups)
-    status = gate_status(rows)
+    """The gate as its card, its summary and its notice read it.
+
+    ``now`` is this moment as a record writes a timestamp, which is what the
+    deadline is read against: how long the gate has been going
+    (``elapsed_s``), how long it has left (``remaining_s``), and whether it
+    is ``overdue`` -- the one thing a caller acts on, by giving the gate up
+    (``Controller._advance_gate``). Without one, those three are not
+    reported: a caller that cannot say what time it is does not get an
+    elapsed time worked out from a clock nobody named.
+
+    ``hosts`` is what the caller knows about each host of the bench, for the
+    pending stages' ``waiting_on`` (``waiting_reasons``).
+    """
+    rows = stage_views(gate, groups, hosts)
+    status = gate_status(rows, expired=bool(gate.deadline_expired))
     ended = [row["finished_at"] for row in rows if row["finished_at"]]
     settled = [row for row in rows if str(row["status"]) not in UNFINISHED]
     finished_at = (
@@ -1558,6 +1956,14 @@ def gate_view(
     duration_s = (
         wall_seconds(gate.created_at, finished_at)
         if finished_at and any(row["started_at"] for row in rows) else None
+    )
+    # Counted from the gate's own created_at, so the figures survive a
+    # controller restart: the deadline is a period of a stored record's life,
+    # not of this process's.
+    elapsed_s = wall_seconds(gate.created_at, finished_at or now) if now else None
+    remaining_s = (
+        None if elapsed_s is None or status not in UNFINISHED
+        else round(max(0.0, gate.deadline_s - elapsed_s), 3)
     )
     required = [row for row in rows if not row["optional"]]
     return {
@@ -1577,6 +1983,22 @@ def gate_view(
         "finished_at": finished_at,
         "duration_s": duration_s,
         "duration_hms": human_duration_or_none(duration_s),
+        # The deadline, and where the gate stands against it. ``overdue`` is
+        # what a caller acts on; the two counted figures are what an
+        # operator reads, in the words every counted duration here uses
+        # (durations.coarse_duration).
+        "deadline_hms": coarse_duration(gate.deadline_s),
+        "deadline_at": _plus(gate.created_at, gate.deadline_s),
+        "elapsed_s": elapsed_s,
+        "elapsed_hms": None if elapsed_s is None else coarse_duration(elapsed_s),
+        "remaining_s": remaining_s,
+        "remaining_hms": (
+            None if remaining_s is None else coarse_duration(remaining_s)
+        ),
+        "overdue": bool(
+            status == RUNNING and elapsed_s is not None
+            and elapsed_s >= gate.deadline_s
+        ),
         "stages_asked": len(rows),
         "stages_settled": len(settled),
         "stages_passed": sum(row["status"] == PASSED for row in rows),

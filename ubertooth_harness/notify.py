@@ -916,6 +916,9 @@ def gate_notice(
     and run IDs, and the gates this configuration measures nothing for. The
     child groups send none of their own, so a gate of twelve stages is one
     message rather than twelve.
+
+    A gate that was given up on for reaching its deadline says so beside the
+    verdict, because that failure is not one of its stages' (#410).
     """
     gate_id = header_text(gate.get("gate_id"), 80)
     status = header_text(gate.get("status"), 32) or "unknown"
@@ -940,6 +943,13 @@ def gate_notice(
     if gate.get("cancel_requested"):
         rows.append(("Cancel asked for", header_text(
             gate.get("cancel_reason") or "yes", MAX_REASON_CHARS)))
+    if gate.get("deadline_expired"):
+        # The one verdict a reader must not take for an ordinary failure: the
+        # gate ran out of time, so some of its stages never ran at all.
+        rows.append(("Deadline", header_text(
+            f"reached: the gate was given up on after "
+            f"{gate.get('deadline_hms') or '-'} and its running stages were "
+            "canceled", MAX_REASON_CHARS)))
     blocks: list[str] = []
     for stage in stages[:MAX_LISTED_STAGES]:
         name = header_text(stage.get("stage"), 80)

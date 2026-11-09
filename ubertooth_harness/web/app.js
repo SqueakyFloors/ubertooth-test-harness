@@ -1113,6 +1113,10 @@
     const query = new URLSearchParams();
     query.set("config", $("gate-config").value || "release-comprehensive");
     if ($("gate-bootloader").checked) query.set("with_bootloader", "true");
+    // The deadline this page would send, so the summary and the preflight
+    // judge the gate that would really be started rather than a derived one.
+    const deadline = gateDeadlineSeconds();
+    if (deadline !== null) query.set("deadline_s", String(deadline));
     for (const host of hosts.sort()) query.append("host", host);
     $("gate-summary").textContent = hosts.length
       ? "Working out what this configuration would do here…"
@@ -1156,13 +1160,20 @@
     const view = state.gateConfig;
     const stages = view.stages || [];
     const waves = view.waves || [];
-    const seconds = view.preflight ? view.preflight.estimated_s : null;
+    const preflight = view.preflight || {};
+    const seconds = preflight.estimated_s;
+    const deadline = preflight.deadline_hms;
     $("gate-summary").textContent =
       `${stages.length} stage(s) in ${waves.length} wave(s) on `
       + `${(view.hosts || []).join(", ")}`
       + (typeof seconds === "number"
         ? `, about ${formatSeconds(seconds)} of test time plus each stage's`
           + " own build, flash and preflight"
+        : "")
+      + (deadline
+        ? `. Given up on after ${deadline} (${preflight.deadline_source}):`
+          + " its running stages are canceled and the verdict is failed, so"
+          + " a bench nobody frees cannot leave the gate waiting with no end."
         : "");
     const waveOf = new Map();
     waves.forEach((wave, index) => {
@@ -1224,6 +1235,19 @@
       + (preflight.refusal || "see the preflight above.");
   }
 
+  // The deadline this page is asking for, in seconds, or null for the one
+  // the configuration's own estimates derive. The field is in minutes,
+  // which is how an operator says how long a job may take; the controller
+  // judges the figure either way, so a number outside the bounds comes back
+  // as a refusal in the preflight above Run rather than as a started gate.
+  function gateDeadlineSeconds() {
+    const field = $("gate-deadline");
+    if (!field || !field.value.trim()) return null;
+    const minutes = Number(field.value);
+    if (!Number.isFinite(minutes) || minutes <= 0) return null;
+    return Math.round(minutes * 60);
+  }
+
   async function startGate() {
     const status = $("run-status");
     const chosen = state.refOptions.get($("ref").value);
@@ -1234,6 +1258,7 @@
       ref: chosen ? chosen.name : "",
       commit: chosen ? chosen.commit : null,
       with_bootloader: $("gate-bootloader").checked,
+      deadline_s: gateDeadlineSeconds(),
     };
     if (!hosts.length || !body.ref) {
       status.textContent = "Choose a ref and at least one host first.";
@@ -1330,6 +1355,24 @@
       el("dt", { text: "Started" }), el("dd", {}, timeElement(gate.created_at)),
       el("dt", { text: "Duration" }),
       el("dd", { text: gate.duration_hms || (gate.active ? "running" : "—") }),
+      // The deadline, and where the gate stands against it. A gate that is
+      // waiting is the case this is for: how long it has been going and how
+      // long it has left answer "is anything still going to happen?".
+      el("dt", { text: "Deadline" }),
+      el("dd", {
+        text: `${gate.deadline_hms || "—"} (${gate.deadline_source || "derived"})`
+          + (gate.deadline_expired
+            ? " — reached: the gate was given up on and its running stages"
+              + " were canceled"
+            : ""),
+      }),
+      ...(gate.active
+        ? [
+          el("dt", { text: "Elapsed" }), el("dd", { text: gate.elapsed_hms || "—" }),
+          el("dt", { text: "Remaining" }),
+          el("dd", { text: gate.remaining_hms || "—" }),
+        ]
+        : []),
     );
     $("gate-cancel").hidden = !gate.active;
     $("gate-rows").replaceChildren(...(gate.stages || []).map((stage) => el(
@@ -1340,7 +1383,13 @@
           ? el("span", { className: "hint", text: stage.opt_in ? " opt-in" : " optional" })
           : null,
         el("p", { className: "hint", text: stage.purpose || "" }),
-        stage.reason ? el("p", { className: "hint", text: stage.reason }) : null),
+        stage.reason ? el("p", { className: "hint", text: stage.reason }) : null,
+        // A pending stage says what it is waiting for, so a stage that is
+        // about to start reads differently from one that never will.
+        ...(stage.waiting_on || []).map((entry) => el("p", {
+          className: "hint gate-waiting",
+          text: `Waiting on ${entry.kind}: ${entry.detail}`,
+        }))),
       el("td", { text: `${stage.plan}/${stage.suite}` }),
       el("td", { text: (stage.resources || []).join(", ") || "none" }),
       el("td", { className: "time", text: stage.duration_hms || "—" }),
@@ -1358,6 +1407,13 @@
         run.duration_hms ? el("span", { className: "hint", text: run.duration_hms }) : null))),
     )));
     const notes = [];
+    if (gate.deadline_expired) {
+      notes.push(`This gate reached its whole-gate deadline of ${gate.deadline_hms}`
+        + ` (${gate.deadline_source}), so it was given up on: its running stages`
+        + " were canceled and the stages behind them never ran. The verdict is"
+        + " failed because the gate did not finish, not because a stage"
+        + " measured a failure.");
+    }
     for (const entry of gate.manual_gates || []) {
       notes.push(`This gate measures nothing for ${entry.name} (${entry.reference}): `
         + `${entry.reason}. Run it by hand and record it with release-evidence --attest.`);
@@ -3247,6 +3303,7 @@
     $("what").addEventListener("change", syncWhat);
     $("gate-config").addEventListener("change", loadGateConfiguration);
     $("gate-bootloader").addEventListener("change", loadGateConfiguration);
+    $("gate-deadline").addEventListener("change", loadGateConfiguration);
     $("gate-cancel").addEventListener("click", cancelGate);
     $("gate-close").addEventListener("click", closeGate);
     syncWhat();

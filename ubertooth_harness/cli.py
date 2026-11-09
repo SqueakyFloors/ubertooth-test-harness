@@ -587,7 +587,7 @@ def _gate_configuration(args: argparse.Namespace) -> dict:
         # gate starts, and judges it then. So that check is left out rather
         # than answered with a guess.
         ref=args.ref or "", commit=None, with_bootloader=args.with_bootloader,
-        results_dir=None,
+        results_dir=None, deadline_s=_gate_deadline(args),
     )
     checks = [
         check for check in report["checks"]
@@ -600,6 +600,9 @@ def _gate_configuration(args: argparse.Namespace) -> dict:
         "waves": report["waves"],
         "estimated_s": report["estimated_s"],
         "estimated_hms": report["estimated_hms"],
+        "deadline_s": report["deadline_s"],
+        "deadline_hms": report["deadline_hms"],
+        "deadline_source": report["deadline_source"],
         "manual_gates": [dict(entry) for entry in releasegate.MANUAL_GATES],
         "excluded": [dict(entry) for entry in releasegate.EXCLUDED],
         "preflight": {
@@ -612,12 +615,34 @@ def _gate_configuration(args: argparse.Namespace) -> dict:
     }
 
 
+def _gate_deadline(args: argparse.Namespace) -> float | None:
+    """``--deadline MINUTES`` in seconds, or None for the derived budget.
+
+    Minutes because that is how an operator says how long a job may take;
+    seconds everywhere after this, because that is what every other duration
+    in the harness is. The bounds are the gate's own
+    (``releasegate.validated_deadline``), so a figure outside them is
+    refused here rather than on the controller.
+    """
+    minutes = getattr(args, "deadline", None)
+    if minutes is None:
+        return None
+    try:
+        return releasegate.validated_deadline(float(minutes) * 60.0)
+    except (releasegate.ReleaseGateError, TypeError, ValueError) as error:
+        raise HarnessError(f"--deadline: {error}") from None
+
+
 def _print_gate_configuration(view: dict) -> None:
     print(f"{view['config']} on {', '.join(view['hosts'])}")
     print(
         f"{len(view['stages'])} stage(s) in {len(view['waves'])} wave(s), "
         f"about {view['estimated_hms'] or 'an unknown time'} of test time "
         "plus each stage's own build, flash and preflight"
+    )
+    print(
+        f"given up on after {view['deadline_hms']} "
+        f"({view['deadline_source']}), running stages canceled"
     )
     print()
     for wave, names in enumerate(view["waves"], start=1):
@@ -737,6 +762,7 @@ def _print_gate(gate: dict) -> None:
     )
     if gate["cancel_requested"]:
         print(f"  cancel asked for: {gate['cancel_reason'] or 'yes'}")
+    print(f"  {_gate_clock(gate)}")
     for stage in gate["stages"]:
         print(
             f"  {stage['stage']:22} {str(stage['status']):12} "
@@ -760,6 +786,10 @@ def _print_gate(gate: dict) -> None:
             print(f"      roles  {', '.join(stage['resources'])}")
         if stage["reason"]:
             print(f"      reason {stage['reason']}")
+        for entry in stage.get("waiting_on") or ():
+            # A pending stage says what it is waiting for, so a stage that is
+            # about to start reads differently from one that never will.
+            print(f"      waiting on ({entry['kind']}) {entry['detail']}")
     for entry in gate["manual_gates"]:
         print(
             f"  not measured here: {entry['name']} ({entry['reference']}) -- "
@@ -776,6 +806,30 @@ def _print_gate(gate: dict) -> None:
             "  ubertooth-harness release-evidence --release <NAME> "
             "--output <DIR> \\\n    " + " \\\n    ".join(sorted(directories))
         )
+
+
+def _gate_clock(gate: dict) -> str:
+    """Where this gate stands against its deadline, in one line.
+
+    A running gate counts both ways -- how long it has been going and how
+    long it has left -- because the question an operator has while a gate
+    sits there is whether anything is still going to happen. A gate that is
+    over says what its deadline was, and says so plainly when that deadline
+    is why it is over.
+    """
+    deadline = f"deadline {gate.get('deadline_hms') or '-'}"
+    if gate.get("deadline_expired"):
+        return (
+            f"{deadline} ({gate.get('deadline_source')}): reached, so the "
+            "gate was given up on and its running stages were canceled"
+        )
+    if gate.get("status") == releasegate.RUNNING:
+        return (
+            f"{deadline} ({gate.get('deadline_source')}): "
+            f"{gate.get('elapsed_hms') or '-'} gone, "
+            f"{gate.get('remaining_hms') or '-'} left"
+        )
+    return f"{deadline} ({gate.get('deadline_source')}), not reached"
 
 
 def _release_gate(args: argparse.Namespace) -> int:
@@ -803,6 +857,7 @@ def _release_gate(args: argparse.Namespace) -> int:
             "config": args.config, "hosts": hosts, "ref": args.ref,
             "commit": args.commit,
             "with_bootloader": bool(args.with_bootloader),
+            "deadline_s": _gate_deadline(args),
         },
     )
     gate = answer.get("gate") or {}
@@ -1104,6 +1159,14 @@ def _parser() -> argparse.ArgumentParser:
     gate.add_argument(
         "--poll", type=float, default=_GATE_POLL_S, metavar="SECONDS",
         help="how often --follow asks the controller (default: %(default)s)",
+    )
+    gate.add_argument(
+        "--deadline", type=float, metavar="MINUTES",
+        help="the whole-gate deadline, in minutes: a gate still going then "
+        "is given up on, its running stages canceled and its verdict failed. "
+        f"{releasegate.DEADLINE_FLOOR_S / 60:.0f} to "
+        f"{releasegate.DEADLINE_CEILING_S / 60:.0f} minutes; without this, "
+        "it is derived from the stages' own estimates",
     )
     gate.add_argument("--json", action="store_true", help="machine-readable output")
 
