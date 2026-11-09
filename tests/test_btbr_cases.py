@@ -393,7 +393,7 @@ class CaseTests(unittest.TestCase):
             self.assertIsNone(re.search(pattern, report), pattern)
 
     def test_a_failed_check_trips_the_forbidden_patterns(self):
-        report = fake_session_report(faults=("quiet-lmp",))
+        report = fake_session_report(faults=("deaf-peer",))
         (case,) = cases()
         step = case.steps[-1]
         self.assertTrue(any(re.search(pattern, report)
