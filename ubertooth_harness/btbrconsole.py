@@ -1177,17 +1177,20 @@ def check_tx_link(session: Session) -> str:
     return ""
 
 
-def _connection_given_up(session: Session) -> str:
+def _connection_given_up(session: Session, until: int | None = None) -> str:
     """The board did not hold the connection, with what said so, or "".
 
     Read over the connection's own output, from the page that brought it up,
     so a link given up at any point while it was held is caught and not only
-    one given up in the moment this is read.
+    one given up in the moment this is read. ``until`` bounds that window
+    where this is read after the `idle` that ended the connection: that
+    `idle` leaves the connected state itself, and reading past it would make
+    every connection this session held look like one given up.
     """
     resumed = _connection_lasted(session)
     if resumed:
         return resumed
-    text = session.console.text()[session.page_mark:]
+    text = session.console.text()[session.page_mark:until]
     if PEER_DETACHED in text:
         return (f"the peer hung up ({PEER_DETACHED!r}): the connection the "
                 "transmit runs went out on was ended from the other end")
@@ -1400,6 +1403,9 @@ def check_page_idle(session: Session) -> str:
     capture, and so that a connection given up while it is held has the time
     to be given up; the transmit runs before this one have already held it for
     a few seconds, so what is left of the hold is what is waited out here.
+    The look after the `idle` covers the whole of that hold, so a link the
+    peer dropped or the board let go after the transmit check had read fails
+    here.
 
     Raises CheckNotRun where the recovery after an earlier failure has already
     ended the connection: `idle` is how the recovery stops a running command,
@@ -1418,10 +1424,13 @@ def check_page_idle(session: Session) -> str:
     left = max(0.0, session.hold_seconds - held)
     if left:
         time.sleep(left)
+    # Where the hold ends, so the look below covers the connection's own life
+    # and not the `idle` that leaves the connected state on purpose.
+    before_idle = session.console.mark()
     reason = session.idle("page-idle", PAGING_DONE)
     if reason:
         return reason
-    return _connection_lasted(session)
+    return _connection_given_up(session, until=before_idle)
 
 
 def _connection_lasted(session: Session) -> str:
@@ -1508,10 +1517,11 @@ def check_page_repeat(session: Session) -> str:
         # Nothing is held on a repeat, so the connection has had less time to
         # be given up than the first one had; the look costs nothing and the
         # first page is where that is really decided.
+        before_idle = session.console.mark()
         reason = session.idle(f"{label}-idle", PAGING_DONE)
         if reason:
             return reason
-        reason = _connection_lasted(session)
+        reason = _connection_given_up(session, until=before_idle)
         if reason:
             return f"page {number} of {repeats} after the first: {reason}"
     session.report(f"check page-repeat: {repeats} further page(s) completed "
