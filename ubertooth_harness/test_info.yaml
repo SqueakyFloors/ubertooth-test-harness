@@ -2011,7 +2011,12 @@ Classic capture record fields:
     which is the reason a reader needs, rather than on three distinct noise
     figures among four noise-bearing records. The audio capture has a floor of
     its own, higher than the shared one, because it is the one whose measured
-    size is known to be in the hundreds. No record may carry
+    size is known to be in the hundreds. The records floor sizes the sample
+    the signal count is taken over, since every record carries a signal
+    figure, but not the noise count's: a noise figure is a measurement a
+    record either made or did not. So six records must carry a measured
+    figure before the noise count is asked, and a capture that measured the
+    background on almost nothing fails on that instead. No record may carry
     more payload than one capture bank holds either -- 34 bytes, the 400
     symbols of a bank less the 122 the access code and header take -- which
     is arithmetic rather than a measurement.

@@ -201,6 +201,28 @@ MIN_HEC_VALID_RECORDS = 5
 # a capture whose figures do not vary at all.
 MIN_DISTINCT_SIGNAL = 4
 MIN_DISTINCT_NOISE = 4
+# Records that must carry a measured background figure at all: the sample
+# MIN_DISTINCT_NOISE is counted over. Every record carries a signal figure,
+# so the signal floor is a count over the capture's records, which its own
+# records floor already sizes; a noise figure is a measurement a record
+# either made or did not, so without this the noise floor is a count over a
+# sample of unknown size, and a capture of fifty records in which three
+# measured the background is asked for four different figures out of three
+# (ubertooth-test-harness#406).
+#
+# Bounded from both sides by figures already measured rather than by a
+# guess. Below, MIN_DISTINCT_NOISE is 4, and a sample of four asks that
+# every one of the four differ, which is the sharp edge this is here to
+# remove; at six, two of the six may repeat and the floor is still a test of
+# variation. Above, a capture cannot carry more measured figures than it has
+# records, and the lowest records floor held to the level floors is
+# MIN_PACKETS -- ten. Of the twenty measured captures, 90 to 326 records of
+# 122 to 373 carried a measured figure, roughly three quarters, so a capture
+# that only just met a ten-record floor would be expected to carry about
+# seven, and six leaves it clear. Against the measurements themselves this
+# is a fifteenth of the thinnest sample any of them collected, so a working
+# receiver clears it on a capture far thinner than any measured one.
+MIN_MEASURED_NOISE = 6
 # Records the audio capture must hold, its own floor rather than the shared
 # one. The two floors above are derived figures -- how much a sample varies
 # -- and a sample of four noise-bearing records cannot speak to variation
@@ -723,8 +745,9 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
     capture ran leaves it out and the times are reported without being
     held to anything.
 
-    ``levels`` off leaves out the two floors on how much the level figures
-    vary. They were measured on captures of this piconet, and a caller whose
+    ``levels`` off leaves out the floors on the level figures -- how much
+    they vary, and the size of the sample the noise one is counted over.
+    They were measured on captures of this piconet, and a caller whose
     capture is of something else has no measurement to stand on.
     """
     if following and central is None:
@@ -739,6 +762,7 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
               "--max-payload-bytes", str(bredrrecord.MAX_BANK_PAYLOAD))
     if levels:
         checks += ("--min-distinct-signal", str(MIN_DISTINCT_SIGNAL),
+                   "--min-measured-noise", str(MIN_MEASURED_NOISE),
                    "--min-distinct-noise", str(MIN_DISTINCT_NOISE))
     if run_seconds is not None:
         # The records measure the run that captured them. The ceiling is the

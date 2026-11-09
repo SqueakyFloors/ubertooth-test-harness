@@ -17,6 +17,8 @@ from ubertooth_harness.classic_cases import (
     CLOCK_LOCK_TIED,
     CLOCK_LOCK_UNSCORED,
     MAX_BACKWARD_STEP_US,
+    MIN_DISTINCT_NOISE,
+    MIN_MEASURED_NOISE,
     MIN_PACKETS,
     PAIR_SETUP_S,
     follow_classic_cases,
@@ -451,6 +453,27 @@ class RecordFieldCaseTests(unittest.TestCase):
                     other = list(step.resolve_argv({CAPTURE_DIR_KEY: "/x"}))
                     self.assertEqual(str(MIN_PACKETS),
                                      other[other.index("--min-packets") + 1])
+
+    def test_every_capture_states_the_noise_sample_its_floor_is_counted_over(self):
+        """#406: the records floor sizes a capture, not the sample the noise
+        floor is counted over, and a capture of fifty records in which three
+        measured the background would be asked for four different figures
+        out of three. Every capture held to the level floors states that
+        sample, between the two bounds the figure has to sit in: large
+        enough that the floor on different figures can be met with a repeat
+        to spare, and no larger than the records floor the thinnest of these
+        captures is held to."""
+        self.assertGreater(MIN_MEASURED_NOISE, MIN_DISTINCT_NOISE)
+        self.assertLess(MIN_MEASURED_NOISE, MIN_PACKETS)
+        for case_id, case in self.cases("comprehensive").items():
+            for step in self.steps(case).values():
+                if not step.step_id.startswith("verify-"):
+                    continue
+                checks = list(step.resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+                with self.subTest(case=case_id, step=step.step_id):
+                    self.assertEqual(
+                        str(MIN_MEASURED_NOISE),
+                        checks[checks.index("--min-measured-noise") + 1])
 
     def test_the_survey_case_asks_for_a_recovered_uap_and_no_address(self):
         steps = self.steps(self.cases("comprehensive")["survey-fields"])
