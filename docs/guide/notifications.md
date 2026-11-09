@@ -148,6 +148,10 @@ why it did not.
 - **After the report.** The controller builds a notice only once the run has
   a terminal status and its `report.md` is on disk, so a message never points
   at results that are not there.
+- **Once per release gate, not once per stage.** A gate's stages are run
+  groups of its own, and they send no notice: the gate sends one when its last
+  stage settles, with a line per stage
+  ([release-gate.md](release-gate.md#email)).
 - **Once per run or group ID.** Each notice is claimed in a ledger beside the
   run directories (`<results dir>/notifications/<key>.json`) with an atomic
   exclusive create. A controller restart, a runner that reports one run's end

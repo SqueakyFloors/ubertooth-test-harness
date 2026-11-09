@@ -229,7 +229,9 @@ One flat directory per run, outside the repository by default.
   pattern over the same bytes. A check written as code records its verdict
   only, which is the price of counting things no pattern can.
 - Beside the run directories, the controller keeps `estimates.json` (learned
-  durations), `groups/` (one record per run group), `notifications/` (one
+  durations), `groups/` (one record per run group), `release-gates/` (one
+  record per release gate, the configuration's stages and the child group each
+  became), `notifications/` (one
   record per completion notice already sent, which is what keeps a notice
   unique across restarts), and `publications/` (one record per published
   validation bundle, the only thing that puts a public URL in a notice). A
@@ -248,7 +250,10 @@ carries a button that opens what that test is for, read from
 `ubertooth_harness/test_info.yaml` beside the catalog's own roles,
 arguments and estimate. A run on several
 hosts at once is a **run group**, carried on one stream, and a run of one
-host is a group of one, so the GUI has one thing to draw.
+host is a group of one, so the GUI has one thing to draw. A **release gate**
+is the layer above: one named configuration of every bounded release suite,
+each stage a run group of its own, scheduled in waves and answered with one
+verdict ([release-gate.md](docs/guide/release-gate.md)).
 
 Two properties matter for the design:
 
@@ -352,6 +357,7 @@ Open:
 | [docs/guide/transitions-guards-watchdog.md](docs/guide/transitions-guards-watchdog.md) | coverage profiles, guard boards, the firmware watchdog |
 | [docs/guide/test-devices.md](docs/guide/test-devices.md) | how the harness drives the DKs, the ESP32 peers, and a host adapter |
 | [docs/guide/services.md](docs/guide/services.md) | controller, runner service, web GUI, run groups |
+| [docs/guide/release-gate.md](docs/guide/release-gate.md) | the comprehensive release gate: stages, waves, preflight, verdict |
 | [docs/guide/deploy.md](docs/guide/deploy.md) | deploying the services on the lab host and a Mac |
 | [docs/reference/runner-protocol.md](docs/reference/runner-protocol.md) | the controller↔runner wire protocol, version 8 |
 | [docs/reference/run-records.md](docs/reference/run-records.md) | `run.jsonl`, `report.md`, output files, re-checking a run |

@@ -4,6 +4,7 @@ import argparse
 from collections.abc import Sequence
 import contextlib
 from dataclasses import asdict
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 
 from ubertooth_harness.build import (
     APPLICATION_IMAGE,
@@ -28,6 +30,7 @@ from ubertooth_harness.build import (
 )
 from ubertooth_harness import bootloader
 from ubertooth_harness.cancellation import CancellationToken
+from ubertooth_harness.durations import human_duration_or_none
 
 from ubertooth_harness.environment import (
     HarnessEnvironmentError,
@@ -50,6 +53,7 @@ from ubertooth_harness.flash import (
 )
 from ubertooth_harness import leases as board_leases
 from ubertooth_harness import dfuparts, libbtbbpin, notify
+from ubertooth_harness import releasegate
 from ubertooth_harness import evidence as release_evidence
 from ubertooth_harness.manifest import (
     FileIdentity,
@@ -527,6 +531,338 @@ def _release_evidence(args: argparse.Namespace) -> int:
     return 0 if bundle.complete or args.allow_incomplete else 1
 
 
+_GATE_POLL_S = 5.0
+# How many of a stage's left-to-another tests the printed entry names.
+_DROPPED_SHOWN = 4
+# One request to a loopback controller, which answers from memory or from one
+# file: a request that takes longer than this is not going to answer.
+_GATE_REQUEST_TIMEOUT_S = 30.0
+
+
+def _gate_hosts(args: argparse.Namespace) -> tuple[list[str], dict[str, str | None]]:
+    """The hosts to compile the configuration for, and their platforms.
+
+    ``--host`` names them; with a registry (``--hardware``) and no ``--host``
+    they are every registered host, and the registry is where each one's
+    platform comes from, which decides the steps a host would not run at all.
+    """
+    platforms: dict[str, str | None] = {}
+    if args.hardware is not None:
+        registry = FileResourceRegistry.load(args.hardware)
+        platforms = {
+            host.alias: getattr(host, "platform", None) for host in registry.hosts()
+        }
+    hosts = list(args.host or sorted(platforms))
+    if not hosts:
+        raise HarnessError(
+            "release-gate needs the hosts to run on: --host NAME (repeatable), "
+            "or --hardware REGISTRY to take every registered host"
+        )
+    unknown = [host for host in hosts if platforms and host not in platforms]
+    if unknown:
+        raise HarnessError(
+            f"{', '.join(unknown)} is not a Host in {args.hardware} "
+            f"({', '.join(sorted(platforms)) or 'none registered'})"
+        )
+    return hosts, {host: platforms.get(host) for host in hosts}
+
+
+def _gate_configuration(args: argparse.Namespace) -> dict:
+    """The configuration compiled for these hosts, with its preflight."""
+    hosts, platforms = _gate_hosts(args)
+    try:
+        stages = releasegate.enabled(
+            releasegate.configuration(args.config),
+            with_bootloader=args.with_bootloader,
+        )
+        plans = releasegate.compile_stages(
+            stages, args.plans_dir, hosts, platforms=platforms,
+        )
+        waves = releasegate.schedule(plans)
+    except releasegate.ReleaseGateError as error:
+        raise HarnessError(str(error)) from None
+    report = releasegate.preflight(
+        plans, waves,
+        # Nothing here resolves a ref: the controller does that once, when a
+        # gate starts, and judges it then. So that check is left out rather
+        # than answered with a guess.
+        ref=args.ref or "", commit=None, with_bootloader=args.with_bootloader,
+        results_dir=None,
+    )
+    checks = [
+        check for check in report["checks"]
+        if check["name"] != releasegate.IMMUTABLE_REVISION
+    ]
+    return {
+        "config": args.config, "hosts": hosts,
+        "with_bootloader": bool(args.with_bootloader),
+        "stages": [plan.record() for plan in plans],
+        "waves": report["waves"],
+        "estimated_s": report["estimated_s"],
+        "estimated_hms": report["estimated_hms"],
+        "manual_gates": [dict(entry) for entry in releasegate.MANUAL_GATES],
+        "excluded": [dict(entry) for entry in releasegate.EXCLUDED],
+        "preflight": {
+            **report, "checks": checks,
+            "passed": not [
+                check for check in checks
+                if not check["passed"] and check["blocking"]
+            ],
+        },
+    }
+
+
+def _print_gate_configuration(view: dict) -> None:
+    print(f"{view['config']} on {', '.join(view['hosts'])}")
+    print(
+        f"{len(view['stages'])} stage(s) in {len(view['waves'])} wave(s), "
+        f"about {view['estimated_hms'] or 'an unknown time'} of test time "
+        "plus each stage's own build, flash and preflight"
+    )
+    print()
+    for wave, names in enumerate(view["waves"], start=1):
+        print(f"wave {wave}: {', '.join(names)}")
+    print()
+    for stage in view["stages"]:
+        options = [
+            name for name, wanted in (
+                ("firmware", stage["with_firmware"]),
+                ("btbr", stage["with_btbr"]),
+                ("python", stage["with_python"]),
+            ) if wanted
+        ]
+        print(f"{stage['stage']}: {stage['plan']}/{stage['suite']}")
+        print(f"  purpose     {stage['purpose']}")
+        print(f"  hosts       {', '.join(stage['hosts']) or '(none: ' + stage['refusal'] + ')'}")
+        print(f"  tests       {', '.join(stage['tests']) or 'the whole suite'}")
+        print(f"  roles       {', '.join(stage['resources']) or 'none'}")
+        print(
+            f"  build       {'build, flash' if stage['build'] else 'no build'}"
+            + (f", also {', '.join(options)}" if options else "")
+            + (f", bootloader {stage['bootloader']}"
+               if stage["bootloader"] != releasegate.BOOTLOADER_RECORD else "")
+        )
+        print(
+            f"  estimate    {human_duration_or_none(stage['estimated_s']) or 'unknown'}"
+        )
+        if stage["dropped_tests"]:
+            # Named up to a few: the fast suite leaves most of itself to the
+            # release suite, and the whole list is longer than the rest of
+            # the entry together. --json carries all of them.
+            named = [
+                f"{entry['test']} ({entry['covered_by']})"
+                for entry in stage["dropped_tests"][:_DROPPED_SHOWN]
+            ]
+            rest = len(stage["dropped_tests"]) - len(named)
+            print(
+                f"  not here    {len(stage['dropped_tests'])} test(s) another "
+                "stage covers at the same coverage or better: "
+                + ", ".join(named)
+                + (f", and {rest} more" if rest > 0 else "")
+            )
+        if stage["condition"]:
+            kind = "opt-in" if stage["opt_in"] else "optional"
+            print(f"  {kind:11} {stage['condition']}")
+    print()
+    print("preflight:")
+    for check in view["preflight"]["checks"]:
+        print(f"  {'ok  ' if check['passed'] else 'FAIL'} {check['name']}: {check['detail']}")
+    print()
+    print("this gate measures nothing for:")
+    for entry in view["manual_gates"]:
+        print(f"  {entry['name']} ({entry['reference']}): {entry['reason']}")
+    for entry in view["excluded"]:
+        print(f"  {entry['name']}: {entry['reason']}")
+
+
+def _gate_request(url: str, method: str, path: str, body: dict | None = None) -> dict:
+    """One request to a loopback controller; raises HarnessError.
+
+    Only loopback, as the controller only listens there: a URL naming
+    anything else is refused here rather than dialed.
+    """
+    try:
+        checked = notify.check_loopback_url(url, "--controller")
+    except notify.NotifyConfigError as error:
+        raise HarnessError(str(error)) from None
+    rest = checked.removeprefix("http://")
+    host, _, port = rest.partition(":")
+    connection = http.client.HTTPConnection(
+        host, int(port or 80), timeout=_GATE_REQUEST_TIMEOUT_S
+    )
+    payload = None if body is None else json.dumps(body).encode()
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    try:
+        connection.request(method, path, body=payload, headers=headers)
+        response = connection.getresponse()
+        text = response.read().decode("utf-8", "replace")
+    except OSError as error:
+        raise HarnessError(f"cannot reach the controller at {checked}: {error}") from None
+    finally:
+        connection.close()
+    try:
+        answer = json.loads(text) if text else {}
+    except ValueError:
+        raise HarnessError(
+            f"the controller answered {response.status} with something that is "
+            "not JSON"
+        ) from None
+    if response.status >= 400:
+        detail = answer.get("detail") if isinstance(answer, dict) else None
+        raise HarnessError(
+            f"the controller refused this ({response.status}): "
+            + (str(detail) if detail else text[:500])
+        )
+    return answer if isinstance(answer, dict) else {}
+
+
+def _print_gate(gate: dict) -> None:
+    """The stage matrix and the verdict of one gate."""
+    print(
+        f"release gate {gate['gate_id']} ({gate['config']}): {gate['status']}"
+    )
+    print(
+        f"  {gate['ref']} at {(gate['commit'] or '-')[:12]} on "
+        f"{', '.join(gate['hosts'])}"
+    )
+    print(
+        f"  {gate['required_passed']} of {gate['required_asked']} required "
+        f"stage(s) passed, {gate['stages_passed']} of {gate['stages_asked']} "
+        "in all"
+        + (
+            f", {gate['duration_hms']}" if gate["duration_hms"] else ""
+        )
+    )
+    if gate["cancel_requested"]:
+        print(f"  cancel asked for: {gate['cancel_reason'] or 'yes'}")
+    for stage in gate["stages"]:
+        print(
+            f"  {stage['stage']:22} {str(stage['status']):12} "
+            f"{stage['plan']}/{stage['suite']}"
+            + (
+                f"  {human_duration_or_none(stage['duration_s'])}"
+                if stage["duration_s"] is not None else ""
+            )
+        )
+        for run in stage["runs"]:
+            print(
+                f"      {str(run['host']):14} {str(run['status'] or '-'):10} "
+                f"{run['run_id'] or 'no run'}"
+                + (f"  {run['duration_hms']}" if run.get("duration_hms") else "")
+            )
+            if run.get("report"):
+                print(f"        report  {run['report']}")
+            if run.get("run_directory"):
+                print(f"        records {run['run_directory']}")
+        if stage["resources"]:
+            print(f"      roles  {', '.join(stage['resources'])}")
+        if stage["reason"]:
+            print(f"      reason {stage['reason']}")
+    for entry in gate["manual_gates"]:
+        print(
+            f"  not measured here: {entry['name']} ({entry['reference']}) -- "
+            "run it by hand and record it with release-evidence --attest"
+        )
+    directories = [
+        run["run_directory"] for stage in gate["stages"]
+        for run in stage["runs"] if run.get("run_directory")
+    ]
+    if directories and gate["status"] != releasegate.RUNNING:
+        print()
+        print("release evidence from this gate's runs, on the test host:")
+        print(
+            "  ubertooth-harness release-evidence --release <NAME> "
+            "--output <DIR> \\\n    " + " \\\n    ".join(sorted(directories))
+        )
+
+
+def _release_gate(args: argparse.Namespace) -> int:
+    """Show one release configuration, or start it on a controller.
+
+    Without ``--controller`` nothing is started: the configuration is
+    compiled for the hosts named, and its stages, waves and preflight are
+    printed, which is the dry run of a whole gate. With one, the gate is
+    started there -- the controller resolves the ref once, preflights the
+    graph and refuses it as a whole -- and followed to its verdict.
+    """
+    if not args.controller:
+        view = _gate_configuration(args)
+        if args.json:
+            print(json.dumps(view, indent=2, sort_keys=True))
+        else:
+            _print_gate_configuration(view)
+        return 0 if view["preflight"]["passed"] else 1
+    if not args.ref:
+        raise HarnessError("starting a release gate needs --ref")
+    hosts, _platforms = _gate_hosts(args)
+    answer = _gate_request(
+        args.controller, "POST", "/api/release-gates",
+        {
+            "config": args.config, "hosts": hosts, "ref": args.ref,
+            "commit": args.commit,
+            "with_bootloader": bool(args.with_bootloader),
+        },
+    )
+    gate = answer.get("gate") or {}
+    gate_id = gate.get("gate_id")
+    if not gate_id:
+        raise HarnessError("the controller started a gate it did not name")
+    if args.json:
+        print(json.dumps(gate, indent=2, sort_keys=True))
+    else:
+        _print_gate(gate)
+    if not args.follow:
+        return 0
+    canceling = False
+
+    def cancel(signum, _frame):
+        nonlocal canceling
+        if canceling:
+            raise KeyboardInterrupt
+        canceling = True
+        print("\ncanceling the gate; its running stages are being stopped "
+              "and nothing more will be started", file=sys.stderr)
+        try:
+            _gate_request(
+                args.controller, "POST", f"/api/release-gates/{gate_id}/cancel",
+                {"reason": "canceled from the command line"},
+            )
+        except HarnessError as error:
+            print(f"cancel: {error}", file=sys.stderr)
+
+    with _signal_handlers(cancel):
+        while gate.get("status") == releasegate.RUNNING:
+            time.sleep(args.poll)
+            gate = _gate_request(
+                args.controller, "GET", f"/api/release-gates/{gate_id}"
+            ).get("gate") or gate
+    if args.json:
+        print(json.dumps(gate, indent=2, sort_keys=True))
+    else:
+        print()
+        _print_gate(gate)
+    return 0 if gate.get("status") == releasegate.PASSED else 1
+
+
+@contextlib.contextmanager
+def _signal_handlers(handler):
+    """SIGINT and SIGTERM call ``handler`` while this is held."""
+    previous = {}
+    for number in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[number] = signal.signal(number, handler)
+        except (OSError, ValueError):  # not the main thread
+            continue
+    try:
+        yield
+    finally:
+        for number, original in previous.items():
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(number, original)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ubertooth-harness")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -711,6 +1047,65 @@ def _parser() -> argparse.ArgumentParser:
         help="print the upload command even though a required gate has no "
         "evidence; the missing gates are listed in the summary either way",
     )
+
+    gate = subparsers.add_parser(
+        "release-gate",
+        help="show one release configuration -- every bounded release suite, "
+        "in the waves it would run in, with the whole graph's preflight -- or "
+        "start it on a controller as one gate of child runs",
+    )
+    gate.add_argument(
+        "--config", default=releasegate.COMPREHENSIVE,
+        choices=sorted(releasegate.CONFIGURATIONS),
+        help="the named configuration (default: %(default)s)",
+    )
+    gate.add_argument(
+        "--host", action="append", metavar="NAME",
+        help="a registered host to run the configuration on; repeatable. "
+        "With --hardware and no --host, every registered host",
+    )
+    gate.add_argument(
+        "--hardware", type=Path, metavar="REGISTRY",
+        help="a registry to take the hosts and their platforms from, which "
+        "decides the steps a host would not run at all",
+    )
+    gate.add_argument(
+        "--plans-dir", type=Path, default=_DEFAULT_PLAN.parent, metavar="DIR",
+        help="directory of <plan>.yaml files the configuration's stages name",
+    )
+    gate.add_argument(
+        "--with-bootloader", action="store_true",
+        help="include the programmer-paired bootloader acceptance stage, "
+        "which writes the one part of flash an ordinary run cannot put back; "
+        "each host's run installs it only on a board its own registry pairs "
+        "with a debug programmer",
+    )
+    gate.add_argument(
+        "--controller", metavar="URL",
+        help="start the gate on this loopback controller (http://127.0.0.1:"
+        "PORT) instead of only showing it; the controller resolves the ref "
+        "once, preflights the whole graph, and refuses the gate as a whole",
+    )
+    gate.add_argument(
+        "--ref", metavar="REF",
+        help="the branch or tag to qualify; required with --controller, "
+        "which resolves it to one commit every stage then runs",
+    )
+    gate.add_argument(
+        "--commit", metavar="COMMIT",
+        help="the commit --ref was listed at, so a ref that has moved since "
+        "is refused rather than run",
+    )
+    gate.add_argument(
+        "--follow", action="store_true",
+        help="with --controller, print the stage matrix until the gate "
+        "settles and exit non-zero unless it passed; Ctrl-C cancels the gate",
+    )
+    gate.add_argument(
+        "--poll", type=float, default=_GATE_POLL_S, metavar="SECONDS",
+        help="how often --follow asks the controller (default: %(default)s)",
+    )
+    gate.add_argument("--json", action="store_true", help="machine-readable output")
 
     runner = subparsers.add_parser(
         "runner",
@@ -2117,6 +2512,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "release-evidence":
             return _release_evidence(args)
+        if args.command == "release-gate":
+            return _release_gate(args)
         raise HarnessError(f"unknown command {args.command}")
     except (
         BuildError,

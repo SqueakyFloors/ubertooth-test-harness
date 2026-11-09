@@ -104,11 +104,40 @@ from ubertooth_harness.notify import (
     Notice,
     Notifier,
     digest_events,
+    gate_notice,
     group_notice,
     read_publication,
     run_notice,
 )
 from ubertooth_harness.report import write_report
+from ubertooth_harness.releasegate import (
+    CANCELED as STAGE_CANCELED,
+    COMPREHENSIVE,
+    CONFIGURATIONS,
+    EXCLUDED,
+    ERROR as STAGE_ERROR,
+    FAILED as STAGE_FAILED,
+    GATES_DIR,
+    IMMUTABLE_REVISION,
+    MANUAL_GATES,
+    MIN_FREE_BYTES,
+    NOT_REACHED as STAGE_NOT_REACHED,
+    PENDING as STAGE_PENDING,
+    RUNNING as GATE_RUNNING,
+    SKIPPED as STAGE_SKIPPED,
+    ReleaseGate,
+    ReleaseGateError,
+    compile_stages,
+    configuration,
+    enabled,
+    gate_from_record,
+    gate_view,
+    new_gate,
+    pending_decisions,
+    preflight as gate_preflight,
+    schedule,
+    valid_gate_id,
+)
 from ubertooth_harness.runfiles import (
     PAGE_BYTES,
     OutputFileError,
@@ -637,6 +666,13 @@ class Controller:
         self.runs: dict[str, Run] = {}
         self.groups: dict[str, RunGroup] = {}
         self.groups_dir = self.results_dir / GROUPS_DIR
+        # Release gates: one named configuration's stages, each stage a child
+        # run group of its own (releasegate.py).
+        self.gates: dict[str, ReleaseGate] = {}
+        self.gates_dir = self.results_dir / GATES_DIR
+        # Held while a gate is being started or advanced, so two children
+        # ending at once cannot start one stage twice.
+        self._gate_lock = asyncio.Lock()
         self._links: dict[str, Link] = {}
         self._send_locks: dict[Link, asyncio.Lock] = {}
         self._pending_runs: dict[str, _Pending] = {}
@@ -651,6 +687,7 @@ class Controller:
         self._tasks: set[asyncio.Task] = set()
         self._load_runs()
         self._load_groups()
+        self._load_gates()
         # A retention window is applied once here, so a controller started
         # with one does not serve what it is about to remove, and then every
         # prune_interval_s from the monitor.
@@ -996,6 +1033,7 @@ class Controller:
                     self._unlearned.remove(run.run_id)
         if removed:
             self._prune_groups()
+            self._prune_gates()
             self.log(
                 f"retention: removed {len(removed)} run directory/directories "
                 f"older than {self.keep_runs_days:g} day(s)"
@@ -1527,6 +1565,9 @@ class Controller:
             # passed in them took as long as it says.
             await self.learn(run)
             self.notify_finished(run)
+            # A stage of a release gate may have just ended, and the stages
+            # waiting behind it are started from here (#403).
+            self.advance_gates()
 
     def _fail_pending(self, host: str, reason: str) -> None:
         for table in (
@@ -1598,8 +1639,10 @@ class Controller:
             return
         self._publish_group(group)
         # This may be the group's last word: the hosts that did run have
-        # already ended, and nothing else would reach its notice (#392).
+        # already ended, and nothing else would reach its notice (#392), nor
+        # the gate this group may be a stage of (#403).
         self.notify_group_settled(group)
+        self.advance_gates()
 
     def _take_board_request(
         self, target: Target, kind: str, message: Mapping
@@ -1816,8 +1859,10 @@ class Controller:
             self.log(f"run {run.run_id} on {target.host}: {run.status}")
             await self.learn(run)
             # Last, and after the report is on disk: a notice points at
-            # results that are already there (#392).
+            # results that are already there (#392). A release gate whose
+            # stage this run belongs to is advanced from here (#403).
             self.notify_finished(run)
+            self.advance_gates()
         elif kind == "devices":
             pending = self._take_board_request(target, kind, message)
             if pending is not None:
@@ -2067,10 +2112,15 @@ class Controller:
         """One group's notice, or None while any of its hosts is not in.
 
         A group that started nowhere is not reported: it has nothing to say
-        about a run, and such a group is forgotten rather than stored.
+        about a run, and such a group is forgotten rather than stored. Nor is
+        one that is a stage of a release gate: that gate sends one notice for
+        all of its stages when the last of them settles (#403), so a gate of
+        twelve stages is one message rather than twelve.
         """
         view = self.view_group(group)
         if view["status"] == GROUP_RUNNING or not view["hosts_started"]:
+            return None
+        if self.gate_of_group(group.group_id) is not None:
             return None
         digests = {}
         for member in view["members"]:
@@ -2849,6 +2899,481 @@ class Controller:
             "progress": group_progress(steps),
         }
 
+    # ----- release gates ---------------------------------------------------
+
+    def _load_gates(self) -> None:
+        """Every stored gate record; an unreadable one is logged and left."""
+        try:
+            paths = sorted(self.gates_dir.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        except OSError as error:
+            self.log(f"cannot read the release gate records: {error}")
+            return
+        for path in paths:
+            if path.suffix != ".json" or not path.is_file():
+                continue
+            try:
+                gate = gate_from_record(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, TypeError) as error:
+                self.log(f"skipping unreadable release gate {path.name}: {error}")
+                continue
+            if gate.gate_id != path.stem:
+                self.log(f"skipping release gate {path.name}: gate_id mismatch")
+                continue
+            self.gates[gate.gate_id] = gate
+
+    def _persist_gate(self, gate: ReleaseGate) -> None:
+        self.gates_dir.mkdir(parents=True, exist_ok=True)
+        destination = self.gates_dir / f"{gate.gate_id}.json"
+        temporary = self.gates_dir / f".{gate.gate_id}.json.tmp"
+        temporary.write_text(
+            json.dumps(gate.record(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+
+    def get_gate(self, gate_id: str) -> ReleaseGate:
+        gate = self.gates.get(gate_id) if valid_gate_id(gate_id) else None
+        if gate is None:
+            raise ControllerError(f"unknown release gate {gate_id!r}", 404)
+        return gate
+
+    def view_gate(self, gate: ReleaseGate) -> dict:
+        """One gate as the API, the live stream and its notice report it.
+
+        The stage matrix is built from each stage's child group view, which
+        is built from that group's children's own records, so a gate never
+        holds a status of its own that could disagree with a run.
+        """
+        return gate_view(gate, {
+            group_id: self.view_group(self.groups[group_id])
+            for group_id in gate.group_ids() if group_id in self.groups
+        })
+
+    def gate_views(self) -> list[dict]:
+        """Every gate, newest first."""
+        views = [self.view_gate(gate) for gate in self.gates.values()]
+        views.sort(key=lambda view: (view["created_at"], view["gate_id"]), reverse=True)
+        return views
+
+    def gate_of_group(self, group_id: str) -> ReleaseGate | None:
+        """The gate one run group is a stage of, or None.
+
+        A handful of gates with a dozen stages each, so this is a short scan
+        rather than a second index that could fall out of step with the
+        records.
+        """
+        for gate in self.gates.values():
+            if group_id in gate.group_ids():
+                return gate
+        return None
+
+    def _publish_gate(self, gate: ReleaseGate) -> None:
+        wanted = [
+            subscriber for subscriber in self._subscribers
+            if subscriber.wants_group(gate.gate_id) or subscriber.unfiltered
+        ]
+        if not wanted:
+            # Built only for a browser that is listening: this is on the path
+            # of every run update.
+            return
+        message = {"type": "release_gate", "gate": self.view_gate(gate)}
+        for subscriber in wanted:
+            subscriber.offer(message)
+
+    def _stage_overhead(self, hosts: Sequence[str]) -> dict[str, float]:
+        """What each host has learned a build of this kind takes.
+
+        Added to every stage's own estimate, because each stage is a run of
+        its own and builds the commit again
+        (``releasegate.wall_estimate``). Flashing and preflight are not in
+        it: neither has a learned figure without a run's own records (a
+        preflight estimate scales with that run's check count), so the
+        answer is a floor rather than a guess, and it says so where it is
+        reported. A host that has finished no run contributes nothing.
+        """
+        overhead: dict[str, float] = {}
+        for host in hosts:
+            total = 0.0
+            for stage in run_stage_estimates(
+                self.estimates, (), host, build=True, with_firmware=True,
+                with_python=True,
+            ):
+                seconds = stage.get("estimated_s")
+                if isinstance(seconds, (int, float)):
+                    total += float(seconds)
+            overhead[host] = round(total, 1)
+        return overhead
+
+    def _compile_gate(
+        self, config: str, hosts: Sequence[str], *, ref: str,
+        commit: str | None, with_bootloader: bool,
+    ):
+        """The stages, the waves and the whole graph's preflight.
+
+        Reads the plan files and the free space, so callers hand it to a
+        thread. Refuses a configuration this harness has not got, and a
+        stage naming a plan or suite it has not got, as the caller's
+        mistake: the configuration is this repository's own.
+        """
+        try:
+            stages = enabled(configuration(config), with_bootloader=with_bootloader)
+            platforms = {
+                host: self.targets[host].platform for host in hosts
+                if host in self.targets
+            }
+            plans = compile_stages(
+                stages, self.plans_dir, hosts, platforms=platforms,
+                catalog=self.catalog,
+            )
+            waves = schedule(plans)
+        except ReleaseGateError as error:
+            raise ControllerError(str(error), 422) from None
+        report = gate_preflight(
+            plans, waves, ref=ref, commit=commit,
+            with_bootloader=with_bootloader, results_dir=self.results_dir,
+            overhead_s=self._stage_overhead(hosts),
+            minimum_free_bytes=MIN_FREE_BYTES,
+        )
+        return plans, waves, report
+
+    async def configuration_view(
+        self, config: str, hosts, *, with_bootloader: bool = False
+    ) -> dict:
+        """What a gate of this configuration on these hosts would do.
+
+        The stages, the waves they would run in, and the preflight of the
+        whole graph -- everything the GUI shows before Run and everything
+        ``start_gate`` refuses on, bar the one check that needs a ref: this
+        listing is read before a ref is chosen, and the start resolves it and
+        judges it then. Nothing is asked of a target: the plans, the catalog
+        and the hosts' platforms are all of it.
+        """
+        chosen = self._group_hosts(hosts) if hosts else []
+        unknown = [host for host in chosen if host not in self.targets]
+        if unknown:
+            raise ControllerError(f"unknown target {unknown[0]!r}", 404)
+        plans, _waves, report = await asyncio.to_thread(
+            self._compile_gate, config, chosen, ref="", commit=None,
+            with_bootloader=with_bootloader,
+        )
+        return {
+            "config": config,
+            "configurations": sorted(CONFIGURATIONS),
+            "hosts": chosen,
+            "with_bootloader": bool(with_bootloader),
+            "stages": [plan.record() for plan in plans],
+            "waves": report["waves"],
+            "manual_gates": [dict(entry) for entry in MANUAL_GATES],
+            "excluded": [dict(entry) for entry in EXCLUDED],
+            "preflight": {
+                **report,
+                "checks": [
+                    check for check in report["checks"]
+                    if check["name"] != IMMUTABLE_REVISION
+                ],
+                # Without a ref there is nothing to resolve, so the one
+                # check that is left out cannot be counted as passed either.
+                "passed": not [
+                    check for check in report["checks"]
+                    if check["name"] != IMMUTABLE_REVISION
+                    and not check["passed"] and check["blocking"]
+                ],
+            },
+        }
+
+    async def start_gate(
+        self, *, config: str = COMPREHENSIVE, hosts, ref: str,
+        commit: str | None = None, with_bootloader: bool = False,
+    ) -> ReleaseGate:
+        """Start one release gate: the configuration's stages, in waves.
+
+        The whole graph is preflighted first, and a gate with one blocking
+        failure starts nothing: a graph that would stop halfway through has
+        occupied the bench, written firmware and produced a verdict nobody
+        can use. The ref is resolved once here, so every stage of every host
+        runs one immutable commit even if the branch moves while the gate
+        runs.
+
+        Only what may start now is started; each later stage starts when the
+        stages it waits for have settled (``_advance_gate``).
+        """
+        chosen = self._group_hosts(hosts)
+        unknown = [host for host in chosen if host not in self.targets]
+        if unknown:
+            raise ControllerError(f"unknown target {unknown[0]!r}", 404)
+        resolved = await self.resolve_ref(ref, commit)
+        plans, waves, report = await asyncio.to_thread(
+            self._compile_gate, config, chosen, ref=ref, commit=resolved,
+            with_bootloader=with_bootloader,
+        )
+        if not report["passed"]:
+            raise ControllerError(
+                f"release gate {config} cannot start: {report['refusal']}", 422
+            )
+        gate = new_gate(
+            config, chosen, plans, ref=ref, commit=resolved,
+            with_bootloader=with_bootloader, waves=waves,
+        )
+        while gate.gate_id in self.gates:
+            gate = new_gate(
+                config, chosen, plans, ref=ref, commit=resolved,
+                with_bootloader=with_bootloader, waves=waves,
+            )
+        for plan in plans:
+            if not plan.runnable:
+                # Optional, and this bench has nothing to run it with: a
+                # required stage in that position is what preflight refused.
+                gate.set_stage_outcome(
+                    plan.name, STAGE_SKIPPED,
+                    plan.refusal or "no host of this gate runs this suite",
+                )
+        self.gates[gate.gate_id] = gate
+        async with self._gate_lock:
+            await self._advance_gate(gate)
+        if not gate.group_ids():
+            reasons = "; ".join(
+                f"{entry['stage']}: {entry['error']}" for entry in gate.stages
+                if entry.get("error")
+            )
+            self._forget_gate(gate)
+            raise ControllerError(
+                f"release gate {config} started no stage: {reasons}", 409
+            )
+        return gate
+
+    def _busy_hosts(self) -> set[str]:
+        """Hosts that cannot take a run now: one is active or being started.
+
+        A stage whose host is busy waits rather than being refused: a target
+        runner runs one run at a time, and the gate is asked to advance again
+        whenever any run ends.
+        """
+        busy = {
+            host for host, target in self.targets.items()
+            if target.active_run_id is not None
+        }
+        busy.update(pending.host for pending in self._pending_runs.values())
+        return busy
+
+    async def _advance_gate(self, gate: ReleaseGate) -> None:
+        """Start every stage of this gate that may start now. Never raises.
+
+        Called when the gate is created and whenever a run ends, with the
+        ``_gate_lock`` held, so two children ending at once cannot start one
+        stage twice. One stage's start failing is that stage's result: the
+        rest of the graph goes on, and a required stage that did not start
+        fails the gate at the end rather than in the middle of it.
+        """
+        changed = False
+        # Bounded: each pass either starts or settles at least one stage, so
+        # one pass per stage and one to find nothing left is every pass there
+        # can be.
+        for _pass in range(len(gate.stages) + 1):
+            rows = self.view_gate(gate)["stages"]
+            if gate.cancel_requested:
+                for row in rows:
+                    if row["status"] == STAGE_PENDING:
+                        changed |= gate.set_stage_outcome(
+                            row["stage"], STAGE_CANCELED,
+                            gate.cancel_reason
+                            or f"release gate {gate.gate_id} was canceled",
+                        )
+                break
+            ready, abandoned = pending_decisions(
+                rows, busy_hosts=self._busy_hosts()
+            )
+            for name, reason in abandoned:
+                changed |= gate.set_stage_outcome(name, STAGE_NOT_REACHED, reason)
+            if not ready:
+                if not abandoned:
+                    break
+                continue
+            # Every stage of one wave is started at once: a wave's stages
+            # have disjoint host sets, so none of them waits for another's
+            # runner to answer.
+            started = await asyncio.gather(
+                *(self._start_stage(gate, name) for name in ready)
+            )
+            changed = changed or any(started)
+        if all(
+            entry.get("group_id") or entry.get("outcome") for entry in gate.stages
+        ) and not gate.dispatched_at:
+            # Every stage has been reached: nothing more will be started, so
+            # a stage still pending from here on was not reached at all.
+            gate.dispatched_at = _now()
+            changed = True
+        if changed:
+            try:
+                self._persist_gate(gate)
+            except Exception as error:  # noqa: BLE001 - the children stand
+                self.log(f"could not write release gate {gate.gate_id}: {error}")
+            self._publish_gate(gate)
+        self.notify_gate_settled(gate)
+
+    async def _start_stage(self, gate: ReleaseGate, name: str) -> bool:
+        """Start one stage as a child run group; True if the gate changed."""
+        entry = gate.stage(name)
+        if entry is None:
+            return False
+        try:
+            group = await self.start_group(
+                entry["hosts"], ref=gate.ref, commit=gate.commit,
+                plan=entry["plan"], suite=entry["suite"],
+                tests=list(entry.get("tests") or ()), build=entry["build"],
+                flash_build=entry["flash_build"],
+                with_firmware=entry["with_firmware"],
+                with_btbr=entry["with_btbr"], with_python=entry["with_python"],
+                bootloader=entry["bootloader"],
+            )
+        except ControllerError as error:
+            self.log(
+                f"release gate {gate.gate_id}: stage {name} did not start: "
+                f"{error.detail}"
+            )
+            return gate.set_stage_outcome(
+                name,
+                STAGE_SKIPPED if entry.get("optional") else STAGE_FAILED,
+                error.detail,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - the gate goes on
+            self.log(
+                f"release gate {gate.gate_id}: stage {name} failed inside the "
+                f"controller: {error!r}"
+            )
+            return gate.set_stage_outcome(
+                name, STAGE_ERROR,
+                f"the stage failed inside the controller ({type(error).__name__}); "
+                "its log says why",
+            )
+        return gate.set_stage_group(name, group.group_id)
+
+    def advance_gates(self) -> None:
+        """Ask every running gate to start whatever may start now.
+
+        Called wherever a run ends or a group's last word is written. Held as
+        a task: nothing waits for it, and a failure inside it cannot reach
+        the run that triggered it.
+        """
+        if not self.gates:
+            return
+        if not any(self.view_gate(gate)["active"] for gate in self.gates.values()):
+            return
+        try:
+            task = asyncio.ensure_future(self._advance_running_gates())
+        except RuntimeError as error:
+            # Called from a path with no running loop (a test driving the
+            # controller synchronously). Nothing here may raise.
+            self.log(f"warning: no event loop to advance the release gates: {error}")
+            return
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _advance_running_gates(self) -> None:
+        async with self._gate_lock:
+            for gate in list(self.gates.values()):
+                if gate.gate_id not in self.gates:
+                    continue
+                if self.view_gate(gate)["active"]:
+                    await self._advance_gate(gate)
+
+    async def cancel_gate(self, gate_id: str, reason: str) -> tuple[ReleaseGate, list[dict]]:
+        """Cancel a gate: its running stages, and every stage still to come.
+
+        The record carries the cancel before any runner is asked, so a stage
+        that has not started is never started afterwards -- that is what
+        stops the rest of the graph, whatever happens to the runs that are
+        going now. Each running stage's own cancel stands on its own, as a
+        group's hosts do: one whose runner is away keeps its reason and the
+        others are still cancelled.
+        """
+        gate = self.get_gate(gate_id)
+        view = self.view_gate(gate)
+        if not view["active"]:
+            raise ControllerError(
+                f"release gate {gate.gate_id} is not running ({view['status']})", 409
+            )
+        if not gate.cancel_requested:
+            gate.cancel_requested = True
+            gate.cancel_reason = reason[:MAX_REASON_CHARS] or None
+            self._persist_gate(gate)
+        outcomes = []
+        for row in view["stages"]:
+            if row["status"] != GROUP_RUNNING or not row["group_id"]:
+                continue
+            try:
+                await self.cancel_group(row["group_id"], reason)
+            except ControllerError as error:
+                outcomes.append({
+                    "stage": row["stage"], "group_id": row["group_id"],
+                    "canceled": False, "error": error.detail,
+                })
+                continue
+            outcomes.append({
+                "stage": row["stage"], "group_id": row["group_id"],
+                "canceled": True, "error": None,
+            })
+        async with self._gate_lock:
+            # Marks every stage that had not started as cancelled, and
+            # settles the gate.
+            await self._advance_gate(gate)
+        self._publish_gate(gate)
+        return gate, outcomes
+
+    def _forget_gate(self, gate: ReleaseGate) -> None:
+        """Drop a gate that started nothing, record and all."""
+        view = self.view_gate(gate)
+        self.gates.pop(gate.gate_id, None)
+        try:
+            (self.gates_dir / f"{gate.gate_id}.json").unlink(missing_ok=True)
+        except OSError as error:
+            self.log(f"could not remove release gate {gate.gate_id}: {error}")
+        message = {"type": "release_gate", "gate": view, "removed": True}
+        for subscriber in list(self._subscribers):
+            if subscriber.wants_group(gate.gate_id) or subscriber.unfiltered:
+                subscriber.offer(message)
+
+    def _prune_gates(self) -> None:
+        """Forget gate records whose every stage's group has been removed."""
+        for gate in list(self.gates.values()):
+            if any(group_id in self.groups for group_id in gate.group_ids()):
+                continue
+            if not gate.group_ids():
+                # Started nothing and was kept anyway (a restart found it
+                # mid-dispatch): the retention window is not what decides
+                # it, so it stays.
+                continue
+            self._forget_gate(gate)
+
+    def notify_gate_settled(self, gate: ReleaseGate) -> None:
+        """Start a gate's completion notice if it has just become terminal.
+
+        One message for the whole gate; the stages' own groups send none
+        (``_group_notice``). Harmless to call whenever a gate changes: a
+        running gate builds nothing, and a notice already sent is claimed in
+        the ledger, so one gate is reported once however many times this is
+        reached.
+        """
+        self._start_notice(
+            self._notice_for_gate(gate), f"release gate {gate.gate_id}"
+        )
+
+    def _notice_for_gate(self, gate: ReleaseGate) -> Callable:
+        async def build() -> Notice | None:
+            view = self.view_gate(gate)
+            if view["status"] == GATE_RUNNING:
+                return None
+            return gate_notice(
+                view, gui_base=self.gui_base(), results_dir=self.results_dir,
+                public_url=self._public_url(gate.gate_id),
+                subject_prefix=self.notifier.config.subject_prefix,
+            )
+
+        return build
+
     async def read_run_file(
         self, run: Run, path: str, offset: int = 0, limit: int = PAGE_BYTES
     ) -> dict:
@@ -3150,6 +3675,27 @@ ENDPOINTS = {
         "with_python, or a bootloader of check or update without build is "
         "refused"
     ),
+    "GET /api/release-configurations": (
+        "the release gate configurations, and what one of them would do on "
+        "the chosen hosts: ?host=HOST (repeatable), ?config=NAME and "
+        "?with_bootloader=true, answering with every stage, the waves they "
+        "would run in, and the whole graph's preflight"
+    ),
+    "POST /api/release-gates": (
+        "start one release gate: {config, hosts, ref, commit, "
+        "with_bootloader}; the whole graph is preflighted first and a "
+        "blocking failure starts nothing (422), the ref is resolved once so "
+        "every stage runs one commit, and each stage is a child run group"
+    ),
+    "GET /api/release-gates": "every release gate, newest first",
+    "GET /api/release-gates/{gate_id}": (
+        "one gate: its verdict and its stage matrix, each stage with its run "
+        "IDs, commit, device roles, duration and report path"
+    ),
+    "POST /api/release-gates/{gate_id}/cancel": (
+        "cancel a release gate: {reason}; every running stage is cancelled "
+        "and no stage still to come is started"
+    ),
     "POST /api/run-groups": (
         "start one run per host as a run group: {hosts, ref, commit, plan, "
         "suite, tests, build, flash_build, with_firmware, with_btbr, "
@@ -3199,7 +3745,7 @@ ENDPOINTS = {
 
 
 def create_app(controller: Controller):
-    from fastapi import FastAPI, Request, WebSocket
+    from fastapi import FastAPI, Query, Request, WebSocket
     from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
     from pydantic import BaseModel, ConfigDict, Field
 
@@ -3234,6 +3780,21 @@ def create_app(controller: Controller):
         # is checked in one place, Controller._group_hosts, so an empty list,
         # a repeated host and a name no registry could hold all read alike.
         hosts: list[str]
+
+    class GateRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        # Which configuration, and the hosts to run it on. Everything else a
+        # stage needs -- its plan, suite, test selection and build options --
+        # comes from the configuration, which is the point of it: an operator
+        # chooses a revision and a bench, not twelve suites.
+        config: str = COMPREHENSIVE
+        hosts: list[str]
+        ref: str
+        commit: str | None = None
+        # The programmer-paired bootloader acceptance stage, which writes the
+        # one part of flash an ordinary run cannot put back. Off unless it is
+        # asked for here.
+        with_bootloader: bool = False
 
     class CancelRequest(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
@@ -3355,6 +3916,39 @@ def create_app(controller: Controller):
             bootloader=request.bootloader,
         )
         return {"run": run.view()}
+
+    @app.get("/api/release-configurations")
+    async def release_configurations(
+        config: str = COMPREHENSIVE,
+        host: list[str] | None = Query(default=None),
+        with_bootloader: bool = False,
+    ):
+        # What a gate would do, before one is started: the GUI shows the
+        # stages and the preflight from here, and starts nothing by asking.
+        return await controller.configuration_view(
+            config, host or [], with_bootloader=with_bootloader
+        )
+
+    @app.post("/api/release-gates", status_code=201)
+    async def start_gate(request: GateRequest):
+        gate = await controller.start_gate(
+            config=request.config, hosts=request.hosts, ref=request.ref,
+            commit=request.commit, with_bootloader=request.with_bootloader,
+        )
+        return {"gate": controller.view_gate(gate)}
+
+    @app.get("/api/release-gates")
+    async def list_gates():
+        return {"gates": controller.gate_views()}
+
+    @app.get("/api/release-gates/{gate_id}")
+    async def get_gate(gate_id: str):
+        return {"gate": controller.view_gate(controller.get_gate(gate_id))}
+
+    @app.post("/api/release-gates/{gate_id}/cancel", status_code=202)
+    async def cancel_gate(gate_id: str, request: CancelRequest):
+        gate, canceled = await controller.cancel_gate(gate_id, request.reason)
+        return {"gate": controller.view_gate(gate), "canceled": canceled}
 
     @app.post("/api/run-groups", status_code=201)
     async def start_group(request: GroupRequest):

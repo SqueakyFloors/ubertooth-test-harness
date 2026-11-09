@@ -96,6 +96,28 @@
     <div class="panel-body">
       <form id="run-form" class="form" novalidate>
         <div class="field">
+          <label for="what">What to run</label>
+          <select id="what" name="what" aria-describedby="what-note">
+            <option value="plan" selected>One plan and suite</option>
+            <option value="gate">A release gate: every bounded release suite</option>
+          </select>
+          <p id="what-note" class="hint">A release gate runs one named configuration as one job: each stage is a run group of its own, with its own leases, build options, firmware expectation and report, and the gate passes only when every required stage passes. The configuration chooses the plans, suites and build options; you choose the ref and the hosts.</p>
+        </div>
+        <div id="gate-setup" class="gate-setup" hidden>
+          <div class="field">
+            <label for="gate-config">Configuration</label>
+            <select id="gate-config" name="gate_config"></select>
+          </div>
+          <div class="field field-check">
+            <input type="checkbox" id="gate-bootloader" name="gate_bootloader" aria-describedby="gate-bootloader-note">
+            <label for="gate-bootloader">Include the bootloader acceptance stage</label>
+          </div>
+          <p id="gate-bootloader-note" class="hint">It installs the bootloader built from this ref over the debug programmer the registry pairs with a board, which is the one part of flash an ordinary run cannot put back. Each host's run writes it only on a board its own registry pairs with a programmer, and records what is installed otherwise.</p>
+          <p id="gate-summary" class="hint" role="status"></p>
+          <ol id="gate-stages" class="gate-stages" aria-label="The stages of this configuration, in the waves they run in"></ol>
+          <ul id="gate-preflight" class="gate-preflight" aria-label="Preflight of the whole graph"></ul>
+        </div>
+        <div class="field">
           <label for="ref">Git ref</label>
           <div class="control-row">
             <select id="ref" name="ref" required aria-describedby="refs-status"></select>
@@ -163,6 +185,37 @@
           <p id="run-status" class="hint" role="status" aria-live="polite"></p>
         </div>
       </form>
+    </div>
+  </section>
+
+  <section id="gate-panel" class="panel panel-gate" hidden aria-labelledby="gate-heading">
+    <div class="panel-head panel-head-closable">
+      <h2 id="gate-heading" tabindex="-1">Release gate</h2>
+      <button type="button" id="gate-close">Close</button>
+    </div>
+    <div class="panel-body">
+      <dl id="gate-overview" class="summary"></dl>
+      <div class="live-actions">
+        <button type="button" id="gate-cancel" class="danger" hidden>Cancel the gate</button>
+        <p id="gate-cancel-status" class="hint" role="status"></p>
+      </div>
+      <div class="table-wrap">
+        <table class="gate-matrix">
+          <caption>Every stage of this gate, in the order it is reached</caption>
+          <thead>
+            <tr>
+              <th scope="col">Stage</th>
+              <th scope="col">Plan / suite</th>
+              <th scope="col">Device roles</th>
+              <th scope="col" class="time">Duration</th>
+              <th scope="col">Status</th>
+              <th scope="col">Runs</th>
+            </tr>
+          </thead>
+          <tbody id="gate-rows"></tbody>
+        </table>
+      </div>
+      <p id="gate-notes" class="hint"></p>
     </div>
   </section>
 

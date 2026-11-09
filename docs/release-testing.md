@@ -137,6 +137,29 @@ against, and as an **optional** comparison arm ([section
 
 ## 6. Execution order and schedule
 
+### Asking for all of it at once
+
+Sections 5 and 6 are also a configuration the harness carries out:
+`release-comprehensive`, one named gate of every bounded, recurring stage
+here, scheduled in waves and answered with one verdict and one stage matrix
+([release-gate.md](guide/release-gate.md)).
+
+```sh
+python -m ubertooth_harness release-gate --hardware hardware.yaml   # what it would do
+python -m ubertooth_harness release-gate --controller http://127.0.0.1:8765 \
+  --hardware hardware.yaml --ref <release-tag> --follow
+```
+
+It covers TC-01 (as the fast-only checks the main suite does not supersede,
+with every host's build, flash and preflight), TC-02, TC-03 and TC-04
+(the comprehensive BLE suite holds both), TC-05, TC-07, TC-08, TC-09, TC-10,
+TC-13, and TC-17 when the bootloader stage is asked for; TC-11's weak-link
+variant is an optional stage. What it does not run, and why, is in that
+document: TC-06, TC-12, TC-14, TC-15 and TC-16 stay the by-hand or
+by-command-line cases they are, and no soak is in it. The order rules below
+are the gate's own scheduling rules, so a gate and a hand-run schedule agree
+on what may overlap.
+
 Order rules, in force whatever the bench:
 
 1. TC-01 first. A failure there is cheaper to diagnose than anywhere else.
