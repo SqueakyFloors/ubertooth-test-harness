@@ -476,7 +476,22 @@ class Levels(unittest.TestCase):
     def floors(self, found, **options):
         return bredrrecord.problems(found, min_packets=50,
                                     min_distinct_signal=4,
+                                    min_measured_noise=6,
                                     min_distinct_noise=4, **options)
+
+    def unmeasured(self, count):
+        """``count`` records that made no background measurement.
+
+        The figure a record without one carries is the sentinel the writers
+        leave, above the signal, which is why the noise flag is clear
+        (harness #909). Their signal figures vary like ``levels``, so a
+        capture made mostly of these still clears the signal floor and the
+        noise sample is what it is judged on.
+        """
+        return [parsed(record(signal=-50 - (step % 20), noise=127,
+                              flags=GOOD_FLAGS
+                              & ~bredrrecord.NOISEPOWER_VALID))
+                for step in range(count)]
 
     def test_a_capture_that_met_its_floor_is_held_to_the_variation(self):
         """The regression the two floors are for: a receiver that latched one
@@ -504,6 +519,78 @@ class Levels(unittest.TestCase):
         thin = self.floors(self.levels(4, vary=False), lap=0x123456)
         self.assertEqual("4 records, expected at least 50", thin[0])
         self.assertIn("another LAP", " ".join(thin))
+
+    def test_a_capture_that_measured_almost_no_background_fails_on_that(self):
+        """#406: the records floor sizes the capture, not the sample the
+        noise floor is counted over. Fifty records of which three measured
+        the background would be asked for four different figures out of
+        three, which no receiver can give; the capture fails on the sample
+        instead, and the floor on variation is left unasked rather than
+        reported beside it as a level fault."""
+        thin_sample = self.floors(self.levels(3, vary=True)
+                                  + self.unmeasured(47))
+        self.assertEqual(
+            ["3 of 50 records carry a measured noise figure, expected at "
+             "least 6: too few for a floor on how much the background varies "
+             "to be a test of anything"],
+            thin_sample)
+
+    def test_a_sample_at_its_floor_is_held_to_the_variation(self):
+        """At the sample floor the capture is judged on variation again, and
+        six records carrying one latched figure fail on that -- the
+        regression the floor is for, reported as itself."""
+        self.assertEqual([], self.floors(self.levels(6, vary=True)
+                                         + self.unmeasured(44)))
+        latched = self.floors([parsed(record(signal=-50 - step, noise=-80))
+                               for step in range(6)]
+                              + self.unmeasured(44))
+        self.assertEqual(
+            ["1 distinct noise figures in the 6 records that carry a measured "
+             "one, expected at least 4"], latched)
+
+    def test_the_floor_bites_at_the_lowest_records_floor_it_is_asked_of(self):
+        """The window the sample floor changes, pinned where it is reachable
+        -- the shared records floor of ten rather than the audio capture's
+        fifty. A ten-record capture whose four measured figures all differ
+        meets the count today, and four of four differing is the pass the
+        count cannot tell from a receiver with nothing to say, so it fails
+        on the sample instead (#406). The same ten records with six
+        measurements in them are judged on variation and clear it."""
+        def floors(found):
+            return bredrrecord.problems(found, min_packets=10,
+                                        min_distinct_signal=4,
+                                        min_measured_noise=6,
+                                        min_distinct_noise=4)
+
+        self.assertEqual(
+            ["4 of 10 records carry a measured noise figure, expected at "
+             "least 6: too few for a floor on how much the background varies "
+             "to be a test of anything"],
+            floors(self.levels(4, vary=True) + self.unmeasured(6)))
+        self.assertEqual([], floors(self.levels(4, vary=True)
+                                    + self.levels(2, vary=False)
+                                    + self.unmeasured(4)))
+
+    def test_a_capture_short_of_its_records_floor_is_asked_for_no_sample(self):
+        """The sample floor is a count over the capture's own records, so it
+        goes the way of the variation floors on a thin capture (#399): the
+        count is the one reason reported."""
+        self.assertEqual(["4 records, expected at least 50"],
+                         self.floors(self.unmeasured(4)))
+
+    def test_a_noise_floor_larger_than_its_sample_is_refused(self):
+        """A floor of N different figures over a sample of fewer than N
+        cannot be met however the receiver behaves, so the command line says
+        so rather than a run failing on it (#406)."""
+        for sample in ("0", "3"):
+            with self.subTest(sample=sample):
+                with self.assertRaises(SystemExit):
+                    with redirect_stderr(io.StringIO()) as stderr:
+                        bredrrecord.main(["x.pcap", "--min-distinct-noise", "4",
+                                          "--min-measured-noise", sample])
+                self.assertIn("--min-distinct-noise 4 needs "
+                              "--min-measured-noise of at least 4",
+                              stderr.getvalue())
 
     def test_the_variation_is_judged_where_no_records_floor_was_asked_for(self):
         """A caller that set no ``--min-packets`` has asked for no count, so

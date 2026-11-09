@@ -4473,6 +4473,32 @@ A capture short of its floor is now held to the count alone, which is the
 reason a reader needs, and a capture that met its floor is held to both
 floors as before.
 
+The two floors stand on different samples, though, and the records floor
+sizes only one of them. Every record carries a signal figure, so the signal
+floor counts over the capture's records. A noise figure is a measurement a
+record either made or did not, so the noise floor counts over a subset of
+unknown size, and a capture of fifty records in which three measured the
+background would be asked for four different figures out of three — a test
+no receiver can pass, reported as a level fault
+([#406](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/406)).
+So the capture must first carry at least six records with a measured figure,
+and below that it fails on having measured the background on almost nothing,
+with the floor on variation left unasked rather than added as a second,
+misleading line. Six sits between the two bounds the figure has: above four,
+the floor on different figures, so it can be met with a repeat to spare, and
+below ten, the records floor the thinnest of these captures is held to, which
+leaves four of those ten free to have measured nothing. It is a fifteenth of
+the thinnest sample the twenty captures collected, so nothing near a measured
+size comes near it.
+
+There is a window it does change: a ten-record capture whose four measured
+figures all differ meets the count today and fails this floor. That is the
+point. Four different figures out of four is the pass the count cannot tell
+from a receiver with nothing to say, and a capture that produces one is a
+twelfth of the thinnest window measured, so it fails naming its sample. The
+command line refuses a floor of more different figures than the sample it is
+counted over could hold, so a run cannot ask the impossible again.
+
 **A payload longer than the bank it arrived in.** No record may carry more
 payload than one capture bank can hold. An Ubertooth sends a Basic Rate
 packet as one bank of 400 symbols and libbtbb decodes it from that bank and
@@ -4632,7 +4658,8 @@ esp32peer.py audio  <peer options> --type ev3 --min-frames <n> \
     -l <central LAP> -u <central UAP> -r <case dir>/audio.pcapng
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
 bredrrecord.py <case dir>/records.pcapng --min-packets <n> --max-access-code-errors 2 \
-    --max-payload-bytes 34 --min-distinct-signal 4 --min-distinct-noise 4 \
+    --max-payload-bytes 34 --min-distinct-signal 4 --min-measured-noise 6 \
+    --min-distinct-noise 4 \
     --max-span-s <s> --max-backward-step-us <us> --min-hec-valid <n> \
     --lap <central LAP> --reference-lap <central LAP> --reference-uap <central UAP> \
     --following-lap <central LAP> --following-uap <central UAP> \
