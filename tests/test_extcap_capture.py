@@ -156,6 +156,15 @@ if __name__ == "__main__":
 SERIAL_A = "1ff0ff1967102caf8334fa5ac52000f5"
 SERIAL_B = "0b700017490c2cafa039ee5ac52000f5"
 NO_BOARD = "0badc0de" * 4
+# Records the fake writes for the MAX_BYTES tests, and how many times each of
+# their limits is tried.
+RECORDS = 10
+OVERFLOW_ATTEMPTS = 3
+# Seconds for the one overflow attempt that waits out the clock rather than
+# stopping on the overflow, which is how a real capture case ends: long enough
+# for two interpreter start-ups and the fake's first record on a loaded
+# machine, and it is what that attempt costs.
+OVERFLOW_CLOCK_S = 5.0
 
 # ubertooth-btle -f -U <serial> -q <fifo> -A <channel> as at fork 71e1a8a: -A
 # is checked before the FIFO is opened; the FIFO is opened (header written)
@@ -227,6 +236,11 @@ def phdr_record(rf=0, access_address=0x8E89BED6, length=None, fraction=2):
 
 def header(link_type=256, magic=0xA1B23C4D):
     return struct.pack("<IHHiIII", magic, 2, 4, 0, 0, 400, link_type)
+
+
+# What the fake writes for the MAX_BYTES tests: the header and ten records,
+# 414 bytes.
+WHOLE_STREAM = len(header()) + RECORDS * len(phdr_record())
 
 
 class ParseStreamTests(unittest.TestCase):
@@ -341,24 +355,66 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("-A 37", out)
 
     def test_a_stream_longer_than_max_bytes_fails(self):
-        # 24-byte header plus 39-byte records: 10 records are 414 bytes.
-        # Past MAX_BYTES the records are dropped unread, so the capture
-        # cannot count its way to ten: it waits out the seconds.
-        with mock.patch.object(extcapcapture, "MAX_BYTES", 200):
-            code, out = self.fixture().capture(
-                (f"--extcap-interface=ubertooth{SERIAL_A}",), records=10,
-                board=SERIAL_A, channel=37, seconds=1.5, stop_after_records=None)
+        # The refusal names the bytes the FIFO carried, which is however much
+        # the writer managed to send before the capture ended: the machine's
+        # speed decides that figure, so what is checked here is what the
+        # limit means (issue #400). The stream is longer than the limit, it
+        # is no longer than everything the fake sends, and it is whole
+        # records, since the fake writes the header with its first record and
+        # every record after that in one write each, all far below PIPE_BUF,
+        # which a FIFO keeps whole. Each limit is overflowed by a different
+        # record: the first for 40 bytes, the second for 100, and the fifth
+        # for 200. Most attempts end on the overflow rather than on the
+        # clock, which is what keeps them to about a second each; the last
+        # one waits out OVERFLOW_CLOCK_S instead, as a capture case does,
+        # since that is the only way a real case reaches this refusal.
+        fixture = self.fixture()
+        for limit in (40, 100, 200):
+            for attempt in range(1, OVERFLOW_ATTEMPTS + 1):
+                with self.subTest(limit=limit, attempt=attempt):
+                    with mock.patch.object(extcapcapture, "MAX_BYTES", limit):
+                        code, out = fixture.capture(
+                            (f"--extcap-interface=ubertooth{SERIAL_A}",),
+                            records=RECORDS, board=SERIAL_A, channel=37,
+                            stop_after_records=RECORDS)
+                    self.assertOverflowed(code, out, limit)
+        with self.subTest("waits out the clock"), \
+                mock.patch.object(extcapcapture, "MAX_BYTES", 40):
+            code, out = fixture.capture(
+                (f"--extcap-interface=ubertooth{SERIAL_A}",), records=RECORDS,
+                board=SERIAL_A, channel=37, seconds=OVERFLOW_CLOCK_S,
+                stop_after_records=None)
+            self.assertOverflowed(code, out, 40)
+
+    def assertOverflowed(self, code, out, limit):
+        """The capture was refused for a stream longer than limit, and for
+        nothing else."""
         self.assertEqual(1, code, out)
-        self.assertIn("FAIL: the FIFO carried 414 bytes, more than the 200 checked", out)
+        refusal = re.search(
+            rf"(?m)^FAIL: the FIFO carried (\d+) bytes, more than the {limit} "
+            rf"checked; the stream past that was not checked$", out)
+        self.assertTrue(refusal, out)
+        self.assertEqual(1, out.count("FAIL:"), out)
+        carried = int(refusal.group(1))
+        self.assertGreater(carried, limit, out)
+        self.assertLessEqual(carried, WHOLE_STREAM, out)
+        self.assertEqual(0, (carried - len(header())) % len(phdr_record()),
+                         f"{carried} bytes is not whole records\n{out}")
+        # The cut at MAX_BYTES is reported as the overflow, not as a record
+        # the writer left unfinished.
         self.assertNotIn("truncated", out)
         self.assertNotIn("capture checks passed", out)
-        # The same stream exactly at the limit passes.
-        with mock.patch.object(extcapcapture, "MAX_BYTES", 414):
+
+    def test_a_stream_exactly_at_max_bytes_passes(self):
+        # The same stream with nothing to spare: every record is checked, so
+        # the capture counts its way to all ten and nothing overflows.
+        with mock.patch.object(extcapcapture, "MAX_BYTES", WHOLE_STREAM):
             code, out = self.fixture().capture(
-                (f"--extcap-interface=ubertooth{SERIAL_A}",), records=10,
-                board=SERIAL_A, channel=37, seconds=1.5, stop_after_records=10)
+                (f"--extcap-interface=ubertooth{SERIAL_A}",), records=RECORDS,
+                board=SERIAL_A, channel=37, stop_after_records=RECORDS)
         self.assertEqual(0, code, out)
-        self.assertIn("records: 10 ", out)
+        self.assertIn(f"records: {RECORDS} ", out)
+        self.assertNotIn("FAIL", out)
 
     def test_failures(self):
         fixture = self.fixture()
