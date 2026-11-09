@@ -164,18 +164,19 @@ code { overflow-wrap: anywhere; }
   max-width: 80rem; margin: 0 auto; padding: var(--gap) 1.25rem 3rem;
   display: grid; gap: var(--gap);
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "targets" "manage" "setup" "live" "history";
+  grid-template-areas: "targets" "manage" "setup" "gate" "live" "history";
 }
 .panel-targets { grid-area: targets; }
 .panel-manage { grid-area: manage; }
 .panel-setup { grid-area: setup; }
+.panel-gate { grid-area: gate; }
 .panel-live { grid-area: live; }
 .panel-history { grid-area: history; }
 
 @media (min-width: 60rem) {
   .layout {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
-    grid-template-areas: "targets setup" "manage manage" "live live" "history history";
+    grid-template-areas: "targets setup" "manage manage" "gate gate" "live live" "history history";
   }
 }
 
@@ -755,3 +756,32 @@ td.actions button, td.actions .button-link {
   color: var(--link); text-decoration: underline; cursor: pointer;
 }
 .link:hover { text-decoration: none; }
+
+/* ----- release gates ----------------------------------------------------- */
+
+/* What a release configuration would do, under Run setup: one entry per
+   stage with the wave it runs in, and the preflight of the whole graph. Both
+   are lists of text, so they need spacing rather than a layout of their
+   own. */
+.gate-setup {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 0.8rem 1rem; background: var(--surface-2);
+  display: grid; gap: 0.7rem;
+}
+.gate-stages, .gate-preflight { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.6rem; }
+.gate-preflight { list-style: none; padding-left: 0; }
+.gate-stage p, .gate-preflight p { margin: 0.15rem 0 0; }
+.gate-preflight .check-bad { color: var(--bad-fg); }
+
+/* The gate's own panel: one row per stage, with its runs beside it. */
+.gate-matrix { width: 100%; border-collapse: collapse; }
+.gate-matrix caption { text-align: left; padding: 0 0 0.5rem; color: var(--muted); font-size: 0.85rem; }
+.gate-matrix th, .gate-matrix td {
+  text-align: left; vertical-align: top; padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+.gate-matrix th[scope="row"] { font-weight: 600; min-width: 11rem; }
+.gate-matrix th[scope="row"] p { margin: 0.2rem 0 0; font-weight: 400; }
+.gate-matrix .time { white-space: nowrap; }
+.gate-run { margin: 0 0 0.25rem; display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; }
+.panel-gate .live-actions { margin: 0.8rem 0; display: flex; gap: 0.8rem; align-items: center; flex-wrap: wrap; }

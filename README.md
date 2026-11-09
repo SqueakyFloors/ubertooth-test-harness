@@ -15,6 +15,7 @@ document that answers your question. The architecture is in
 | understand how the harness is put together | [DESIGN.md](DESIGN.md) |
 | know what a test does and what a pass proves | [docs/tests.md](docs/tests.md) |
 | qualify a release | [docs/release-testing.md](docs/release-testing.md) |
+| run every bounded release suite as one job | [docs/guide/release-gate.md](docs/guide/release-gate.md) |
 | set up a bench | [docs/hardware.md](docs/hardware.md) |
 | see which test uses which fixture | [docs/hardware-utilization.md](docs/hardware-utilization.md) |
 | write or compile a plan | [docs/guide/plans-and-resources.md](docs/guide/plans-and-resources.md) |

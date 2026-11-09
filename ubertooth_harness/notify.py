@@ -101,6 +101,10 @@ MAX_VALUE_CHARS = 300
 MAX_URL_CHARS = 300
 # How many hosts of one group the body lists in full.
 MAX_LISTED_HOSTS = 16
+# How many stages of one release gate the body lists in full. The one
+# configuration has twelve; a longer one is summarized rather than mailed
+# in full.
+MAX_LISTED_STAGES = 24
 
 # Plain `local@domain`, which is every address a bench needs. No display
 # name, no comment, no quoted local part, and so nothing that could carry a
@@ -714,12 +718,20 @@ def read_publication(
     return url
 
 
-def _gui_link(gui_base: str, run_id: str) -> str:
-    """The loopback GUI's own link to one run (``/ui/#run=<run_id>``)."""
+def _gui_link(gui_base: str, identifier: str, *, kind: str = "run") -> str:
+    """The loopback GUI's own link to one run or release gate.
+
+    ``/ui/#run=<run_id>`` for a run or a run group, and
+    ``/ui/#gate=<gate_id>`` for a release gate, which is the address its own
+    panel opens from (#403). A gate ID in a ``#run=`` link would open the GUI
+    selecting a run that does not exist.
+    """
     base = gui_base.rstrip("/") if gui_base else ""
-    if not base or not _KEY_RE.fullmatch(run_id or ""):
+    if not base or not _KEY_RE.fullmatch(identifier or "") or kind not in (
+        "run", "gate"
+    ):
         return ""
-    return f"{base}/ui/#run={run_id}"
+    return f"{base}/ui/#{kind}={identifier}"
 
 
 _CLOSING = (
@@ -885,6 +897,110 @@ def group_notice(
     return Notice(
         key=f"group-{group_id}",
         subject=_subject(subject_prefix, status, f"group {group_id}", plan, suite),
+        body="\n".join(parts) + "\n",
+    )
+
+
+def gate_notice(
+    gate: Mapping,
+    *,
+    gui_base: str = "",
+    results_dir: Path | str | None = None,
+    public_url: str | None = None,
+    subject_prefix: str = "",
+) -> Notice:
+    """The notice for a release gate whose every stage has settled (#403).
+
+    One message for the whole gate: its verdict, the commit every stage ran,
+    how long it took, one line per stage with that stage's verdict, duration
+    and run IDs, and the gates this configuration measures nothing for. The
+    child groups send none of their own, so a gate of twelve stages is one
+    message rather than twelve.
+    """
+    gate_id = header_text(gate.get("gate_id"), 80)
+    status = header_text(gate.get("status"), 32) or "unknown"
+    config = header_text(gate.get("config") or "-", 120)
+    ref = header_text(gate.get("ref") or "-", 120)
+    commit = header_text(gate.get("commit") or "-", 80)
+    stages = [
+        stage for stage in (gate.get("stages") or ()) if isinstance(stage, Mapping)
+    ]
+    rows = [
+        ("Verdict", status),
+        ("Release gate", gate_id),
+        ("Configuration", config),
+        ("Stages", header_text(
+            f"{gate.get('required_passed')} of {gate.get('required_asked')} "
+            f"required stages passed, {gate.get('stages_passed')} of "
+            f"{gate.get('stages_asked')} in all", 120)),
+        ("Started (UTC)", _utc(gate.get("created_at"))),
+        ("Finished (UTC)", _utc(gate.get("finished_at"))),
+        ("Duration", duration_text(gate.get("created_at"), gate.get("finished_at"))),
+    ]
+    if gate.get("cancel_requested"):
+        rows.append(("Cancel asked for", header_text(
+            gate.get("cancel_reason") or "yes", MAX_REASON_CHARS)))
+    blocks: list[str] = []
+    for stage in stages[:MAX_LISTED_STAGES]:
+        name = header_text(stage.get("stage"), 80)
+        plan = header_text(stage.get("plan") or "-", 120)
+        suite = header_text(stage.get("suite") or "-", 120)
+        text = (
+            f"  {name}: {header_text(stage.get('status'), 32)}"
+            f" - {plan}/{suite}, "
+            f"{duration_text(stage.get('started_at'), stage.get('finished_at'))}"
+        )
+        runs = [run for run in (stage.get("runs") or ()) if isinstance(run, Mapping)]
+        if runs:
+            text += "\n    " + ", ".join(
+                f"{header_text(run.get('host'), 80)} "
+                f"{header_text(run.get('run_id') or 'no run', 64)}"
+                for run in runs[:MAX_LISTED_HOSTS]
+            )
+        reason = header_text(stage.get("reason") or "", MAX_REASON_CHARS)
+        if reason:
+            text += f"\n    reason: {reason}"
+        blocks.append(text)
+    if len(stages) > MAX_LISTED_STAGES:
+        blocks.append(f"  ... and {len(stages) - MAX_LISTED_STAGES} more stage(s)")
+    manual = [
+        header_text(entry.get("name"), 120)
+        for entry in (gate.get("manual_gates") or ())
+        if isinstance(entry, Mapping)
+    ]
+    places = []
+    if results_dir is not None:
+        places.append(f"  controller results: {header_text(results_dir, MAX_VALUE_CHARS)}")
+    link = _gui_link(gui_base, gate_id, kind="gate")
+    if link:
+        places.append(f"  GUI (through the usual SSH tunnel): {link}")
+    if public_url:
+        places.append(f"  published validation bundle: {public_url}")
+    parts = [
+        f"Ubertooth harness release gate {gate_id}: {status}",
+        "",
+        *(f"{name}: {value}" for name, value in rows),
+        "",
+        "Source (the commit is the identity; a ref can move):",
+        f"  Ubertooth {ref} at {commit}",
+        "",
+        "Stages:",
+        *blocks,
+    ]
+    if manual:
+        parts += [
+            "",
+            "This gate measures nothing for (run by hand, recorded with "
+            "release-evidence --attest):",
+            *(f"  {name}" for name in manual),
+        ]
+    if places:
+        parts += ["", "Where to look:", *places]
+    parts += ["", _CLOSING]
+    return Notice(
+        key=f"gate-{gate_id}",
+        subject=_subject(subject_prefix, status, f"release gate {gate_id}",
+                         config, header_text(ref, 120)),
         body="\n".join(parts) + "\n",
     )
 

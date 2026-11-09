@@ -56,6 +56,12 @@
     not_reached: "not reached",
     not_applicable: "not applicable",
   };
+  // How often a running release gate's own answer is asked for again. Its
+  // stages are run groups, and the live stream a browser follows is one run
+  // group's, so the gate itself is polled.
+  const GATE_REFRESH_MS = 5000;
+  // How many of a stage's left-to-another tests the entry names.
+  const DROPPED_SHOWN = 4;
   // How often the group's own step rows are fetched again while it runs.
   // The pills' fill is animated from each cell's start time between
   // fetches, so this is about statuses changing, not about smoothness.
@@ -97,6 +103,16 @@
     historyAdded: new Set(),
     historyGone: new Set(),
     plans: [],
+    // The release gate being set up: what GET /api/release-configurations
+    // answered for the chosen configuration, hosts and bootloader tick, and
+    // a token so a slower answer for a choice already left cannot replace a
+    // newer one.
+    gateConfig: null,
+    gateConfigToken: 0,
+    // The gate the Release gate panel is showing, and the timer that asks
+    // for it again while it runs.
+    gate: null,
+    gateTimer: null,
     // What each listed test is for, keyed by catalog name, as /api/plans
     // sends it once per response (#315). Empty until the plans load.
     testInfo: {},
@@ -322,6 +338,9 @@
     }
     renderHostChoices();
     maybeLoadPlans();
+    // And another host for a gate to run on, which changes which stages
+    // have one and what the graph is estimated to take.
+    loadGateConfiguration();
     // A newly registered target is a history filter choice too.
     renderHistoryChoices();
     if (state.manage) renderManage();
@@ -395,9 +414,12 @@
           if (box.checked) state.chosen.add(host);
           else state.chosen.delete(host);
           // Another host is another plan listing: its own estimates, and
-          // its own answer to what the suite leaves out and must build.
+          // its own answer to what the suite leaves out and must build. In
+          // gate mode it is another graph: which stages have a host, which
+          // may overlap, and what the whole thing is estimated to take.
           renderHostChoices();
           renderSuiteTests();
+          loadGateConfiguration();
         },
       });
       return el("li", { className: blocked ? "host-choice host-choice-out" : "host-choice" },
@@ -905,7 +927,11 @@
     const hosts = groupHosts();
     const ticked = [...state.chosen];
     let reason = "";
-    if (!hosts.length) {
+    if (gateMode()) {
+      // The configuration decides the suites, so what holds Run is whether
+      // this bench can run the whole graph (GET /api/release-configurations).
+      reason = gateRefusal();
+    } else if (!hosts.length) {
       reason = !ticked.length
         ? "Tick the host, or hosts, to run the plan on."
         : "No ticked host can run this suite: see each host's reason above.";
@@ -1039,8 +1065,344 @@
       + `${adds} and are not counted above: ${named}.`;
   }
 
+  // ----- release gates -----------------------------------------------------
+  //
+  // One named configuration, run as one job: each stage is an ordinary run
+  // group of its own, in waves, and the gate passes only when every required
+  // stage passes (#403). Nothing about a stage is chosen here -- the
+  // configuration chooses the plans, suites, test selections and build
+  // options -- so this panel asks the controller what a gate would do
+  // (GET /api/release-configurations) and shows it before Run.
+
+  const gatePath = (gateId) => `/api/release-gates/${encodeURIComponent(gateId)}`;
+
+  function gateMode() {
+    return $("what").value === "gate";
+  }
+
+  // Everything the plan-and-suite half of the form decides is the
+  // configuration's in gate mode, so those fields are disabled rather than
+  // left looking as though they applied.
+  // The plan-and-suite fields, which a gate's configuration decides.
+  const PLAN_FIELDS = ["plan", "suite", "build", "flash-build", "bootloader"];
+
+  function holdPlanFields() {
+    for (const id of [...PLAN_FIELDS, ...BUILD_OPTIONS.map((o) => o.id)]) {
+      $(id).disabled = true;
+    }
+  }
+
+  function syncWhat() {
+    const gate = gateMode();
+    $("gate-setup").hidden = !gate;
+    if (gate) holdPlanFields();
+    else {
+      for (const id of PLAN_FIELDS) $(id).disabled = false;
+      syncBuildOptions();
+    }
+    $("suite-test-list").hidden = gate;
+    $("run-button").textContent = gate ? "Run the gate" : "Run";
+    if (gate) loadGateConfiguration();
+    else syncRunButton();
+  }
+
+  async function loadGateConfiguration() {
+    if (!gateMode()) return;
+    const token = ++state.gateConfigToken;
+    const hosts = [...state.chosen].filter((host) => state.targets.has(host));
+    const query = new URLSearchParams();
+    query.set("config", $("gate-config").value || "release-comprehensive");
+    if ($("gate-bootloader").checked) query.set("with_bootloader", "true");
+    for (const host of hosts.sort()) query.append("host", host);
+    $("gate-summary").textContent = hosts.length
+      ? "Working out what this configuration would do here…"
+      : "Tick the host, or hosts, to run the gate on.";
+    if (!hosts.length) {
+      state.gateConfig = null;
+      $("gate-stages").replaceChildren();
+      $("gate-preflight").replaceChildren();
+      syncRunButton();
+      return;
+    }
+    try {
+      const data = await api("GET", `/api/release-configurations?${query.toString()}`);
+      if (token !== state.gateConfigToken) return;
+      state.gateConfig = data;
+    } catch (error) {
+      if (token !== state.gateConfigToken) return;
+      state.gateConfig = null;
+      $("gate-summary").textContent = `This configuration could not be read: ${error.message}`;
+      $("gate-stages").replaceChildren();
+      $("gate-preflight").replaceChildren();
+      syncRunButton();
+      return;
+    }
+    fillGateConfigurations(state.gateConfig.configurations);
+    renderGateConfiguration();
+    syncRunButton();
+  }
+
+  function fillGateConfigurations(names) {
+    const select = $("gate-config");
+    const wanted = Array.isArray(names) ? names : [];
+    if (select.options.length === wanted.length) return;
+    const chosen = select.value;
+    select.replaceChildren(...wanted.map(
+      (name) => el("option", { value: name, text: name })));
+    if (wanted.includes(chosen)) select.value = chosen;
+  }
+
+  function renderGateConfiguration() {
+    const view = state.gateConfig;
+    const stages = view.stages || [];
+    const waves = view.waves || [];
+    const seconds = view.preflight ? view.preflight.estimated_s : null;
+    $("gate-summary").textContent =
+      `${stages.length} stage(s) in ${waves.length} wave(s) on `
+      + `${(view.hosts || []).join(", ")}`
+      + (typeof seconds === "number"
+        ? `, about ${formatSeconds(seconds)} of test time plus each stage's`
+          + " own build, flash and preflight"
+        : "");
+    const waveOf = new Map();
+    waves.forEach((wave, index) => {
+      for (const name of wave) waveOf.set(name, index + 1);
+    });
+    $("gate-stages").replaceChildren(...stages.map((stage) => {
+      const wave = waveOf.get(stage.stage);
+      const dropped = (stage.dropped_tests || []).length;
+      const notes = [
+        `${stage.plan}/${stage.suite}`,
+        stage.hosts.length ? stage.hosts.join(", ") : `no host: ${stage.refusal}`,
+        wave ? `wave ${wave}` : "not scheduled",
+        typeof stage.estimated_s === "number"
+          ? formatSeconds(stage.estimated_s) : "no estimate",
+      ];
+      return el("li", { className: "gate-stage" },
+        el("strong", { text: stage.stage }), " ",
+        el("span", { className: "hint", text: notes.join(" · ") }),
+        el("p", { className: "hint", text: stage.purpose }),
+        stage.condition
+          ? el("p", {
+            className: "hint",
+            text: `${stage.opt_in ? "Opt-in" : "Optional"}: ${stage.condition}`,
+          })
+          : null,
+        dropped ? el("p", { className: "hint", text: droppedText(stage) }) : null);
+    }));
+    const checks = (view.preflight && view.preflight.checks) || [];
+    $("gate-preflight").replaceChildren(...checks.map((check) => el(
+      "li", { className: check.passed ? "check-ok" : "check-bad" },
+      statusBadge(check.passed ? "passed" : "failed"), " ",
+      el("strong", { text: check.name }), ": ",
+      el("span", { text: check.detail })),
+    ));
+  }
+
+  // The tests this stage leaves to another, named up to a few of them: the
+  // fast suite leaves most of itself to the release suite, and the whole list
+  // would be longer than everything else on the entry together.
+  function droppedText(stage) {
+    const entries = stage.dropped_tests || [];
+    const named = entries.slice(0, DROPPED_SHOWN).map(
+      (entry) => `${entry.test} (${entry.covered_by})`);
+    const rest = entries.length - named.length;
+    return `${entries.length} test(s) of this suite are another stage's: `
+      + named.join(", ") + (rest > 0 ? `, and ${rest} more` : "");
+  }
+
+  // Why Run is held in gate mode, or "".
+  function gateRefusal() {
+    if (![...state.chosen].filter((host) => state.targets.has(host)).length) {
+      return "Tick the host, or hosts, to run the gate on.";
+    }
+    const view = state.gateConfig;
+    if (!view) return "This configuration has not been read yet.";
+    const preflight = view.preflight || {};
+    if (preflight.passed) return "";
+    return "This bench cannot run the whole configuration: "
+      + (preflight.refusal || "see the preflight above.");
+  }
+
+  async function startGate() {
+    const status = $("run-status");
+    const chosen = state.refOptions.get($("ref").value);
+    const hosts = [...state.chosen].filter((host) => state.targets.has(host)).sort();
+    const body = {
+      config: $("gate-config").value || "release-comprehensive",
+      hosts,
+      ref: chosen ? chosen.name : "",
+      commit: chosen ? chosen.commit : null,
+      with_bootloader: $("gate-bootloader").checked,
+    };
+    if (!hosts.length || !body.ref) {
+      status.textContent = "Choose a ref and at least one host first.";
+      return;
+    }
+    $("run-button").disabled = true;
+    status.textContent = `Starting the ${body.config} gate at ${refLabel(body)}`
+      + ` on ${hosts.join(", ")}…`;
+    try {
+      const data = await api("POST", "/api/release-gates", body);
+      status.textContent = `Started release gate ${data.gate.gate_id}.`;
+      showGate(data.gate);
+    } catch (error) {
+      status.textContent = `Not started: ${error.message}`;
+    } finally {
+      syncRunButton();
+    }
+  }
+
+  function showGate(gate) {
+    state.gate = gate;
+    $("gate-panel").hidden = false;
+    // In the address so that reloading the page, or passing the address on,
+    // comes back to this gate: a gate outlives a browser tab.
+    if (window.location.hash !== `#gate=${gate.gate_id}`) {
+      window.location.hash = `gate=${encodeURIComponent(gate.gate_id)}`;
+    }
+    renderGate();
+    scheduleGateRefresh();
+  }
+
+  function closeGate() {
+    state.gate = null;
+    if (state.gateTimer) window.clearTimeout(state.gateTimer);
+    state.gateTimer = null;
+    $("gate-panel").hidden = true;
+    if (window.location.hash.startsWith("#gate=")) {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }
+
+  // The gate the address names, if it names one and the controller still has
+  // it. A gate that is gone is not an error: the panel simply stays closed.
+  async function openGateFromAddress() {
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const gateId = hash.get("gate");
+    if (!gateId) return;
+    try {
+      const data = await api("GET", gatePath(gateId));
+      showGate(data.gate);
+    } catch (error) {
+      $("run-status").textContent = `Release gate ${gateId}: ${error.message}`;
+    }
+  }
+
+  // While a gate is running its own answer is asked for again: its stages
+  // are run groups, and the live stream a browser follows is one run group's.
+  function scheduleGateRefresh() {
+    if (state.gateTimer) window.clearTimeout(state.gateTimer);
+    state.gateTimer = null;
+    if (!state.gate || !state.gate.active) return;
+    state.gateTimer = window.setTimeout(refreshGate, GATE_REFRESH_MS);
+  }
+
+  async function refreshGate() {
+    if (!state.gate) return;
+    const gateId = state.gate.gate_id;
+    try {
+      const data = await api("GET", gatePath(gateId));
+      if (!state.gate || state.gate.gate_id !== gateId) return;
+      state.gate = data.gate;
+      renderGate();
+    } catch (error) {
+      $("gate-cancel-status").textContent = `Could not read the gate: ${error.message}`;
+    }
+    scheduleGateRefresh();
+  }
+
+  function renderGate() {
+    const gate = state.gate;
+    if (!gate) return;
+    $("gate-overview").replaceChildren(
+      el("dt", { text: "Gate" }), el("dd", {}, el("code", { text: gate.gate_id })),
+      el("dt", { text: "Configuration" }), el("dd", { text: gate.config }),
+      el("dt", { text: "Verdict" }), el("dd", {}, statusBadge(gate.status)),
+      el("dt", { text: "Ref" }),
+      el("dd", {}, el("code", { text: `${gate.ref} ${String(gate.commit || "").slice(0, 12)}` })),
+      el("dt", { text: "Hosts" }), el("dd", { text: (gate.hosts || []).join(", ") }),
+      el("dt", { text: "Required stages" }),
+      el("dd", {
+        text: `${gate.required_passed} of ${gate.required_asked} passed`
+          + `, ${gate.stages_passed} of ${gate.stages_asked} in all`,
+      }),
+      el("dt", { text: "Started" }), el("dd", {}, timeElement(gate.created_at)),
+      el("dt", { text: "Duration" }),
+      el("dd", { text: gate.duration_hms || (gate.active ? "running" : "—") }),
+    );
+    $("gate-cancel").hidden = !gate.active;
+    $("gate-rows").replaceChildren(...(gate.stages || []).map((stage) => el(
+      "tr", { className: `gate-row gate-row-${statusWord(stage.status).replace(/ /g, "-")}` },
+      el("th", { scope: "row" },
+        el("strong", { text: stage.stage }),
+        stage.optional || stage.opt_in
+          ? el("span", { className: "hint", text: stage.opt_in ? " opt-in" : " optional" })
+          : null,
+        el("p", { className: "hint", text: stage.purpose || "" }),
+        stage.reason ? el("p", { className: "hint", text: stage.reason }) : null),
+      el("td", { text: `${stage.plan}/${stage.suite}` }),
+      el("td", { text: (stage.resources || []).join(", ") || "none" }),
+      el("td", { className: "time", text: stage.duration_hms || "—" }),
+      el("td", {}, statusBadge(stage.status)),
+      el("td", {}, ...(stage.runs || []).map((run) => el("p", { className: "gate-run" },
+        el("span", { text: run.host }),
+        run.status ? statusBadge(run.status) : null,
+        run.run_id
+          ? el("button", {
+            type: "button", text: "Watch",
+            "aria-label": `Watch run ${run.run_id} of stage ${stage.stage}`,
+            onclick: () => selectRun(run.run_id),
+          })
+          : el("span", { className: "hint", text: run.error || "no run" }),
+        run.duration_hms ? el("span", { className: "hint", text: run.duration_hms }) : null))),
+    )));
+    const notes = [];
+    for (const entry of gate.manual_gates || []) {
+      notes.push(`This gate measures nothing for ${entry.name} (${entry.reference}): `
+        + `${entry.reason}. Run it by hand and record it with release-evidence --attest.`);
+    }
+    for (const entry of gate.unverified_restores || []) {
+      notes.push(`The ${entry.stage} stage writes the application image back`
+        + " itself, and no later stage on that board flashed and preflighted"
+        + " it, so the restore is that stage's own word for it.");
+    }
+    for (const entry of gate.optional_problems || []) {
+      notes.push(`The optional stage ${entry.stage} ended ${statusWord(entry.status)}`
+        + `${entry.reason ? `: ${entry.reason}` : ""}. An optional stage does not`
+        + " decide the verdict.");
+    }
+    $("gate-notes").textContent = notes.join(" ");
+  }
+
+  async function cancelGate() {
+    if (!state.gate) return;
+    const gateId = state.gate.gate_id;
+    const status = $("gate-cancel-status");
+    $("gate-cancel").disabled = true;
+    status.textContent = "Canceling the gate…";
+    try {
+      const data = await api("POST", `${gatePath(gateId)}/cancel`,
+        { reason: "canceled from the GUI" });
+      state.gate = data.gate;
+      const stopped = (data.canceled || []).filter((entry) => entry.canceled).length;
+      status.textContent = `Canceled ${stopped} running stage(s); nothing more`
+        + " will be started.";
+      renderGate();
+      scheduleGateRefresh();
+    } catch (error) {
+      status.textContent = `Not canceled: ${error.message}`;
+    } finally {
+      $("gate-cancel").disabled = false;
+    }
+  }
+
   async function submitRun(event) {
     event.preventDefault();
+    if (gateMode()) {
+      await startGate();
+      return;
+    }
     const status = $("run-status");
     const hosts = groupHosts();
     const chosen = state.refOptions.get($("ref").value);
@@ -2806,6 +3168,10 @@
   let bootloaderNoteText = "";
 
   function syncBuildOptions() {
+    // In gate mode the configuration decides all of this, and the fields are
+    // held: this runs on several paths (a suite listing, a tick), so holding
+    // them is done here as well as when the mode changes.
+    if (gateMode()) holdPlanFields();
     const build = $("build").checked;
     const flashing = build && $("flash-build").checked;
     $("flash-build").disabled = !build;
@@ -2845,6 +3211,7 @@
         }
       }
       if (!build) sentences.push("Needs Build.");
+      if (gateMode()) box.disabled = true;
       $(`${option.id}-note`).textContent = sentences.join(" ");
     }
     const bootloaderNote = $("bootloader-note");
@@ -2875,6 +3242,15 @@
     $("plan").addEventListener("change", () => renderSuites());
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelGroup);
+    // The release gate: what to run, which configuration, and the one stage
+    // that is asked for by name rather than included (#403).
+    $("what").addEventListener("change", syncWhat);
+    $("gate-config").addEventListener("change", loadGateConfiguration);
+    $("gate-bootloader").addEventListener("change", loadGateConfiguration);
+    $("gate-cancel").addEventListener("click", cancelGate);
+    $("gate-close").addEventListener("click", closeGate);
+    syncWhat();
+    openGateFromAddress();
     // The history filters: a change applies at once, and the form's own
     // submit (Enter in the ref box, or Apply) does the same rather than
     // navigating away.
