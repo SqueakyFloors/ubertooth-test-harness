@@ -2408,13 +2408,13 @@ Follow Classic piconet over HCI:
     Linux only. One Ubertooth, receive only; a host Bluetooth adapter; and the
     two ESP32 Classic peers holding their streaming link, as Bluetooth inquiry
     scan needs. Unlike that test this one pages, so ubertooth-follow needs
-    CAP_NET_ADMIN: opening a raw HCI socket is unprivileged, but the kernel's
+    CAP_NET_RAW: opening a raw HCI socket is unprivileged, but the kernel's
     own filter on such a socket keeps HCI Create Connection outside the subset
     an unprivileged opener may send, where Remote Name Request is inside it.
     Without it the tool stops early with its own message about connecting
     failing. That is settled before anything is leased or built: a run holding
     the capability uses it, a run given --allow-hci-capability grants
-    cap_net_admin+ep to a private copy of its own ubertooth-follow and takes
+    cap_net_raw+ep to a private copy of its own ubertooth-follow and takes
     it back when the run ends, and a run with neither records this test
     blocked, naming the tool's own error, rather than failing its cases as if
     the peers had stopped.

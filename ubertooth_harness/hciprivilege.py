@@ -4,8 +4,8 @@
 a page is an HCI Create Connection. Opening a raw HCI socket is not
 privileged, but the kernel's own filter on such a socket (`hci_sec_filter` in
 `net/bluetooth/hci_sock.c`) keeps Create Connection outside the subset an
-unprivileged opener may send, so without `CAP_NET_ADMIN` the tool stops with
-its own message:
+unprivileged opener may send, so without a capability the tool stops with its
+own message:
 
     error: connecting to 20:50:0D:E9:C5:BA failed: Operation not permitted
 
@@ -13,6 +13,16 @@ Measured on the bench, that is all it says, and it says it in a tenth of a
 second, before it opens the board. A run that does not know about the
 privilege reads that as the peers having stopped streaming, which cost most
 of the diagnosis of #401.
+
+**Which capability is a measurement, not a reading of the source.** The
+capability granted is `CAP_NET_RAW`, and that is what the bench settled: the
+same private copy of the same build, run against the same peer within a
+minute of itself on a 6.8 Linux kernel, was refused with `Operation not
+permitted` carrying `cap_net_admin+ep`, and paged successfully carrying
+`cap_net_raw+ep`; `cap_net_raw,cap_net_admin+ep`, which this bench used to
+grant by hand, paged too. So `CAP_NET_RAW` alone is both sufficient and the
+smaller set, and it is what is granted. Why `CAP_NET_ADMIN` is not enough on
+that kernel is **not established** here; the measurement is.
 
 So two things live here. The first is the question "can this run page at
 all", asked before anything is leased or built (`availability`), which is
@@ -26,7 +36,7 @@ works:
   the lease directory root-owned, which breaks `validate` and every other
   worker on the bench. Nothing here runs as root but `setcap` itself, through
   `sudo -n`, twice: once to grant and once to take back.
-- **Never a systemwide binary.** `sudo setcap cap_net_admin+ep
+- **Never a systemwide binary.** `sudo setcap cap_net_raw+ep
   /usr/local/bin/ubertooth-follow` leaves every user on the host able to page
   from the adapter, for as long as nobody remembers to undo it. What is
   granted here is a copy this run made, in a directory only this user can
@@ -75,9 +85,9 @@ from ubertooth_harness.hostneeds import Blocked
 OPTION = "--allow-hci-capability"
 # The run record this writes, read back by report.py.
 EVENT = "hci_privilege"
-# Bit 12 of a capability set is CAP_NET_ADMIN (linux/capability.h).
-NET_ADMIN_BIT = 12
-CAPABILITY = "cap_net_admin"
+# Bit 13 of a capability set is CAP_NET_RAW (linux/capability.h).
+NET_RAW_BIT = 13
+CAPABILITY = "cap_net_raw"
 # What is granted: effective and permitted, no inheritable flag, so the
 # capability reaches this one program and nothing it starts.
 GRANT = f"{CAPABILITY}+ep"
@@ -117,7 +127,7 @@ _VERIFY_ENVIRONMENT = {
 # alone is enough: a privileged copy that reached another decoder is refused.
 _ANOTHER_LIBBTBB = "libbtbb was loaded from"
 # What `getcap` reports for a file that carries this grant. libcap writes
-# `path cap_net_admin=ep` since 2.42 and `path = cap_net_admin+ep` before it,
+# `path cap_net_raw=ep` since 2.42 and `path = cap_net_raw+ep` before it,
 # and both are the same file, so both are read. The set must be exactly this
 # capability with exactly these flags: a file that came back with more is not
 # what this asked for.
@@ -128,8 +138,8 @@ _GETCAP_LINE = re.compile(
 
 # Why a run can page, or cannot. `basis` is for the record; `reason` is the
 # sentence a person reads.
-BASIS_PROCESS = "the run process holds CAP_NET_ADMIN"
-BASIS_COPY = "a private copy of the run's own tool, with cap_net_admin+ep"
+BASIS_PROCESS = "the run process holds CAP_NET_RAW"
+BASIS_COPY = f"a private copy of the run's own tool, with {GRANT}"
 BASIS_NONE = "none"
 
 
@@ -141,8 +151,8 @@ class HciPrivilegeError(RuntimeError):
 # What this process already holds
 
 
-def net_admin_in_status(text: str) -> bool:
-    """Does this `/proc/<pid>/status` text show CAP_NET_ADMIN effective?
+def net_raw_in_status(text: str) -> bool:
+    """Does this `/proc/<pid>/status` text show CAP_NET_RAW effective?
 
     The effective set is what the kernel checks, so it is the one read: a
     process holding the capability permitted but not effective cannot page
@@ -156,19 +166,19 @@ def net_admin_in_status(text: str) -> bool:
             held = int(value.strip(), 16)
         except ValueError:
             return False
-        return bool(held & (1 << NET_ADMIN_BIT))
+        return bool(held & (1 << NET_RAW_BIT))
     return False
 
 
-def process_holds_net_admin(status: Path | None = None) -> bool:
-    """Does this process hold CAP_NET_ADMIN effective?
+def process_holds_net_raw(status: Path | None = None) -> bool:
+    """Does this process hold CAP_NET_RAW effective?
 
     False for anything this cannot read, which includes every platform that
     has no `/proc`: a run that cannot establish it holds the capability is a
     run that must not assume it does.
     """
     try:
-        return net_admin_in_status((status or _STATUS).read_text())
+        return net_raw_in_status((status or _STATUS).read_text())
     except OSError:
         return False
 
@@ -216,30 +226,30 @@ def availability(
         # so this is the platform need's answer and not this one's.
         return Availability(
             False, BASIS_NONE,
-            "CAP_NET_ADMIN is Linux's, and the two BlueZ tools are built only "
+            "CAP_NET_RAW is Linux's, and the two BlueZ tools are built only "
             "there",
         )
-    if process_holds_net_admin(status):
+    if process_holds_net_raw(status):
         return Availability(
             True, BASIS_PROCESS,
-            "the run process holds CAP_NET_ADMIN effective, so the tools page "
+            "the run process holds CAP_NET_RAW effective, so the tools page "
             "with it and nothing is granted to a file",
         )
     if not allow:
         return Availability(
             False, BASIS_NONE,
-            "an HCI Create Connection needs CAP_NET_ADMIN, which this run "
-            "does not hold; without it ubertooth-follow stops in a tenth of a "
+            "an HCI Create Connection needs CAP_NET_RAW, which this run does "
+            "not hold; without it ubertooth-follow stops in a tenth of a "
             "second with `error: connecting to <address> failed: Operation "
             f"not permitted`. Rerun with {OPTION} to have the run grant "
-            "cap_net_admin+ep to a private copy of its own tool for the "
-            "length of the run, or run it as a user that holds the capability",
+            f"{GRANT} to a private copy of its own tool for the length of "
+            "the run, or run it as a user that holds the capability",
         )
     missing = [name for name in (SETCAP, GETCAP) if _libcap_tool(name, which) is None]
     if missing:
         return Availability(
             False, BASIS_NONE,
-            f"{OPTION} grants cap_net_admin+ep to a private copy of the run's "
+            f"{OPTION} grants {GRANT} to a private copy of the run's "
             f"own tool, which needs libcap's {' and '.join(missing)}; "
             "not installed (Debian and Ubuntu: libcap2-bin)",
         )
@@ -247,11 +257,11 @@ def availability(
         return Availability(
             False, BASIS_NONE,
             f"{OPTION} sets the capability with `sudo -n {SETCAP}`, and sudo "
-            "is not installed; run as a user that holds CAP_NET_ADMIN instead",
+            "is not installed; run as a user that holds CAP_NET_RAW instead",
         )
     return Availability(
         True, BASIS_COPY,
-        f"{OPTION}: the run grants cap_net_admin+ep to a private copy of its "
+        f"{OPTION}: the run grants {GRANT} to a private copy of its "
         "own ubertooth-follow, verifies it, and takes it back when the run "
         "ends",
     )

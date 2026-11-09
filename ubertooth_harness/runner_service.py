@@ -166,7 +166,7 @@ class RunnerConfig:
     libbtbb_source: Path | None = None
     libbtbb_ref: str | None = None
     allow_power_changes: bool = False
-    # Let a dispatched run grant cap_net_admin+ep to a private copy of its
+    # Let a dispatched run grant cap_net_raw+ep to a private copy of its
     # own ubertooth-follow, so the tests that page a target over HCI can run
     # (hciprivilege.py, #401). A deploy-time choice, like the power one
     # above and unlike the destructive opt-in, which a runner never passes

@@ -5444,9 +5444,11 @@ measured `hciconfig`, `hcitool con`, `hcitool inq`, `hcitool name` and
 unprivileged process cannot do on a raw HCI socket is page —
 `hcitool cc <peer>` answers `Operation not permitted`, and so does
 `ubertooth-follow`, which pages its target in every case. So
-`ubertooth-follow` needs `CAP_NET_ADMIN`, and `ubertooth-scan` needs it for
-`-x` only; `hciconfig` and `hcitool` need nothing. See
-[`docs/hardware.md`](hardware.md) for how a bench grants it.
+`ubertooth-follow` needs `CAP_NET_RAW`, and `ubertooth-scan` needs it for
+`-x` only; `hciconfig` and `hcitool` need nothing. Which capability is a
+measurement rather than a reading of the source, and `CAP_NET_ADMIN` alone
+was measured not to be enough; see
+[`docs/hardware.md`](hardware.md) for that and for how a bench grants it.
 `hostneeds.Needs` has no way to express a capability, so nothing checks this
 before the run.
 
@@ -5647,10 +5649,10 @@ case runs the tool for about 83 seconds and captures for most of them.
 **It also needs a privilege, and that is settled before the run.** The page
 is an HCI Create Connection, which the kernel's filter on a raw HCI socket
 keeps outside the subset an unprivileged opener may send, so it needs
-`CAP_NET_ADMIN`; without it the tool stops in about a tenth of a second with
+`CAP_NET_RAW`; without it the tool stops in about a tenth of a second with
 `error: connecting to <address> failed: Operation not permitted`, before it
 opens the board. A run holding the capability uses it;
-`run-suite --allow-hci-capability` grants `cap_net_admin+ep` to a private
+`run-suite --allow-hci-capability` grants `cap_net_raw+ep` to a private
 copy of the run's own `ubertooth-follow` and takes it back when the run ends;
 a run with neither records this test **blocked**, naming that error, and
 measures the rest of the suite. How the copy is made, verified and removed is

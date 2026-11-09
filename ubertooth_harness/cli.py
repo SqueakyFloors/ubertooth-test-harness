@@ -971,13 +971,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_suite.add_argument(
         "--allow-hci-capability", action="store_true",
-        help="let the run grant cap_net_admin+ep to a private copy of its own "
+        help="let the run grant cap_net_raw+ep to a private copy of its own "
              "ubertooth-follow, for the length of the run, so the tests that "
              "page a target over HCI can run. Nothing is granted to an "
              "installed binary and nothing is left behind; the run records "
              "the copy, its hash, and that the capability was taken back. "
              "Needs libcap (setcap, getcap) and sudo for those two calls. "
-             "Without it, and without the run holding CAP_NET_ADMIN itself, "
+             "Without it, and without the run holding CAP_NET_RAW itself, "
              "those tests are recorded blocked",
     )
     run_suite.add_argument("--output", type=Path, required=True)
@@ -1216,7 +1216,7 @@ def _parser() -> argparse.ArgumentParser:
     runner.add_argument(
         "--allow-hci-capability", action="store_true",
         help="pass --allow-hci-capability to every run (set here, never by "
-        "the controller): a run may grant cap_net_admin+ep to a private copy "
+        "the controller): a run may grant cap_net_raw+ep to a private copy "
         "of its own ubertooth-follow for the length of the run, so the tests "
         "that page a target over HCI can run. Needs libcap and a sudoers rule "
         "letting this user run setcap without a password",
@@ -2176,7 +2176,7 @@ def _grant_hci_privilege(args, registry, sources, executor, publisher, run_dir,
     """Let this run page over HCI, and record exactly how.
 
     Three answers, and each is recorded. The run process holds
-    ``CAP_NET_ADMIN`` already, so nothing is granted to a file; or the run
+    ``CAP_NET_RAW`` already, so nothing is granted to a file; or the run
     was given ``--allow-hci-capability``, so a private copy of its own tool
     is made, privileged, and verified (hciprivilege.grant); or it cannot
     page, which ``_run_suite`` has already recorded as blocked, so reaching

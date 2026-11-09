@@ -445,13 +445,24 @@ considering once a bench exists to test one on.
 page.** Everything here talks to the controller over a raw Bluetooth HCI
 socket, and opening one is not itself privileged — the kernel's own filter
 on such a socket (`hci_sec_filter` in `net/bluetooth/hci_sock.c`) lets an
-unprivileged opener send a subset of the HCI commands and requires
-`CAP_NET_ADMIN` for the rest. Measured on the bench as an ordinary user with
+unprivileged opener send a subset of the HCI commands and requires a
+capability for the rest. Measured on the bench as an ordinary user with
 no capabilities anywhere: `hciconfig <device>`, `hcitool con`, `hcitool inq`,
 `hcitool name <peer>` and `hcitool clock <peer>` all work, and
 `hcitool cc <peer>` does not — `Can't create connection: Operation not
 permitted`. HCI Create Connection is the command outside the filter's subset,
 where Remote Name Request is inside it.
+
+**Which capability, measured.** `CAP_NET_RAW`, and the bench settled it
+rather than the source: the same private copy of the same build, run against
+the same peer within a minute of itself on a 6.8 Linux kernel, was refused
+with `Operation not permitted` carrying `cap_net_admin+ep`, and paged
+successfully — `Not use AFH`, and on into its capture — carrying
+`cap_net_raw+ep`. `cap_net_raw,cap_net_admin+ep`, which this bench used to
+grant by hand, paged too, so the `CAP_NET_RAW` half of it was what was
+doing the work. `CAP_NET_RAW` alone is therefore both sufficient and the
+smaller set, and it is what the run grants. Why `CAP_NET_ADMIN` is not
+enough on that kernel is **not established**; that it is not is.
 
 So of the four binaries only the two fork tools need anything, and only for
 what they page: `ubertooth-follow` pages its target for the clock offset in
@@ -464,7 +475,7 @@ needs one of:
 - **the run granting it to itself, which is what a bench should do:**
   `run-suite --allow-hci-capability` copies the run's own
   `ubertooth-follow` into a directory of the run's that only its user can
-  reach (0700), gives the **copy** `cap_net_admin+ep`, verifies it, puts the
+  reach (0700), gives the **copy** `cap_net_raw+ep`, verifies it, puts the
   copy first on the run's PATH, and takes the capability back and removes
   the copy when the run ends. Nothing installed is touched and nothing is
   left behind; `ubertooth_harness/hciprivilege.py` is the whole of it and
@@ -481,13 +492,14 @@ needs one of:
   A deployed runner is given the option once, at deploy time, like
   `--allow-power-changes`: `scripts/deploy.sh --allow-hci-capability`. The
   controller cannot pass it, so no click turns it on;
-- or the run made by a user or service that already holds `CAP_NET_ADMIN`,
+- or the run made by a user or service that already holds `CAP_NET_RAW`,
   which the run records and grants nothing for;
-- or, by hand for a one-off, `sudo setcap cap_net_admin+ep <path>` on the
+- or, by hand for a one-off, `sudo setcap cap_net_raw+ep <path>` on the
   built `ubertooth-follow` — which has to be redone for each build, since a
   `--build` run puts fresh binaries in its own run prefix, and has to be
   undone afterwards. The bench granted `cap_net_raw,cap_net_admin+ep` this
-  way, which also works and is what the runs below were measured with.
+  way for the runs recorded below, which is the same thing with a capability
+  the page does not need.
 
 Without one of them, `run-suite` records
 `Follow Classic piconet over HCI` **blocked**, naming the capability and the

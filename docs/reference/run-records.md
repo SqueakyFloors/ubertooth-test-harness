@@ -28,7 +28,7 @@ a capture case ran, and `output/` when a command printed a lot):
   build commands, preflight, and each test's events, including every command
   and its output as it arrives. A run whose suite pages a target over HCI
   carries `hci_privilege` twice: once for what it did about the privilege
-  (`held`, the run's own `CAP_NET_ADMIN`; or `granted`, naming the private
+  (`held`, the run's own `CAP_NET_RAW`; or `granted`, naming the private
   copy, the SHA-256 it was compared with, and the capability `getcap` read
   back) and once for taking it back (`released`, with what the removal
   established, or `failed`, which fails the run whatever the tests said).

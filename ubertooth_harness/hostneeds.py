@@ -20,7 +20,7 @@ One declaration, ``Needs``, sits on a case (``CommandCase.needs``,
   --with-btbr``, or ``--artifact "btbr build=PATH"``), which is asked for in
   its own right rather than read off the firmware build;
 - the privilege an HCI connection needs: a case that pages a target from the
-  host's Bluetooth controller needs ``CAP_NET_ADMIN``, which the run either
+  host's Bluetooth controller needs ``CAP_NET_RAW``, which the run either
   holds, grants to a private copy of its own tool for the length of the run
   (``--allow-hci-capability``), or has not got (``hciprivilege.py``, #401).
 
@@ -90,7 +90,8 @@ class Needs:
     # The case makes an HCI connection: it pages a target from the host's
     # Bluetooth controller. The kernel's filter on a raw HCI socket keeps
     # HCI Create Connection outside the subset an unprivileged opener may
-    # send, so this needs CAP_NET_ADMIN (hciprivilege.py, #401). Without it
+    # send, so this needs CAP_NET_RAW (hciprivilege.py, #401, where the
+    # bench measurement that settled which capability is recorded). Without it
     # the tool stops in a tenth of a second with its own "Operation not
     # permitted", which reads like the peers having stopped.
     hci_connect: bool = False
@@ -124,7 +125,7 @@ class Needs:
         if self.btbr_build:
             parts.append("btbr firmware image")
         if self.hci_connect:
-            parts.append("CAP_NET_ADMIN (it pages over HCI)")
+            parts.append("CAP_NET_RAW (it pages over HCI)")
         return ", ".join(parts) or "nothing"
 
 
@@ -233,7 +234,7 @@ def unmet(needs: Needs, capabilities: HostCapabilities | None) -> str:
         # reason comes from hciprivilege.availability, which names the real
         # error and the option that would grant the capability (#401).
         return capabilities.hci_connect_reason or (
-            "it pages over HCI, which needs CAP_NET_ADMIN, and this run has "
+            "it pages over HCI, which needs CAP_NET_RAW, and this run has "
             "none"
         )
     return ""

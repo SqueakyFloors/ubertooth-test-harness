@@ -63,7 +63,7 @@
 #                             runs that ask for a build
 #   --allow-power-changes     passed to the runner (lets runs switch USB power)
 #   --allow-hci-capability    passed to the runner: a run may grant
-#                             cap_net_admin+ep to a private copy of its own
+#                             cap_net_raw+ep to a private copy of its own
 #                             ubertooth-follow for the length of the run, so
 #                             the tests that page a target over HCI can run.
 #                             Needs libcap and a sudoers rule letting the

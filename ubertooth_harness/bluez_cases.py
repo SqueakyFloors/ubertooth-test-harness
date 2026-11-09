@@ -171,7 +171,8 @@ AFH_READ_S = 3 * HCI_READ_S + 2 * 0.2
 _SCAN_NEEDS = Needs(platforms=("linux",), bluez_tools=("ubertooth-scan",),
                     host_tools=("hciconfig", "hcitool"))
 # The follow cases page the target for its clock offset, which is an HCI
-# Create Connection and so needs CAP_NET_ADMIN (hciprivilege.py, #401). The
+# Create Connection and so needs CAP_NET_RAW (hciprivilege.py, #401, which
+# records the bench measurement that settled which capability). The
 # scan's cases do not: its name reads are Remote Name Requests, which the
 # kernel's filter on a raw HCI socket lets an unprivileged opener send, and
 # the only paging path it has is `-x`, which no case passes.

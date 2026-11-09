@@ -33,7 +33,7 @@ from ubertooth_harness.hciprivilege import (
     availability,
     decide,
     grant,
-    net_admin_in_status,
+    net_raw_in_status,
     release,
     tests_needing_privilege,
 )
@@ -151,26 +151,37 @@ class _Bench:
 
 class StatusTests(unittest.TestCase):
 
+    def test_the_capability_granted_is_the_one_the_bench_measured(self):
+        # CAP_NET_RAW, not CAP_NET_ADMIN. The bench measured the same copy of
+        # the same build refused with cap_net_admin+ep and paging with
+        # cap_net_raw+ep, so this is a measurement the code has to keep
+        # rather than a reading of the kernel source (#401).
+        self.assertEqual("cap_net_raw", hciprivilege.CAPABILITY)
+        self.assertEqual("cap_net_raw+ep", GRANT)
+        self.assertEqual(13, hciprivilege.NET_RAW_BIT)
+
     def test_the_effective_set_is_what_is_read(self):
-        # Bit 12. A process holding it permitted but not effective cannot
-        # page either, so the permitted set is not what decides.
-        self.assertTrue(net_admin_in_status(
-            "Name:\tpython3\nCapEff:\t0000000000001000\n"))
-        self.assertTrue(net_admin_in_status("CapEff:\t000001ffffffffff\n"))
-        self.assertFalse(net_admin_in_status(
-            "CapPrm:\t0000000000001000\nCapEff:\t0000000000000000\n"))
-        self.assertFalse(net_admin_in_status("CapEff:\t0000000000000800\n"))
+        # Bit 13, CAP_NET_RAW. A process holding it permitted but not
+        # effective cannot page either, so the permitted set is not what
+        # decides. 0x2000 is the bit alone; 0x1000 is CAP_NET_ADMIN beside
+        # it, which the bench measured is not enough on its own.
+        self.assertTrue(net_raw_in_status(
+            "Name:\tpython3\nCapEff:\t0000000000002000\n"))
+        self.assertTrue(net_raw_in_status("CapEff:\t000001ffffffffff\n"))
+        self.assertFalse(net_raw_in_status(
+            "CapPrm:\t0000000000002000\nCapEff:\t0000000000000000\n"))
+        self.assertFalse(net_raw_in_status("CapEff:\t0000000000001000\n"))
 
     def test_a_status_this_cannot_read_is_not_a_capability(self):
         # Fail closed: a run that cannot establish it holds the capability
         # must not assume it does.
-        self.assertFalse(net_admin_in_status(""))
-        self.assertFalse(net_admin_in_status("CapEff:\tnot a number\n"))
-        self.assertFalse(net_admin_in_status("CapEffective:\tffffffffffffffff\n"))
+        self.assertFalse(net_raw_in_status(""))
+        self.assertFalse(net_raw_in_status("CapEff:\tnot a number\n"))
+        self.assertFalse(net_raw_in_status("CapEffective:\tffffffffffffffff\n"))
 
     def test_a_missing_proc_file_is_not_a_capability(self):
         with tempfile.TemporaryDirectory() as directory:
-            self.assertFalse(hciprivilege.process_holds_net_admin(
+            self.assertFalse(hciprivilege.process_holds_net_raw(
                 Path(directory) / "nothing"))
 
 
@@ -193,7 +204,7 @@ class AvailabilityTests(unittest.TestCase):
     def test_a_run_that_holds_it_grants_nothing_to_a_file(self):
         decided = availability(
             "linux", allow=False,
-            status=self._status("CapEff:\t0000000000001000\n"))
+            status=self._status("CapEff:\t0000000000002000\n"))
         self.assertTrue(decided.available)
         self.assertEqual(BASIS_PROCESS, decided.basis)
         # Even without the option: there is nothing to arm, because nothing
@@ -332,7 +343,7 @@ class GrantTests(unittest.TestCase):
             self.assertEqual(0o700, stat.S_IMODE(bench.directory.stat().st_mode))
             self.assertEqual(os.geteuid(), copy.stat().st_uid)
             # What getcap read back is recorded, not what setcap was asked for.
-            self.assertEqual("cap_net_admin=ep", granted.copies[0].capability)
+            self.assertEqual("cap_net_raw=ep", granted.copies[0].capability)
             self.assertEqual(VERSION_LINE, granted.copies[0].version_line)
             release(granted)
 
@@ -406,15 +417,15 @@ class GrantTests(unittest.TestCase):
             fake = _Fake(reported="cap_net_admin,cap_net_raw=ep")
             with self.assertRaises(HciPrivilegeError) as raised:
                 bench.grant(fake)
-            self.assertIn("cap_net_admin+ep and nothing else",
+            self.assertIn("cap_net_raw+ep and nothing else",
                           str(raised.exception))
             self.assertFalse(bench.directory.exists())
 
     def test_the_older_getcap_wording_is_the_same_file(self):
         with _Bench() as bench:
-            fake = _Fake(reported="= cap_net_admin+ep")
+            fake = _Fake(reported="= cap_net_raw+ep")
             granted = bench.grant(fake)
-            self.assertEqual("cap_net_admin+ep", granted.copies[0].capability)
+            self.assertEqual("cap_net_raw+ep", granted.copies[0].capability)
             release(granted)
 
     def test_a_directory_left_behind_is_never_reused(self):
