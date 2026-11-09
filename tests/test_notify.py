@@ -15,6 +15,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import textwrap
 import unittest
@@ -132,6 +133,22 @@ def parsed(data):
     return email.message_from_bytes(data, policy=email.policy.default)
 
 
+def write_private(path: Path, text: str, mode: int = 0o600) -> Path:
+    """Write a file at the mode the test means, whatever the host's umask is.
+
+    Two checks refuse a file other local users could rewrite, and each has its
+    own wording: ``load_config`` on the configuration file ("writable by
+    others ... chmod go-w it") and ``_check_private_file`` on the password
+    file ("readable or writable by others ... chmod 600 it"). A file left at
+    whatever the umask gives (0664 at umask 002) trips the configuration
+    check before the test reaches the one it is about, so every test that
+    cares about these refusals states its mode instead of inheriting one.
+    """
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, mode)
+    return path
+
+
 class CollectLog:
     def __init__(self):
         self.lines: list[str] = []
@@ -162,8 +179,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_a_disabled_file_needs_nothing_else(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "notify.yaml"
-            path.write_text("enabled: false\n", encoding="utf-8")
+            path = write_private(Path(directory) / "notify.yaml", "enabled: false\n")
             self.assertFalse(load_config(path).enabled)
 
     def test_unknown_settings_are_refused(self):
@@ -271,19 +287,20 @@ class ConfigTests(unittest.TestCase):
 
     def test_a_world_writable_configuration_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "notify.yaml"
-            path.write_text("enabled: false\n", encoding="utf-8")
-            os.chmod(path, 0o666)
-            with self.assertRaisesRegex(NotifyConfigError, "writable by others"):
+            path = write_private(
+                Path(directory) / "notify.yaml", "enabled: false\n", 0o666
+            )
+            with self.assertRaisesRegex(
+                NotifyConfigError, rf"{re.escape(str(path))} .*writable by others"
+            ):
                 load_config(path)
 
     def test_a_readable_password_file_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
-            secret = Path(directory) / "smtp-password"
-            secret.write_text("hunter2\n", encoding="utf-8")
-            os.chmod(secret, 0o644)
-            path = Path(directory) / "notify.yaml"
-            path.write_text(textwrap.dedent(f"""\
+            secret = write_private(
+                Path(directory) / "smtp-password", "hunter2\n", 0o644
+            )
+            path = write_private(Path(directory) / "notify.yaml", textwrap.dedent(f"""\
                 enabled: true
                 sender: {SENDER}
                 recipients: [{RECIPIENT}]
@@ -292,8 +309,15 @@ class ConfigTests(unittest.TestCase):
                   tls: starttls
                   username: {SENDER}
                   password_file: {secret}
-                """), encoding="utf-8")
-            with self.assertRaisesRegex(NotifyConfigError, "readable or writable"):
+                """))
+            # The refusal must be the password file's own, named as such: the
+            # configuration file is private here, so its check cannot fire.
+            # Both checks word the bits differently, so match only the part
+            # that does not depend on which bit is set.
+            with self.assertRaisesRegex(
+                NotifyConfigError,
+                r"smtp\.password_file .*writable by others \(mode 644\)",
+            ):
                 load_config(path)
             os.chmod(secret, 0o600)
             config = load_config(path)
@@ -355,8 +379,9 @@ class ConfigTests(unittest.TestCase):
 
     def test_sendmail_must_be_an_absolute_executable_path(self):
         with tempfile.TemporaryDirectory() as directory:
-            script = Path(directory) / "sendmail"
-            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            script = write_private(
+                Path(directory) / "sendmail", "#!/bin/sh\nexit 0\n"
+            )
             base = {
                 "enabled": True, "sender": SENDER, "recipients": [RECIPIENT],
                 "transport": "sendmail",

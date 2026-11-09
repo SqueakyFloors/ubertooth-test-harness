@@ -287,8 +287,10 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
     pytools.SKIP_EXIT (--close with no record to close the FIFO after).
 
     stop_after_records ends the capture as soon as that many records have
-    arrived, instead of waiting out seconds, which is then only a limit. The
-    capture cases do not set it (a case captures for its duration); the
+    arrived, instead of waiting out seconds, which is then only a limit. It
+    also ends one whose stream has passed MAX_BYTES, since the rest of that
+    stream is dropped unread and the count can never arrive. The capture
+    cases do not set it (a case captures for its duration); the
     harness's own tests do, so that they wait for the records they check
     rather than for the clock (issue #184).
     """
@@ -430,8 +432,13 @@ def _run(argv, reader, seconds, errors, failures, refused, out, *, close=False,
             next_scan = time.monotonic() + CHILD_SCAN_S
         if not reader.read():
             time.sleep(POLL_S)
-        elif (stop_after_records is not None
-                and parse_stream(bytes(reader.data)).records >= stop_after_records):
+        elif stop_after_records is not None and (
+                reader.overflow
+                or parse_stream(bytes(reader.data)).records >= stop_after_records):
+            # Past MAX_BYTES the stream is dropped unread, so the records a
+            # caller asked to stop after can no longer arrive however long
+            # the clock runs: the overflow has already settled the capture
+            # (it is a failure), so stop on it rather than on the clock.
             break
     stopped = process.poll() is None
     quiet = close and stopped and not parse_stream(bytes(reader.data)).records
