@@ -696,7 +696,8 @@ def problems(found: list[Record], *, lap: int | None = None,
     """Everything wrong with these records, worst first; empty when they pass."""
     found = list(found)
     failures = []
-    if len(found) < min_packets:
+    thin = len(found) < min_packets
+    if thin:
         failures.append(f"{len(found)} records, expected at least {min_packets}")
     # After the count: a capture that recorded nothing has no times to check
     # either, and "0 records" is the fault a reader needs first.
@@ -783,14 +784,24 @@ def problems(found: list[Record], *, lap: int | None = None,
     # (fork SqueakyFloors/ubertooth#711). A floor on distinct figures is
     # what tells the two apart, and only a live capture has one to meet:
     # a synthetic fixture carries whatever figures it was written with.
-    if min_distinct_signal:
+    #
+    # Both are derived from the sample the capture happened to collect, and
+    # the figures they were set from were measured on captures that met a
+    # records floor. So a capture that fell short of its own floor is not
+    # held to them: it is already failing on the count, and "3 distinct noise
+    # figures in the 4 records that carry a measured one" beside that reads
+    # as a receiver reporting one latched level when what happened is that
+    # four records arrived (ubertooth-test-harness#399). A capture that met
+    # its floor is held to both, which is where the regression they guard
+    # against would show.
+    if min_distinct_signal and not thin:
         distinct = len(set(signal_levels(found)))
         if distinct < min_distinct_signal:
             failures.append(
                 f"{distinct} distinct signal figures in {len(found)} records, "
                 f"expected at least {min_distinct_signal}: a receiver "
                 "reporting one latched reading for every packet looks like this")
-    if min_distinct_noise:
+    if min_distinct_noise and not thin:
         measured = noise_levels(found)
         distinct = len(set(measured))
         if distinct < min_distinct_noise:
@@ -1055,11 +1066,13 @@ def main(argv: list[str] | None = None) -> int:
         "--min-distinct-signal", type=int, default=0,
         help="different signal figures the records must carry between them; "
              "a receiver that latched one reading and reported it for every "
-             "packet carries exactly one")
+             "packet carries exactly one. Judged only on a capture that met "
+             "--min-packets: a capture thinner than that fails on the count")
     parser.add_argument(
         "--min-distinct-noise", type=int, default=0,
         help="different background figures the records that carry a measured "
-             "one must have between them")
+             "one must have between them; judged on the same condition as "
+             "--min-distinct-signal")
     parser.add_argument(
         "--settling-record", action="store_true",
         help="hold the first record carrying a reference UAP -- the one that "

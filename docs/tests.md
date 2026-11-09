@@ -4461,6 +4461,18 @@ this: its fixture carries one fixed reading and no background estimate at
 all, which is why the floors are here and not in
 [Raw receive replay](#raw-receive-replay).
 
+Both are counts over whatever sample the capture collected, so neither is
+asked of a capture that fell short of its own records floor. A DEV2 gate run
+recorded an audio capture of 10 records, cleared the shared floor of ten by
+one record, and failed on `3 distinct noise figures in the 4 records that
+carry a measured one`: three of four differing is a receiver whose figures do
+vary, so the check failed a capture that satisfied its intent, and the report
+named a level fault where the fault was that four records arrived
+([#399](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/399)).
+A capture short of its floor is now held to the count alone, which is the
+reason a reader needs, and a capture that met its floor is held to both
+floors as before.
+
 **A payload longer than the bank it arrived in.** No record may carry more
 payload than one capture bank can hold. An Ubertooth sends a Basic Rate
 packet as one bank of 400 symbols and libbtbb decodes it from that bank and
@@ -4532,8 +4544,23 @@ stream, at `sco type ev3`, so its payload is on the air at the basic rate the
 Ubertooth receives; the records must then name `HV3/EV3/3-EV3` packets. That
 is the one check here with no equivalent in the other Classic tests, because
 voice packets never appear in a capture of the SPP stream. It is held to the
-same floors as a stream capture, which the bench measured for it too: 394
-records with 112 passing headers against 285 with 59 for the stream.
+same level and header floors as a stream capture, which the bench measured
+for it too: 394 records with 112 passing headers against 285 with 59 for the
+stream.
+
+**The audio capture carries a records floor of its own**, 50 rather than the
+ten every other capture here is held to, which is what makes a thin audio
+capture fail as a thin capture. The measured audio captures of this piconet
+hold 328, 329 and 396 records on one receiver and 2920 on another; the one
+that failed a DEV2 gate held 10, over a link that carried 6864 frames each
+way with nothing dropped
+([#399](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/399)).
+Fifty is a sixth of the lowest measured capture, so a working receiver clears
+it on a capture far thinner than any of those, and five times the thin
+window. The other three captures keep the shared floor of ten: no comparable
+window has been recorded for them, and a floor with no measurement behind it
+would be a guess. What a thin window is remains an open question for the
+bench; the floor only makes the failure name it.
 
 What the session has to show about the link, beside the records, is read from
 both boards twice: once as late as possible before the capture starts and
@@ -4604,7 +4631,7 @@ esp32peer.py audio  <peer options> --type ev3 --min-frames <n> \
     -- ubertooth-rx -U <serial> -t <duration> \
     -l <central LAP> -u <central UAP> -r <case dir>/audio.pcapng
 esp32peer.py reset --device <peer port> --address <BD_ADDR> --role <role> --alias <alias>
-bredrrecord.py <case dir>/records.pcapng --min-packets 10 --max-access-code-errors 2 \
+bredrrecord.py <case dir>/records.pcapng --min-packets <n> --max-access-code-errors 2 \
     --max-payload-bytes 34 --min-distinct-signal 4 --min-distinct-noise 4 \
     --max-span-s <s> --max-backward-step-us <us> --min-hec-valid <n> \
     --lap <central LAP> --reference-lap <central LAP> --reference-uap <central UAP> \
@@ -4620,7 +4647,8 @@ passed and ten carrying the reference UAP, and the PCAPNG must name the
 central's LAP and UAP, with a full UAP mask, as the address it was following; then the same with the roles swapped,
 where every record must carry the other board's LAP instead.
 Comprehensive runs 4, adding the EV3 audio link, whose records must include at
-least one `HV3/EV3/3-EV3` packet and whose session must report one unbroken
+least one `HV3/EV3/3-EV3` packet and number at least fifty, and whose session
+must report one unbroken
 link, both applications' frame counters, and both controllers' packet
 counters, all measured across the capture alone; and a survey (`-z -r`), whose records must
 include at least one carrying a UAP the survey recovered for itself.
@@ -4636,7 +4664,9 @@ channel, squelch, and LEDs restored.
 
 **Known limits.** The packet floors are floors, for the same reason as the
 other Classic tests: how much of a piconet a sweeping receiver hears varies
-widely between runs.
+widely between runs. The audio capture's own floor of fifty is a floor in the
+same sense, a sixth of the thinnest audio capture the bench has measured; it
+says a capture at a thirtieth of that size failed, not what made it thin.
 
 The payload length and CRC checks need a link whose payloads are not
 encrypted, which this pair's are not — they pair with nobody. A capture of an

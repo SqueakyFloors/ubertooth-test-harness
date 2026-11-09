@@ -9,6 +9,7 @@ from ubertooth_harness import esp32peer, leases
 from ubertooth_harness.receive_cases import EXIT_SLACK_S
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.classic_cases import (
+    AUDIO_MIN_RECORDS,
     AUDIO_SETUP_S,
     AUDIO_TYPE,
     AUDIO_TYPE_NAME,
@@ -422,6 +423,34 @@ class RecordFieldCaseTests(unittest.TestCase):
         checks = list(steps["verify-pcapng"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
         self.assertEqual(AUDIO_TYPE_NAME,
                          checks[checks.index("--require-types") + 1])
+
+    def test_the_audio_case_holds_its_own_records_floor(self):
+        """#399: a DEV2 gate run's audio capture held 10 records where this
+        bench measures 328 to 2920, cleared the shared floor of ten by one,
+        and then failed on three distinct noise figures among four
+        noise-bearing records. The audio capture carries a floor of its own,
+        so a capture that thin fails on being thin; the other three keep the
+        shared floor, which is all that has been measured for them."""
+        self.assertGreater(AUDIO_MIN_RECORDS, MIN_PACKETS)
+        cases = self.cases("comprehensive")
+        audio = self.steps(cases["audio-fields"])["verify-pcapng"]
+        checks = list(audio.resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+        self.assertEqual(str(AUDIO_MIN_RECORDS),
+                         checks[checks.index("--min-packets") + 1])
+        # The derived floors stay on it: a capture that meets this one is
+        # held to how much its levels vary, as before.
+        self.assertIn("--min-distinct-signal", checks)
+        self.assertIn("--min-distinct-noise", checks)
+        self.assertIn(f"{AUDIO_MIN_RECORDS}+ records",
+                      cases["audio-fields"].expected_state)
+        for case_id in ("follow-fields", "swapped-fields", "survey-fields"):
+            with self.subTest(case=case_id):
+                for step in self.steps(cases[case_id]).values():
+                    if not step.step_id.startswith("verify-"):
+                        continue
+                    other = list(step.resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+                    self.assertEqual(str(MIN_PACKETS),
+                                     other[other.index("--min-packets") + 1])
 
     def test_the_survey_case_asks_for_a_recovered_uap_and_no_address(self):
         steps = self.steps(self.cases("comprehensive")["survey-fields"])

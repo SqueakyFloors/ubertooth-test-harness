@@ -462,6 +462,58 @@ class Levels(unittest.TestCase):
     def test_neither_is_asked_without_its_option(self):
         self.assertEqual([], self.check(record(signal=-55, noise=-80)))
 
+    def levels(self, count, *, vary):
+        """``count`` records, their levels either varying or all the same.
+
+        A varying figure moves over a 20 dB window, which keeps both inside
+        the radio's range and the noise below the signal, as libbtbb's own
+        writer requires for the flag these records carry.
+        """
+        return [parsed(record(signal=-50 - (step % 20 if vary else 0),
+                              noise=-80 - (step % 20 if vary else 0)))
+                for step in range(count)]
+
+    def floors(self, found, **options):
+        return bredrrecord.problems(found, min_packets=50,
+                                    min_distinct_signal=4,
+                                    min_distinct_noise=4, **options)
+
+    def test_a_capture_that_met_its_floor_is_held_to_the_variation(self):
+        """The regression the two floors are for: a receiver that latched one
+        reading and reported it for every packet (SqueakyFloors/ubertooth#711,
+        #754). A capture that collected the records asked of it is held to
+        both, and names each count."""
+        self.assertEqual([], self.floors(self.levels(50, vary=True)))
+        problems = " ".join(self.floors(self.levels(50, vary=False)))
+        self.assertIn("1 distinct signal figures in 50 records, expected at "
+                      "least 4", problems)
+        self.assertIn("1 distinct noise figures in the 50 records that carry a "
+                      "measured one, expected at least 4", problems)
+
+    def test_a_capture_below_its_records_floor_fails_on_being_thin(self):
+        """#399: a DEV2 gate run's audio capture held 10 records where the
+        bench measures hundreds to thousands, and the suite failed on "3
+        distinct noise figures in the 4 records that carry a measured one".
+        Both floors are derived from the sample a capture collected, so a
+        capture short of its own floor is held to the count alone and the
+        reported reason is the thin capture."""
+        problems = self.floors(self.levels(4, vary=False))
+        self.assertEqual(["4 records, expected at least 50"], problems)
+        # The count is the first thing a reader sees either way, and the
+        # other rules still apply to the records that did arrive.
+        thin = self.floors(self.levels(4, vary=False), lap=0x123456)
+        self.assertEqual("4 records, expected at least 50", thin[0])
+        self.assertIn("another LAP", " ".join(thin))
+
+    def test_the_variation_is_judged_where_no_records_floor_was_asked_for(self):
+        """A caller that set no ``--min-packets`` has asked for no count, so
+        nothing is short of it and both floors apply as before."""
+        problems = bredrrecord.problems(self.levels(4, vary=False),
+                                        min_distinct_signal=4,
+                                        min_distinct_noise=4)
+        self.assertIn("1 distinct signal figures in 4 records", problems[0])
+        self.assertIn("1 distinct noise figures in the 4 records", problems[1])
+
     def test_a_level_outside_the_radios_range_is_refused_on_the_command_line(self):
         for value in ("1", "-121", "x"):
             with self.subTest(value=value):
