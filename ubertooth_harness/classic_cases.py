@@ -201,6 +201,20 @@ MIN_HEC_VALID_RECORDS = 5
 # a capture whose figures do not vary at all.
 MIN_DISTINCT_SIGNAL = 4
 MIN_DISTINCT_NOISE = 4
+# Records the audio capture must hold, its own floor rather than the shared
+# one. The two floors above are derived figures -- how much a sample varies
+# -- and a sample of four noise-bearing records cannot speak to variation
+# however it comes out, so a capture that thin has to fail on being thin
+# (ubertooth-test-harness#399). A DEV2 gate run recorded 10 records of a
+# healthy eSCO link where the measured audio captures of the same release and
+# pin hold 328, 329 and 396 on one receiver and 2920 on another sixteen
+# minutes after that window; the sweep the level floors come from held 394.
+# This is a sixth of the lowest of those, so a working receiver clears it on
+# a capture far thinner than any measured one, and five times the thin
+# window, which fails and says why. The stream, swapped and survey captures
+# keep MIN_PACKETS: no comparable window has been recorded for them, and a
+# floor with no measurement behind it is a guess.
+AUDIO_MIN_RECORDS = 50
 
 # A clock is accepted on how well it explains the hops it was scored against,
 # and only while no other candidate explains them nearly as well; where the
@@ -832,9 +846,10 @@ def record_fields_cases(arguments, resources, resource_identities):
             # prints them like any other; what it does not do is enter
             # follow mode, which none of these checks needs.
             check=piconet_packets(central, MIN_PACKETS, only=True),
-            expected_state=(f"the pcapng holds {MIN_PACKETS}+ records of LAP "
-                            f"{central}, at least one named {AUDIO_TYPE_NAME}, "
-                            f"each record's fields agreeing with its own header"),
+            expected_state=(f"the pcapng holds {AUDIO_MIN_RECORDS}+ records of "
+                            f"LAP {central}, at least one named "
+                            f"{AUDIO_TYPE_NAME}, each record's fields agreeing "
+                            f"with its own header"),
             files=(("-r", "audio.pcapng"),),
             audio=True,
             verify=(
@@ -843,6 +858,7 @@ def record_fields_cases(arguments, resources, resource_identities):
                              "audio.pcapng",
                              _record_checks(
                                  initiator, following=True,
+                                 minimum=AUDIO_MIN_RECORDS,
                                  run_seconds=seconds,
                                  extra=("--require-types", AUDIO_TYPE_NAME))),
             )))
