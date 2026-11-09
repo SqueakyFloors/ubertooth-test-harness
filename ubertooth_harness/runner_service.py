@@ -166,6 +166,14 @@ class RunnerConfig:
     libbtbb_source: Path | None = None
     libbtbb_ref: str | None = None
     allow_power_changes: bool = False
+    # Let a dispatched run grant cap_net_admin+ep to a private copy of its
+    # own ubertooth-follow, so the tests that page a target over HCI can run
+    # (hciprivilege.py, #401). A deploy-time choice, like the power one
+    # above and unlike the destructive opt-in, which a runner never passes
+    # on: a bench whose adapter tests are part of its gate turns this on
+    # once, and a run that is not given it records those tests blocked
+    # rather than failing their cases.
+    allow_hci_capability: bool = False
     heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
     # --external-board-lock for every run-suite child; None leaves the
     # children to $UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK, '' turns it off.
@@ -727,6 +735,8 @@ class RunnerService:
                 argv.append("--with-python")
         if self.config.allow_power_changes:
             argv.append("--allow-power-changes")
+        if self.config.allow_hci_capability:
+            argv.append("--allow-hci-capability")
         if self.config.external_board_lock is not None:
             argv.append(f"--external-board-lock={self.config.external_board_lock}")
         environment = dict(os.environ)

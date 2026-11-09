@@ -324,6 +324,48 @@ def _placement_rows(run: _Run) -> list[tuple[str, str]]:
     )]
 
 
+def _hci_privilege_row(run: _Run) -> str:
+    """What this run did about the privilege an HCI connection needs (#401).
+
+    Empty for a run that needed none, which is every run whose suite does
+    not page a target: there is nothing to report and a row saying so would
+    be in every report. A run that did carries both records, the grant and
+    the removal, and the removal is what a reader has to be able to find.
+    """
+    records = [
+        event for event in run.events
+        if event["event_type"] == "hci_privilege"
+    ]
+    if not records:
+        return ""
+    first = records[0]
+    details = first.get("details") or {}
+    basis = str(details.get("basis", ""))
+    copies = details.get("copies") or []
+    text = basis or str(details.get("reason", ""))
+    if copies:
+        text += "; " + ", ".join(
+            f"{item.get('tool')} at {item.get('path')} "
+            f"(sha256 {str(item.get('source_sha256', ''))[:12]}, "
+            f"{item.get('capability')})"
+            for item in copies
+        )
+    last = records[-1]
+    if last is not first or last.get("status") in ("released", "failed"):
+        status = str(last.get("status", ""))
+        notes = (last.get("details") or {}).get("removal") or []
+        taken_back = "; ".join(str(note) for note in notes)
+        if status == "released":
+            text += f"; taken back: {taken_back}" if taken_back else "; taken back"
+        else:
+            text += f"; **{status}**: {taken_back}"
+    elif copies:
+        # The grant is recorded and the removal is not, which is what a run
+        # killed outright leaves. Said plainly: the copy may still be there.
+        text += "; **no removal recorded**"
+    return text
+
+
 def _libbtbb_in_the_tools(run: _Run) -> str:
     """Which libbtbb preflight required of the run's host tools, and whether
     it found it (#294).
@@ -523,6 +565,9 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "DFU part table",
             message if status == "passed" else f"**{status}**: {message}",
         ))
+    privilege = _hci_privilege_row(run)
+    if privilege:
+        rows.append(("HCI privilege", privilege))
     build = manifest.get("build") or {}
     if build:
         toolchain = ", ".join(f"{k} {v}" for k, v in sorted(build.get("toolchain", {}).items()))
@@ -539,7 +584,8 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             f"{capabilities.get('platform')} ({capabilities.get('basis')}); BlueZ tools: "
             + ("not known" if tools is None else ", ".join(tools) or "none")
             + "; Python tools build: " + _known(capabilities.get("python_tools"))
-            + "; firmware build: " + _known(capabilities.get("firmware_build")),
+            + "; firmware build: " + _known(capabilities.get("firmware_build"))
+            + "; HCI connect: " + _known(capabilities.get("hci_connect")),
         ))
     python = environment.get("python", {})
     if python:

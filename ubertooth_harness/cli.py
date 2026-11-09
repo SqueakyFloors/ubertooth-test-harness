@@ -52,7 +52,7 @@ from ubertooth_harness.flash import (
     HarnessError,
 )
 from ubertooth_harness import leases as board_leases
-from ubertooth_harness import dfuparts, libbtbbpin, notify
+from ubertooth_harness import dfuparts, hciprivilege, libbtbbpin, notify
 from ubertooth_harness import releasegate
 from ubertooth_harness import evidence as release_evidence
 from ubertooth_harness.manifest import (
@@ -61,7 +61,9 @@ from ubertooth_harness.manifest import (
     ManifestError,
     build_run_manifest,
 )
-from ubertooth_harness.hostneeds import planned_capabilities, split_cases
+from ubertooth_harness.hostneeds import (
+    planned_capabilities, run_capabilities, split_cases,
+)
 from ubertooth_harness.plan import (
     PlanError, check_runnable, check_suite_runnable, image_label, load_plan,
 )
@@ -74,6 +76,7 @@ from ubertooth_harness.preflight import (
     NO_FLASH_FIX,
     PreflightError,
     PreflightPolicy,
+    host_version_patterns,
     require_release_output,
 )
 from ubertooth_harness.power import (
@@ -966,6 +969,17 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow real USB power switching for exclusive-Ubertooth tests",
     )
+    run_suite.add_argument(
+        "--allow-hci-capability", action="store_true",
+        help="let the run grant cap_net_admin+ep to a private copy of its own "
+             "ubertooth-follow, for the length of the run, so the tests that "
+             "page a target over HCI can run. Nothing is granted to an "
+             "installed binary and nothing is left behind; the run records "
+             "the copy, its hash, and that the capability was taken back. "
+             "Needs libcap (setcap, getcap) and sudo for those two calls. "
+             "Without it, and without the run holding CAP_NET_ADMIN itself, "
+             "those tests are recorded blocked",
+    )
     run_suite.add_argument("--output", type=Path, required=True)
     run_suite.add_argument(
         "--dry-run", action="store_true",
@@ -1198,6 +1212,14 @@ def _parser() -> argparse.ArgumentParser:
         "--allow-power-changes", action="store_true",
         help="pass --allow-power-changes to every run (set here, never by "
         "the controller)",
+    )
+    runner.add_argument(
+        "--allow-hci-capability", action="store_true",
+        help="pass --allow-hci-capability to every run (set here, never by "
+        "the controller): a run may grant cap_net_admin+ep to a private copy "
+        "of its own ubertooth-follow for the length of the run, so the tests "
+        "that page a target over HCI can run. Needs libcap and a sudoers rule "
+        "letting this user run setcap without a password",
     )
     runner.add_argument(
         "--heartbeat-interval", type=float, default=10.0, metavar="SECONDS",
@@ -1434,6 +1456,7 @@ def _runner(args: argparse.Namespace) -> int:
         libbtbb_source=args.libbtbb_source,
         libbtbb_ref=args.libbtbb_ref,
         allow_power_changes=args.allow_power_changes,
+        allow_hci_capability=args.allow_hci_capability,
         heartbeat_interval_s=args.heartbeat_interval,
         external_board_lock=args.external_board_lock,
     ))
@@ -1819,6 +1842,21 @@ def _run_suite(args: argparse.Namespace) -> int:
         item for item in compiled.blocked_for_host(args.host)
         if not selected_names or item.test_name in selected_names
     )
+    # And the one privilege a test here needs, settled before anything is
+    # leased or built: a suite that cannot page is recorded blocked with the
+    # tool's own reason, rather than running three cases that fail in a tenth
+    # of a second and read as the peers having stopped (#401).
+    hci, hci_tests, hci_blocked, invocations = hciprivilege.decide(
+        catalog, invocations, host=args.host, platform=host.platform,
+        allow=getattr(args, "allow_hci_capability", False),
+    )
+    blocked += hci_blocked
+    if hci_tests:
+        # Said before the lease, as the pairing notes are: a run that is
+        # about to grant a capability, or to use one it holds, says so where
+        # a person watching it will see it.
+        print(f"note: {', '.join(hci_tests)} pages a target over HCI; "
+              f"{hci.reason}", file=sys.stderr)
     if not invocations:
         raise HarnessError(
             f"suite {args.suite} has no selected invocation for {args.host}"
@@ -2047,6 +2085,9 @@ def _dry_run(
         with_python=bool(args.with_python), with_firmware=args.with_firmware,
         with_btbr=BTBR_IMAGE in args.firmware_images,
         artifact_labels=labels,
+        # Read again here rather than passed in: a dry run is pure, and this
+        # is a read of the process's own capabilities and the host's PATH.
+        **_hci_capability_fields(args, host),
     )
     print(f"dry run: {plan.name} / {args.suite} on {args.host}; nothing is built or run")
     print(f"host: {capabilities.describe()}")
@@ -2115,6 +2156,87 @@ def _dry_run(
         )
         return 1
     return 0
+
+
+def _hci_capability_fields(args, host) -> dict:
+    """The HCI-connect capability fields, for a HostCapabilities call.
+
+    One place, so the dry run, the run's own record and the case-level need
+    all read the same answer (hciprivilege.availability).
+    """
+    decided = hciprivilege.availability(
+        host.platform, allow=getattr(args, "allow_hci_capability", False)
+    )
+    return {"hci_connect": decided.available,
+            "hci_connect_reason": decided.reason}
+
+
+def _grant_hci_privilege(args, registry, sources, executor, publisher, run_dir,
+                         tests):
+    """Let this run page over HCI, and record exactly how.
+
+    Three answers, and each is recorded. The run process holds
+    ``CAP_NET_ADMIN`` already, so nothing is granted to a file; or the run
+    was given ``--allow-hci-capability``, so a private copy of its own tool
+    is made, privileged, and verified (hciprivilege.grant); or it cannot
+    page, which ``_run_suite`` has already recorded as blocked, so reaching
+    here at all is a fault and the run stops rather than running the cases
+    unprivileged.
+    """
+    host = registry.get(args.host)
+    decided = hciprivilege.availability(
+        host.platform, allow=getattr(args, "allow_hci_capability", False)
+    )
+    if not decided.available:
+        raise HarnessError(
+            ", ".join(tests) + " pages a target over HCI and this run cannot: "
+            + decided.reason
+        )
+    if decided.basis != hciprivilege.BASIS_COPY:
+        held = hciprivilege.Grant(decided.basis, decided.reason)
+        publisher.emit(hciprivilege.EVENT, "held", held.to_details())
+        return held
+    ubertooth = next(source for source in sources if source.name == "Ubertooth")
+    granted = hciprivilege.grant(
+        hciprivilege.PRIVILEGED_TOOLS,
+        directory=hciprivilege.directory_for(run_dir),
+        path=(getattr(executor, "environment", None) or os.environ).get("PATH"),
+        # The copy has to answer with this run's own version line, which
+        # names the Ubertooth release and the libbtbb beside it: that is what
+        # says it loaded the run's libraries and not the system's, with
+        # nothing in its environment to help it (hciprivilege._verify_loads).
+        version_patterns=host_version_patterns(ubertooth),
+    )
+    publisher.emit(hciprivilege.EVENT, "granted", granted.to_details())
+    print(f"note: {granted.reason}", file=sys.stderr)
+    return granted
+
+
+def _release_hci_privilege(publisher, privilege, run_dir) -> bool:
+    """Take the capability back; True if anything privileged is left behind.
+
+    Called from the run's own ``finally``, so it happens on every path a run
+    leaves by: a pass, a failure, a cancellation, and the three signals
+    run-suite handles. The record goes in after the sequencer's own, so
+    report.md is rendered once more to carry it.
+
+    A removal that did not come back clean makes the run fail whatever the
+    tests said: a run that may have left a privileged binary on the bench
+    must not report success.
+    """
+    if not privilege.granted:
+        return False
+    left_behind = False
+    try:
+        hciprivilege.release(privilege)
+        status = "released"
+    except hciprivilege.HciPrivilegeError as error:
+        status, left_behind = "failed", True
+        print(f"error: {error}", file=sys.stderr)
+    if publisher is not None:
+        publisher.emit(hciprivilege.EVENT, status, privilege.to_details())
+        write_report(run_dir)
+    return left_behind
 
 
 def _check_power_cycles_allowed(args, catalog, invocations) -> None:
@@ -2194,7 +2316,11 @@ def _run_leased(
     built = None
     publisher = None
     executor = SubprocessCommandExecutor()
-    if args.build or args.libbtbb_source:
+    # A run that will grant the HCI capability needs its directory and its
+    # record open before the grant, so the copy, its hash and the capability
+    # taken back are in run.jsonl whatever happens next.
+    hci_tests = hciprivilege.tests_needing_privilege(catalog, invocations)
+    if args.build or args.libbtbb_source or hci_tests:
         # Records before the sequencer's: the build, and the libbtbb pin check.
         run_dir = create_run_directory(args.output, run_id)
         publisher = open_run_publisher(run_dir, run_id, _terminal_sink())
@@ -2230,6 +2356,27 @@ def _run_leased(
         raise
     if publisher is None:
         run_dir = create_run_directory(args.output, run_id)
+    privilege = hciprivilege.NOT_GRANTED
+    if hci_tests:
+        try:
+            privilege = _grant_hci_privilege(
+                args, registry, sources, executor, publisher, run_dir, hci_tests
+            )
+        except BaseException as error:
+            _finish_failed_run(
+                publisher, run_dir, str(error) or type(error).__name__
+            )
+            if isolation is not None:
+                isolation.close()
+            raise
+        if privilege.granted:
+            # The copies keep the tools' own names and come first on PATH, so
+            # every command line in the suite is unchanged and only the tools
+            # a case of this suite pages with are privileged at all.
+            executor = SubprocessCommandExecutor(
+                privilege.environment(
+                    getattr(executor, "environment", None) or os.environ)
+            )
     cancellation = CancellationToken()
     previous_handlers = {}
 
@@ -2256,6 +2403,18 @@ def _run_leased(
             preflight_checks=preflight_checks,
             cancellation=cancellation,
             publisher=publisher,
+            # Given rather than left to the sequencer's own default, so the
+            # HCI-connect answer this run settled is the one its record and
+            # its case-level needs read (hostneeds.py).
+            capabilities=run_capabilities(
+                args.host, registry.get(args.host).platform, manifest.build,
+                (item.name for item in manifest.artifacts),
+                # Through getattr, as the sequencer reads it: a caller
+                # may hand run-suite an executor of its own that has no
+                # environment at all.
+                path=(getattr(executor, "environment", None) or {}).get("PATH"),
+                **_hci_capability_fields(args, registry.get(args.host)),
+            ),
             not_applicable=not_applicable,
             blocked=blocked,
         )
@@ -2264,6 +2423,9 @@ def _run_leased(
             signal.signal(signum, handler)
         if isolation is not None:
             isolation.close()
+        # The capability goes back before anything else here: a run that
+        # leaves one on the bench is worse than a run with no summary.
+        left_behind = _release_hci_privilege(publisher, privilege, run_dir)
         # On stderr, with the live stream a reader is tailing: what was
         # tested, on which board and firmware, and how it went (#342). In the
         # finally, so a sequencer that raises still ends with the block; the
@@ -2276,7 +2438,7 @@ def _run_leased(
         print(json.dumps(asdict(summary), indent=2, sort_keys=True))
     except OSError:
         pass  # terminal gone (e.g. SSH dropped); run.jsonl has the result
-    return 0 if summary.passed else 1
+    return 0 if summary.passed and not left_behind else 1
 
 
 def _registered_boards(registry, host: str | None = None):

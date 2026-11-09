@@ -5644,6 +5644,18 @@ it interrupts at, so a tool whose page was answered at once captures for most
 of that allowance as well. Measured on the bench, a `duration: 25s` follow
 case runs the tool for about 83 seconds and captures for most of them.
 
+**It also needs a privilege, and that is settled before the run.** The page
+is an HCI Create Connection, which the kernel's filter on a raw HCI socket
+keeps outside the subset an unprivileged opener may send, so it needs
+`CAP_NET_ADMIN`; without it the tool stops in about a tenth of a second with
+`error: connecting to <address> failed: Operation not permitted`, before it
+opens the board. A run holding the capability uses it;
+`run-suite --allow-hci-capability` grants `cap_net_admin+ep` to a private
+copy of the run's own `ubertooth-follow` and takes it back when the run ends;
+a run with neither records this test **blocked**, naming that error, and
+measures the rest of the suite. How the copy is made, verified and removed is
+in [hardware.md](hardware.md), under the adapter.
+
 **Commands.** The same adapter reads, and `ubertooth-follow` pages the
 piconet's leader from it; the driver interrupts it, since its `-t` is the
 target address rather than a timeout:

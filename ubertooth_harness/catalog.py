@@ -2226,6 +2226,11 @@ def builtin_catalog() -> TestCatalog:
             command_builder=bluez_cases.follow_over_hci_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
+            # Every case pages the target, so the whole test needs the
+            # privilege an HCI connection takes: run-suite records it blocked
+            # with the real reason rather than letting three cases fail as if
+            # the peers had stopped (#401).
+            needs=Needs(hci_connect=True),
         ),
         _device_test(
             "BLE soak",

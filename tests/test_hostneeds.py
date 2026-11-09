@@ -172,6 +172,7 @@ class NeedsTests(unittest.TestCase):
             {"host": "Host_Mac", "platform": "macos", "basis": "build", "bluez_tools": [],
              "python_tools": False, "firmware_build": False,
              "btbr_build": False,
+             "hci_connect": None, "hci_connect_reason": "",
              "host_tools": sorted(mac.host_tools)}, mac.to_dict())
 
     def test_a_host_without_a_host_tool_runs_none_of_its_cases(self):
@@ -423,7 +424,7 @@ class SequencerTests(unittest.TestCase):
         # report.md: the result line, the table column, a section and the transcript.
         self.assertIn("1 cases and 2 tests not applicable", report)
         self.assertIn("| Host can run | macos (build); BlueZ tools: none; Python tools build: "
-                      "no; firmware build: no |", report)
+                      "no; firmware build: no; HCI connect: not known |", report)
         self.assertIn("| Not applicable cases |", report)
         # The Known target cell is empty: a test the host cannot run drove nothing.
         self.assertIn(

@@ -170,8 +170,13 @@ AFH_READ_S = 3 * HCI_READ_S + 2 * 0.2
 # the peers are reached through /dev/serial/by-id.
 _SCAN_NEEDS = Needs(platforms=("linux",), bluez_tools=("ubertooth-scan",),
                     host_tools=("hciconfig", "hcitool"))
+# The follow cases page the target for its clock offset, which is an HCI
+# Create Connection and so needs CAP_NET_ADMIN (hciprivilege.py, #401). The
+# scan's cases do not: its name reads are Remote Name Requests, which the
+# kernel's filter on a raw HCI socket lets an unprivileged opener send, and
+# the only paging path it has is `-x`, which no case passes.
 _FOLLOW_NEEDS = Needs(platforms=("linux",), bluez_tools=("ubertooth-follow",),
-                      host_tools=("hciconfig", "hcitool"))
+                      host_tools=("hciconfig", "hcitool"), hci_connect=True)
 
 # One device of a BlueZ inquiry, as ubertooth-scan prints it: the address the
 # inquiry reported and the name read back from the device, separated by a tab
