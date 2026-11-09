@@ -10,6 +10,17 @@ the terminal summary, ``report.md``, the GUI and its history, the completion
 email, and a release's public evidence all say the same words for the same
 length of time.
 
+Two forms, one wording. :func:`human_duration` writes a measured duration to
+the millisecond, which is how finely the harness times a command. Some
+lengths of time are not measurements of a finished thing: how old a lease is,
+how long a board has been held, how long a command has been waiting. Those
+are read off a clock that is still running, in a table somebody is scanning,
+and the milliseconds are noise there, so :func:`coarse_duration` writes the
+same units to the whole second. Which form a caller wants is its own
+decision; how an hour, a minute, and a second are written is this module's,
+so ``1h 05m 03s`` and ``1h 05m 03.000s`` can never come to disagree about
+the words between the numbers.
+
 Nothing here reads a clock or a record. It converts one number of seconds,
 however that number was arrived at.
 """
@@ -50,11 +61,48 @@ def human_duration(seconds: float) -> str:
     records -- keeps its sign instead of being quietly flattened to zero.
     Infinity and NaN are not durations and raise :class:`ValueError`.
     """
+    value = _finite(seconds)
+    sign = "-" if value < 0 else ""
+    return sign + _written(round(abs(value) * _MS), PLACES)
+
+
+def coarse_duration(seconds: float) -> str:
+    """``3723`` seconds as ``1h 02m 03s``: the same words, whole seconds.
+
+    For a length of time that is still being counted rather than measured:
+    how old a lease is, how long a board has been held, how long a command
+    has been waiting (``ubertooth-harness boards``). The units, their order,
+    and the padding are :func:`human_duration`'s, so a reader who has seen
+    one form reads the other; only the milliseconds go, because a figure
+    taken off a running clock does not have them to the millisecond and a
+    board table is easier to scan without them.
+
+    Rounded down, not to the nearest second, because this is a figure that
+    is counting up: a lease taken 12.9s ago has been held for 12 whole
+    seconds, and ``13s`` would claim a second that has not passed. A
+    negative value keeps its sign, as above; a caller reading a clock that
+    may have gone backwards clamps it before it gets here.
+    """
+    value = _finite(seconds)
+    sign = "-" if value < 0 else ""
+    return sign + _written(int(abs(value)) * _SECOND_MS, 0)
+
+
+def _finite(seconds: float) -> float:
+    """The value as a float, refusing what is not a length of time."""
     value = float(seconds)
     if not math.isfinite(value):
         raise ValueError(f"not a duration: {seconds!r}")
-    sign = "-" if value < 0 else ""
-    total_ms = round(abs(value) * _MS)
+    return value
+
+
+def _written(total_ms: int, places: int) -> str:
+    """The unsigned duration in whole milliseconds, in words.
+
+    One place decides the units and their spelling for both forms above;
+    ``places`` is only how many decimals of a second are written, and 0
+    writes none.
+    """
     days, rest = divmod(total_ms, _DAY_MS)
     hours, rest = divmod(rest, _HOUR_MS)
     minutes, rest = divmod(rest, _MINUTE_MS)
@@ -66,8 +114,10 @@ def human_duration(seconds: float) -> str:
         elif amount:
             parts.append(f"{amount}{unit}")
     second = f"{whole:02d}" if parts else str(whole)
-    parts.append(f"{second}.{milliseconds:0{PLACES}d}s")
-    return sign + " ".join(parts)
+    if places:
+        second = f"{second}.{milliseconds:0{places}d}"
+    parts.append(f"{second}s")
+    return " ".join(parts)
 
 
 def human_duration_or_none(seconds: float | None) -> str | None:

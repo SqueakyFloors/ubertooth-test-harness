@@ -125,11 +125,17 @@ one, and remove the lock file once you know there is none
 `boards` marks such a lease and removes nothing itself:
 
 ```
-UT_Linux5    held  agent, lease: bash soak.sh, pid 2380347, since ... (for 5h12m)
+UT_Linux5    held  agent, lease: bash soak.sh, pid 2380347, since ... (for 5h 12m 33s)
              stale: its process (pid 2380347) is gone, and so is the process
              group it ran in (2380347); the next command that wants it takes
              it over
 ```
+
+The `(for ...)` is how long the lease has been held. It, a lease's age, and
+the waits in the queue lines below are written in the units every other
+length of time the harness prints uses, to the whole second (`12s`,
+`4m 11s`, `1h 05m 03s`): see
+[One way of saying a length of time](../reference/run-records.md#one-way-of-saying-a-length-of-time).
 
 ### Waiting in turn
 
@@ -178,7 +184,7 @@ is gone, and those are the only things `boards` takes away. It shows how
 deep a queue is (in `--json`, as `waiting`):
 
 ```
-UT_0         held  agent #14, run 2026-10-31-ble, pid 7781 (for 0h04m11s)
+UT_0         held  agent #14, run 2026-10-31-ble, pid 7781 (for 4m 11s)
              queue: 2 commands are waiting for it
 ```
 

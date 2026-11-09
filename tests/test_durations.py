@@ -3,16 +3,24 @@
 A measured duration stays a number for machines; the text beside it comes
 from :mod:`ubertooth_harness.durations` and from nowhere else, so the
 terminal summary, report.md, the GUI, the completion email, and a release's
-evidence cannot drift into four different ways of saying an hour.
+evidence cannot drift into four different ways of saying an hour. The same
+module writes the whole-second form a figure still being counted is read in,
+which is a lease's age and how long it has been held (#398).
 """
 
 import dataclasses
+import datetime
 import math
 import unittest
 from pathlib import Path
 
+from ubertooth_harness import leases
 from ubertooth_harness.controller import Run
-from ubertooth_harness.durations import human_duration, human_duration_or_none
+from ubertooth_harness.durations import (
+    coarse_duration,
+    human_duration,
+    human_duration_or_none,
+)
 from ubertooth_harness.notify import duration_text
 from ubertooth_harness.rungroups import RunGroup, group_view, host_steps, wall_seconds
 from ubertooth_harness.sequencer import SequencerSummary
@@ -81,6 +89,63 @@ class FormatTests(unittest.TestCase):
     def test_a_duration_never_measured_passes_through(self):
         self.assertIsNone(human_duration_or_none(None))
         self.assertEqual(human_duration_or_none(0.25), "0.250s")
+
+
+class CoarseFormatTests(unittest.TestCase):
+    """The whole-second form, for a figure read off a running clock (#398)."""
+
+    def test_every_scale_a_lease_or_a_wait_reaches(self):
+        for seconds, text in (
+            (0.0, "0s"),
+            (12.0, "12s"),
+            (45.4, "45s"),
+            (59.9, "59s"),
+            (60.0, "1m 00s"),
+            (252.0, "4m 12s"),
+            (3600.0, "1h 00m 00s"),
+            (3723.0, "1h 02m 03s"),
+            (4234.536, "1h 10m 34s"),
+            # A lease nobody released is read in days, as a soak is.
+            (90123.0, "1d 01h 02m 03s"),
+        ):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(coarse_duration(seconds), text)
+
+    def test_a_part_second_is_dropped_rather_than_rounded_up(self):
+        """A figure counting up must not claim a second that has not passed."""
+        for seconds in (0.9, 11.999, 59.999, 3599.999):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(
+                    _parse(coarse_duration(seconds)), float(int(seconds))
+                )
+
+    def test_both_forms_say_the_same_words_about_the_same_length_of_time(self):
+        """The one thing #398 is about: the units and the padding agree.
+
+        At a whole second the two texts differ in the milliseconds and in
+        nothing else, so neither can start spelling an hour its own way.
+        """
+        for seconds in (0.0, 12.0, 60.0, 252.0, 3723.0, 90123.0):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(
+                    human_duration(seconds).replace(".000s", "s"),
+                    coarse_duration(seconds),
+                )
+
+    def test_a_duration_with_hours_is_as_wide_as_another_with_hours(self):
+        self.assertEqual(
+            len(coarse_duration(3605)), len(coarse_duration(6600))
+        )
+        self.assertEqual(coarse_duration(3605), "1h 00m 05s")
+
+    def test_a_clock_that_went_backwards_keeps_its_sign(self):
+        self.assertEqual(coarse_duration(-5), "-5s")
+
+    def test_what_is_not_a_duration_is_refused(self):
+        for value in (math.inf, -math.inf, math.nan):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    coarse_duration(value)
 
 
 class SurfaceTests(unittest.TestCase):
@@ -177,6 +242,26 @@ class SurfaceTests(unittest.TestCase):
         ).view()
         self.assertIsNone(running["duration_s"])
         self.assertIsNone(running["duration_hms"])
+
+    def test_a_leases_age_and_held_for_come_from_the_same_formatter(self):
+        """`boards` had a compact format of its own until #398."""
+        self.assertEqual(leases.describe_seconds(3723), coarse_duration(3723))
+        held = leases.held_for(
+            {"acquired_at": "2026-01-01T01:00:00"},
+            datetime.datetime(2026, 1, 1, 1, 4, 11, 500000),
+        )
+        self.assertEqual(held, coarse_duration(251.5))
+        self.assertEqual(held, "4m 11s")
+
+    def test_an_age_the_lock_file_does_not_record_is_left_unsaid(self):
+        """A lock file is another command's: nothing read out of one raises."""
+        now = datetime.datetime(2026, 1, 1, 1, 0, 0)
+        self.assertEqual(leases.held_for({}, now), "")
+        self.assertEqual(leases.held_for({"acquired_at": "whenever"}, now), "")
+        # A clock that went backwards between the two stamps.
+        self.assertEqual(
+            leases.held_for({"acquired_at": "2026-01-01T02:00:00"}, now), "0s"
+        )
 
 
 def _record(sequence: int, kind: str, status: str, clock: str) -> dict:

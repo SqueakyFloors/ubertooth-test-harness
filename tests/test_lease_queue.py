@@ -779,8 +779,8 @@ class QueuedReportTests(QueueFixture):
         line = leases.describe_queued_resource(queued)
         self.assertIn("UT_0 is free but queued for waiting-agent", line)
         self.assertIn("it asked for UT_0 and UT_1", line)
-        self.assertIn("has waited 4m1", line)
-        self.assertIn("of the 10m00s it asked to wait", line)
+        self.assertIn("has waited 4m 12s", line)
+        self.assertIn("of the 10m 00s it asked to wait", line)
         self.assertIn("is still waiting for UT_1, held by holder", line)
 
     def test_what_the_lease_in_the_way_records_decides_how_long_this_lasts(self):
@@ -1280,8 +1280,8 @@ class QueuedReportTests(QueueFixture):
     def test_a_wait_reads_as_a_person_would_say_it(self):
         self.assertEqual("0s", leases.describe_seconds(0))
         self.assertEqual("45s", leases.describe_seconds(45.4))
-        self.assertEqual("4m12s", leases.describe_seconds(252))
-        self.assertEqual("1h02m03s", leases.describe_seconds(3723))
+        self.assertEqual("4m 12s", leases.describe_seconds(252))
+        self.assertEqual("1h 02m 03s", leases.describe_seconds(3723))
         self.assertEqual("", leases.describe_seconds(None))
         self.assertEqual("", leases.describe_seconds("soon"))
         self.assertEqual("0s", leases.describe_seconds(-5))
@@ -1357,7 +1357,7 @@ class QueueCliTests(QueueFixture):
         self.assertRegex(lines[1], r"^ +queue: 1 command is waiting for it$")
         self.assertIn("queued for flash-run", lines[2])
         self.assertIn("it asked for UT_0 and UT_1", lines[2])
-        self.assertIn("of the 10m00s it asked to wait", lines[2])
+        self.assertIn("of the 10m 00s it asked to wait", lines[2])
         self.assertIn("still waiting for UT_1, held by elsewhere", lines[2])
         self.assertIn("that lease is left alone: it was taken on another-host", lines[2])
         self.assertIn("stays held until somebody clears it", lines[2])
@@ -1463,7 +1463,7 @@ class QueueCliTests(QueueFixture):
         # What the sequencer emits for such a run, from the frozen record.
         message = leases.describe_queued_resource(json_value(record), past=True)
         self.assertIn("UT_0 was free and queued for flash-run", message)
-        self.assertIn("This command gave way for 4m03s", message)
+        self.assertIn("This command gave way for 4m 03s", message)
         # And what a report reads back out of the manifest.
         rows = dict(_queued_rows(manifest.to_dict()))
         self.assertIn("UT_0 was free and queued for flash-run",
