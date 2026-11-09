@@ -4966,7 +4966,8 @@ scheduling tests beside them (`test_btbr_scan_schedule.c`,
 `host/python/ubtbr/tests/test_ubtbr.py` for a peer that declines the
 connection. What this test adds is the other half: the observable end result
 on a real bench. The page completes and exchanges the peer's name every time
-it is asked, not once; the link carries packets after the transmit runs; the
+it is asked, not once; the board still holds the connection after the
+transmit runs, and the `idle` after the hold ends that same connection; the
 scan modes run and return; no connection is reported and then given up
 (`Paging resumed`, read once the connection has been held and stopped, which
 is long enough for link supervision to have ended a connection that carried
@@ -5087,6 +5088,16 @@ and enter and leave both scan modes.
 
 What a pass does not prove:
 
+- **That the air link was still alive after the transmit runs.** What the
+  transmit check reads is the board's own view: it stayed in `CONNECTED`,
+  nothing said the link had been given up, and one `idle` ended it. The peer's
+  view is not available — the ESP32 peer firmware reports nothing at all about
+  a bare ACL link, only about the profile links it carries — and this peer
+  sends nothing on a held link, so there is no traffic to read either
+  ([#402](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/402)).
+  A link the board believed it held and the peer had dropped would pass this,
+  and the page that follows, which starts a fresh page train, is what would
+  catch it.
 - **That a transmitted packet reached the air.** The board reports nothing
   back about a packet it sent, so the line `tx` prints is what was asked for.
   The packet the harness compares it with is the harness's own, which is a
@@ -5120,13 +5131,40 @@ What a pass does not prove:
   race against a real peripheral that often takes several attempts.
 - **Encryption**, which `btbr` does not implement.
 
-The unhandled-opcode check leans on the peer. Measured on the bench on
-2026-11-01: with the link up, the peer sent `LMP_DECR_POWER_REQ` about four
-times a second for the whole connection, this link layer refused each one, and
-the tool named the opcode in exactly one `warning:` line. So a connection held
-for the hold brings one, and the check requires that, because a check that
-decided nothing should not read as a pass; a peer firmware that stopped asking
-would fail it, and the reason says why.
+The unhandled-opcode check, and the transmit check beside it, lean on what
+the peer sends of its own, and what that is has changed under them.
+
+Measured on the bench on 2026-11-01, on peers running `utesp-1.5.0`: with the
+link up, the peer sent `LMP_DECR_POWER_REQ` about four times a second for the
+whole connection, this link layer refused each one, and the tool named the
+opcode in exactly one `warning:` line.
+
+Measured again on 2026-11-09, on peers running `utesp-1.6.0`
+([#402](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/402)):
+the peer sends nothing. A link held 20 s before any transmit carried no
+capture record, and 10 s after the four transmit runs carried none either,
+while the board stayed in `CONNECTED` the whole time — no `Paging resumed`,
+no detach either way, no refusal line — and one `idle` ended the connection
+in 0.1 s. The peer image changed between the two measurements (it was flashed
+to `utesp-1.6.0` on 2026-11-04); whether that is what stopped the requests is
+not established, and neither the RF geometry nor the controller's own
+power-control state is ruled out.
+
+So neither check asks the peer for traffic any more. The transmit check
+asserts what the board can be held to on its own — that it still holds the
+connection the transmit runs went out on — and reports a capture record where
+one arrives. The unhandled-opcode check asserts the rule it exists for, that
+no opcode is named more than once, and reports that nothing arrived where
+nothing did, rather than failing a session in which nothing is wrong. A peer
+that volunteers LMP again brings the rule back under test without any change
+here.
+
+Separately, the recovery that follows a failed check sends `idle`, and the
+page holding a connection is a running command, so that recovery ends the
+connection. The check that was going to end it is then reported as **not
+run**, with the earlier check named, rather than reporting that `idle` did
+not work: in the two runs in #402 it reported exactly that, 23 seconds after
+the board had printed `Paging done`.
 
 ## Recover AFH map
 

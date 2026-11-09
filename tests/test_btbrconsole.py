@@ -107,7 +107,8 @@ class SessionTests(unittest.TestCase):
             f"check page: connected to {PEER_ADDRESS}",
             f"check page-peer-name: LMP_NAME_RES carried '{PEER_NAME}'",
             f"check tx-formats: {len(btbrconsole.TX_RUNS)} run(s) transmitted",
-            "check tx-link: the link carried a packet ",
+            "check tx-link: the board still held the connection after the "
+            "runs; the link carried a packet ",
             "check page-idle: 'Paging done'",
             "check lmp-unhandled: 0x20 refused, each named once",
             f"check page-repeat: {btbrconsole.PAGE_REPEATS} further page(s) "
@@ -217,8 +218,6 @@ class SessionTests(unittest.TestCase):
             ("no-lmp-name", "no LMP_NAME_RES on the air carried the peer's name"),
             ("repeat-unhandled",
              "an unhandled LMP opcode was reported more than once: 0x20 3 times"),
-            ("quiet-lmp",
-             "no LMP request with no handler was reported at all"),
             ("capture-on-stderr", "a capture record is on stderr"),
             ("stuck-idle", "idle did not reach"),
             ("bad-exit", "the session exited 1 after"),
@@ -230,7 +229,12 @@ class SessionTests(unittest.TestCase):
             ("tx-already-waiting",
              "the board refused a transmit this session asked for"),
             ("scheduler-storm", "the board could not schedule its work"),
-            ("dead-link", "the connection did not carry on"),
+            ("peer-hangs-up", "the peer hung up ('Peer detached'): the "
+                              "connection the transmit runs went out on was "
+                              "ended from the other end"),
+            ("drops-out-of-connected",
+             "the board left the connected state while the connection was "
+             "being held: 'State CONNECTED -> STANDBY'"),
             ("second-page-fails", "page 1 of 1 after the first: the peer"),
             ("false-connection", "link supervision ended it and the page "
                                  "train started again"),
@@ -256,9 +260,53 @@ class SessionTests(unittest.TestCase):
                       report)
         # The transmit check names it too, and passes on the packet that
         # followed.
-        self.assertIn("check tx-link: the link carried a packet ", report)
+        self.assertIn("check tx-link: the board still held the connection "
+                      "after the runs; the link carried a packet ", report)
         self.assertIn("the board had reported 'TX: cannot schedule transmit",
                       report)
+
+    def test_a_peer_that_volunteers_nothing_on_the_link_still_passes(self):
+        # ubertooth-test-harness#402. The bench's own peer sends nothing on a
+        # held link: measured on 2026-11-09, 20 s before the transmit runs and
+        # 10 s after them carried no capture record, while the board stayed in
+        # CONNECTED and one `idle` ended the connection in 0.1 s. Neither the
+        # transmit check nor the unhandled-opcode check may fail for that: one
+        # asserts that the board still held the connection, and the other that
+        # nothing arrived for the once-per-opcode rule to decide.
+        status, _captured, report = self.run_session(
+            faults=("quiet-link", "quiet-lmp"))
+        self.assertEqual(0, status, report)
+        checks = len(btbrconsole.checks(False))
+        self.assertIn(f"checks: {checks} passed of {checks}, 0 failed, "
+                      "0 not run", report)
+        self.assertIn("check tx-link: the board still held the connection "
+                      "after the runs; no packet arrived in the", report)
+        self.assertIn("which this peer volunteers none of", report)
+        self.assertIn("check lmp-unhandled: no request with no handler "
+                      "arrived on the held link", report)
+        self.assertIn("check page-idle: 'Paging done'", report)
+
+    def test_a_check_the_recovery_left_nothing_to_decide_is_not_run(self):
+        # ubertooth-test-harness#402. The recovery after a failed check sends
+        # `idle`, which ends the page holding the connection, so the check
+        # that was going to end that connection has nothing of its own left.
+        # It must say so: before this, it waited out its whole window on a
+        # board already in standby and reported that `idle` had not worked.
+        status, _captured, report = self.run_session(
+            faults=("false-connection",))
+        self.assertEqual(1, status, report)
+        self.assertIn("after tx-link: the stop ended the connection this "
+                      "session was holding", report)
+        self.assertIn("check page-idle: not run: the recovery after tx-link "
+                      "failed sent the `idle` this check exists to send",
+                      report)
+        checks = len(btbrconsole.checks(False))
+        # The same lost link fails the repeat page too, which is its own
+        # reason and not this cascade. What matters here is that the check the
+        # recovery disarmed is counted apart from both.
+        self.assertIn(f"checks: {checks - 3} passed of {checks}, 2 failed, "
+                      "1 not run", report)
+        self.assertNotIn("check page-idle: FAILED", report)
 
     def test_a_peer_that_cannot_be_reset_fails_the_repeat_page(self):
         # The repeat page is only a page of the peer if the peer has forgotten
@@ -300,6 +348,50 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(1, status)
         self.assertIn(f"checks: 0 passed of {checks}, 0 failed, "
                       f"{checks} not run", report)
+
+
+class ConnectionGivenUpTests(unittest.TestCase):
+    """The window the look after a hold reads, and where it stops.
+
+    `idle` ends the connection on purpose and says so with a transition out
+    of the connected state, so the look that follows it has to stop before
+    that line and after everything the hold brought. Both ends of that bound
+    are checked here rather than through the fake board: the window this
+    covers is between the transmit check's read and the `idle`, and the
+    driver sends the board nothing in it, so a fake that answers input lines
+    cannot put a line there to order.
+    """
+
+    HELD = "Connection ready, lt_addr=1\n"
+    IDLE = "Send idle\nState CONNECTED -> STANDBY\nPaging done\n"
+
+    def session(self, text: str):
+        console = btbrconsole.Console(("true",), io.StringIO())
+        stream = btbrconsole.Stream("stderr", io.BytesIO(b""), None, "")
+        console.streams = {"stderr": stream}
+        stream._append(text)
+        return btbrconsole.Session(
+            console, PEER_ADDRESS, PEER_NAME, 1.0, 1.0, 1.0, 1.0,
+            lambda line: None, "", "")
+
+    def test_a_connection_held_and_then_stopped_was_not_given_up(self):
+        session = self.session(self.HELD + self.IDLE)
+        self.assertEqual("", btbrconsole._connection_given_up(
+            session, until=len(self.HELD)))
+
+    def test_without_the_bound_the_idle_itself_reads_as_a_link_given_up(self):
+        # Why the bound is there: `idle` leaves the connected state on
+        # purpose, and the same look that catches a link given up catches
+        # that too if it is allowed to read past it.
+        session = self.session(self.HELD + self.IDLE)
+        self.assertIn("left the connected state",
+                      btbrconsole._connection_given_up(session))
+
+    def test_a_peer_that_hung_up_during_the_hold_is_inside_the_bound(self):
+        held = self.HELD + "Peer detached\n"
+        session = self.session(held + self.IDLE)
+        self.assertIn("the peer hung up", btbrconsole._connection_given_up(
+            session, until=len(held)))
 
 
 class StreamReaderTests(unittest.TestCase):

@@ -58,11 +58,18 @@ What the session checks, and why each answer is knowable in advance:
   counted fill, the payload header the host writes, and a `dv`'s voice field,
   whose fill starts at `0xa0` so the boundary between the two fields is
   visible in the bytes alone.
-- **tx-link**: the connection carries on after those runs: a new capture
-  record arrives. Whether the board reported a slot it could not put on the
-  air is counted by scheduler-reports below, and named in this check's report
-  line where there was one.
-- **page-idle**: the connection is held, then `idle` ends it.
+- **tx-link**: the board still holds the connection after those runs: it has
+  not left the connected state, link supervision has not ended a link that
+  carried nothing, and neither end has hung up. A capture record arriving in
+  the window is better evidence and is reported where there is one, but the
+  registered peer volunteers nothing on a held link, so its absence is
+  reported rather than failed (ubertooth-test-harness#402). Whether the board
+  reported a slot it could not put on the air is counted by
+  scheduler-reports, and named in this check's report line where there was
+  one.
+- **page-idle**: the connection is held, then `idle` ends it. Where an
+  earlier failure's recovery has already ended it, this check is not run and
+  says so, rather than reporting that `idle` did not work.
 - **page-repeat**: the peer is reset, paged again, and the page completes and
   exchanges its name again. A pager that reported a connection its page
   response never earned carries nothing and loses the attempt to link
@@ -80,8 +87,11 @@ What the session checks, and why each answer is knowable in advance:
   `LMP_NAME_RES` on the air says which device replied.
 - **lmp-unhandled**: a request this link layer has no handler for is refused
   and named in one `warning:` line per opcode for the life of the connection,
-  not one per packet. These controllers ask for power control several times a
-  second, so a regression to one line per packet is loud.
+  not one per packet. What arrives decides whether there is anything to check
+  it on: these peers asked for power control several times a second when the
+  check was written and volunteer nothing now, so a session where none
+  arrives reports that instead of failing it
+  (ubertooth-test-harness#402).
 - **idle**: `idle` stops the running command, the firmware reports it, and
   the prompt comes back. It runs after the inquiry, after the page, and after
   each of the scan modes.
@@ -117,7 +127,8 @@ packets it decoded; the report, and the tool's standard error marked with
 ``btbr| ``, are on standard error, where the case's patterns read them. Exit
 status is 0 when every check passed, 1 when one did not or the session could
 not be driven, and ``SKIP_EXIT`` with a ``SKIP: <reason>`` line when the run
-built no Python tools to test.
+built no Python tools to test. A check an earlier failure left nothing to
+decide is reported as not run and counted apart from both.
 """
 
 from __future__ import annotations
@@ -171,8 +182,9 @@ IDLE_TIMEOUT_S = 20.0
 # about 2 s and a page connected in about 7 s.
 DEFAULT_INQUIRY_S = 25.0
 DEFAULT_PAGE_S = 30.0
-# How long the connection is held once it is up, so the LMP exchange and the
-# peer's own requests reach the capture.
+# How long the connection is held once it is up: so the LMP exchange and
+# anything the peer sends of its own reach the capture, and so that a
+# connection given up while it is held has the time to be given up.
 DEFAULT_HOLD_S = 10.0
 # Pages after the first, which say that a page completes every time and not
 # once. Each costs the page and a little, and nothing is held on them.
@@ -497,6 +509,12 @@ PAGING_RESUMED = "Paging resumed"
 DECLINED = "closing the link"
 LMP_DETACH_SENT = re.compile(r"(?m)lmp_tx.*LMP_DETACH")
 PEER_DETACHED = "Peer detached"
+# The board's own state machine line, for the one transition that says a
+# connection is no longer held: out of CONNECTED. The setup prints
+# `State CONNECTED -> CONNECTED` once as the connection settles, which is not
+# one. Not anchored at the start of a line: a line printed right after a
+# prompt lands on the end of it.
+LEFT_CONNECTED = re.compile(r"State CONNECTED -> (?!CONNECTED\b)(?P<state>\w+)")
 
 # ---------------------------------------------------------------------------
 # The option values the command line refuses before it looks for a board
@@ -536,6 +554,18 @@ OPTION_TIMEOUT_S = 20.0
 
 class ConsoleError(RuntimeError):
     """The console session could not be driven to the point of a verdict."""
+
+
+class CheckNotRun(Exception):
+    """This check's precondition had gone, so it decided nothing.
+
+    Raised, not returned, because a reason returned is a failure, and a check
+    that never ran is not one: counting it as a failure would put a second
+    reason in the session's verdict that is not about the board at all. The
+    one thing that takes a precondition away is the recovery after an earlier
+    check failed (``_recover``), which sends `idle` and so ends the connection
+    a later check was going to end itself.
+    """
 
 
 def _now() -> float:
@@ -882,6 +912,13 @@ class Session:
     # When the connection came up, so the hold that follows the transmit runs
     # is the hold and not the hold on top of them.
     page_started: float = 0.0
+    # The label of the check whose failure led the recovery to end the
+    # connection this session was holding. `idle` is how a running command is
+    # stopped, and the page that holds a connection is a running command, so
+    # the recovery after a failure inside the connection ends it; the check
+    # that was going to end it then has nothing of its own to decide and says
+    # so (see CheckNotRun).
+    connection_ended_by: str = ""
 
     @property
     def peer_bdaddr(self) -> str:
@@ -1095,33 +1132,83 @@ def check_tx_formats(session: Session) -> str:
 
 
 def check_tx_link(session: Session) -> str:
-    """The connection carries on after the transmit runs.
+    """The board still holds the connection after the transmit runs.
 
     A transmit slot the board could not put on the air used to cost the link
     the repeat it was carrying and the acknowledgment with it (fork #1166),
     and the board says on its console when a slot went nowhere. That cannot be
-    produced on a healthy board, so what a bench can say is this: the link is
-    still carrying packets afterwards, and if the board did report a slot that
-    went nowhere, it carried on regardless. The count is the scheduler-reports
-    check's business; what this one needs is the packet after the runs.
+    produced on a healthy board, so what a bench can say is that the
+    connection the transmit runs went out on is still held afterwards: the
+    board has not left the connected state, link supervision has not ended a
+    link that carried nothing, and neither end has hung up. The `idle` of the
+    check after this one ends that connection, which is the other half of the
+    same statement.
 
-    It needs the peer to be sending, which it is: these controllers ask for
-    power control several times a second for the life of the link, and each
-    request reaches the capture stream as a record. The unhandled-opcode check
-    leans on the same thing, and docs/tests.md says so.
+    A packet arriving in the window is better evidence and is reported where
+    there is one, but it needs the peer to be sending, and the registered
+    ESP32 Classic peer volunteers nothing on a held link: measured on the
+    bench on 2026-11-09, a link held 20 s before any transmit and 10 s after
+    them carried no capture record either side of the runs, while the board
+    stayed in CONNECTED throughout and one `idle` ended it in 0.1 s
+    (ubertooth-test-harness#402, docs/tests.md). So the absence of a packet is
+    reported rather than failed, and a link really given up is what fails.
+
+    Whether the board reported a slot it could not put on the air is counted
+    by scheduler-reports; it is named here where there was one.
     """
     console = session.console
     said = [line for line in SCHEDULER_REFUSALS if line in console.text()]
     mark = console.mark("stdout")
     record, took = console.wait(CAPTURE_LINE, TX_LINK_S, stream="stdout",
                                 since=mark)
-    if record is None:
-        return (f"no packet arrived in the {TX_LINK_S:g}s after the transmit "
-                "runs: the connection did not carry on")
+    # Read after the window, so it covers the whole of it: a link given up
+    # during the runs or just after them is announced a moment later. No
+    # `until` bound, unlike the two checks that read this after their own
+    # `idle`: nothing has sent `idle` yet here, so there is no deliberate
+    # transition out of the connected state to leave out.
+    given_up = _connection_given_up(session)
+    if given_up:
+        return given_up
     note = ("" if not said
             else "; the board had reported " + ", ".join(repr(line) for line in said))
-    session.report(f"check tx-link: the link carried a packet {took:.1f} s "
-                   f"after the runs{note}")
+    carried = (f"the link carried a packet {took:.1f} s after them"
+               if record is not None else
+               f"no packet arrived in the {TX_LINK_S:g}s after them, which "
+               "this peer volunteers none of")
+    session.report("check tx-link: the board still held the connection after "
+                   f"the runs; {carried}{note}")
+    return ""
+
+
+def _connection_given_up(session: Session, until: int | None = None) -> str:
+    """The board did not hold the connection, with what said so, or "".
+
+    Read over the connection's own output, from the page that brought it up,
+    so a link given up at any point while it was held is caught and not only
+    one given up in the moment this is read. ``until`` bounds that window
+    where this is read after the `idle` that ended the connection: that
+    `idle` leaves the connected state itself, and reading past it would make
+    every connection this session held look like one given up.
+
+    The page-train look below takes no such bound and needs none: `idle`
+    answers with `Paging done`, and `Paging resumed` is the pager going back
+    to its train after losing a link, which it has no reason to print once
+    the page has been stopped.
+    """
+    resumed = _connection_lasted(session)
+    if resumed:
+        return resumed
+    text = session.console.text()[session.page_mark:until]
+    if PEER_DETACHED in text:
+        return (f"the peer hung up ({PEER_DETACHED!r}): the connection the "
+                "transmit runs went out on was ended from the other end")
+    sent = LMP_DETACH_SENT.search(text)
+    if sent is not None:
+        return f"this end hung up on the peer: {sent[0]!r}"
+    left = LEFT_CONNECTED.search(text)
+    if left is not None:
+        return ("the board left the connected state while the connection was "
+                f"being held: {left[0]!r}")
     return ""
 
 
@@ -1320,19 +1407,38 @@ def check_page(session: Session) -> str:
 def check_page_idle(session: Session) -> str:
     """The connection is held, and then `idle` ends it.
 
-    The link is held so the peer's own requests reach the capture, which is
-    what the unhandled-opcode check reads. The transmit runs before this one
-    have already held it for a few seconds, so what is left of the hold is
-    what is waited out here.
+    The link is held so that anything the peer sends of its own reaches the
+    capture, and so that a connection given up while it is held has the time
+    to be given up; the transmit runs before this one have already held it for
+    a few seconds, so what is left of the hold is what is waited out here.
+    The look after the `idle` covers the whole of that hold, so a link the
+    peer dropped or the board let go after the transmit check had read fails
+    here.
+
+    Raises CheckNotRun where the recovery after an earlier failure has already
+    ended the connection: `idle` is how the recovery stops a running command,
+    and the page holding a connection is one, so there is then no connection
+    for this check to end. Before that was said out loud, this check waited
+    out its whole window on a board already in standby and reported that
+    `idle` had not worked, which was not true and not its own reason
+    (ubertooth-test-harness#402).
     """
+    if session.connection_ended_by:
+        raise CheckNotRun(
+            "the recovery after " + session.connection_ended_by
+            + " failed sent the `idle` this check exists to send, so the "
+            "connection was already ended and there was none to end here")
     held = _now() - session.page_started if session.page_started else 0.0
     left = max(0.0, session.hold_seconds - held)
     if left:
         time.sleep(left)
+    # Where the hold ends, so the look below covers the connection's own life
+    # and not the `idle` that leaves the connected state on purpose.
+    before_idle = session.console.mark()
     reason = session.idle("page-idle", PAGING_DONE)
     if reason:
         return reason
-    return _connection_lasted(session)
+    return _connection_given_up(session, until=before_idle)
 
 
 def _connection_lasted(session: Session) -> str:
@@ -1419,10 +1525,11 @@ def check_page_repeat(session: Session) -> str:
         # Nothing is held on a repeat, so the connection has had less time to
         # be given up than the first one had; the look costs nothing and the
         # first page is where that is really decided.
+        before_idle = session.console.mark()
         reason = session.idle(f"{label}-idle", PAGING_DONE)
         if reason:
             return reason
-        reason = _connection_lasted(session)
+        reason = _connection_given_up(session, until=before_idle)
         if reason:
             return f"page {number} of {repeats} after the first: {reason}"
     session.report(f"check page-repeat: {repeats} further page(s) completed "
@@ -1449,7 +1556,17 @@ def _check_peer_named(session: Session, out_mark: int,
 
 
 def check_lmp_unhandled(session: Session) -> str:
-    """An LMP request with no handler is named once per opcode, not per packet."""
+    """An LMP request with no handler is named once per opcode, not per packet.
+
+    The rule is what is checked, so what arrived decides whether there was
+    anything to check it on. The registered peer volunteers no LMP on a held
+    link -- measured on the bench on 2026-11-09, and before that on
+    2026-11-01 it asked for power control about four times a second
+    (ubertooth-test-harness#402, docs/tests.md) -- so a session where none
+    arrives reports that rather than failing: nothing about the board or the
+    tool is wrong in it, and the once-per-opcode rule has the fork's own
+    deterministic tests behind it.
+    """
     found: dict[str, int] = {}
     for match in LMP_UNHANDLED.finditer(session.console.text()):
         found[match["opcode"]] = found.get(match["opcode"], 0) + 1
@@ -1459,15 +1576,11 @@ def check_lmp_unhandled(session: Session) -> str:
                 + ", ".join(f"{opcode} {found[opcode]} times"
                             for opcode in repeated))
     if not found:
-        # Nothing arrived, so nothing was decided. These controllers ask for
-        # power control about four times a second for the life of the link,
-        # and this link layer has no handler for it, so a connection held for
-        # the hold above always brings one: none at all is either a peer that
-        # no longer asks or a tool that stopped saying so, and both are worth
-        # a look rather than a quiet pass.
-        return ("no LMP request with no handler was reported at all, so "
-                "nothing was checked: the peer asks for power control several "
-                "times a second, and this link layer refuses it")
+        session.report(
+            "check lmp-unhandled: no request with no handler arrived on the "
+            "held link, so the once-per-opcode rule decided nothing: this "
+            "peer volunteers no LMP")
+        return ""
     session.opcodes = sorted(found)
     session.report("check lmp-unhandled: " + ", ".join(session.opcodes)
                    + " refused, each named once")
@@ -1701,7 +1814,14 @@ def run_session(arguments, out, err, environment) -> int:
         console.start()
         _start(console, report)
         for label, check in planned:
-            reason = check(session)
+            try:
+                reason = check(session)
+            except CheckNotRun as skipped:
+                # Not decided, so not counted: the reason names what took the
+                # precondition away, which is an earlier failure of this
+                # session's own.
+                report(f"check {label}: not run: {skipped}")
+                continue
             decided.append(label)
             if reason:
                 failed_checks.append(label)
@@ -1748,6 +1868,11 @@ def _recover(session: Session, label: str, report) -> None:
     Best effort, and never raises: the session is already failing, and what
     this is for is the checks after it. `idle` with nothing running is
     answered too, so it is sent whether or not anything was left running.
+
+    Where the stop ended a page that was holding a connection, that is
+    recorded: the check that was going to end that connection itself then has
+    nothing of its own to decide, and says so rather than reporting that
+    `idle` did not work (check_page_idle, CheckNotRun).
     """
     console = session.console
     try:
@@ -1758,6 +1883,10 @@ def _recover(session: Session, label: str, report) -> None:
         report(f"after {label}: the board could not be put back in standby "
                f"({error})")
         return
+    if PAGING_DONE in console.text()[mark:]:
+        session.connection_ended_by = label
+        report(f"after {label}: the stop ended the connection this session "
+               "was holding")
     if match is None:
         # The prompt comes back after any line, so this is the tool having
         # stopped answering rather than a board left in a mode; a board that

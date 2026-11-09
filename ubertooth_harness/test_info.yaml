@@ -2174,9 +2174,10 @@ Classic btbr console:
     command lines the host will not take, bdaddr, an address whose first byte
     is zero echoed with its twelve digits, the inquiry, the page and the LMP
     exchange, four transmit runs compared with the packets their formats give,
-    the link still carrying packets after them, the hold and the idle that end
-    the connection, the once-per-opcode report of an LMP request with no
-    handler, the page again with the peer reset before it, the two scan modes,
+    the board still holding that connection after them, the hold and the idle
+    that end the connection, the once-per-opcode report of an LMP request with
+    no handler where one arrives, the page again with the peer reset before
+    it, the two scan modes,
     the count of the board's own refusal lines, no hang-up on a peer that took
     the connection, and the split
     between the capture on standard output and
@@ -2184,7 +2185,10 @@ Classic btbr console:
     end in a paging timeout with no connection, and it also makes five more
     transmit runs, covering three more formats, and pages the peer once
     more. The report says how many checks
-    passed, failed, and never ran. The cleanup always writes the application
+    passed, failed, and never ran; a check whose precondition an earlier
+    failure's recovery took away is reported as not run, not failed, because
+    the recovery's idle ends the connection a later check was going to end.
+    The cleanup always writes the application
     image back, reads it, records the bootloader the application image
     reports, and resets the peer; a cleanup failure fails the case, so the
     board cannot be left on btbr quietly. No cleanup step wants a value the
@@ -2207,9 +2211,13 @@ Classic btbr console:
     an exhausted scheduler, or a page response that never went out: none of
     those can be produced on a healthy board, the fork's firmware tests are the
     gate, and what this test adds is the observable end result -- the page
-    completing every time it is asked, the link carrying packets after the
-    transmit runs, no connection reported and then given up, and a count of
-    every refusal line the board can print. The count allows a few: each line
+    completing every time it is asked, the board still holding the connection
+    after the transmit runs, no connection reported and then given up, and a
+    count of every refusal line the board can print. It does not say the air
+    link was still alive after those runs: what is read is the board's own
+    view, the peer firmware reports nothing about a bare ACL link, and this
+    peer sends nothing on a held link, so there is no traffic to read either
+    (ubertooth-test-harness#402). The count allows a few: each line
     is an exceptional condition the firmware is built to survive, so up to
     three of one line are reported and more than three of the same line
     fails. Those strings are the board's

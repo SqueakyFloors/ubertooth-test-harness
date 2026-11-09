@@ -59,7 +59,10 @@ OTHER_NAME = "Example Device"
 #   slot-not-sent       the board reports one transmit it did not put on the air
 #   scheduler-storm     it reports that transmit over and over
 #   tx-already-waiting  it refuses a tx this session sent
-#   dead-link           the connection carries nothing after the transmit runs
+#   quiet-link          the peer volunteers nothing on the held link, as the
+#                       bench's own peer does (ubertooth-test-harness#402)
+#   peer-hangs-up       the peer ends the connection while it is held
+#   drops-out-of-connected  the board leaves the connected state on its own
 #   second-page-fails   a page after the first is never answered
 #   false-connection    a connection is reported and then the page resumes
 #   stuck-scan          a scan mode never reports itself ready
@@ -303,11 +306,12 @@ link = None
 pending = []
 
 def carry_the_link(stop):
-    """While the connection is up it carries packets, as a real one does.
+    """While the connection is up it carries packets, as one may.
 
-    The peer asks for power control several times a second and this link
-    layer refuses each one, so the capture stream keeps filling for as long
-    as the link lasts.
+    A peer that asks for power control several times a second fills the
+    capture stream for as long as the link lasts, which is what the bench's
+    peers did when these checks were written. `quiet-link` is the peer that
+    volunteers nothing, which is what they do now.
     """
     while not stop.wait(0.2):
         out("RX LMP: BBHdr(lt_addr=1, type=DM1, flags=FA) | (tid 1) "
@@ -318,7 +322,7 @@ def start_the_link():
     stop = threading.Event()
     thread = threading.Thread(target=carry_the_link, args=(stop,), daemon=True)
     link = stop
-    if "dead-link" not in FAULTS:
+    if "quiet-link" not in FAULTS:
         thread.start()
 
 def stop_the_link():
@@ -446,6 +450,16 @@ while True:
             # lands while the connection is being held rather than inside the
             # answers the page itself printed.
             pending.append("Paging resumed")
+        if "peer-hangs-up" in FAULTS:
+            # The other end ends the link while it is held, which is what a
+            # real stack does when it has had enough of a connection. Same
+            # timing as above: delivered while the connection is held.
+            pending.append("Peer detached")
+            pending.append("State CONNECTED -> STANDBY")
+        if "drops-out-of-connected" in FAULTS:
+            # The board leaves the connected state with nothing said about
+            # why, which is the catch-all a link given up has to fall into.
+            pending.append("State CONNECTED -> STANDBY")
         if "hangs-up" in FAULTS:
             err("warning: the peer refused LMP_HOST_CONNECTION_REQ: "
                 "unsupported LMP feature; closing the link")

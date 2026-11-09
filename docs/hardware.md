@@ -246,6 +246,28 @@ also a device an Ubertooth can discover and connect to, which is what
 it before the session, so an earlier test's role, link, or `disc off` cannot
 reach it.
 
+**A bare ACL link is one the peer neither reports nor feeds**, measured on
+2026-11-09 against `utesp-1.6.0` for
+[#402](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/402).
+When an Ubertooth pages the peer without going on to a profile, the link the
+two hold is an ACL link and nothing more, and two things follow.
+
+The peer's shell says nothing about it: `status` counts the links its Serial
+Port Profile and Hands-Free profiles have had, and a connection carrying
+neither is not among them, so the peer cannot be asked which end hung up or
+why. A test that needs that answer needs a third radio watching the air, not
+the peer.
+
+And the peer volunteers no traffic on it. A link held 20 s before any
+transmit carried no capture record at the Ubertooth, and 10 s after four
+`tx` runs carried none either. On 2026-11-01, with the peers on
+`utesp-1.5.0`, the same link brought `LMP_DECR_POWER_REQ` about four times a
+second; the peers were flashed to `utesp-1.6.0` on 2026-11-04, and whether
+that is what stopped the requests is not established — the RF geometry and
+the controller's own power-control state are not ruled out either. So a test
+that wants packets on a held link has to ask for them rather than wait, and
+`Classic btbr console` reads the board's own connection state instead.
+
 The device name is what the peer answers an inquiry and an LMP name request
 with, and the firmware builds it from the board's own address
 (`UT-ESP32-` and the LAP in upper case) and will not let the shell set it. So

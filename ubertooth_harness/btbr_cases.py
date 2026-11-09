@@ -319,8 +319,10 @@ def _console_step(serial: str, peer, *, comprehensive: bool) -> Step:
             rf"'{peer['name']}'$",
             rf"(?m)^check tx-formats: {runs} run\(s\) transmitted, each the "
             r"packet its format gives: ",
-            r"(?m)^check tx-link: the link carried a packet ",
-            r"(?m)^check lmp-unhandled: .*, each named once$",
+            r"(?m)^check tx-link: the board still held the connection after "
+            r"the runs; ",
+            r"(?m)^check lmp-unhandled: (?:.*, each named once"
+            r"|no request with no handler arrived on the held link, .*)$",
             rf"(?m)^check page-repeat: {repeats} further page\(s\) completed "
             r"and named the peer$",
             r"(?m)^check scan-modes: page_scan, inquiry_scan each started, "
