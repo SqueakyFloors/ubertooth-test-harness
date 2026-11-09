@@ -350,6 +350,50 @@ class SessionTests(unittest.TestCase):
                       f"{checks} not run", report)
 
 
+class ConnectionGivenUpTests(unittest.TestCase):
+    """The window the look after a hold reads, and where it stops.
+
+    `idle` ends the connection on purpose and says so with a transition out
+    of the connected state, so the look that follows it has to stop before
+    that line and after everything the hold brought. Both ends of that bound
+    are checked here rather than through the fake board: the window this
+    covers is between the transmit check's read and the `idle`, and the
+    driver sends the board nothing in it, so a fake that answers input lines
+    cannot put a line there to order.
+    """
+
+    HELD = "Connection ready, lt_addr=1\n"
+    IDLE = "Send idle\nState CONNECTED -> STANDBY\nPaging done\n"
+
+    def session(self, text: str):
+        console = btbrconsole.Console(("true",), io.StringIO())
+        stream = btbrconsole.Stream("stderr", io.BytesIO(b""), None, "")
+        console.streams = {"stderr": stream}
+        stream._append(text)
+        return btbrconsole.Session(
+            console, PEER_ADDRESS, PEER_NAME, 1.0, 1.0, 1.0, 1.0,
+            lambda line: None, "", "")
+
+    def test_a_connection_held_and_then_stopped_was_not_given_up(self):
+        session = self.session(self.HELD + self.IDLE)
+        self.assertEqual("", btbrconsole._connection_given_up(
+            session, until=len(self.HELD)))
+
+    def test_without_the_bound_the_idle_itself_reads_as_a_link_given_up(self):
+        # Why the bound is there: `idle` leaves the connected state on
+        # purpose, and the same look that catches a link given up catches
+        # that too if it is allowed to read past it.
+        session = self.session(self.HELD + self.IDLE)
+        self.assertIn("left the connected state",
+                      btbrconsole._connection_given_up(session))
+
+    def test_a_peer_that_hung_up_during_the_hold_is_inside_the_bound(self):
+        held = self.HELD + "Peer detached\n"
+        session = self.session(held + self.IDLE)
+        self.assertIn("the peer hung up", btbrconsole._connection_given_up(
+            session, until=len(held)))
+
+
 class StreamReaderTests(unittest.TestCase):
     """How the reader treats carriage returns, which decide whether a check
     sees an answer the tool printed: every pattern anchors on the end of a

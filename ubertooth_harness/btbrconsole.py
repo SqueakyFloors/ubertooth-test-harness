@@ -1162,7 +1162,10 @@ def check_tx_link(session: Session) -> str:
     record, took = console.wait(CAPTURE_LINE, TX_LINK_S, stream="stdout",
                                 since=mark)
     # Read after the window, so it covers the whole of it: a link given up
-    # during the runs or just after them is announced a moment later.
+    # during the runs or just after them is announced a moment later. No
+    # `until` bound, unlike the two checks that read this after their own
+    # `idle`: nothing has sent `idle` yet here, so there is no deliberate
+    # transition out of the connected state to leave out.
     given_up = _connection_given_up(session)
     if given_up:
         return given_up
@@ -1186,6 +1189,11 @@ def _connection_given_up(session: Session, until: int | None = None) -> str:
     where this is read after the `idle` that ended the connection: that
     `idle` leaves the connected state itself, and reading past it would make
     every connection this session held look like one given up.
+
+    The page-train look below takes no such bound and needs none: `idle`
+    answers with `Paging done`, and `Paging resumed` is the pager going back
+    to its train after losing a link, which it has no reason to print once
+    the page has been stopped.
     """
     resumed = _connection_lasted(session)
     if resumed:
