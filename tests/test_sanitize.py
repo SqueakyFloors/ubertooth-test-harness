@@ -278,6 +278,35 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(
             line_findings(f"-I{sanitize.PATH}/../host/libubertooth/src"), [])
 
+    def test_a_token_with_a_space_is_a_head_and_a_redirect_is_not(self):
+        # A case names a directory it deliberately did not create as
+        # `<missing dir>`, and the token's space must not cost it its
+        # meaning. A redirect ends in the same character and opens no token,
+        # whether or not a space precedes it (#426).
+        for line in ("transition passed: ubertooth-rx -i <fixture> -d "
+                     "<missing dir>/x.bin",
+                     "mkdir <the missing one>/a/b"):
+            with self.subTest(line=line):
+                self.assertEqual(line_findings(line), [])
+        for line in ("ubertooth-dump <in >/srv/bench/out.log",
+                     "ubertooth-dump 2>/srv/bench/out.log"):
+            with self.subTest(line=line):
+                self.assertEqual([item.text for item in line_findings(line)],
+                                 ["/srv/bench/out.log"])
+
+    def test_a_quantifier_in_a_recorded_pattern_is_a_head_and_a_glob_is_not(self):
+        # A case records the output it expects as a regular expression, which
+        # stands in for a directory the way a placeholder does (#426).
+        self.assertEqual(line_findings(
+            r'"pattern": "(?m)^error: -q and -d cannot both write to one '
+            r'file \(\S*/cap\.pcap and \S*/\./cap\.pcap\)$"'), [])
+        self.assertEqual(line_findings("extcap .*/cap.pcapng written"), [])
+        for line in ("cp * /srv/bench/x", "ls /srv/bench/*"):
+            with self.subTest(line=line):
+                self.assertIn(
+                    sanitize.RULE_PATH,
+                    [item.rule for item in line_findings(line)])
+
     def test_a_path_whose_head_a_record_already_took_out_is_not_a_path(self):
         # A case describes its own scratch directory as `<dir>`, so the
         # transcript carries the tail of a path whose head is already gone.

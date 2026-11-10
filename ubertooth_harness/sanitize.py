@@ -361,14 +361,23 @@ _ABSOLUTE_PATH = re.compile(
 RELATIVE_DOTS = (1, 2)
 # A token standing in for something taken out, written where the thing was:
 # this module's own placeholders, and the ones the harness writes of its own
-# -- a case describes its scratch directory as `<dir>`, so a transcript says
-# `mkdir <dir>/in-the-way` and `ubertooth-btle -q <dir>/new.pcap stray`. A
-# slash after one belongs to a path whose head is already gone (#413), so it
-# starts nothing. The pattern wants the whole token, `<` to `>` with no space
-# or slash inside, which is what keeps it off a shell redirect: `2>` ends in
-# the same character and opens no token, so `2>/srv/bench/out.log` is still
-# read.
-_REDACTED_HEAD = re.compile(r"<[A-Za-z][A-Za-z0-9_.-]*>$")
+# -- a case describes its scratch directory as `<dir>` and a directory it
+# deliberately did not create as `<missing dir>`, so a transcript says
+# `mkdir <dir>/in-the-way` and `ubertooth-rx -i <fixture> -d <missing
+# dir>/x.bin`. A slash after one belongs to a path whose head is already gone
+# (#413), so it starts nothing. The pattern wants the whole token, `<` to `>`
+# with no slash inside and a space allowed between words but not before the
+# `>`, which is what keeps it off a shell redirect: `2>` and `<in >` both end
+# in the same character and open no token, so `2>/srv/bench/out.log` and
+# `cmd <in >/srv/bench/out.log` are still read (#426).
+_REDACTED_HEAD = re.compile(r"<[A-Za-z](?:[A-Za-z0-9 _.-]*[A-Za-z0-9_.-])?>$")
+# A pattern, not a path. A case records the output it expects as a regular
+# expression, and where that output carries a directory the pattern stands in
+# for it: `\(\S*/cap\.pcap and \S*/\./cap\.pcap\)`. A quantifier is not a
+# path character, so a slash straight after a quantified atom starts no path
+# either (#426). A glob is written with a space after it (`cp * /srv/bench`),
+# which this does not match and the scan still reads.
+_PATTERN_HEAD = re.compile(r"(?:\\[A-Za-z.]|[.)\]])[*+]$")
 _MAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+")
 # `user@machine` without a domain, which is how an SSH destination and a
 # lease holder are written. A placeholder is allowed on the left, because
@@ -452,10 +461,12 @@ def _path_findings(line: str) -> Iterable[str]:
     before the slash rather than by the slash alone -- a token this reads as
     the middle of is not a path of its own:
 
-    * a path whose head is already gone, written straight after the token
-      that replaced it: this module's own placeholders (`<home>/src`, or
-      `<path>/../host/libubertooth/src` where the prefix named a build tree)
-      and the ones the harness writes of its own (`<dir>/new.pcap`);
+    * a path whose head is already gone, written straight after what replaced
+      it: this module's own placeholders (`<home>/src`, or
+      `<path>/../host/libubertooth/src` where the prefix named a build tree),
+      the tokens the harness writes of its own (`<dir>/new.pcap`,
+      `<missing dir>/x.bin`), and the quantifier a recorded pattern stands in
+      for a directory with (`\\S*/cap\\.pcap`);
     * the `//` of a URL, which is evidence;
     * a relative path a build named its own trees with (`-I../common`), which
       names no directory on any host.
@@ -482,7 +493,8 @@ def _path_findings(line: str) -> Iterable[str]:
         path = match.group(1)
         before = line[:match.start()]
         if (before.endswith("://") or _dot_relative(before)
-                or _REDACTED_HEAD.search(before)):
+                or _REDACTED_HEAD.search(before)
+                or _PATTERN_HEAD.search(before)):
             continue
         if (_root(path) in SYSTEM_ROOTS
                 and _root(posixpath.normpath(path)) in SYSTEM_ROOTS):
