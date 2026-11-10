@@ -33,10 +33,14 @@ allowed (:data:`SYSTEM_ROOTS`), and any other absolute path is a finding, on
 the view that a path this does not recognize is more likely a bench's own
 directory than something a reader needs. ``--strip-path`` is how an operator
 answers one: it names the prefix, which :func:`sanitize` then replaces before
-the scan ever sees it. A root is judged by its first component only, so a
-bench that keeps its runs under an allowed root (``/opt/<bench name>``) has
-to name that prefix too; judging further would refuse the toolchain and
-library paths a build legitimately records.
+the scan ever sees it. A slash begins a path only when the text before it
+says so: one inside a relative token a build wrote (``-I../common``), or one
+straight after a placeholder the rewriting left, belongs to that token and is
+not a path of its own (#413). A root is judged by its first component, as
+written and as the ``..`` in the path leave it, so a bench that keeps its runs
+under an allowed root (``/opt/<bench name>``) has to name that prefix too;
+judging further would refuse the toolchain and library paths a build
+legitimately records.
 
 The two halves read a name with one function (:func:`_name_pattern`), which
 matters: a gate that read a name more widely than the rewriting would refuse
@@ -53,6 +57,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 import ipaddress
+import posixpath
 import re
 
 from ubertooth_harness.report import REDACTED, redact_serials
@@ -337,11 +342,21 @@ SYSTEM_ROOTS = (
 # a colon-separated list (`PKG_CONFIG_PATH=/usr/lib:/srv/bench/lib`) is read
 # as the second path and not swallowed by the first; a `>` does not stop one
 # either, so a path after a shell redirect (`2>/srv/bench/out.log`) is read.
-# What that costs is the `>` a placeholder ends with and the `://` of a URL,
-# and ``_path_findings`` looks at the text before each match for both.
+# What that costs is the `>` a placeholder ends with, the `://` of a URL, and
+# the dot a relative path leads with, and ``_path_findings`` looks at the
+# text before each match for all three.
 _ABSOLUTE_PATH = re.compile(
     r"(?<![\w/~])(/[A-Za-z0-9_.][^\s\"'`)\]},;|:]*)"
 )
+# How many dots before a slash make the slash part of a relative path rather
+# than the start of an absolute one. A build names its own trees with one or
+# two and records the command it ran: the firmware compiles with
+# `-Wa,-alhms=./bluetooth_rxtx.lst`, `-I../common`, and
+# `-I../../host/libubertooth/src`, none of which is a path on any host (#413).
+# A longer run is not a path component: `...` is how this module and report.py
+# mark text they cut, so `cut.../srv/bench/x` is still read as the path it
+# carries.
+RELATIVE_DOTS = (1, 2)
 _MAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+")
 # `user@machine` without a domain, which is how an SSH destination and a
 # lease holder are written. A placeholder is allowed on the left, because
@@ -393,28 +408,56 @@ def _excerpt(line: str, found: str) -> str:
     return text[:EXCERPT_CHARS] + ("..." if len(text) > EXCERPT_CHARS else "")
 
 
+def _dot_relative(before: str) -> bool:
+    """Is the slash after ``before`` inside a relative path, not starting one?
+
+    ``before`` is the text up to the slash, so the dots it ends with are the
+    path component the slash belongs to: one or two of them (`./x`, `../x`,
+    `a/../b`) make the token relative, and :data:`RELATIVE_DOTS` says why a
+    longer run does not.
+    """
+    return len(before) - len(before.rstrip(".")) in RELATIVE_DOTS
+
+
+def _root(path: str) -> str:
+    """The first component of an absolute path, which is what is judged."""
+    rest = path[1:]
+    return "/" + rest.split("/", 1)[0] if "/" in rest else path
+
+
 def _path_findings(line: str) -> Iterable[str]:
     """Every absolute path in the line this export does not recognize.
 
-    Two things that look like one are left: a path written straight after a
-    placeholder, which is what the rewriting produced (`<home>/src`), and the
-    `//` of a URL, which is evidence.
+    Three things that look like one are left, and each is judged by the text
+    before the slash rather than by the slash alone -- a token this reads as
+    the middle of is not a path of its own:
 
-    What this does not read is the rest of an allowed path: a root is judged
-    by its first component, so a bench that keeps its runs under
-    ``/opt/<bench name>`` publishes that name whole and has to be named with
-    ``--strip-path``. Judging further would refuse the toolchain and library
-    paths a build legitimately records.
+    * a path written straight after a placeholder, which is what the
+      rewriting produced (`<home>/src`, or `<path>/../host/libubertooth/src`
+      where the prefix named a build tree);
+    * the `//` of a URL, which is evidence;
+    * a relative path a build named its own trees with (`-I../common`), which
+      names no directory on any host.
+
+    A path that is one is judged by its first component, as written and as
+    the `..` in it leave it: a toolchain path that climbs about inside an
+    allowed root (``/usr/lib/gcc/../../include``) is the kind a build
+    legitimately records, and one that climbs out of it
+    (``/usr/../srv/bench``) names the bench whatever it starts with. What
+    this does not read is the rest of an allowed path, so a bench that keeps
+    its runs under an allowed root (``/opt/<bench name>``) publishes that
+    name whole and has to name the prefix with ``--strip-path``; judging
+    further would refuse the library paths a build legitimately records.
     """
     for match in _ABSOLUTE_PATH.finditer(line):
         path = match.group(1)
         before = line[:match.start()]
-        if before.endswith("://") or any(
+        if before.endswith("://") or _dot_relative(before) or any(
             before.endswith(mark) for mark in PLACEHOLDERS
         ):
             continue
-        root = "/" + path.split("/", 2)[1] if "/" in path[1:] else path
-        if root in SYSTEM_ROOTS or path in SYSTEM_ROOTS:
+        if (_root(path) in SYSTEM_ROOTS
+                and _root(posixpath.normpath(path)) in SYSTEM_ROOTS):
             continue
         yield path
 

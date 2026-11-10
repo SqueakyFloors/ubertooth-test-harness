@@ -132,11 +132,16 @@ every absolute path a host tool, the operating system, or a package manager
 legitimately names is allowed (`/usr`, `/dev`, `/opt`, `/etc`, `/Library`,
 and the rest), and **any other absolute path is a refusal**, on the view
 that a path this does not recognize is more likely a bench's own directory
-than something a reader needs. `--strip-path` is how you answer one. A root
-is judged by its first component only, so a bench that keeps its runs under
-an allowed root (`/opt/<bench name>`) has to name that prefix too; judging
-further would refuse the toolchain and library paths a build legitimately
-records.
+than something a reader needs. `--strip-path` is how you answer one. A slash
+begins a path only when what precedes it says so: one inside a relative
+token a build wrote (`-I../common`, `-Wa,-alhms=./bluetooth_rxtx.lst`), or
+one straight after a placeholder the rewriting left, belongs to that token
+and names no directory on any host. A root is judged by its first component,
+as written and as the `..` in the path leave it, so a toolchain path that
+climbs about inside an allowed root is kept and one that climbs out of it is
+refused; a bench that keeps its runs under an allowed root (`/opt/<bench
+name>`) has to name that prefix too, since judging further would refuse the
+library paths a build legitimately records.
 
 The two halves read a private name with one function, deliberately: a gate
 that read a name more widely than the rewriting would refuse a line the
