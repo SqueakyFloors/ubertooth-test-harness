@@ -136,7 +136,11 @@ than something a reader needs. `--strip-path` is how you answer one. A slash
 begins a path only when what precedes it says so: one inside a relative
 token a build wrote (`-I../common`, `-Wa,-alhms=./bluetooth_rxtx.lst`), or
 one straight after a placeholder the rewriting left, belongs to that token
-and names no directory on any host. A root is judged by its first component,
+and names no directory on any host. A relative path is read the way every
+relative path always has been (`output/016-dump.stderr.log` is not a path
+either), so a bench directory a build writes relatively is answered the same
+way as the rest: name it with `--strip-path`, which is rewritten wherever it
+appears, relative spelling included. A root is judged by its first component,
 as written and as the `..` in the path leave it, so a toolchain path that
 climbs about inside an allowed root is kept and one that climbs out of it is
 refused; a bench that keeps its runs under an allowed root (`/opt/<bench

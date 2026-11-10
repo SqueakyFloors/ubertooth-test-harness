@@ -439,6 +439,14 @@ def _path_findings(line: str) -> Iterable[str]:
     * a relative path a build named its own trees with (`-I../common`), which
       names no directory on any host.
 
+    The last of those is read as every other relative path always has been:
+    `-Isrv/bench/x` was never a finding, so `-I../srv/bench/x` is not one
+    either, and the dots are not what decides it. What this costs is a
+    directory name an export was not told about and a build wrote relatively;
+    what still covers it is the rest of the module, since a name the export
+    knows is found anywhere in a line and a ``--strip-path`` prefix is
+    rewritten anywhere in one.
+
     A path that is one is judged by its first component, as written and as
     the `..` in it leave it: a toolchain path that climbs about inside an
     allowed root (``/usr/lib/gcc/../../include``) is the kind a build

@@ -246,6 +246,25 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(
             line_findings(f"-I{sanitize.PATH}/../host/libubertooth/src"), [])
 
+    def test_a_relative_path_is_read_the_same_way_however_it_is_spelled(self):
+        # This rule reads absolute paths, and a relative one names no
+        # directory on any host. The same tail without the dots was always
+        # published, so the dots cannot be what decides it.
+        for line in ("-I../srv/bench/private/include",
+                     "-Isrv/bench/private/include",
+                     "-I./srv/bench/private/include"):
+            with self.subTest(line=line):
+                self.assertEqual(line_findings(line), [])
+        # What the export does know to be private is still found inside one,
+        # and a prefix an operator named is rewritten there too, so a bench
+        # directory is answered in either spelling.
+        self.assertEqual(sanitize.sanitize("-I../bench-linux-7/include", BENCH),
+                         f"-I../{HOST}/include")
+        named = Private().with_paths(("/srv/bench",))
+        self.assertEqual(
+            sanitize.sanitize("-I../srv/bench/private/include", named),
+            f"-I..{sanitize.PATH}/private/include")
+
     def test_a_path_after_text_this_module_cut_is_still_read(self):
         # Three dots are how a cut is marked, not a path component, so a
         # bench path that lands against one is still refused.
