@@ -165,13 +165,22 @@ OVERFLOW_ATTEMPTS = 3
 # for two interpreter start-ups and the fake's first record on a loaded
 # machine, and it is what that attempt costs.
 OVERFLOW_CLOCK_S = 5.0
+# How many times each failure the capture reports is brought on, so that one
+# which only usually arrives in time shows up here, and the seconds the fake
+# is held back for on the last of those attempts, which is what a loaded
+# machine does to it. The delay is longer than the 2-second budget those
+# cases used to allow themselves, so a case that waited a clock out rather
+# than waiting for its own condition would read an empty FIFO (issue #417).
+FAILURE_ATTEMPTS = 3
+SLOW_WRITER_S = 2.5
 
 # ubertooth-btle -f -U <serial> -q <fifo> -A <channel> as at fork 71e1a8a: -A
 # is checked before the FIFO is opened; the FIFO is opened (header written)
 # before the board, so an unknown serial ends after the header with exit 1;
 # SIGTERM ends the capture with exit 0. FAKE_BTLE switches on a bug ("quiet"
 # is no traffic in range: the header, then no record); FAKE_RECORDS caps the
-# records sent.
+# records sent; FAKE_DELAY holds everything it does back by that many seconds,
+# which is what a machine under load does to it.
 FAKE_BTLE = r'''#!PYTHON
 import os, signal, struct, sys, time
 # A C program's default: a write to a FIFO nobody reads any more kills it.
@@ -186,6 +195,7 @@ bug = os.environ.get("FAKE_BTLE", "")
 limit = int(os.environ.get("FAKE_RECORDS", "0"))
 if bug == "quiet":
     limit = -1
+time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
 channel = int(args[args.index("-A") + 1])
 if channel not in (37, 38, 39):
     if bug == "slow-refusal":
@@ -298,19 +308,20 @@ class Fixture:
         self.path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
         self.fifo = str(self.root / "extcap.fifo")
 
-    def capture(self, extcap_args, *, bug="", boards=SERIAL_A, records=0, **options):
+    def capture(self, extcap_args, *, bug="", boards=SERIAL_A, records=0, delay=0.0,
+                **options):
         out = io.StringIO()
         env = {"PATH": self.path, "FAKE_BTLE": bug, "FAKE_BOARDS": boards,
-               "FAKE_RECORDS": str(records)}
+               "FAKE_RECORDS": str(records), "FAKE_DELAY": str(delay)}
         # stop_after_records ends a capture that is going to pass as soon as
-        # the records it checks have arrived, and a refused capture ends when
-        # the script does, so the seconds are only a limit for them: a long
-        # one costs nothing and no longer races two Python start-ups on a
-        # busy machine (1.5 s ran out under the parallel suite, 0.5 s before
-        # that). A test that has to reach the limit (no traffic at all, a
-        # capture that is meant to keep running) passes its own seconds, and
-        # so does one that turns on what the fake writes after its third
-        # record, with stop_after_records=None.
+        # the records it checks have arrived, a refused capture ends when the
+        # script does, and so does one the fake ends by exiting or by cutting
+        # a record short, so the seconds are only a limit for all of them: a
+        # long one costs nothing and no longer races two Python start-ups on
+        # a busy machine (2 s ran out at a load average of 140, 1.5 s under
+        # the parallel suite, 0.5 s before that). Only a test that has to
+        # reach the limit (no traffic at all, a capture that is meant to keep
+        # running) passes its own seconds.
         with mock.patch.dict(os.environ, env), redirect_stdout(out), \
                 mock.patch("sys.stderr", io.StringIO()):
             code = extcapcapture.capture(
@@ -418,23 +429,39 @@ class CaptureTests(unittest.TestCase):
 
     def test_failures(self):
         fixture = self.fixture()
-        # The last two turn on what the fake does after its third record, so
-        # they wait for it rather than stopping at a record count.
+        # Each case ends on what it is about, not on a clock: the first two
+        # as soon as the records they check have arrived, the last two as
+        # soon as the script exits, which the fake's third record brings on
+        # by exiting 1 or by cutting a record short. The seconds are the
+        # fixture's limit, which a case only reaches when something is wrong;
+        # the 2 seconds they used to allow themselves raced two interpreter
+        # start-ups under heavy load, and the capture then refused an empty
+        # FIFO rather than reporting the failure the case is about (issue
+        # #417). How the capture ended is asserted too, so a case that did
+        # run out of its limit says so instead of failing on the missing
+        # FAIL line. Each failure is brought on FAILURE_ATTEMPTS times, the
+        # last of them against a fake held back for longer than that old
+        # budget, which is this flake with the load left out.
         cases = {
-            "wrong-channel": ("advertising records on RF channel(s) [0], not only 12", 3),
-            "link-type": ("link type 192, not 256", 3),
-            "truncated": ("truncated", None),
-            "exits": ("btle-extcap exited 1 before the stop", None),
+            "wrong-channel": ("advertising records on RF channel(s) [0], not only 12",
+                              3, "extcap exit: 0 (after SIGTERM)"),
+            "link-type": ("link type 192, not 256", 3, "extcap exit: 0 (after SIGTERM)"),
+            "truncated": ("truncated", None, "extcap exit: 0 (before the stop)"),
+            "exits": ("btle-extcap exited 1 before the stop", None,
+                      "extcap exit: 1 (before the stop)"),
         }
-        for bug, (failure, stop) in cases.items():
-            with self.subTest(bug):
-                code, out = fixture.capture(
-                    (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=38"),
-                    bug=bug, board=SERIAL_A, channel=38, seconds=2,
-                    stop_after_records=stop)
-                self.assertEqual(1, code, out)
-                self.assertRegex(out, rf"(?m)^FAIL: .*{re.escape(failure)}")
-                self.assertNotIn("capture checks passed", out)
+        for bug, (failure, stop, ending) in cases.items():
+            for attempt in range(1, FAILURE_ATTEMPTS + 1):
+                delay = SLOW_WRITER_S if attempt == FAILURE_ATTEMPTS else 0.0
+                with self.subTest(bug, attempt=attempt, delay=delay):
+                    code, out = fixture.capture(
+                        (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=38"),
+                        bug=bug, board=SERIAL_A, channel=38, delay=delay,
+                        stop_after_records=stop)
+                    self.assertEqual(1, code, out)
+                    self.assertIn(ending, out)
+                    self.assertRegex(out, rf"(?m)^FAIL: .*{re.escape(failure)}")
+                    self.assertNotIn("capture checks passed", out)
 
     def test_the_board_and_channel_must_reach_ubertooth_btle(self):
         fixture = self.fixture()
