@@ -145,6 +145,38 @@ class SanitizeTests(unittest.TestCase):
             f"/dev/serial/by-id/usb-SEGGER_J-Link_{SERIAL}-if00",
         )
 
+    def test_a_masked_port_name_is_published_model_number_and_all(self):
+        # A bridge's by-id name carries the vendor's model number beside the
+        # serial, and `CP2102N` is four digits: the export refused hundreds
+        # of lines over one after the serial was masked exactly as intended
+        # (#424).
+        for text, expected in (
+            ("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
+             "Controller_48fed63583bef011a861c37948e9de0f-if00-port0",
+             "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
+             f"Controller_{SERIAL}-if00-port0"),
+            ("/dev/serial/by-id/usb-FTDI_FT232R_USB_UART-if00-port0",
+             "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART-if00-port0"),
+        ):
+            with self.subTest(text=text):
+                clean = sanitize.sanitize(text, BENCH)
+                self.assertEqual(clean, expected)
+                self.assertEqual(line_findings(clean, BENCH), [])
+
+    def test_a_port_name_whose_serial_was_missed_is_still_refused(self):
+        # The masking is told the serials a run recorded. One it was not told
+        # about is what this rule is the backstop for, in either width the
+        # bench's own ports carry.
+        for text in (
+            "/dev/serial/by-id/usb-SEGGER_J-Link_001050204517-if00",
+            "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
+            "Controller_7c58657c25bef01199babd7948e9de0f-if00-port0",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(
+                    sanitize.RULE_SERIAL,
+                    [item.rule for item in line_findings(text, Private())])
+
     def test_an_alias_inside_a_longer_alias_is_not_replaced_on_its_own(self):
         # `UT` is a registered alias of its own and `UT_0` is another: the
         # longer one is replaced as itself, not as `UT` and a stray `_0`.
@@ -197,6 +229,145 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(line_findings(
             "https://github.com/SqueakyFloors/ubertooth/releases"), [])
         self.assertEqual(line_findings(f"built in {sanitize.PATH}/host"), [])
+
+    def test_a_builds_own_relative_arguments_are_not_paths(self):
+        # The firmware compiles with its include and listing arguments
+        # written relative to the directory make ran in, and the run records
+        # the command. None of those slashes starts a path on any host, and
+        # the export refused the whole DEV2 bundle over them (#413).
+        line = (
+            "arm-none-eabi-gcc -D__thumb2__=1 -msoft-float -mtune=cortex-m3 "
+            "-Wa,-alhms=./bluetooth_rxtx.lst -I../common "
+            "-I../common/lpcusb/target -I../../host/libubertooth/src "
+            "-std=gnu99 -I. -MMD -MP -MD bluetooth_rxtx.c"
+        )
+        self.assertEqual(sanitize.sanitize(line, BENCH), line)
+        self.assertEqual(line_findings(line, BENCH), [])
+
+    def test_a_relative_argument_is_read_the_same_way_quoted(self):
+        for line in ('-I"../common"', "-I'../common'", '-I "../common"',
+                     "cc -o ./build/x.o -c ../common/x.c"):
+            with self.subTest(line=line):
+                self.assertEqual(line_findings(line), [])
+
+    def test_an_absolute_argument_of_the_same_form_is_still_a_finding(self):
+        # The relative form is what a build writes; the absolute form names a
+        # directory on the test host, and naming it is what the gate is for.
+        for line, path in (
+            ("-I /srv/bench/common", "/srv/bench/common"),
+            ("-Wa,-alhms=/srv/bench/bluetooth_rxtx.lst",
+             "/srv/bench/bluetooth_rxtx.lst"),
+            ('-I"/srv/bench/common"', "/srv/bench/common"),
+            ("make -C /srv/bench/firmware", "/srv/bench/firmware"),
+        ):
+            with self.subTest(line=line):
+                found = line_findings(line)
+                self.assertEqual([item.rule for item in found],
+                                 [sanitize.RULE_PATH])
+                self.assertEqual(found[0].text, path)
+
+    def test_traversal_neither_launders_a_path_nor_makes_one(self):
+        # Climbing out of an allowed root does not make the bench directory
+        # it lands in publishable; climbing about inside one is what a
+        # toolchain path does; and a traversal the rewriting left behind a
+        # placeholder is not a path of its own.
+        found = line_findings("-I /usr/../srv/bench/include")
+        self.assertEqual([item.rule for item in found], [sanitize.RULE_PATH])
+        self.assertEqual(found[0].text, "/usr/../srv/bench/include")
+        self.assertEqual(line_findings("-I /usr/lib/gcc/../../include"), [])
+        self.assertEqual(
+            line_findings(f"-I{sanitize.PATH}/../host/libubertooth/src"), [])
+
+    def test_a_token_with_a_space_is_a_head_and_a_redirect_is_not(self):
+        # A case names a directory it deliberately did not create as
+        # `<missing dir>`, and the token's space must not cost it its
+        # meaning. A redirect ends in the same character and opens no token,
+        # whether or not a space precedes it (#426).
+        for line in ("transition passed: ubertooth-rx -i <fixture> -d "
+                     "<missing dir>/x.bin",
+                     "mkdir <the missing one>/a/b"):
+            with self.subTest(line=line):
+                self.assertEqual(line_findings(line), [])
+        for line in ("ubertooth-dump <in >/srv/bench/out.log",
+                     "ubertooth-dump 2>/srv/bench/out.log"):
+            with self.subTest(line=line):
+                self.assertEqual([item.text for item in line_findings(line)],
+                                 ["/srv/bench/out.log"])
+
+    def test_a_quantifier_in_a_recorded_pattern_is_a_head_and_a_glob_is_not(self):
+        # A case records the output it expects as a regular expression, which
+        # stands in for a directory the way a placeholder does (#426).
+        self.assertEqual(line_findings(
+            r'"pattern": "(?m)^error: -q and -d cannot both write to one '
+            r'file \(\S*/cap\.pcap and \S*/\./cap\.pcap\)$"'), [])
+        self.assertEqual(line_findings("extcap .*/cap.pcapng written"), [])
+        for line in ("cp * /srv/bench/x", "ls /srv/bench/*"):
+            with self.subTest(line=line):
+                self.assertIn(
+                    sanitize.RULE_PATH,
+                    [item.rule for item in line_findings(line)])
+
+    def test_a_path_whose_head_a_record_already_took_out_is_not_a_path(self):
+        # A case describes its own scratch directory as `<dir>`, so the
+        # transcript carries the tail of a path whose head is already gone.
+        # The DEV2 export refused 96 distinct things over this, most of them
+        # this form (#413).
+        for line in (
+            "transition passed: ubertooth-btle -q <dir>/new.pcap stray",
+            "STEP PASS: mkdir <dir>/in-the-way",
+            "One SIGINT to ubertooth-dump -d <dir>/dump.bin, once it has written",
+            f"built in {sanitize.PATH}/host, logs in {TMP}/x, home {HOME}/src",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(line_findings(line), [])
+
+    def test_a_redirect_is_not_a_token_and_the_path_after_it_is_read(self):
+        # `2>` ends in the character a token ends in and opens no token, so
+        # the rule that leaves `<dir>/x` alone must not leave this alone.
+        for line in ("ubertooth-dump 2>/srv/bench/out.log",
+                     "ubertooth-dump 2> /srv/bench/out.log",
+                     "ubertooth-dump <dir >/srv/bench/out.log"):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    [item.text for item in line_findings(line)],
+                    ["/srv/bench/out.log"])
+
+    def test_a_relative_path_is_read_the_same_way_however_it_is_spelled(self):
+        # This rule reads absolute paths, and a relative one names no
+        # directory on any host. The same tail without the dots was always
+        # published, so the dots cannot be what decides it.
+        for line in ("-I../srv/bench/private/include",
+                     "-Isrv/bench/private/include",
+                     "-I./srv/bench/private/include"):
+            with self.subTest(line=line):
+                self.assertEqual(line_findings(line), [])
+        # What the export does know to be private is still found inside one,
+        # and a prefix an operator named is rewritten there too, so a bench
+        # directory is answered in either spelling.
+        self.assertEqual(sanitize.sanitize("-I../bench-linux-7/include", BENCH),
+                         f"-I../{HOST}/include")
+        named = Private().with_paths(("/srv/bench",))
+        self.assertEqual(
+            sanitize.sanitize("-I../srv/bench/private/include", named),
+            f"-I..{sanitize.PATH}/private/include")
+
+    def test_a_path_after_text_this_module_cut_is_still_read(self):
+        # Three dots are how a cut is marked, not a path component, so a
+        # bench path that lands against one is still refused.
+        found = line_findings("logged to.../srv/bench/out.log")
+        self.assertEqual([item.text for item in found], ["/srv/bench/out.log"])
+
+    def test_a_command_line_of_several_path_forms_names_only_the_bench_one(self):
+        line = (
+            f"/usr/bin/make -C {sanitize.PATH}/firmware/bluetooth_rxtx "
+            "-I../common -I '/srv/bench/vendor/include' -L/opt/homebrew/lib "
+            f"-o {HOME}/out.elf 2>/srv/bench/build.log"
+        )
+        found = line_findings(line, BENCH)
+        self.assertEqual([item.rule for item in found],
+                         [sanitize.RULE_PATH, sanitize.RULE_PATH])
+        self.assertEqual([item.text for item in found],
+                         ["/srv/bench/vendor/include", "/srv/bench/build.log"])
 
     def test_a_sanitized_line_of_everything_comes_back_clean(self):
         line = (

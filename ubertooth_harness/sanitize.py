@@ -33,10 +33,14 @@ allowed (:data:`SYSTEM_ROOTS`), and any other absolute path is a finding, on
 the view that a path this does not recognize is more likely a bench's own
 directory than something a reader needs. ``--strip-path`` is how an operator
 answers one: it names the prefix, which :func:`sanitize` then replaces before
-the scan ever sees it. A root is judged by its first component only, so a
-bench that keeps its runs under an allowed root (``/opt/<bench name>``) has
-to name that prefix too; judging further would refuse the toolchain and
-library paths a build legitimately records.
+the scan ever sees it. A slash begins a path only when the text before it
+says so: one inside a relative token a build wrote (``-I../common``), or one
+straight after a placeholder the rewriting left, belongs to that token and is
+not a path of its own (#413). A root is judged by its first component, as
+written and as the ``..`` in the path leave it, so a bench that keeps its runs
+under an allowed root (``/opt/<bench name>``) has to name that prefix too;
+judging further would refuse the toolchain and library paths a build
+legitimately records.
 
 The two halves read a name with one function (:func:`_name_pattern`), which
 matters: a gate that read a name more widely than the rewriting would refuse
@@ -53,6 +57,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 import ipaddress
+import posixpath
 import re
 
 from ubertooth_harness.report import REDACTED, redact_serials
@@ -60,7 +65,9 @@ from ubertooth_harness.report import REDACTED, redact_serials
 
 # What each kind of private thing becomes. They carry their angle brackets so
 # a reader can tell a placeholder from a name, and so the scan below can tell
-# one from a path it has to judge: every placeholder ends in ``>``.
+# a path whose head is gone from one it has to judge: a placeholder is a
+# ``<token>``, which is the form the scan looks for (:data:`_REDACTED_HEAD`),
+# and the harness writes tokens of its own in that form too.
 HOME = "<home>"
 TMP = "<tmp>"
 # A prefix an operator named with ``--strip-path``, and the source checkouts
@@ -337,11 +344,40 @@ SYSTEM_ROOTS = (
 # a colon-separated list (`PKG_CONFIG_PATH=/usr/lib:/srv/bench/lib`) is read
 # as the second path and not swallowed by the first; a `>` does not stop one
 # either, so a path after a shell redirect (`2>/srv/bench/out.log`) is read.
-# What that costs is the `>` a placeholder ends with and the `://` of a URL,
-# and ``_path_findings`` looks at the text before each match for both.
+# What that costs is the `>` a placeholder ends with, the `://` of a URL, and
+# the dot a relative path leads with, and ``_path_findings`` looks at the
+# text before each match for all three.
 _ABSOLUTE_PATH = re.compile(
     r"(?<![\w/~])(/[A-Za-z0-9_.][^\s\"'`)\]},;|:]*)"
 )
+# How many dots before a slash make the slash part of a relative path rather
+# than the start of an absolute one. A build names its own trees with one or
+# two and records the command it ran: the firmware compiles with
+# `-Wa,-alhms=./bluetooth_rxtx.lst`, `-I../common`, and
+# `-I../../host/libubertooth/src`, none of which is a path on any host (#413).
+# A longer run is not a path component: `...` is how this module and report.py
+# mark text they cut, so `cut.../srv/bench/x` is still read as the path it
+# carries.
+RELATIVE_DOTS = (1, 2)
+# A token standing in for something taken out, written where the thing was:
+# this module's own placeholders, and the ones the harness writes of its own
+# -- a case describes its scratch directory as `<dir>` and a directory it
+# deliberately did not create as `<missing dir>`, so a transcript says
+# `mkdir <dir>/in-the-way` and `ubertooth-rx -i <fixture> -d <missing
+# dir>/x.bin`. A slash after one belongs to a path whose head is already gone
+# (#413), so it starts nothing. The pattern wants the whole token, `<` to `>`
+# with no slash inside and a space allowed between words but not before the
+# `>`, which is what keeps it off a shell redirect: `2>` and `<in >` both end
+# in the same character and open no token, so `2>/srv/bench/out.log` and
+# `cmd <in >/srv/bench/out.log` are still read (#426).
+_REDACTED_HEAD = re.compile(r"<[A-Za-z](?:[A-Za-z0-9 _.-]*[A-Za-z0-9_.-])?>$")
+# A pattern, not a path. A case records the output it expects as a regular
+# expression, and where that output carries a directory the pattern stands in
+# for it: `\(\S*/cap\.pcap and \S*/\./cap\.pcap\)`. A quantifier is not a
+# path character, so a slash straight after a quantified atom starts no path
+# either (#426). A glob is written with a space after it (`cp * /srv/bench`),
+# which this does not match and the scan still reads.
+_PATTERN_HEAD = re.compile(r"(?:\\[A-Za-z.]|[.)\]])[*+]$")
 _MAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+")
 # `user@machine` without a domain, which is how an SSH destination and a
 # lease holder are written. A placeholder is allowed on the left, because
@@ -359,8 +395,16 @@ _AT_HOST = re.compile(r"(?<![\w.@-])[A-Za-z0-9._<>-]+@[A-Za-z0-9][A-Za-z0-9.-]*"
 _HEX_SERIAL = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{32}(?![0-9A-Za-z])")
 _HEX_PIECE = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{24,31}(?![0-9A-Za-z])")
 # A serial port named by the serial inside it. report.py keeps the path and
-# masks the serial, so a by-id name still carrying digits is a leak.
-_BY_ID = re.compile(r"/dev/serial/by-id/\S*\d{4,}\S*")
+# masks the serial, so a long run of digits left in one is a serial the
+# masking missed. How long matters, because a vendor writes a model number
+# beside the serial: the serials a bench's by-id names carry are 12 digits (a
+# SEGGER probe) or 32 hex (a Silicon Labs bridge, which `_HEX_SERIAL` reads
+# wherever it appears), and the model number beside them is three or four
+# digits -- `CP2102N`, `FT232R`. A run of eight sits between the two, so a
+# bridge name whose serial is already masked is published and a probe serial
+# that was missed is still refused (#424).
+BY_ID_SERIAL_DIGITS = 8
+_BY_ID = re.compile(rf"/dev/serial/by-id/\S*\d{{{BY_ID_SERIAL_DIGITS},}}\S*")
 # A per-user runtime directory, which carries the operator's numeric id.
 _RUNTIME_DIR = re.compile(r"/run/user/\d+")
 # An SSH invocation. Its destination may be an alias from a private
@@ -393,28 +437,67 @@ def _excerpt(line: str, found: str) -> str:
     return text[:EXCERPT_CHARS] + ("..." if len(text) > EXCERPT_CHARS else "")
 
 
+def _dot_relative(before: str) -> bool:
+    """Is the slash after ``before`` inside a relative path, not starting one?
+
+    ``before`` is the text up to the slash, so the dots it ends with are the
+    path component the slash belongs to: one or two of them (`./x`, `../x`,
+    `a/../b`) make the token relative, and :data:`RELATIVE_DOTS` says why a
+    longer run does not.
+    """
+    return len(before) - len(before.rstrip(".")) in RELATIVE_DOTS
+
+
+def _root(path: str) -> str:
+    """The first component of an absolute path, which is what is judged."""
+    rest = path[1:]
+    return "/" + rest.split("/", 1)[0] if "/" in rest else path
+
+
 def _path_findings(line: str) -> Iterable[str]:
     """Every absolute path in the line this export does not recognize.
 
-    Two things that look like one are left: a path written straight after a
-    placeholder, which is what the rewriting produced (`<home>/src`), and the
-    `//` of a URL, which is evidence.
+    Three things that look like one are left, and each is judged by the text
+    before the slash rather than by the slash alone -- a token this reads as
+    the middle of is not a path of its own:
 
-    What this does not read is the rest of an allowed path: a root is judged
-    by its first component, so a bench that keeps its runs under
-    ``/opt/<bench name>`` publishes that name whole and has to be named with
-    ``--strip-path``. Judging further would refuse the toolchain and library
-    paths a build legitimately records.
+    * a path whose head is already gone, written straight after what replaced
+      it: this module's own placeholders (`<home>/src`, or
+      `<path>/../host/libubertooth/src` where the prefix named a build tree),
+      the tokens the harness writes of its own (`<dir>/new.pcap`,
+      `<missing dir>/x.bin`), and the quantifier a recorded pattern stands in
+      for a directory with (`\\S*/cap\\.pcap`);
+    * the `//` of a URL, which is evidence;
+    * a relative path a build named its own trees with (`-I../common`), which
+      names no directory on any host.
+
+    The last of those is read as every other relative path always has been:
+    `-Isrv/bench/x` was never a finding, so `-I../srv/bench/x` is not one
+    either, and the dots are not what decides it. What this costs is a
+    directory name an export was not told about and a build wrote relatively;
+    what still covers it is the rest of the module, since a name the export
+    knows is found anywhere in a line and a ``--strip-path`` prefix is
+    rewritten anywhere in one.
+
+    A path that is one is judged by its first component, as written and as
+    the `..` in it leave it: a toolchain path that climbs about inside an
+    allowed root (``/usr/lib/gcc/../../include``) is the kind a build
+    legitimately records, and one that climbs out of it
+    (``/usr/../srv/bench``) names the bench whatever it starts with. What
+    this does not read is the rest of an allowed path, so a bench that keeps
+    its runs under an allowed root (``/opt/<bench name>``) publishes that
+    name whole and has to name the prefix with ``--strip-path``; judging
+    further would refuse the library paths a build legitimately records.
     """
     for match in _ABSOLUTE_PATH.finditer(line):
         path = match.group(1)
         before = line[:match.start()]
-        if before.endswith("://") or any(
-            before.endswith(mark) for mark in PLACEHOLDERS
-        ):
+        if (before.endswith("://") or _dot_relative(before)
+                or _REDACTED_HEAD.search(before)
+                or _PATTERN_HEAD.search(before)):
             continue
-        root = "/" + path.split("/", 2)[1] if "/" in path[1:] else path
-        if root in SYSTEM_ROOTS or path in SYSTEM_ROOTS:
+        if (_root(path) in SYSTEM_ROOTS
+                and _root(posixpath.normpath(path)) in SYSTEM_ROOTS):
             continue
         yield path
 

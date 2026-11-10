@@ -159,6 +159,26 @@ def _write_exe(path: Path, text: str) -> None:
     write_executable(path, text)
 
 
+def write_config(path: Path, text: str, mode: int = 0o600) -> Path:
+    """Write a settings file at the mode the test means, not the umask's.
+
+    `harness_config_load` sources the file, so it refuses one any other local
+    user could rewrite: any of the 0022 bits. A file left at whatever the
+    umask gives (0664 at umask 002) is refused before the test reaches the
+    behavior it is about, so every test that writes one states its mode: 0600
+    for a file meant to be read, and a loose mode where the refusal is the
+    point.
+    """
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, mode)
+    return path
+
+
+# Modes with one or both of the 0022 bits a sourced file may not have: group
+# only, other only, and both. Each must be refused on its own.
+SHARED_WRITE_MODES = (0o664, 0o646, 0o666)
+
+
 def _tree(root: Path) -> dict:
     """Every file under root with its content and mtime."""
     if not root.exists():
@@ -967,11 +987,10 @@ class MacDeployTest(unittest.TestCase):
         self.assertEqual("--allow-power-changes", runner[-1])
 
     def test_the_controller_host_comes_from_the_config_file(self):
-        config = self.lab.root / "harness-open.conf"
-        config.write_text(
+        config = write_config(
+            self.lab.root / "harness-open.conf",
             "HARNESS_HOST=conf-host.example\nHARNESS_JUMP=conf-jump.example\n"
             "HARNESS_PORT=9300\n",
-            encoding="utf-8",
         )
         self.assertOk(self.lab.mac_deploy(
             HARNESS_HOST=None, HARNESS_JUMP=None, HARNESS_OPEN_CONFIG=str(config),
@@ -995,11 +1014,10 @@ class MacDeployTest(unittest.TestCase):
     def test_a_config_file_cannot_change_deploy_s_own_variables(self):
         # The file is sourced as shell, so it is read in a subshell: only the
         # three connection values come back out of it.
-        config = self.lab.root / "nosy.conf"
-        config.write_text(
+        config = write_config(
+            self.lab.root / "nosy.conf",
             "HARNESS_HOST=conf-host.example\nport=1234\nrunner_host=Nope\n"
             "force=1\npython=/bin/true\n",
-            encoding="utf-8",
         )
         env = {"HARNESS_HOST": None, "HARNESS_JUMP": "",
                "HARNESS_OPEN_CONFIG": str(config)}
@@ -1017,11 +1035,10 @@ class MacDeployTest(unittest.TestCase):
     def test_a_config_file_that_prints_does_not_shift_the_settings(self):
         # It is read like a shell profile, so it may print; that output must
         # not be mistaken for one of the values it sets.
-        config = self.lab.root / "chatty.conf"
-        config.write_text(
+        config = write_config(
+            self.lab.root / "chatty.conf",
             "echo loading my harness settings\nHARNESS_HOST=conf-host.example\n"
             "HARNESS_JUMP=conf-jump.example\nHARNESS_PORT=9000\n",
-            encoding="utf-8",
         )
         result = self.lab.mac_deploy(
             HARNESS_HOST=None, HARNESS_JUMP=None, HARNESS_OPEN_CONFIG=str(config),
@@ -1047,13 +1064,25 @@ class MacDeployTest(unittest.TestCase):
         self.assertFalse([c for c in self.lab.commands() if c.startswith("python -")])
 
     def test_a_config_file_others_can_write_is_refused(self):
+        # The file is sourced, so any of the 0022 bits is disqualifying: a
+        # file one group member can rewrite is as dangerous as a world
+        # writable one. What is refused is the mode, not a particular bit or
+        # the wording the mode is reported in, so each mode is tried on its
+        # own and the same file, private, is then accepted.
         config = self.lab.root / "writable.conf"
-        config.write_text("HARNESS_HOST=conf-host.example\n", encoding="utf-8")
-        config.chmod(0o666)
-        result = self.lab.mac_deploy(HARNESS_OPEN_CONFIG=str(config))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("writable by others", result.stderr)
-        self.assertEqual(_tree(self.lab.home), {})
+        text = "HARNESS_HOST=conf-host.example\n"
+        for mode in SHARED_WRITE_MODES:
+            with self.subTest(mode=oct(mode)):
+                write_config(config, text, mode)
+                result = self.lab.mac_deploy(HARNESS_OPEN_CONFIG=str(config))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(str(config), result.stderr)
+                self.assertIn("writable by others", result.stderr)
+                # Refused before anything was installed or started.
+                self.assertEqual(_tree(self.lab.home), {})
+                self.assertEqual(self.lab.commands(), [])
+        write_config(config, text)
+        self.assertOk(self.lab.mac_deploy(HARNESS_OPEN_CONFIG=str(config)))
 
     def test_refuses_to_run_without_a_controller_host(self):
         result = self.lab.mac_deploy(HARNESS_HOST=None)
@@ -1221,9 +1250,7 @@ class MacDeployTest(unittest.TestCase):
 
     def test_uninstall_works_with_a_broken_config_file(self):
         self.assertOk(self.lab.mac_deploy())
-        broken = self.lab.root / "broken.conf"
-        broken.write_text("false\n", encoding="utf-8")
-        broken.chmod(0o666)
+        broken = write_config(self.lab.root / "broken.conf", "false\n", 0o666)
         result = self.lab.mac_deploy("--uninstall", HARNESS_OPEN_CONFIG=str(broken))
         self.assertOk(result)
         self.assertEqual([], list(self.lab.agent_dir.iterdir()))
@@ -1398,28 +1425,42 @@ class HarnessOpenTest(unittest.TestCase):
         self.assertIn("not owned by you", result.stderr)
 
     def test_refuses_a_config_file_others_can_write(self):
+        # Each 0022 bit on its own is enough to refuse sourcing the file, and
+        # the same file at 0600 is read: it is the mode that decides.
         config = self.lab.root / "writable.conf"
-        config.write_text("HARNESS_HOST=conf-host.example\n", encoding="utf-8")
-        config.chmod(0o666)
-        result = self.lab.run(
-            "harness-open", "--dry-run", HARNESS_OPEN_CONFIG=str(config),
+        text = "HARNESS_HOST=conf-host.example\n"
+        for mode in SHARED_WRITE_MODES:
+            with self.subTest(mode=oct(mode)):
+                write_config(config, text, mode)
+                result = self.lab.run(
+                    "harness-open", "--dry-run", HARNESS_OPEN_CONFIG=str(config),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(str(config), result.stderr)
+                self.assertIn("writable by others", result.stderr)
+        write_config(config, text)
+        argv = self._dry_run_env(
+            HARNESS_HOST=None, HARNESS_JUMP=None, HARNESS_OPEN_CONFIG=str(config),
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("writable by others", result.stderr)
+        self.assertTrue(argv.endswith("conf-host.example"), argv)
 
     def test_a_failing_config_file_is_reported(self):
         # Read like a shell profile: an earlier failure does not stop it, but
         # the file's own exit status is reported rather than killing us mute.
-        broken = self.lab.root / "broken.conf"
-        broken.write_text("HARNESS_HOST=conf-host.example\nfalse\n", encoding="utf-8")
+        broken = write_config(
+            self.lab.root / "broken.conf",
+            "HARNESS_HOST=conf-host.example\nfalse\n",
+        )
         result = self.lab.run(
             "harness-open", "--dry-run", HARNESS_OPEN_CONFIG=str(broken),
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("failed (status 1)", result.stderr)
 
-        survives = self.lab.root / "noisy.conf"
-        survives.write_text("false\nHARNESS_HOST=conf-host.example\n", encoding="utf-8")
+        survives = write_config(
+            self.lab.root / "noisy.conf",
+            "false\nHARNESS_HOST=conf-host.example\n",
+        )
         argv = self._dry_run_env(
             HARNESS_HOST=None, HARNESS_JUMP=None,
             HARNESS_OPEN_CONFIG=str(survives),
@@ -1443,10 +1484,9 @@ class HarnessOpenTest(unittest.TestCase):
         self.assertIn("HARNESS_HOST", result.stderr)
 
     def test_a_private_config_file_supplies_the_host_and_jump(self):
-        config = self.lab.root / "harness-open.conf"
-        config.write_text(
+        config = write_config(
+            self.lab.root / "harness-open.conf",
             "HARNESS_HOST=conf-host.example\nHARNESS_JUMP=conf-jump.example\n",
-            encoding="utf-8",
         )
         argv = self._dry_run_env(
             HARNESS_HOST=None, HARNESS_JUMP=None, HARNESS_OPEN_CONFIG=str(config),
@@ -1462,8 +1502,9 @@ class HarnessOpenTest(unittest.TestCase):
         self.assertTrue(argv.endswith(f"-J {JUMP_HOST} opt-host.example"), argv)
 
     def test_an_empty_jump_in_the_environment_beats_the_config_file(self):
-        config = self.lab.root / "harness-open.conf"
-        config.write_text("HARNESS_JUMP=conf-jump.example\n", encoding="utf-8")
+        config = write_config(
+            self.lab.root / "harness-open.conf", "HARNESS_JUMP=conf-jump.example\n",
+        )
         argv = self._dry_run_env(HARNESS_JUMP="", HARNESS_OPEN_CONFIG=str(config))
         self.assertNotIn("-J", argv)
         self.assertTrue(argv.endswith(LAB_HOST), argv)
