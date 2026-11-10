@@ -65,9 +65,10 @@ class EstimateTests(unittest.TestCase):
     # A test whose comprehensive profile runs exactly the smoke cases, so the
     # two estimates are equal and must be allowed to be. `Bluetooth inquiry
     # scan` is one because the bench argued its comprehensive case out of
-    # existence: `-s -x` reaches each device over a connection it makes, and
-    # the acceptor is in the pair's link throughout, so the case wants a
-    # third idle Classic device the bench has not got (#88). The test keeps
+    # existence: `-s -x` prints a line these cases forbid, and exits 1, for
+    # every read that fails -- the bench's own peers included, and it pages
+    # devices the bench does not own too -- so how to hold its status is
+    # undecided (#429). The test keeps
     # its `coverage` argument, so the plan and the case that comes back do
     # not have to change with it.
     SAME_IN_BOTH_PROFILES = frozenset({"Bluetooth inquiry scan"})

@@ -298,14 +298,17 @@ Ubertooth a piconet to sweep for.
 
 Both tests have run against a USB adapter, and against a second one: smoke
 passed in 300 to 407 s over seven runs and comprehensive in 390, 400 and
-526 s. The `hci` plan is
-still not in `release.yaml`, and the reason is the peers rather than the
-adapter — the runs found serial bytes lost under load
+526 s, and 23 further smoke runs on 2026-11-10 in 414 to 490 s each. The
+`hci` plan is a release gate stage of its own. It used to be held out, and
+the reason was the peers rather than the adapter — the runs found serial
+bytes lost under load
 ([#310](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/310))
 and peers that would not come back to their boot state
 ([#311](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/311)) --
-11 of 91 pair sessions between them, so four more pair-driven cases would
-fail about two gate runs in five. What the runs settled and what they left open is in
+11 of 91 pair sessions between them. Both were fixed in #316 and the rate was
+counted again: 23 runs, 92 pair sessions, 0 of them hit either fault
+([#322](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/322)).
+What the runs settled and what they left open is in
 [`docs/tests.md`](../tests.md), per case. Every step of the plan binds the
 adapter, so running it on a bench without one is refused, naming the missing
 resource; in a suite that holds other work the two tests are left out as not

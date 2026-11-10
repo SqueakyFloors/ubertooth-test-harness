@@ -257,12 +257,13 @@ class PlanTests(unittest.TestCase):
             self.assertEqual([INQUIRY_TEST_NAME, FOLLOW_TEST_NAME],
                              [step.test_name for step in plan.steps(suite)])
 
-    def test_the_plan_is_not_in_the_release_suites(self):
-        """These cases have run on hardware and passed, but they are four
-        more pair-driven cases, and the bench measured peer-side faults in
-        11 of 91 pair sessions -- serial bytes lost under load (#310) and
-        peers that would not come back to their boot state (#311) -- which
-        would fail about two gate runs in five."""
+    def test_the_plan_has_no_entry_in_the_release_suite(self):
+        """The gate runs this plan as a stage of its own (`hci`, the
+        comprehensive suite, in releasegate.py) rather than as entries in
+        `release.yaml`, so neither test name belongs in that file. The two
+        peer faults that once kept the plan out of the gate altogether
+        (#310, #311) were fixed in #316 and re-counted at 0 of 92 pair
+        sessions (#322)."""
         release = (ROOT / "testplans" / "release.yaml").read_text(encoding="utf-8")
         for name in (INQUIRY_TEST_NAME, FOLLOW_TEST_NAME):
             self.assertNotIn(name, release)
