@@ -246,6 +246,31 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(
             line_findings(f"-I{sanitize.PATH}/../host/libubertooth/src"), [])
 
+    def test_a_path_whose_head_a_record_already_took_out_is_not_a_path(self):
+        # A case describes its own scratch directory as `<dir>`, so the
+        # transcript carries the tail of a path whose head is already gone.
+        # The DEV2 export refused 96 distinct things over this, most of them
+        # this form (#413).
+        for line in (
+            "transition passed: ubertooth-btle -q <dir>/new.pcap stray",
+            "STEP PASS: mkdir <dir>/in-the-way",
+            "One SIGINT to ubertooth-dump -d <dir>/dump.bin, once it has written",
+            f"built in {sanitize.PATH}/host, logs in {TMP}/x, home {HOME}/src",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(line_findings(line), [])
+
+    def test_a_redirect_is_not_a_token_and_the_path_after_it_is_read(self):
+        # `2>` ends in the character a token ends in and opens no token, so
+        # the rule that leaves `<dir>/x` alone must not leave this alone.
+        for line in ("ubertooth-dump 2>/srv/bench/out.log",
+                     "ubertooth-dump 2> /srv/bench/out.log",
+                     "ubertooth-dump <dir >/srv/bench/out.log"):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    [item.text for item in line_findings(line)],
+                    ["/srv/bench/out.log"])
+
     def test_a_relative_path_is_read_the_same_way_however_it_is_spelled(self):
         # This rule reads absolute paths, and a relative one names no
         # directory on any host. The same tail without the dots was always

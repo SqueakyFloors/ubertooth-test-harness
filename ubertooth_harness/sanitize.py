@@ -65,7 +65,9 @@ from ubertooth_harness.report import REDACTED, redact_serials
 
 # What each kind of private thing becomes. They carry their angle brackets so
 # a reader can tell a placeholder from a name, and so the scan below can tell
-# one from a path it has to judge: every placeholder ends in ``>``.
+# a path whose head is gone from one it has to judge: a placeholder is a
+# ``<token>``, which is the form the scan looks for (:data:`_REDACTED_HEAD`),
+# and the harness writes tokens of its own in that form too.
 HOME = "<home>"
 TMP = "<tmp>"
 # A prefix an operator named with ``--strip-path``, and the source checkouts
@@ -357,6 +359,16 @@ _ABSOLUTE_PATH = re.compile(
 # mark text they cut, so `cut.../srv/bench/x` is still read as the path it
 # carries.
 RELATIVE_DOTS = (1, 2)
+# A token standing in for something taken out, written where the thing was:
+# this module's own placeholders, and the ones the harness writes of its own
+# -- a case describes its scratch directory as `<dir>`, so a transcript says
+# `mkdir <dir>/in-the-way` and `ubertooth-btle -q <dir>/new.pcap stray`. A
+# slash after one belongs to a path whose head is already gone (#413), so it
+# starts nothing. The pattern wants the whole token, `<` to `>` with no space
+# or slash inside, which is what keeps it off a shell redirect: `2>` ends in
+# the same character and opens no token, so `2>/srv/bench/out.log` is still
+# read.
+_REDACTED_HEAD = re.compile(r"<[A-Za-z][A-Za-z0-9_.-]*>$")
 _MAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+")
 # `user@machine` without a domain, which is how an SSH destination and a
 # lease holder are written. A placeholder is allowed on the left, because
@@ -432,9 +444,10 @@ def _path_findings(line: str) -> Iterable[str]:
     before the slash rather than by the slash alone -- a token this reads as
     the middle of is not a path of its own:
 
-    * a path written straight after a placeholder, which is what the
-      rewriting produced (`<home>/src`, or `<path>/../host/libubertooth/src`
-      where the prefix named a build tree);
+    * a path whose head is already gone, written straight after the token
+      that replaced it: this module's own placeholders (`<home>/src`, or
+      `<path>/../host/libubertooth/src` where the prefix named a build tree)
+      and the ones the harness writes of its own (`<dir>/new.pcap`);
     * the `//` of a URL, which is evidence;
     * a relative path a build named its own trees with (`-I../common`), which
       names no directory on any host.
@@ -460,9 +473,8 @@ def _path_findings(line: str) -> Iterable[str]:
     for match in _ABSOLUTE_PATH.finditer(line):
         path = match.group(1)
         before = line[:match.start()]
-        if before.endswith("://") or _dot_relative(before) or any(
-            before.endswith(mark) for mark in PLACEHOLDERS
-        ):
+        if (before.endswith("://") or _dot_relative(before)
+                or _REDACTED_HEAD.search(before)):
             continue
         if (_root(path) in SYSTEM_ROOTS
                 and _root(posixpath.normpath(path)) in SYSTEM_ROOTS):
