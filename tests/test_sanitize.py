@@ -145,6 +145,38 @@ class SanitizeTests(unittest.TestCase):
             f"/dev/serial/by-id/usb-SEGGER_J-Link_{SERIAL}-if00",
         )
 
+    def test_a_masked_port_name_is_published_model_number_and_all(self):
+        # A bridge's by-id name carries the vendor's model number beside the
+        # serial, and `CP2102N` is four digits: the export refused hundreds
+        # of lines over one after the serial was masked exactly as intended
+        # (#424).
+        for text, expected in (
+            ("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
+             "Controller_48fed63583bef011a861c37948e9de0f-if00-port0",
+             "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
+             f"Controller_{SERIAL}-if00-port0"),
+            ("/dev/serial/by-id/usb-FTDI_FT232R_USB_UART-if00-port0",
+             "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART-if00-port0"),
+        ):
+            with self.subTest(text=text):
+                clean = sanitize.sanitize(text, BENCH)
+                self.assertEqual(clean, expected)
+                self.assertEqual(line_findings(clean, BENCH), [])
+
+    def test_a_port_name_whose_serial_was_missed_is_still_refused(self):
+        # The masking is told the serials a run recorded. One it was not told
+        # about is what this rule is the backstop for, in either width the
+        # bench's own ports carry.
+        for text in (
+            "/dev/serial/by-id/usb-SEGGER_J-Link_001050204517-if00",
+            "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
+            "Controller_7c58657c25bef01199babd7948e9de0f-if00-port0",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(
+                    sanitize.RULE_SERIAL,
+                    [item.rule for item in line_findings(text, Private())])
+
     def test_an_alias_inside_a_longer_alias_is_not_replaced_on_its_own(self):
         # `UT` is a registered alias of its own and `UT_0` is another: the
         # longer one is replaced as itself, not as `UT` and a stray `_0`.

@@ -386,8 +386,16 @@ _AT_HOST = re.compile(r"(?<![\w.@-])[A-Za-z0-9._<>-]+@[A-Za-z0-9][A-Za-z0-9.-]*"
 _HEX_SERIAL = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{32}(?![0-9A-Za-z])")
 _HEX_PIECE = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{24,31}(?![0-9A-Za-z])")
 # A serial port named by the serial inside it. report.py keeps the path and
-# masks the serial, so a by-id name still carrying digits is a leak.
-_BY_ID = re.compile(r"/dev/serial/by-id/\S*\d{4,}\S*")
+# masks the serial, so a long run of digits left in one is a serial the
+# masking missed. How long matters, because a vendor writes a model number
+# beside the serial: the serials a bench's by-id names carry are 12 digits (a
+# SEGGER probe) or 32 hex (a Silicon Labs bridge, which `_HEX_SERIAL` reads
+# wherever it appears), and the model number beside them is three or four
+# digits -- `CP2102N`, `FT232R`. A run of eight sits between the two, so a
+# bridge name whose serial is already masked is published and a probe serial
+# that was missed is still refused (#424).
+BY_ID_SERIAL_DIGITS = 8
+_BY_ID = re.compile(rf"/dev/serial/by-id/\S*\d{{{BY_ID_SERIAL_DIGITS},}}\S*")
 # A per-user runtime directory, which carries the operator's numeric id.
 _RUNTIME_DIR = re.compile(r"/run/user/\d+")
 # An SSH invocation. Its destination may be an alias from a private
