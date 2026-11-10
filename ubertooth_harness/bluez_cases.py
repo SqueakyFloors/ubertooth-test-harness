@@ -567,20 +567,19 @@ def _pair_report(acceptor, initiator) -> tuple[str, ...]:
 def inquiry_scan_cases(arguments, resources, resource_identities):
     """Bluetooth inquiry scan: ubertooth-scan's two halves.
 
-    Both profiles run the same two cases. `-s -x` is deliberately not
-    exercised, and the bench settled why: `-x` fetches its report over a
-    connection it makes to each device, and the acceptor is in the pair's
-    link throughout, so the connection does not happen -- a run had the
-    inquiry list the acceptor and its extended report carry no address at
-    all. An idle acceptor would answer, but then the sweep has no piconet to
-    report, and with two Classic boards the two cannot both hold. What the
-    case wants is a third Classic device, idle and connectable, which this
-    bench has not got (#88).
+    Both profiles run the same two cases. `-s -x` is not exercised, and what
+    stops it is the exit status rather than the bench. It was recorded here
+    that `-x` fetches its report over a connection it makes to each device,
+    that the acceptor is in the pair's link throughout so the connection does
+    not happen, and that the case wanted a third Classic device. Measured
+    again on 2026-11-10 with the peers on `utesp-1.6.0`, `-x` returned a full
+    extended report for both peers whether the pair was streaming or idle, so
+    no third device is wanted (#88).
 
-    Measured in the same run, and the reason a case here could not have
-    pinned the exit status either: `-x` also asks every piconet the sweep
-    heard, and twenty of those reads failed against devices the bench does
-    not own. docs/tests.md records both measurements.
+    What a case still has to settle is the status: `-x` also pages every
+    piconet the sweep heard, those reads fail against devices the bench does
+    not own, and each failure both prints a line these cases forbid and makes
+    the tool exit 1 (#429). docs/tests.md records both measurements.
     """
     serial = _serial(resource_identities, INQUIRY_TEST_NAME)
     acceptor, initiator = _pair(resource_identities, INQUIRY_TEST_NAME, resources)

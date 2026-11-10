@@ -2360,10 +2360,15 @@ Bluetooth inquiry scan:
     map line after it. Both cases have passed on a bench adapter, and both
     coverage profiles run the same two.
   limitations: >-
-    A pass does not prove -x works: that case was removed after the bench
-    showed the acceptor stays in the pair's link, so the connection -x needs
-    does not happen, and about twenty of its reads failed against devices the
-    bench does not own. It wants a third idle, connectable Classic device.
+    A pass does not prove -x works: that case was removed after a bench run
+    had the acceptor's extended report come back with no address, which was
+    read at the time as the pair's link preventing the connection -x makes.
+    Measured again on 2026-11-10, with the peers on utesp-1.6.0, -x returned a
+    full extended report for both peers whether the pair was streaming or
+    idle, so that reading was wrong and no third device is wanted. What stops
+    a case is the exit status: -x pages every piconet the sweep heard, those
+    reads fail against devices the bench does not own, and each failure both
+    prints a forbidden error line and makes the tool exit 1 (#429).
     The inquiry asks that one of the two peers came back under its own name
     rather than both, because a run showed a name reported against the wrong
     address inside the library, below anything the harness can see; both wrong
@@ -2438,8 +2443,12 @@ Follow Classic piconet over HCI:
     for the same reason: they were measured on captures ubertooth-rx took,
     and how much a level varies across a capture this tool takes is not
     established. The payload bound, which is arithmetic, is checked.
-    -a's map-reading branch is untested for want of a peer that runs a paged
-    link with AFH on. -l and -u without -t are deliberately not exercised:
+    -a's map-reading branch is untested, and not for want of a fixture: -a
+    reads the map of the link it has just paged, and a controller answers AFH
+    off for a link seconds old, so no freshly paged target reaches that
+    branch (fork #1200). The peers themselves do report a map with AFH on for
+    the link they hold with each other. -l and -u without -t are deliberately
+    not exercised:
     the page then goes to a guessed address and whether it arrives is not
     knowable in advance. The capture floor measures the whole command rather
     than the receive interval, because the tool prints no mark for the moment
