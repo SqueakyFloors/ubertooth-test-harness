@@ -165,12 +165,13 @@ OVERFLOW_ATTEMPTS = 3
 # for two interpreter start-ups and the fake's first record on a loaded
 # machine, and it is what that attempt costs.
 OVERFLOW_CLOCK_S = 5.0
-# How many times each failure the capture reports is brought on, so that a
-# failure which only usually arrives in time shows up here (issue #417).
+# How many times each failure the capture reports is brought on, so that one
+# which only usually arrives in time shows up here, and the seconds the fake
+# is held back for on the last of those attempts, which is what a loaded
+# machine does to it. The delay is longer than the 2-second budget those
+# cases used to allow themselves, so a case that waited a clock out rather
+# than waiting for its own condition would read an empty FIFO (issue #417).
 FAILURE_ATTEMPTS = 3
-# Seconds the fake waits before it writes anything in the slow-writer test:
-# longer than the 2-second budget that test_failures used to give itself, so
-# a capture that still waited out a clock would read an empty FIFO.
 SLOW_WRITER_S = 2.5
 
 # ubertooth-btle -f -U <serial> -q <fifo> -A <channel> as at fork 71e1a8a: -A
@@ -432,14 +433,15 @@ class CaptureTests(unittest.TestCase):
         # as soon as the records they check have arrived, the last two as
         # soon as the script exits, which the fake's third record brings on
         # by exiting 1 or by cutting a record short. The seconds are the
-        # fixture's limit, which none of them reaches; the 2 seconds they
-        # used to allow themselves raced two interpreter start-ups under
-        # heavy load, and the capture then refused an empty FIFO rather than
-        # reporting the failure the case is about (issue #417). How the
-        # capture ended is asserted too, so a case that did run out of its
-        # limit says so instead of failing on the missing FAIL line. Each
-        # one is brought on FAILURE_ATTEMPTS times, which costs start-ups
-        # rather than waits.
+        # fixture's limit, which a case only reaches when something is wrong;
+        # the 2 seconds they used to allow themselves raced two interpreter
+        # start-ups under heavy load, and the capture then refused an empty
+        # FIFO rather than reporting the failure the case is about (issue
+        # #417). How the capture ended is asserted too, so a case that did
+        # run out of its limit says so instead of failing on the missing
+        # FAIL line. Each failure is brought on FAILURE_ATTEMPTS times, the
+        # last of them against a fake held back for longer than that old
+        # budget, which is this flake with the load left out.
         cases = {
             "wrong-channel": ("advertising records on RF channel(s) [0], not only 12",
                               3, "extcap exit: 0 (after SIGTERM)"),
@@ -450,36 +452,16 @@ class CaptureTests(unittest.TestCase):
         }
         for bug, (failure, stop, ending) in cases.items():
             for attempt in range(1, FAILURE_ATTEMPTS + 1):
-                with self.subTest(bug, attempt=attempt):
+                delay = SLOW_WRITER_S if attempt == FAILURE_ATTEMPTS else 0.0
+                with self.subTest(bug, attempt=attempt, delay=delay):
                     code, out = fixture.capture(
                         (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=38"),
-                        bug=bug, board=SERIAL_A, channel=38, stop_after_records=stop)
-                    self.assertFailed(code, out, failure, ending)
-
-    def test_a_fake_slow_to_start_still_reaches_the_failure_it_brings_on(self):
-        # A loaded machine delays the fake's records past any budget the test
-        # could pick, which is why the two failures that the fake brings on
-        # after its third record wait for the script to exit instead (issue
-        # #417). Here it writes nothing for longer than the budget they used
-        # to allow themselves, and both still fail for their own bug.
-        fixture = self.fixture()
-        for bug, failure, ending in (
-                ("exits", "btle-extcap exited 1 before the stop",
-                 "extcap exit: 1 (before the stop)"),
-                ("truncated", "truncated", "extcap exit: 0 (before the stop)")):
-            with self.subTest(bug):
-                code, out = fixture.capture(
-                    (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=38"),
-                    bug=bug, board=SERIAL_A, channel=38, delay=SLOW_WRITER_S,
-                    stop_after_records=None)
-                self.assertFailed(code, out, failure, ending)
-
-    def assertFailed(self, code, out, failure, ending):
-        """The capture was refused for failure, having ended as ending says."""
-        self.assertEqual(1, code, out)
-        self.assertIn(ending, out)
-        self.assertRegex(out, rf"(?m)^FAIL: .*{re.escape(failure)}")
-        self.assertNotIn("capture checks passed", out)
+                        bug=bug, board=SERIAL_A, channel=38, delay=delay,
+                        stop_after_records=stop)
+                    self.assertEqual(1, code, out)
+                    self.assertIn(ending, out)
+                    self.assertRegex(out, rf"(?m)^FAIL: .*{re.escape(failure)}")
+                    self.assertNotIn("capture checks passed", out)
 
     def test_the_board_and_channel_must_reach_ubertooth_btle(self):
         fixture = self.fixture()
