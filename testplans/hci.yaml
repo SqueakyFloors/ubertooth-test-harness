@@ -15,7 +15,8 @@ plan: BlueZ tools with a host Bluetooth adapter
 # Every case here has run on a bench with a USB adapter, and both suites
 # have passed: smoke in 300 to 407 s over seven runs and comprehensive in
 # 390, 400 and 526 s, at the durations below, and 23 further smoke runs on
-# 2026-11-10 took 414 to 490 s each. Two different adapters were
+# 2026-11-10 took 414 to 490 s each, those having built the firmware image
+# too. Two different adapters were
 # used, with a registry per adapter differing in one line, and every command
 # in a run named the adapter that run was given. What the runs settled and
 # what they left open is in docs/tests.md under each test.
@@ -33,20 +34,24 @@ plan: BlueZ tools with a host Bluetooth adapter
 # plus one back at boot mid-capture in 47 follow runs (#311). Both were fixed
 # in #316, and the rate was counted again afterwards: 23 runs of the smoke
 # suite on 2026-11-10 against 2026-11-DEV2, 92 pair sessions, **0 of them hit
-# either fault** -- no lost line on any bridge and no restart on any board
-# (#322). So neither fault is a reason to treat this plan as less gateable
-# than the other hardware suites.
+# either fault** (#322). A restart fails its case, so no restart in any of the
+# 92 is what one failed session establishes; a recovered lost line fails
+# nothing and is reported in the session's bridge line, so for that fault the
+# figure is the 73 of 92 sessions whose saved output carries that line, all 73
+# `framed` on both bridges. Neither fault is a reason to treat this plan as
+# less gateable than the other hardware suites.
 #
-# What the same 23 runs did find is not peer-side: one of 81 clock-drift
-# corrections `ubertooth-follow` made failed its USB transfer and said so,
-# which the case reads as a forbidden `error:` line, so 1 of the 23 runs
-# failed. The follow carried on capturing either side of it. That is fork
-# #1250, and until it is fixed this stage fails about one run in twenty for
-# that and nothing else.
+# What the same 23 runs did find is not peer-side: of the 81 clock-drift
+# corrections `ubertooth-follow` was seen to make, one failed its USB transfer
+# and said so, which the case reads as a forbidden `error:` line, so 1 of the
+# 23 runs failed. The follow carried on capturing. That is fork #1250. It is
+# one event, so 1 in 81 is where to look rather than a rate, and it was
+# counted on this smoke profile, whose two follow cases read the clock fewer
+# times than the comprehensive profile's three.
 #
-# Cost, from the catalog's own estimates: this plan's smoke suite is 345 s and
-# testplans/release.yaml is 1189.7 s, so a host running both is about 1535 s,
-# roughly 26 minutes.
+# Cost, from the catalog's own estimates: the comprehensive suite the gate
+# runs is 440 s beside testplans/release.yaml's 1190.5 s, so about 1630 s,
+# roughly 27 minutes. This smoke suite is 345 s.
 #
 # 25 s per capture is what the bench needs for a useful count of this
 # piconet, as the classic plan records: the Ubertooth sweeps 79 channels and

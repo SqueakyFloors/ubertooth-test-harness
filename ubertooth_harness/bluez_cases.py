@@ -567,19 +567,21 @@ def _pair_report(acceptor, initiator) -> tuple[str, ...]:
 def inquiry_scan_cases(arguments, resources, resource_identities):
     """Bluetooth inquiry scan: ubertooth-scan's two halves.
 
-    Both profiles run the same two cases. `-s -x` is not exercised, and what
-    stops it is the exit status rather than the bench. It was recorded here
-    that `-x` fetches its report over a connection it makes to each device,
-    that the acceptor is in the pair's link throughout so the connection does
-    not happen, and that the case wanted a third Classic device. Measured
-    again on 2026-11-10 with the peers on `utesp-1.6.0`, `-x` returned a full
-    extended report for both peers whether the pair was streaming or idle, so
-    no third device is wanted (#88).
+    Both profiles run the same two cases. `-s -x` is not exercised, and the
+    bench has narrowed what one would need. It was recorded here that `-x`
+    fetches its report over a connection it makes to each device, that the
+    acceptor is in the pair's link throughout so the connection does not
+    happen, and that the case wanted a third Classic device. Measured again
+    on 2026-11-10 with the peers on `utesp-1.6.0`, the connection does
+    happen: a peer in the pair's link answers its address, name, LMP version
+    and features, and fails the extended-features, clock-offset and AFH-map
+    reads; an idle peer answers all of it. So no third device is wanted (#88).
 
-    What a case still has to settle is the status: `-x` also pages every
-    piconet the sweep heard, those reads fail against devices the bench does
-    not own, and each failure both prints a line these cases forbid and makes
-    the tool exit 1 (#429). docs/tests.md records both measurements.
+    What a case still has to settle is the status. Every one of those failed
+    reads prints a line these cases forbid and makes the tool exit 1, the
+    bench's own peers included, and `-x` pages every piconet the sweep heard,
+    so devices the bench does not own fail too (#429). docs/tests.md records
+    both measurements.
     """
     serial = _serial(resource_identities, INQUIRY_TEST_NAME)
     acceptor, initiator = _pair(resource_identities, INQUIRY_TEST_NAME, resources)
@@ -694,8 +696,9 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
         # reported the piconet. It fails if the read errors instead
         # (FOLLOW_AFH_ACTION_FAIL, which is an `error:` line and exit 1), if
         # the tool claims a map, or if the follow then finds nothing. What
-        # stays unexercised is the branch that applies a map, because no peer
-        # here offers one; docs/tests.md records that and why.
+        # stays unexercised is the branch that applies a map, because the
+        # target a follow must use is in the pair's link and does not answer
+        # a map read on a second one; docs/tests.md records that and why.
         follow("-a", case_id="follow-target-afh",
                name=f"ubertooth-follow -t {target} -a asks the link for its "
                     "channel map, is told there is none, and follows anyway",

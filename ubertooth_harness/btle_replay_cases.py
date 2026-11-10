@@ -22,8 +22,8 @@ the air. Three of them:
   identifiers the Bluetooth SIG has registered and says ``not assigned`` for
   the one it has not (SqueakyFloors/libbtbb#75 and
   SqueakyFloors/libbtbb#128). The other reader of that table is
-  ``ubertooth-scan -x``, which needs BlueZ, a board and a third idle Classic
-  device, so the dump is the cheap way to it;
+  ``ubertooth-scan -x``, which needs BlueZ, a board and a discoverable
+  Classic device, so the dump is the cheap way to it;
 - that advertisement at three of the board's readings, which is the one way
   to the level a packet is reported at without a radio: two readings the
   board can measure, whose figures must differ, and one at the top of the

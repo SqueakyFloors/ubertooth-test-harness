@@ -2430,7 +2430,7 @@ had from the start, and one it has never assigned, which libbtbb reports as
 `not assigned`
 ([libbtbb#128](https://github.com/SqueakyFloors/libbtbb/pull/128)). The other
 reader of that table is `ubertooth-scan -x`, which needs BlueZ, a board and a
-third idle Classic device, so the dump is the cheap way to it. The third is
+discoverable Classic device, so the dump is the cheap way to it. The third is
 that same advertisement at three of the board's readings, which is the one
 way to the level a packet is reported at without a radio.
 
@@ -5528,36 +5528,44 @@ traffic is sparse, but a run on a busy site will transmit to strangers'
 devices. Their addresses land in the run record, which is why no run output
 is committed.
 
-**`-s -x` is not exercised, and what stops it is the exit status rather than
-the bench.** It was recorded here that `-x` fetches its per-device report over
-a connection it makes to each device, that the acceptor is in the pair's link
-throughout so the connection does not happen — one run had the inquiry list
-the acceptor while its extended report gave the address as nothing at all —
-and that the case therefore wanted a third Classic device, idle and
-connectable. **That requirement was measured again and does not hold.**
+**`-s -x` is not exercised, and the bench has narrowed why.** It was recorded
+here that `-x` fetches its per-device report over a connection it makes to
+each device, that the acceptor is in the pair's link throughout so the
+connection does not happen — one run had the inquiry list the acceptor while
+its extended report gave the address as nothing at all — and that the case
+therefore wanted a third Classic device, idle and connectable. **The third
+device is not what it wants.** What that reading got wrong is which part of
+the report fails.
 
-On 2026-11-10, with the peers on `utesp-1.6.0`, `ubertooth-scan -s -x` was run
-twice through the same adapter minutes apart: once while the pair streamed, so
-the acceptor was a peripheral in that link, and once with both peers idle at
-boot. Both times `-x` returned a full extended report for **both** peers —
-`BD Address`, `Device Name`, `LMP Version`, `Manufacturer` and the feature
-list — and in the streaming condition the pair came through it with one
-connection, no disconnection, 4591 writes sent and 918200 bytes received. So a
-peer in a link does answer the connection `-x` makes, and the two peers the
-bench already has are enough for the content of this case
+Measured on 2026-11-10, with the peers on `utesp-1.6.0`,
+`ubertooth-scan -s -x` was run twice through the same adapter minutes apart:
+once while the pair streamed, so the acceptor was a peripheral in that link,
+and once with both peers idle at boot. The connection happens in both, and
+how much of the report comes back differs:
+
+| Condition | What `-x` got for each peer |
+|---|---|
+| pair streaming | address, name, LMP version, features — then `reading the extended features failed`, `reading clock offset failed`, and `HCI read AFH map request failed` |
+| peers idle | all of the above, and `Clock offset:` and `AFH Map:` as well |
+
+So a peer in a link does answer the connection and most of its own report,
+and fails the three reads that want a link of their own; an idle peer answers
+all of it. In the streaming condition the pair came through the whole thing
+with one connection, no disconnection, 4591 writes sent and 918200 bytes
+received. Either way the two peers the bench already has are enough for a
+case to assert something real
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
 
-What is left is the exit status, and it is unchanged. `-x` asks every piconet
-the sweep heard as well, and in the same measurement the reads it made of
-devices the bench does not own failed — `cannot create connection`,
-`reading the extended features failed`, `reading clock offset failed` — each
-of which makes the tool exit 1, and each of which also prints a line these
-cases forbid. Both runs exited 1 for that reason alone. Accepting 1 instead
-would accept the other two things that status means — a capture stream that
-died, and a board that would not give its mode up — and neither is visible to
-this case's own checks. So a case here needs a decision about how to hold a
-tool whose status is decided by strangers' devices, which is test design
-rather than hardware
+What a case still has to settle is how to hold a tool whose status and error
+lines are not all the bench's to control. `-x` also pages every piconet the
+sweep heard, so a device the bench does not own gets a connection attempt
+too — `cannot create connection` in the streaming run was a television — and
+every failure above, the bench's own peers included, both prints a line these
+cases forbid and makes the tool exit 1. Both runs exited 1. Accepting 1
+outright would accept the other two things that status means — a capture
+stream that died, and a board that would not give its mode up — and neither
+is visible to this case's own checks. That is test design on fixtures that are
+already here
 ([#429](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/429)).
 
 `-e` is not exercised: no case passes it, so the survey runs with the tool's
@@ -5565,17 +5573,16 @@ default of two allowed access-code bit errors.
 
 **The `hci` plan in the release gate.** Both suites pass:
 smoke in 300 to 407 seconds over seven runs, and 23 further smoke runs on
-2026-11-10 in 414 to 490 s each; comprehensive in 390, 400 and
-526. Its smoke
-estimate is 345 s, and `testplans/release.yaml` is 1189.7 s by the catalog's
-own estimates, so a host running both is about 1535 s — roughly 26 minutes —
-on the one host that has an adapter, the
-way `Recover AFH map` already names a bench host. The plan is a gate stage of
-its own (`hci`, the comprehensive suite), so what the gate runs is the
-comprehensive profile rather than this estimate.
+2026-11-10 in 414 to 490 s each, which build the firmware image as well;
+comprehensive in 390, 400 and
+526. The gate runs this plan as a stage of its own (`hci`, the comprehensive
+suite), so what it costs the gate is that suite's 440 s beside
+`testplans/release.yaml`'s 1190.5 s — about 1630 s, roughly 27 minutes — on
+the one host that has an adapter, the way `Recover AFH map` already names a
+bench host. The smoke suite's own estimate is 345 s.
 
-It used to be held out, and not for the adapter: two faults were measured
-while running it, both peer-side:
+It used to be held out, and not because of the adapter: two faults were
+measured while running it, both peer-side:
 
 - bytes lost on a bridge's serial line while an Ubertooth captures on the
   same host, which failed 7 of 91 pair sessions over an evening
@@ -5589,23 +5596,33 @@ while running it, both peer-side:
 Both were fixed in
 [#316](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/316), and
 the rate was counted again afterwards rather than assumed: **23 runs, 92 pair
-sessions, 0 of them hit either fault** — no lost line on any bridge and no
-restart on any board, against `2026-11-DEV2` with the peers on `utesp-1.6.0`
+sessions, 0 of them hit either fault**, against `2026-11-DEV2` with the peers
+on `utesp-1.6.0`
 ([#322](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/322)).
-So neither fault is a reason to treat this plan as less gateable than the
-other hardware suites.
+The two halves of that are known to different depths, and it is worth saying
+which. A restart fails its case with a reason naming it, so no restart in any
+of the 92 is what one failed session over the 23 runs establishes. A lost
+line that the retry recovers from fails nothing — it is reported in the
+session's own bridge line — so for that fault the figure is the 73 sessions
+of the 92 whose saved output carries that line: all 73 reported `framed`,
+on both bridges, with no line lost. Neither fault is a reason to treat this
+plan as less gateable than the other hardware suites.
 
-**What those 23 runs did fail on, once, is not peer-side.** One of the 81
-clock-drift corrections `ubertooth-follow` made over the 23 runs failed its
-USB transfer and said so on standard error, which these cases read as a
-forbidden `error:` line, so one run of the 23 failed. The follow carried on
-capturing either side of it, and nothing in the capture was wrong. That is
-fork [#1250](https://github.com/SqueakyFloors/ubertooth/issues/1250), and
-until it is fixed this stage fails about one run in twenty for that and
-nothing else. It is recorded here because a gate failure with no defect
-behind it is the kind of thing a reader needs warning about, not because the
-check is wrong: a tool that keeps running after an `error:` line is exactly
-what an exit-status check cannot see.
+**What those 23 runs did fail on, once, is not peer-side.** Of the 81
+clock-drift corrections `ubertooth-follow` was seen to make over the 23 runs,
+one failed its USB transfer and said so on standard error, which these cases
+read as a forbidden `error:` line, so one run of the 23 failed. The follow
+carried on capturing either side of it, and nothing in the capture was wrong.
+That is fork
+[#1250](https://github.com/SqueakyFloors/ubertooth/issues/1250). Two things
+that rate does not support: it is one event, so 1 in 81 is where to look
+rather than a rate to quote; and it was measured on the smoke profile, whose
+two follow cases read the clock fewer times than the comprehensive profile's
+three, so the gate stage will meet it somewhat more often than one run in
+twenty rather than less. It is recorded here because a gate failure with no
+defect behind it is the kind of thing a reader needs warning about, not
+because the check is wrong: a tool that keeps running after an `error:` line
+is exactly what an exit-status check cannot see.
 
 **A host without `hciconfig` and `hcitool` runs nothing.** Both are declared
 as host tools the harness does not install, and a missing host tool makes a
@@ -5621,13 +5638,12 @@ section of a run's report before believing an `hci` run proved anything.
 Bluetooth adapter to learn that target's clock offset and then follows its
 piconet with the Ubertooth. The target is the ESP32 peer that leads the
 piconet. With `-a` the tool additionally asks that link for its channel map,
-so that it can follow with Adaptive Frequency Hopping on — which on this
-bench it is told there is no map to have, since the peer runs the paged link
-with AFH off. So what the `-a` case measures is the tool reaching the read
-and following without a map; the branch that applies one is not reachable
-from a freshly paged target at all (fork
-[#1200](https://github.com/SqueakyFloors/ubertooth/issues/1200)), and the
-expected outcome below and the known limits say so.
+so that it can follow with Adaptive Frequency Hopping on — which against this
+target it is told there is no map to have, since the peer the follow must
+target is already in the pair's link. So what the `-a` case measures is the
+tool reaching the read and following without a map; the branch that applies
+one wants a target that both leads a piconet and answers a map read on a
+second link, and the expected outcome below and the known limits say so.
 
 **Theory of operation.** `ubertooth-follow` is the one host path that gets a
 piconet's clock from somewhere other than the air: it reads the local
@@ -5776,33 +5792,41 @@ file is a BR/EDR pcap holding the piconet's packets and leaves the records to
 `Classic capture record fields`, which reads a capture from a tool whose
 headers do decode. A bench measurement is what fork #518 was waiting for.
 
-`-a` finds no map to read on this bench, and the case pins that outcome. The
+`-a` finds no map to read against this target, and the case pins that outcome.
+The
 peer reports AFH **off** on the link the page made, so the tool says "the
 remote device is not using AFH; following without it", clears `-a`, follows
 anyway, and exits 0 — which is its documented behavior for a remote with AFH
 off, and what the case therefore requires, forbidding an `AFH map read:`
-failure or an error. Whether a link runs with AFH on is the central's choice,
-and the adapter's link to the peer does not, so the branch that reads a map,
+failure or an error. So the branch that reads a map,
 prints it and hands it to the board is **not** exercised.
 
-**No fixture can exercise it while `-a` reads the map of the link it has just
-made,** which is what the fork measured and filed as
-[#1200](https://github.com/SqueakyFloors/ubertooth/issues/1200): a controller
-has not settled on a hop sequence for a link seconds old, so it answers that
-AFH is off, and this would be the answer from any freshly paged target rather
-than something these peers happen to do. The peers are not short of the
-capability — they report `afh_mode: on` with a 76-channel map for the
-Serial Port Profile link they hold with each other, which is the link
-`Recover AFH map` recovers from the air — so this row is a question about what
-the option can read, which fork #1200 holds, and not about the bench
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88) is
-closed on that ground).
+**What the branch wants is narrower than "a peer that offers a map", and the
+bench has measured which part is missing.** The fork found that `-a` reads the
+map of the link it has just paged, and read that as no freshly paged target
+ever reporting one
+([#1200](https://github.com/SqueakyFloors/ubertooth/issues/1200)). A fresh
+link is not the whole story. `ubertooth-scan -x`, which reads the same map
+over its own fresh connection and prints the line only when the mode byte
+reads on, got a map from **both** peers when they were idle —
+`AFH Map: 0xffffffffffffffffff7f`, all 79 channels — and got
+`HCI read AFH map request failed` from both when the pair was streaming. So a
+link seconds old can report AFH on; what does not answer is a peer that is
+already in another link.
+
+That is exactly the target this test must use, since the follow needs a
+piconet to follow and the peer leading one is in it. So the fixture the branch
+wants is a target that **both** leads a piconet and answers a map read on a
+second link, and nothing on this bench does both at once
+([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
+Whether the tool should read the map it does at all is still fork #1200's
+question: the map of the adapter's own link to the target is not the map of
+the piconet the Ubertooth follows, and the two need not agree.
 That is also narrower than it sounds even when it runs: nothing reads the
 board back, so what such a case could check is that the request was made and
 accepted. And because the tool takes its disabled branch here, it clears the
 board's map rather than leaving one set, exactly as a follow without `-a`
-does — so neither case leaves a map behind for the next one. The map the tool reads is of the adapter's link to the peer, not of
-the piconet the Ubertooth follows, and the two need not agree, so comparing a
+does — so neither case leaves a map behind for the next one. Comparing a
 map with a known one stays `Recover AFH map`'s job, from the air.
 
 Whether the allowance for the setup is enough is still not bounded, only
