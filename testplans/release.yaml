@@ -25,6 +25,12 @@ suites:
         hosts: each
         coverage: comprehensive
 
+    # No Ubertooth: every ubertooth-util option -V would suppress, in both
+    # orders. Skipped until the built tool refuses them (ubertooth#1255).
+    - Util version conflicts:
+        hosts: each
+        coverage: comprehensive
+
     # No Ubertooth. sign-read-only-directory skips when run as root.
     - DFU image checks:
         hosts: each

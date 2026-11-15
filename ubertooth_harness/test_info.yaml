@@ -1273,6 +1273,53 @@ Util mode refusals:
     makes the case skip. Nothing here shows what -i does when it is accepted.
   related: []
 
+Util version conflicts:
+  purpose: >-
+    Catches the gap that comprehensive argument coverage missed: ubertooth-util
+    -V is terminal, so before the fork's strict check a command line such as
+    -V -B or -s -V exited 0 with the other half of it dropped without a word.
+    Nothing asked what -V did to the option beside it; this asks, for every
+    option there is.
+  theory: >-
+    The matrix is derived from the option tables the harness already owns --
+    the reads, the settings, the modes, and the six ubertooth-util options no
+    table owns -- so an option added to the harness is paired with -V without
+    anyone remembering to, and a unit test holds that union to the
+    ubertooth-util table of COVERAGE.md. Each option is written on both sides
+    of -V, because the fork sets its flags while reading the command line and
+    decides once the whole line has parsed, so the two orders are one command
+    line and must answer alike. A refusal has to be one error line naming the
+    option and -V, with nothing at all on standard output, which is where the
+    version answer would go, no mode start line, and no board asked for: the
+    no-devices switch is set, so an accepted combination finds no board rather
+    than acting on one, and that is also what stands in for "no device state
+    change". The options -V keeps are required to keep working, so the check
+    cannot pass by refusing everything.
+  hardware: >-
+    No board. Nothing transmits, and ubertooth-util has no file option, so
+    nothing is written either. Each case opens with a probe that reads the
+    libubertooth beside the tool and then runs one -V -B with no board.
+  expected: >-
+    Smoke runs 9 cases: -B, -s, -a, -I and -N beside -V in both orders, and
+    the four that must keep working -- -V alone, -U <selector> -V, -U all -V,
+    and -V -h, which prints both answers with the version first.
+    Comprehensive runs 31: every one of the 23 suppressed options, each in
+    both orders and in both its bare and its value form where it takes a
+    value, those same four, and four more for order -- a bad option value, an
+    option given a value twice, and a stray word, each of which must be
+    reported instead of the conflict, and a command line with two suppressed
+    options, which must give one conflict line naming either of them.
+  limitations: >-
+    It skips until the built ubertooth-util has the check at all, which the
+    probe decides by behavior rather than by message, so a build that refuses
+    the combination in other words is measured and fails on the wording
+    instead of skipping. Which option a message names when two are suppressed
+    is deliberately not pinned. Nothing here runs a board, so "no state
+    change" means only that no board was opened.
+  related:
+    - ubertooth#1255
+    - ubertooth-test-harness#431
+
 DFU image checks:
   purpose: >-
     Covers ubertooth-dfu image validation and -s suffixing with no board

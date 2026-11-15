@@ -30,6 +30,12 @@ suites:
         hosts: each
         coverage: smoke
 
+    # No Ubertooth: ubertooth-util -V beside the options it would suppress.
+    # Skipped until the built tool refuses them (ubertooth#1255).
+    - Util version conflicts:
+        hosts: each
+        coverage: smoke
+
     # No Ubertooth: ubertooth-dfu image checks and -s.
     - DFU image checks:
         hosts: each

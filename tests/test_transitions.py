@@ -797,7 +797,7 @@ class CoverageGenerationTests(unittest.TestCase):
                 self.assertTrue(set(smoke_ids) <= set(full_ids))
 
     def test_comprehensive_compositions_cover_every_compatible_pair(self):
-        options = tuple(option for option, _label, _pattern in transitions._QUERY_OPTIONS)
+        options = tuple(option for option, _label, _pattern in transitions.QUERY_OPTIONS)
         _args, cases = cases_for("Ubertooth util compositions", "comprehensive")
 
         # -V does not compose: its cases are a pair of options but not a

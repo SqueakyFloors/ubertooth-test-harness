@@ -450,7 +450,7 @@ class PlanTests(ControllerTestCase):
             return suite
 
         suite = await release(other)
-        self.assertAlmostEqual(670.5, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(680.4, suite["estimated_s"], delta=0.2)
         self.assertEqual(
             [{"name": "Recover AFH map",
               "reason": f"runs on {named}, not on {other}",

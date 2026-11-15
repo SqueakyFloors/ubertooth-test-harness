@@ -878,7 +878,7 @@ class MultiBoardRefusalTests(unittest.TestCase):
                     # Exactly one error: line and no note or warning: a
                     # refusal that went on to say more would pass a check for
                     # its own message alone.
-                    for pattern in refusal_cases._ONE_ERROR_ONLY:
+                    for pattern in refusal_cases.ONE_ERROR_ONLY:
                         self.assertIn(pattern, refuse.forbidden_patterns)
                     # One expected message, so a case cannot quietly accept two.
                     self.assertEqual(1, len(refuse.output_patterns))

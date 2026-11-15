@@ -2881,6 +2881,107 @@ every tool gives for a selection that found nothing since fork `753269b`), and
 no-devices switch makes the case skip. Nothing here shows what `-i` does when
 it is accepted.
 
+## Util version conflicts
+
+**What it does.** Refuses every `ubertooth-util` report, setter, and mode
+option written beside `-V`, in both orders, and requires the options `-V`
+keeps to keep working, with no board attached.
+
+**Theory of operation.** `-V` is terminal: the tool prints the version answer
+and returns before any report, setter, or mode runs. Until
+[ubertooth#1255](https://github.com/SqueakyFloors/ubertooth/issues/1255) a
+command line such as `-V -B` or `-s -V` therefore exited 0 with the other half
+of it dropped without a word, and the harness's comprehensive argument
+coverage did not catch it, because nothing asked what `-V` did to the option
+beside it ([#431](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/431)).
+
+Every option is written on both sides of `-V`. The fork sets its flags while
+it reads the command line and decides once the whole line has parsed, so the
+two orders are one command line and must give the same message; a tool that
+only noticed the option after `-V` would pass one order and fail the other.
+
+A refusal has to be all five of these, which is more than "it exited 1": the
+one error line below, naming the suppressed option and `-V`; no second error,
+note, or warning line, so a reader has one thing to act on; nothing at all on
+standard output, which is where the version answer goes, so half an answer
+cannot be mistaken for the answer; no mode start line; and no board asked for,
+which the `UBERTOOTH_TEST_NO_DEVICES=1` switch shows, since its "no board is
+selected" note is forbidden in every refusal. That last one is also what
+stands in for "no device state change" on a test with no board: a command line
+refused before any board is opened cannot have changed one. `ubertooth-util`
+has no file option, so there is no file for a refusal to create.
+
+```text
+error: -B cannot be combined with -V; -V reports the version and ends the
+command, so run them as separate commands
+```
+
+The wording is one function in the case builder, because the harness and the
+fork have to agree on it to the character; if the fork lands other words,
+that function is the one place that changes.
+
+What stays composable, and is required to, so the check cannot pass by
+refusing everything: `-U <selector>` and `-U all`, which scope the version
+report rather than being suppressed by it, and `-h`, which the fork
+intentionally keeps beside `-V` and prints after it so the usage text does not
+scroll the version away.
+
+The matrix is derived from the option tables the harness already owns, so an
+option added to the harness cannot escape it: the reads from
+`transitions.QUERY_OPTIONS`, the setters from the `transitions.Setting`
+objects, the modes from `util_refusal_cases.MODES`, and a declared group for
+the six `ubertooth-util` options no table owns (`-S`, `-r`, `-m`, `-N`, `-B`,
+`-w`). A unit test holds that union to the `ubertooth-util` table of
+[COVERAGE.md](../COVERAGE.md), less the three options above and the two the
+fork removed (`-f`, `-9`), so a new option is a failing unit test rather than
+a quiet gap.
+
+**Hardware and arguments.** No board role. `hosts:` and `coverage:`.
+
+**Commands.** No board. Every case opens with the probe, which reads the
+built libubertooth and then runs one `-V -B` with no board, and these create
+no files, so there is no directory to state afterwards:
+
+```text
+utilconflict.py probe ubertooth-util
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -<suppressed>      # and -<suppressed> -V
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -a5                # each value form, both orders
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V                    # the whole answer, no usage
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -U <selector> -V      # and -V -U <selector>
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -U all -V             # and -V -U all
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -h                 # and -h -V: both answers
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -a8                # the value is refused
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -c2426 -c2450      # the repeat is refused
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -B stray           # the stray word is refused
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -s -B              # one line for two options
+```
+
+`-<suppressed>` is each of `-v -s -p -b -a -C -z -l -d -q -n -e -t -x -I -i
+-c -S -r -m -N -B -w`, and the value forms are `-c2426 -C24 -a5 -z-60 -l1 -d1
+-q120`. The cleanup of every case is `-V` on its own, which needs no board and
+records that the tool still answers in full.
+
+**Expected outcome.** Smoke runs 9 cases: `-B`, `-s`, `-a`, `-I`, and `-N`
+beside `-V` in both orders, and the four kept combinations. Comprehensive runs
+31: one case per suppressed option, each in both orders and in both its bare
+and its value form where it takes one, the same four kept combinations, and
+four for order — a bad option value, an option given a value twice, and a
+stray word, each of which must be reported *instead of* the conflict because
+the option loop and the operand check run before it, and a command line
+carrying two suppressed options, which must give one conflict line naming
+either of them.
+
+**Known limits.** It skips until the built `ubertooth-util` has the check at
+all. The probe decides that by behavior rather than by message — it runs `-V
+-B` and reads the exit status — so a build that refuses the combination in
+other words is measured and fails on the wording, rather than skipping
+quietly, which is the one outcome worth designing against. Which option a
+message names when two are suppressed is deliberately not pinned. `-N` is
+treated as suppressed, like every other option `-V` does not execute; if the
+fork decides the bus count belongs with the version report after all, its case
+goes with it. Nothing here runs a board, so "no state change" means only that
+no board was opened.
+
 ## DFU image checks
 
 **What it does.** Checks `ubertooth-dfu -d` image validation and `-s`

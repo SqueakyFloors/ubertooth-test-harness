@@ -858,7 +858,11 @@ def radio_setting_cases(arguments, _resources, resource_identities):
 # -V is not one of them. Since fork f898fe5 (#813) it is the version command
 # and ends the command before any query runs, so it is covered on its own
 # below instead.
-_QUERY_OPTIONS = (
+#
+# `util_version_cases` reads this table too, for the reports it pairs with
+# -V: the options live here once, so a read added to the harness is paired
+# with -V without anyone remembering to.
+QUERY_OPTIONS = (
     ("-v", "firmware", FIRMWARE_PATTERN),
     ("-s", "serial", None),
     ("-p", "part", PART_ID_PATTERN),
@@ -903,7 +907,7 @@ def _version_case(case_id, options, serial):
 
 def _query_patterns(options, serial):
     patterns = []
-    for option, _label, pattern in _QUERY_OPTIONS:
+    for option, _label, pattern in QUERY_OPTIONS:
         if option not in options:
             continue
         patterns.append(serial_pattern(serial) if option == "-s" else pattern)
@@ -924,7 +928,7 @@ def _query_case(case_id, name, options, serial):
 
 def util_composition_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Ubertooth util compositions")
-    every = tuple(option for option, _label, _pattern in _QUERY_OPTIONS)
+    every = tuple(option for option, _label, _pattern in QUERY_OPTIONS)
     compositions = [
         _query_case(
             "full-readback-composition",
@@ -947,7 +951,7 @@ def util_composition_cases(arguments, _resources, resource_identities):
                 expected_returncodes=(1,),
             )
         )
-        labels = {option: label for option, label, _pattern in _QUERY_OPTIONS}
+        labels = {option: label for option, label, _pattern in QUERY_OPTIONS}
         # Every pair, since the only composition above asks for all nine.
         for first, second in compatible_pairs(every):
             cases.append(
@@ -1327,7 +1331,7 @@ def ble_crc_cases(arguments, _resources, resource_identities):
 # them (btle -s, -i/-I, ducky -q/-b, util -t/-n/-e) are not used.
 
 _VALIDATED = (CHANNEL, SQUELCH, LEDS)
-_ANY_MODE_START = r"Entering |Starting |Flashing LEDs|the board is blinking|systime="
+ANY_MODE_START = r"Entering |Starting |Flashing LEDs|the board is blinking|systime="
 _STRAY = r"error: unexpected argument '{}'"
 
 
@@ -1545,7 +1549,7 @@ def _rejection_case(serial: str, rejection: Rejection) -> StateCase:
                 timeout_s=MODE_TIMEOUT_S,
                 expected_returncodes=(1,),
                 output_patterns=(rejection.error,),
-                forbidden_patterns=(_ANY_MODE_START,),
+                forbidden_patterns=(ANY_MODE_START,),
                 mutates=True,
             ),
         )
