@@ -99,7 +99,7 @@ from ubertooth_harness.plan import PlanError, load_plan
 from ubertooth_harness.planner import PlanCompiler, PlanningError
 from ubertooth_harness.resources import FileResourceRegistry
 from ubertooth_harness.stateful import StateCase, artifact_key
-from ubertooth_harness import transitions
+from ubertooth_harness import transitions, util_version_cases
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 DOCUMENT = REPOSITORY / "docs" / "tests.md"
@@ -204,6 +204,15 @@ OPTION = re.compile(r"^(?P<name>-{1,2}[A-Za-z][A-Za-z0-9-]*)")
 # `-<mode>`: the modes Util mode refusals pairs with `-i`.
 _collapsed("Util mode refusals", "ubertooth-util", "-<mode>",
            "-I", "-e", "-n", "-t")
+# `-<suppressed>`: every ubertooth-util option Util version conflicts writes
+# beside `-V`, taken from the matrix itself so a new option is collapsed with
+# it, less the ones that section's block spells out in a command of their own:
+# `-a` and `-c` in their value forms, and the `-b`, `-C`, `-N`, `-s` and `-B`
+# of its ordering and naming lines.
+_VERSION_SPELLED_OUT = ("-a", "-b", "-c", "-s", "-B", "-C", "-N")
+_collapsed("Util version conflicts", "ubertooth-util", "-<suppressed>",
+           *(option for option in util_version_cases.CONFLICTING
+             if option not in _VERSION_SPELLED_OUT))
 # `<refusal>`: the file option, the later value, the repeat or the stray
 # word each refusal case writes after the tool.
 _collapsed("Refused command lines", "ubertooth-btle", "<refusal>", "-a", "-f", "-h")

@@ -821,7 +821,7 @@ _REPLAY_ONE_BOARD = (r"(?m)^error: -i names one saved capture, so it cannot be "
 _SECOND_ERROR = r"(?m)^error:[^\n]*\n(?:[^\n]*\n)*?error:"
 _ANY_NOTE = r"(?m)^note:"
 _ANY_WARNING = r"(?m)^warning:"
-_ONE_ERROR_ONLY = (_SECOND_ERROR, _ANY_NOTE, _ANY_WARNING)
+ONE_ERROR_ONLY = (_SECOND_ERROR, _ANY_NOTE, _ANY_WARNING)
 
 
 # Where a case names a capture file, the word to put it in. Each such case
@@ -846,7 +846,7 @@ def _multi_board_case(case_id, label, words, patterns, *, forbidden=(),
     replaced by a file of that extension, and the command is refused once
     naming a new file and once naming a seeded one.
     """
-    forbidden = (NO_BOARD_NOTE,) + _ONE_ERROR_ONLY + tuple(forbidden)
+    forbidden = (NO_BOARD_NOTE,) + ONE_ERROR_ONLY + tuple(forbidden)
 
     def refuse(step_id, name):
         return tool_step(

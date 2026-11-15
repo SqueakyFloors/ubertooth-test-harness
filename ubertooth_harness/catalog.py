@@ -37,7 +37,7 @@ from ubertooth_harness import (
     invalidapp_cases, python_cases,
     receive_cases,
     refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
-    util_refusal_cases,
+    util_refusal_cases, util_version_cases,
 )
 
 
@@ -1188,6 +1188,14 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # longer, which is why an estimate is a countdown, never a timeout.
     "Failed capture files": _profiles(Estimate(5.3), Estimate(15.1)),
     "Util mode refusals": _profiles(Estimate(1.9), Estimate(3.0)),
+    # Not measured on a target yet: scaled from Util mode refusals, which
+    # runs the same kind of command (ubertooth-util with no board) at about
+    # 0.05 s a command on the calibration host. Smoke is 37 steps and
+    # comprehensive 147, counting each case's cleanup, and the probe step of
+    # each case runs a tool as well as reading the library, so it counts as
+    # two: 46 and 181 commands. A target's own runs replace this as soon as
+    # three of them have measured it (learned.py).
+    "Util version conflicts": _profiles(Estimate(2.3), Estimate(9.1)),
     "DFU image checks": _profiles(Estimate(8.7), Estimate(37.4)),
     "Python tools": _profiles(Estimate(0.5), Estimate(7.7)),
     "BLE extcap interfaces": _profiles(Estimate(0.4), Estimate(1.4)),
@@ -1727,6 +1735,17 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=util_refusal_cases.util_refusal_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            "Util version conflicts",
+            "ubertooth-util refuses every report, setter and mode option "
+            "beside -V, in both orders, before any version output or board "
+            "lookup, and keeps -U and -h, with no Ubertooth "
+            "(UBERTOOTH_TEST_NO_DEVICES=1)",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=util_version_cases.util_version_cases,
             continue_on_case_failure=True,
         ),
         TestDefinition(
