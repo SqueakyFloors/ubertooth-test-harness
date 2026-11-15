@@ -206,9 +206,10 @@ _collapsed("Util mode refusals", "ubertooth-util", "-<mode>",
            "-I", "-e", "-n", "-t")
 # `-<suppressed>`: every ubertooth-util option Util version conflicts writes
 # beside `-V`, taken from the matrix itself so a new option is collapsed with
-# it, less the four that section's block spells out -- `-a` and `-c` in their
-# value forms, and the `-s` and `-B` of its last two lines.
-_VERSION_SPELLED_OUT = ("-a", "-c", "-s", "-B")
+# it, less the ones that section's block spells out in a command of their own:
+# `-a` and `-c` in their value forms, and the `-b`, `-C`, `-N`, `-s` and `-B`
+# of its ordering and naming lines.
+_VERSION_SPELLED_OUT = ("-a", "-b", "-c", "-s", "-B", "-C", "-N")
 _collapsed("Util version conflicts", "ubertooth-util", "-<suppressed>",
            *(option for option in util_version_cases.CONFLICTING
              if option not in _VERSION_SPELLED_OUT))

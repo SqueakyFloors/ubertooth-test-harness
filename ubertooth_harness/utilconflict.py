@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,11 +45,18 @@ if __package__ in (None, ""):
 from ubertooth_harness import refusal  # noqa: E402
 
 # The option the probe pairs with `-V`: a report that takes no value, needs
-# no board to be refused, and is the one ubertooth#1255 names first.
+# no board to be refused, and is the one ubertooth#1255 names first. One
+# option decides for all of them, which is the probe's own limit: a build that
+# refused every option but this one would read as `no` and skip the lot.
 PROBE_OPTION = "-B"
 # What the probed command must say about itself. The tool is given a deadline
 # of its own: it opens no board here, so it has nothing to wait for.
 PROBE_TIMEOUT_S = 10.0
+# A refusal says so on standard error, and prints no part of the version
+# answer: exit 1 on its own is also what a build stopped by something else
+# gives.
+_ERROR_LINE = re.compile(r"(?m)^error: ")
+_VERSION_LINE = re.compile(r"(?m)^(?:Host tools version|Firmware version)")
 
 
 def probe(tool: str = "ubertooth-util", path: str | None = None) -> str:
@@ -80,6 +88,19 @@ def probe(tool: str = "ubertooth-util", path: str | None = None) -> str:
         return (f"no: {Path(found).name} -V {PROBE_OPTION} exited "
                 f"{result.returncode}, which is neither the version answer "
                 "nor a refusal")
+    # Exit 1 is not enough on its own: a build that cannot list the USB bus,
+    # or one stopped by something else entirely, exits 1 too, and arming the
+    # cases on that would report a build's own trouble as 23 failed cases.
+    # What says the command line was refused is a refusal: an error line, and
+    # no part of the version answer printed before it.
+    if not _ERROR_LINE.search(result.stderr or ""):
+        return (f"no: {Path(found).name} -V {PROBE_OPTION} exited 1 without "
+                "an error: line, so it was stopped by something other than "
+                "the command line")
+    if _VERSION_LINE.search(result.stdout or ""):
+        return (f"no: {Path(found).name} -V {PROBE_OPTION} printed the "
+                "version answer and then exited 1, so it did not refuse the "
+                "command line")
     return f"yes ({found})"
 
 

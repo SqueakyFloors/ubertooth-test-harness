@@ -26,7 +26,8 @@ suites:
         coverage: comprehensive
 
     # No Ubertooth: every ubertooth-util option -V would suppress, in both
-    # orders. Skipped until the built tool refuses them (ubertooth#1255).
+    # orders. Skipped until the built tool refuses them (fork #1260 for
+    # ubertooth#1255).
     - Util version conflicts:
         hosts: each
         coverage: comprehensive

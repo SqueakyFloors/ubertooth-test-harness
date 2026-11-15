@@ -1191,11 +1191,11 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # Not measured on a target yet: scaled from Util mode refusals, which
     # runs the same kind of command (ubertooth-util with no board) at about
     # 0.05 s a command on the calibration host. Smoke is 37 steps and
-    # comprehensive 134, counting each case's cleanup, and the probe step of
+    # comprehensive 147, counting each case's cleanup, and the probe step of
     # each case runs a tool as well as reading the library, so it counts as
-    # two. A target's own runs replace this as soon as three of them have
-    # measured it (learned.py).
-    "Util version conflicts": _profiles(Estimate(2.8), Estimate(9.9)),
+    # two: 46 and 181 commands. A target's own runs replace this as soon as
+    # three of them have measured it (learned.py).
+    "Util version conflicts": _profiles(Estimate(2.3), Estimate(9.1)),
     "DFU image checks": _profiles(Estimate(8.7), Estimate(37.4)),
     "Python tools": _profiles(Estimate(0.5), Estimate(7.7)),
     "BLE extcap interfaces": _profiles(Estimate(0.4), Estimate(1.4)),

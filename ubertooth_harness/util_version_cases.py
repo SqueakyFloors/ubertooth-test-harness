@@ -3,9 +3,9 @@ options it would otherwise suppress, with no Ubertooth.
 
 `-V` is terminal. ubertooth-util prints the version answer and returns before
 any report, setter or mode runs (ubertooth-util.c: the `if (do_version)` block
-returns above the mode checks), so until
+returns above the mode checks), so before
 [ubertooth#1255](https://github.com/SqueakyFloors/ubertooth/issues/1255) a
-command line such as `-V -B` or `-s -V` exits 0 with the other half of it
+command line such as `-V -B` or `-s -V` exited 0 with the other half of it
 dropped without a word. The harness had comprehensive argument coverage and
 did not catch that, because nothing asked what `-V` does to the option beside
 it (harness #431). This test asks, for every option there is.
@@ -13,10 +13,12 @@ it (harness #431). This test asks, for every option there is.
 What a conflict must be, per command line:
 
   * exit 1;
-  * the one error line below, naming the suppressed option and `-V`, and no
+  * one error line, `error: -V cannot be combined with <option>; -V prints the
+    version and ends the command, so run them as separate commands`, and no
     second error, note or warning line, so a reader has one thing to act on;
-  * nothing at all on standard output, which is where the version answer
-    goes: a refusal that printed half an answer would be worse than either;
+  * nothing at all on standard output, which is where the version answer and
+    the `-N` count would go: a refusal that printed half an answer would be
+    worse than either;
   * no mode start line;
   * no board asked for, which the no-devices switch shows. Every command runs
     as ``env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util ...``, as in Refused
@@ -37,32 +39,35 @@ What stays composable, and is required to:
   * `-U <selector>` and `-U all`, which scope the version report rather than
     being suppressed by it: `-V` reads the board `-U` names, or every attached
     board without one (libubertooth's ubertooth_print_versions()).
-  * `-h`, which the fork intentionally keeps beside `-V`: a command line with
-    both prints both, the version first so the usage text does not scroll it
-    away (ubertooth-util.c). ubertooth#1255 allows that only while it is
-    intentional, so the case requires both answers rather than assuming one.
+  * `-h`, whose usage text the fork prints after the version answer. It is one
+    of the two options `-V` uses, so it does not excuse a third: `-V -h -b` is
+    refused for `-b`, with no usage text either, which the fork's own
+    command-line matrix pins.
 
 The matrix is derived from the option tables the harness already owns, so an
 option added to the harness cannot escape it: the reads from
-`transitions.QUERY_OPTIONS`, the setters from the `transitions.Setting`
-objects, the modes from `util_refusal_cases.MODES`, and `OTHER_OPTIONS` for
-the six ubertooth-util options no table owns. `tests/test_util_version_cases`
-holds the union to the ubertooth-util table of COVERAGE.md, less the three
-options kept above and the two the fork removed, so a new option shows up as
-a failing unit test rather than as a quiet gap.
+`transitions.QUERY_OPTIONS`, the setters from every `transitions.Setting`
+object the module defines, the modes from `util_refusal_cases.MODES`, and
+`OTHER_OPTIONS` for the six ubertooth-util options no table owns.
+`tests/test_util_version_cases` holds the union to two statements it was not
+derived from: the ubertooth-util table of COVERAGE.md and the tool's own
+getopt string, less the three options kept above and the two the fork removed.
+So a new option shows up as a failing unit test rather than as a quiet gap.
 
-Ordering. The conflict is decided after the command line has parsed and
-before the version answer, so a bad option value, an option given a value
-twice, and a stray word are all reported instead of it (they are found in the
-option loop and the operand check, which run first). Comprehensive coverage
-requires each of those three, and that no conflict line comes out beside
-them.
+Ordering. The conflict is decided once the whole command line has parsed and
+before the version answer, so everything the option parser finds first is
+reported instead: a bad option value, an option given a value twice, the
+`-c`/`-C` clash, and a stray word. Comprehensive coverage requires each of
+those four, and that no conflict line comes out beside them. Where a command
+line carries several suppressed options, the first one written is the one
+named, whichever side of `-V` it is on.
 
 The expected wording is one function, `conflict_error`, because the harness
-and fork #1255 have to agree on it exactly; if the fork lands other words,
-this is the one place that changes. The cases skip until the built tool has
-the check at all (`utilconflict.py` probe), so this runs green against a fork
-that predates ubertooth#1255 rather than failing every case on it.
+and the fork have to agree on it exactly: it is the line fork #1260 prints,
+and if that changes, this is the one place the harness changes with it. The
+cases skip until the built tool has the check at all (`utilconflict.py`
+probe), so this runs green against a fork commit from before it rather than
+failing every case on one.
 """
 
 from __future__ import annotations
@@ -73,10 +78,7 @@ from pathlib import Path
 
 from ubertooth_harness import transitions, util_refusal_cases, utilconflict
 from ubertooth_harness.hostneeds import tool_needs
-from ubertooth_harness.patterns import (
-    HOST_VERSION_LINE,
-    VERSION_ANSWER_PATTERNS,
-)
+from ubertooth_harness.patterns import VERSION_ANSWER_PATTERNS
 from ubertooth_harness.refusal_cases import (
     NO_BOARD_NOTE, ONE_ERROR_ONLY, tool_step,
 )
@@ -105,28 +107,24 @@ _HELPER = str(Path(utilconflict.__file__).resolve())
 # ---------------------------------------------------------------------------
 # The expected refusal
 
-# Why the two cannot be combined, as the message says it. One string, because
-# the harness and the fork have to agree on it to the character: ubertooth#1255
-# is where it lands, and this is the only place the harness states it.
-CONFLICT_REASON = ("-V reports the version and ends the command, so run them "
+# The refusal, as ubertooth-util prints it (fork #1260 for ubertooth#1255,
+# ubertooth-util.c, and ubertooth-util.md OPTIONS under -V). Two statements:
+# the reason, which every refusal carries, and the option named, which is the
+# FIRST option written that -V does not use -- that is the one a reader would
+# look for in the output, and the fork's own command-line matrix pins it.
+CONFLICT_REASON = ("-V prints the version and ends the command, so run them "
                    "as separate commands")
 
 
 def conflict_error(option: str) -> str:
-    """The refusal of ``option`` beside -V, as a whole line of its own."""
-    return (r"(?m)^error: " + re.escape(option)
-            + r" cannot be combined with -V; " + re.escape(CONFLICT_REASON)
-            + r"$")
+    """The refusal naming ``option``, as a whole line of its own.
 
-
-def any_conflict_error(options) -> str:
-    """The refusal of any one of ``options``, for a command line carrying
-    several: which one a message names is the fork's to choose, and nothing
-    here pins it."""
-    return (r"(?m)^error: (?:"
-            + "|".join(re.escape(option) for option in options)
-            + r") cannot be combined with -V; " + re.escape(CONFLICT_REASON)
-            + r"$")
+    `-V` comes first in the message and the suppressed option second, which
+    is how the fork writes it; a message with them the other way round does
+    not match.
+    """
+    return (r"(?m)^error: -V cannot be combined with " + re.escape(option)
+            + r"; " + re.escape(CONFLICT_REASON) + r"$")
 
 
 # The version answer, which a refusal must not print any of. Both labels, on
@@ -151,21 +149,24 @@ VERSION_BEFORE_USAGE = r"(?s)Host tools version:.*ubertooth-util - command line"
 # of every command line that keeps -V, so a kept combination answers in full
 # rather than merely exiting 0.
 NOTHING_ATTACHED = r"(?m)^Firmware version: no Ubertooth attached$"
-VERSION_ANSWER = VERSION_ANSWER_PATTERNS + (HOST_VERSION_LINE, NOTHING_ATTACHED)
+VERSION_ANSWER = VERSION_ANSWER_PATTERNS + (NOTHING_ATTACHED,)
 # A kept combination is not a refusal: no error line of any kind.
 NO_ERROR = (r"(?m)^error:", r"cannot be combined")
 
 # ---------------------------------------------------------------------------
 # The matrix, from the tables the harness already owns
 
-# The settings whose set form is a ubertooth-util option, by the option that
-# writes them. Taken from the Setting objects rather than written out, so a
-# setting added to the harness brings its option with it; the value is any one
-# the setting itself takes, since what is under test is the option beside -V
-# and not the value.
-SETTINGS = (transitions.CHANNEL, transitions.CHANNEL_INDEX,
-            transitions.PA_LEVEL, transitions.SQUELCH, transitions.USR_LED,
-            transitions.LEDS)
+# The settings whose set form is a ubertooth-util option. Collected from the
+# `Setting` objects of `transitions` rather than listed, because the lists
+# there (SMOKE_SETTINGS, RESTORED_SETTINGS and the rest) are each a subset:
+# every Setting the module defines is one the harness writes with
+# ubertooth-util, so this is the whole of them, and a setting added there
+# brings its option with it. The value is any one the setting itself takes,
+# since what is under test is the option beside -V and not the value.
+SETTINGS = tuple(
+    value for name, value in sorted(vars(transitions).items())
+    if isinstance(value, transitions.Setting)
+)
 SETTER_VALUES = {"-c": "2426", "-C": "24", "-a": "5", "-z": "-60",
                  "-l": "1", "-d": "1"}
 # The ubertooth-util options no harness table owns: the two that act on the
@@ -200,9 +201,10 @@ LABELS = {
     "-S": "stop", "-r": "reset", "-m": "range-result", "-N": "count",
     "-B": "bootloader", "-w": "watchdog",
 }
-# The one mode that takes a value, so the matrix covers a mode written both
-# ways; -q<N> is the LED specan threshold (util_cases).
-MODE_VALUES = {"-q": "120"}
+# The two modes that take a value, so the matrix covers a mode written both
+# ways: -q<N> is the LED specan threshold and -n<seconds> the range test's own
+# deadline (util_cases, catalog.py).
+MODE_VALUES = {"-q": "120", "-n": "5"}
 # The smoke subset: one of each kind, with the two ubertooth#1255 names
 # first. Comprehensive runs every option.
 SMOKE_OPTIONS = ("-B", "-s", "-a", "-I", "-N")
@@ -287,8 +289,14 @@ def _accept(step_id, words, patterns, *, forbidden=NO_ERROR) -> Step:
 
 def _host_version() -> Step:
     """The cleanup: nothing on a device to restore, so this records that the
-    tool still runs and still answers -V in full."""
-    return _accept("host-version", (VERSION,), VERSION_ANSWER)
+    tool still runs and still answers -V in full.
+
+    -V reads the no-devices switch itself and reports what is attached, so it
+    never prints the switch's own note: that note belongs to a command that
+    wanted a board (libubertooth's ubertooth_print_versions()).
+    """
+    return _accept("host-version", (VERSION,), VERSION_ANSWER,
+                   forbidden=NO_ERROR + (NO_BOARD_NOTE,))
 
 
 def _case(case_id, name, steps, expected_state) -> StateCase:
@@ -352,8 +360,8 @@ def _kept_cases():
 
 
 def _order_cases():
-    """The three refusals decided before the conflict is, and a command line
-    carrying two conflicting options."""
+    """What is decided before the conflict is, and the command lines carrying
+    more than one suppressed option, where the first written is named."""
     # A bad option value is found in the option loop, before the command line
     # has finished parsing.
     bad_value = _case(
@@ -370,10 +378,22 @@ def _order_cases():
         "repeat-first", "util -V -c2426 -c2450: the repeat is refused first", (
             _refuse("refuse-repeated-channel", (VERSION, "-c2426", "-c2450"),
                     (r"(?m)^error: option '-c' given more than once$",),
-                    forbidden=FORBIDDEN + (r"cannot be combined",)),
+                    forbidden=FORBIDDEN + (r"cannot be combined with -V",)),
         ),
         "refused (exit 1) for the repeated -c, with no conflict line and no "
         "version answer")
+    # -c and -C are one setting written two ways, which the option loop
+    # refuses as it reads the second value (ubertooth-util.md, ARGUMENTS).
+    channel_clash = _case(
+        "channel-clash-first",
+        "util -V -c2426 -C24: the -c/-C clash is refused first", (
+            _refuse("refuse-channel-clash", (VERSION, "-c2426", "-C24"),
+                    (r"(?m)^error: -C cannot be combined with -c; they are the "
+                     r"same channel setting written two ways$",),
+                    forbidden=FORBIDDEN + (r"cannot be combined with -V",)),
+        ),
+        "refused (exit 1) for the two spellings of one channel, with no "
+        "conflict line and no version answer")
     # The operand check runs after the loop and before -V, so a typo such as
     # "- V" is reported rather than dropped.
     stray = _case(
@@ -385,20 +405,48 @@ def _order_cases():
         ),
         "refused (exit 1) naming the stray word, with no conflict line and no "
         "version answer")
-    # Two suppressed options at once. Which of them the message names is the
-    # fork's to choose, so the case requires a conflict line naming one of
-    # them and the one-error rule around it, rather than pinning the choice.
-    both = _case(
-        "two-conflicting-options", "util -V -s -B: one refusal for two options",
-        (
+    # Several suppressed options at once: the first one written is named,
+    # whichever order -V came in. These three command lines are the ones fork
+    # #1260 pins in its own command-line matrix.
+    several = _case(
+        "first-suppressed-option-named",
+        "util with two suppressed options names the first one written", (
             _refuse("refuse-version-first", (VERSION, "-s", "-B"),
-                    (any_conflict_error(("-s", "-B")),)),
+                    (conflict_error("-s"),)),
             _refuse("refuse-version-last", ("-s", "-B", VERSION),
-                    (any_conflict_error(("-s", "-B")),)),
+                    (conflict_error("-s"),)),
+            # -N is suppressed like any other option, and no count is printed
+            # before the refusal, which nothing_on_stdout requires.
+            _refuse("refuse-count-first", (VERSION, "-N", "-B"),
+                    (conflict_error("-N"),)),
         ),
-        "refused (exit 1) with one conflict line naming -s or -B, no second "
-        "error line, and no version answer")
-    return [bad_value, repeated, stray, both]
+        "each refused (exit 1) naming the first suppressed option written, "
+        "with no count and no version answer on stdout")
+    # -h is one of the two -V uses, so what is left to refuse is the third
+    # option, and no usage text comes out either.
+    help_and_one = _case(
+        "help-does-not-excuse-another-option",
+        "util -V -h -b: -h stands beside -V, -b does not", tuple(
+            _refuse(step_id, words, (conflict_error("-b"),),
+                    forbidden=FORBIDDEN + (USAGE_LINE,))
+            for step_id, words in (
+                ("refuse-version-help-board", (VERSION, HELP, "-b")),
+                ("refuse-help-board-version", (HELP, "-b", VERSION)),
+            )),
+        "refused (exit 1) naming -b, with neither the version answer nor the "
+        "usage text")
+    # A value given as the next word is still that option's value, so the
+    # conflict is the option and not a stray word (fork #156's next-word form).
+    next_word = _case(
+        "next-word-value", "util -V -c 2426: the next word is the value", (
+            _refuse("refuse-next-word-channel", (VERSION, "-c", "2426"),
+                    (conflict_error("-c"),),
+                    forbidden=FORBIDDEN + (r"unexpected argument",)),
+        ),
+        "refused (exit 1) naming -c, not the value as a stray word, and with "
+        "no version answer")
+    return [bad_value, repeated, channel_clash, stray, several, help_and_one,
+            next_word]
 
 
 def util_version_cases(arguments, _resources, _resource_identities):

@@ -37,6 +37,17 @@ USAGE = ("ubertooth-util - command line utility for Ubertooth Zero and "
 # which is where the fake's option set comes from: an independent statement of
 # what options there are, so the matrix is not compared with itself.
 UTIL_OPTIONS = ":U:hn::meiIprsStvbBwl::a::C::c::d::q::z::VNx"
+# The refusal, copied from the fork rather than taken from the module under
+# test: ubertooth-util.c in fork #1260 (for ubertooth#1255) prints it as
+# `error: -V cannot be combined with -%c; -V prints the version and ends the
+# command, so run them as separate commands`, and its own command-line matrix
+# records the same line in cli_spec.json. Taking it from
+# util_version_cases.CONFLICT_REASON would have let the two agree on wording
+# the tool never prints, which is exactly the mistake the first round of this
+# test made.
+FORK_REFUSAL = ("error: -V cannot be combined with {option}; -V prints the "
+                "version and ends the command, so run them as separate "
+                "commands")
 # The three -V keeps, so every other letter of that string is suppressed.
 KEPT = ("U", "h", "V")
 # The options that take a value, attached or as the next word.
@@ -145,6 +156,16 @@ class FakeUtil:
                     index += 1
             elif option not in OPTIONAL_VALUE:
                 value = None
+            elif value is None and index < len(words):
+                # An optional value may be the next word (-c 2426, -z -90),
+                # which opt_separate_value() takes when it reads as a number;
+                # only -z takes a negative one.
+                nxt = words[index]
+                numeric = (nxt.lstrip("-").isdigit() if option == "z"
+                           else nxt.isdigit())
+                if numeric:
+                    value = nxt
+                    index += 1
             if value is not None:
                 if option in with_value and not repeated:
                     repeated = (f"error: option '-{option}' given more than "
@@ -152,6 +173,14 @@ class FakeUtil:
                 with_value.add(option)
                 if not bad_value:
                     bad_value = BAD_VALUES.get((option, value), "")
+                # -c and -C are one channel setting written two ways, so a
+                # value given to both is refused as the second is read.
+                if option in "cC" and not bad_value:
+                    other = "C" if option == "c" else "c"
+                    if other in with_value:
+                        bad_value = (f"error: -{option} cannot be combined "
+                                     f"with -{other}; they are the same "
+                                     "channel setting written two ways\n")
             given.append((option, value))
         letters = [option for option, _value in given]
         conflict = self._conflict(words, letters)
@@ -182,7 +211,11 @@ class FakeUtil:
         return self._result(command, 0, answer)
 
     def _conflict(self, words, letters) -> str:
-        """The refusal this command line earns, or "" for none."""
+        """The refusal this command line earns, or "" for none.
+
+        The option named is the first one written that -V does not use, which
+        is what the fork's own command-line matrix pins.
+        """
         if "V" not in letters:
             return ""
         if "no-conflict-check" in self.bugs:
@@ -203,10 +236,18 @@ class FakeUtil:
             if not any(word[1] in suppressed for word in after):
                 return ""
         option = f"-{suppressed[0]}"
+        if "last-option-named" in self.bugs:
+            option = f"-{suppressed[-1]}"
+        if "transposed" in self.bugs:
+            # The two options the other way round in the message, which is
+            # what the harness expected before it was held to the fork's own
+            # line.
+            return (f"error: {option} cannot be combined with -V; -V reports "
+                    "the version and ends the command, so run them as "
+                    "separate commands\n")
         if "wrong-words" in self.bugs:
             return f"error: {option} and -V cannot be used together\n"
-        return (f"error: {option} cannot be combined with -V; "
-                f"{util_version_cases.CONFLICT_REASON}\n")
+        return FORK_REFUSAL.format(option=option) + "\n"
 
     def _refuse(self, command, message):
         stdout = ""
@@ -246,9 +287,27 @@ def run(executor, coverage="comprehensive"):
         return summary, sink.events
 
 
-# The ubertooth-util option table of COVERAGE.md: the option cell of each row,
-# which is how the harness records what options the tool has.
-_COVERAGE_ROW = re.compile(r"^\|\s*`(-[A-Za-z0-9])")
+def refusing_case_names(coverage="comprehensive") -> set[str]:
+    """The names of the cases that require a conflict refusal.
+
+    Every case whose steps carry the refusal pattern, read from the cases
+    themselves: a build with no check at all must fail exactly these, and
+    naming them is what a count of them could not do.
+    """
+    _arguments, built = cases(coverage)
+    # The patterns are regexes, so the reason appears in them escaped.
+    wanted = re.escape(util_version_cases.CONFLICT_REASON)
+    return {case.name for case in built
+            if any(wanted in pattern
+                   for step in case.steps for pattern in step.output_patterns)}
+
+
+# The ubertooth-util option table of COVERAGE.md, which is how the harness
+# records what options the tool has: every option named in the first cell of a
+# row, so a row naming two of them (`-U<index|serial>` beside another
+# spelling) contributes both.
+_COVERAGE_ROW = re.compile(r"^\|(?P<cell>[^|]*)\|")
+_COVERAGE_OPTION = re.compile(r"`-(?P<letter>[A-Za-z0-9])")
 
 
 def coverage_letters() -> set[str]:
@@ -260,9 +319,11 @@ def coverage_letters() -> set[str]:
     for line in section[1].splitlines():
         if line.startswith("## "):
             break
-        match = _COVERAGE_ROW.match(line)
-        if match:
-            found.add(match.group(1)[1])
+        row = _COVERAGE_ROW.match(line)
+        if row is None:
+            continue
+        found.update(match.group("letter")
+                     for match in _COVERAGE_OPTION.finditer(row.group("cell")))
     assert len(found) > 20, found
     return found
 
@@ -330,35 +391,34 @@ class MatrixTests(unittest.TestCase):
 
 class PatternTests(unittest.TestCase):
 
+    def test_the_pattern_matches_the_line_the_fork_prints(self):
+        # FORK_REFUSAL is copied from fork #1260, not built from the module,
+        # so this is the one assertion that would have caught the harness and
+        # the fork agreeing on wording the tool never prints.
+        for option in ("-B", "-s", "-N", "-i", "-c"):
+            with self.subTest(option):
+                self.assertRegex(FORK_REFUSAL.format(option=option) + "\n",
+                                 util_version_cases.conflict_error(option))
+
     def test_the_message_is_matched_whole(self):
-        reason = util_version_cases.CONFLICT_REASON
-        self.assertRegex(f"error: -B cannot be combined with -V; {reason}\n",
-                         util_version_cases.conflict_error("-B"))
-        # Another option, other words, and the pair the other way round all
-        # fail to match.
-        self.assertNotRegex(f"error: -s cannot be combined with -V; {reason}\n",
-                            util_version_cases.conflict_error("-B"))
-        self.assertNotRegex("error: -B cannot be combined with -V\n",
-                            util_version_cases.conflict_error("-B"))
-        self.assertNotRegex(f"error: -V cannot be combined with -B; {reason}\n",
+        line = FORK_REFUSAL.format(option="-B") + "\n"
+        self.assertRegex(line, util_version_cases.conflict_error("-B"))
+        # Another option, the two options the other way round, the earlier
+        # wording, and a truncated line all fail to match.
+        self.assertNotRegex(line, util_version_cases.conflict_error("-s"))
+        self.assertNotRegex(
+            "error: -B cannot be combined with -V; -V prints the version and "
+            "ends the command, so run them as separate commands\n",
+            util_version_cases.conflict_error("-B"))
+        self.assertNotRegex(
+            "error: -V cannot be combined with -B; -V reports the version and "
+            "ends the command, so run them as separate commands\n",
+            util_version_cases.conflict_error("-B"))
+        self.assertNotRegex("error: -V cannot be combined with -B\n",
                             util_version_cases.conflict_error("-B"))
         # -i and -I are different options.
-        self.assertNotRegex(f"error: -I cannot be combined with -V; {reason}\n",
+        self.assertNotRegex(FORK_REFUSAL.format(option="-I") + "\n",
                             util_version_cases.conflict_error("-i"))
-
-    def test_either_option_satisfies_the_two_conflict_pattern(self):
-        reason = util_version_cases.CONFLICT_REASON
-        pattern = util_version_cases.any_conflict_error(("-s", "-B"))
-        for option in ("-s", "-B"):
-            self.assertRegex(
-                f"error: {option} cannot be combined with -V; {reason}\n", pattern)
-        self.assertNotRegex(
-            f"error: -w cannot be combined with -V; {reason}\n", pattern)
-
-    def test_the_reason_is_the_one_the_probe_and_the_fork_share(self):
-        # One statement of the wording: the module's, which the fake above
-        # formats its message from too.
-        self.assertIn("separate commands", util_version_cases.CONFLICT_REASON)
 
 
 class CaseTests(unittest.TestCase):
@@ -371,8 +431,8 @@ class CaseTests(unittest.TestCase):
         # Five options, and the four combinations -V keeps.
         self.assertEqual(5 + 4, len(smoke))
         _a, full = cases("comprehensive")
-        # Every option, the four kept, and four for order.
-        self.assertEqual(23 + 4 + 4, len(full))
+        # Every option, the four kept, and seven about order and naming.
+        self.assertEqual(23 + 4 + 7, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         for case in full:
             self.assertIsInstance(case, StateCase)
@@ -423,16 +483,16 @@ class CaseTests(unittest.TestCase):
                     self.assertIn(("-V", word), pairs)
                     self.assertIn((word, "-V"), pairs)
 
-    def test_fork_1255_passes_everything(self):
+    def test_fork_1260_passes_everything(self):
         summary, _events = run(FakeUtil(), coverage="smoke")
         self.assertTrue(summary.passed, summary.failure_reason)
         summary, _events = run(FakeUtil())
         self.assertTrue(summary.passed, summary.failure_reason)
 
     def test_a_build_before_1255_skips_rather_than_failing(self):
-        # The probe follows the behavior, so a fork that drops the option
-        # beside -V reports "no" and every case skips: this test can be in a
-        # plan, and in CI, before the fork change lands.
+        # The probe follows the behavior, so a fork commit that drops the
+        # option beside -V reports "no" and every case skips. That is what
+        # lets this test sit in a plan before fork #1260 lands.
         old = FakeUtil(bugs=("no-conflict-check",))
         summary, _events = run(old)
         self.assertTrue(summary.passed, summary.failure_reason)
@@ -450,67 +510,92 @@ class CaseTests(unittest.TestCase):
         self.assertEqual({("-V",)}, tools)
 
     def test_a_build_that_claims_the_check_and_drops_the_option_fails(self):
-        # The one outcome worth designing against is the opposite: a probe
-        # that said "no" while the check was there. Here the check is not
-        # there and the probe says it is, and every case that asks for a
-        # refusal fails -- the 23 per-option cases and the two-option one.
+        # The one outcome worth designing against is the opposite of a skip:
+        # a probe that said "no" while the check was there. Here the check is
+        # not there and the probe says it is, so every case that asks for a
+        # refusal fails and the ones that do not still pass.
         summary, events = run(
             FakeUtil(bugs=("no-conflict-check",), probe_says_yes=True))
         self.assertFalse(summary.passed)
-        self.assertEqual(24, len(failed_names(events)))
-        # The three order cases still pass: their refusals come from the
-        # option loop and the operand check, which this build still has.
+        failed = set(failed_names(events))
+        self.assertEqual(refusing_case_names(), failed)
+        # The four pre-conflict order cases still pass: their refusals come
+        # from the option loop and the operand check, which this build has.
         self.assertNotIn("util -V -B stray: the stray word is refused first",
-                         failed_names(events))
+                         failed)
+        self.assertNotIn("util -V -a8: the value is refused, not the conflict",
+                         failed)
 
     def test_noticing_only_the_option_after_version_fails_every_case(self):
         summary, events = run(FakeUtil(bugs=("only-after-version",)),
                               coverage="smoke")
         self.assertFalse(summary.passed)
-        self.assertEqual(5, len(failed_names(events)))
+        self.assertEqual(refusing_case_names("smoke"), set(failed_names(events)))
+
+    def test_the_transposed_wording_fails_every_case(self):
+        # The wording the harness expected before it was held to the fork's
+        # own line: the two options the other way round, and "reports" for
+        # "prints".
+        summary, events = run(FakeUtil(bugs=("transposed",)), coverage="smoke")
+        self.assertFalse(summary.passed)
+        self.assertEqual(refusing_case_names("smoke"), set(failed_names(events)))
 
     def test_other_words_fail_every_case(self):
         summary, events = run(FakeUtil(bugs=("wrong-words",)), coverage="smoke")
-        self.assertEqual(5, len(failed_names(events)))
+        self.assertEqual(refusing_case_names("smoke"), set(failed_names(events)))
+
+    def test_naming_the_last_suppressed_option_fails_that_case(self):
+        # The message names the first option written, not the last.
+        summary, events = run(FakeUtil(bugs=("last-option-named",)))
+        self.assertEqual(
+            ["util with two suppressed options names the first one written"],
+            failed_names(events))
 
     def test_a_version_answer_before_the_refusal_fails_every_case(self):
         summary, events = run(FakeUtil(bugs=("version-then-refuse",)),
                               coverage="smoke")
-        self.assertEqual(5, len(failed_names(events)))
+        self.assertEqual(refusing_case_names("smoke"), set(failed_names(events)))
 
     def test_a_refusal_that_says_more_than_one_thing_fails(self):
         for bug in ("second-error-line", "note-after-refusal", "mode-started",
                     "board-opened"):
             with self.subTest(bug):
                 summary, events = run(FakeUtil(bugs=(bug,)), coverage="smoke")
-                self.assertEqual(5, len(failed_names(events)))
+                self.assertFalse(summary.passed)
+                self.assertEqual(refusing_case_names("smoke"),
+                                 set(failed_names(events)))
 
     def test_refusing_the_selector_or_the_help_fails_the_kept_cases(self):
         summary, events = run(FakeUtil(bugs=("selector-refused",)),
                               coverage="smoke")
+        self.assertFalse(summary.passed)
         self.assertEqual(
             ["util -U <selector> -V keeps the selector",
              "util -U all -V keeps the listing selector"],
             sorted(failed_names(events)))
         summary, events = run(FakeUtil(bugs=("help-refused",)), coverage="smoke")
+        self.assertFalse(summary.passed)
         self.assertEqual(
             ["util -V -h prints both answers, the version first"],
             failed_names(events))
 
     def test_the_usage_text_above_the_version_fails_the_help_case(self):
         summary, events = run(FakeUtil(bugs=("help-first",)), coverage="smoke")
+        self.assertFalse(summary.passed)
         self.assertEqual(
             ["util -V -h prints both answers, the version first"],
             failed_names(events))
 
     def test_deciding_the_conflict_first_fails_the_order_cases(self):
-        # A bad value, a repeat and a stray word are all reported before the
-        # conflict; a build that decided the conflict first would answer a
-        # mistyped command line with the wrong complaint.
+        # A bad value, a repeat, the -c/-C clash and a stray word are all
+        # reported before the conflict; a build that decided the conflict
+        # first would answer a mistyped command line with the wrong
+        # complaint.
         summary, events = run(FakeUtil(bugs=("conflict-first",)))
         self.assertEqual(
             ["util -V -B stray: the stray word is refused first",
              "util -V -a8: the value is refused, not the conflict",
+             "util -V -c2426 -C24: the -c/-C clash is refused first",
              "util -V -c2426 -c2450: the repeat is refused first"],
             sorted(failed_names(events)))
 
@@ -582,8 +667,7 @@ class PlanTests(unittest.TestCase):
 
     def test_plans_use_the_test(self):
         catalog = builtin_catalog()
-        expected = {"fast.yaml": "smoke", "host.yaml": "smoke",
-                    "release.yaml": "comprehensive"}
+        expected = {"fast.yaml": "smoke", "release.yaml": "comprehensive"}
         for filename, profile in expected.items():
             plan = load_plan(REPOSITORY / "testplans" / filename, catalog)
             entries = [entry for suite in plan.suites.values() for entry in suite
@@ -591,6 +675,18 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(
                 [profile], [entry.arguments["coverage"] for entry in entries],
                 filename)
+
+    def test_the_ci_plan_leaves_it_out_until_the_fork_change_lands(self):
+        # scripts/ci.sh runs testplans/host.yaml in the build job and asserts
+        # that no case skipped at run time. Until fork #1260 merges, every
+        # case of this test skips there, so the entry waits: adding it now
+        # would fail CI on both runners rather than measuring anything.
+        plan = load_plan(REPOSITORY / "testplans" / "host.yaml", builtin_catalog())
+        self.assertEqual(
+            [], [entry.test_name for suite in plan.suites.values()
+                 for entry in suite if entry.test_name == NAME])
+        self.assertIn('assert summary["skipped_cases"] == 0',
+                      (REPOSITORY / "scripts" / "ci.sh").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

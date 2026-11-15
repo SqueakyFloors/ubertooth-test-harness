@@ -168,18 +168,14 @@ class FakeUbertooth:
         pa_zero_sets=True,
         set_and_read=True,
         one_value_each=True,
-        version_ends=True,
     ):
         self.serial = serial
-        self.version_ends = version_ends
         # Fork behaviors the option cases check; False models older builds:
         # next_word (8b58f75/0b63b01), reject_strays (#146/#155),
         # pa_zero_sets (4ed4a1d; before it -a0 was a query), set_and_read
         # (5b45b3e, #228; before it a later read of a value dropped its set),
         # one_value_each (opt_check_once(); before it an option given a
-        # value twice kept the last value, and -c with -C sent the second),
-        # and version_ends (f898fe5, #813; before it -V was one report among
-        # the others instead of the version command that ends the command).
+        # value twice kept the last value, and -c with -C sent the second).
         self.next_word = next_word
         self.set_and_read = set_and_read
         self.one_value_each = one_value_each
@@ -586,12 +582,12 @@ class FakeUbertooth:
         )
         if stalled is not None:
             return stalled
-        # -V is the version command: since fork f898fe5 it prints the whole
-        # answer and ends the command, before the mode checks and before
-        # anything else on the command line runs. ``version_ends`` False
-        # models the older build, where -V was one report among the others:
-        # the bare build string, with no label, printed in report order.
-        if "V" in flags and self.version_ends:
+        # -V is the version command: since fork f898fe5 (#813) it prints the
+        # whole answer and ends the command, before the mode checks and
+        # before anything else on the command line runs. No case of this test
+        # writes it beside another option any more: fork #1260 refuses that,
+        # and `Util version conflicts` covers it with no board.
+        if "V" in flags:
             return self._result(command, 0, self._version_answer(), "", on_output)
         if len(modes) > 1:
             if self.reject_conflicts:
@@ -800,25 +796,20 @@ class CoverageGenerationTests(unittest.TestCase):
         options = tuple(option for option, _label, _pattern in transitions.QUERY_OPTIONS)
         _args, cases = cases_for("Ubertooth util compositions", "comprehensive")
 
-        # -V does not compose: its cases are a pair of options but not a
-        # composition, so they are left out of the pair set.
         composed = {frozenset(case.argv[3:]) for case in cases
-                    if len(case.argv) == 5
-                    and case.case_id not in transitions.VERSION_CASES}
+                    if len(case.argv) == 5}
 
         self.assertEqual(
             {frozenset(pair) for pair in compatible_pairs(options)}, composed
         )
+        # -V is not a composable report and no case here writes it: beside
+        # another option it is refused, which `Util version conflicts` covers
+        # with no board (harness #431, fork #1260).
         self.assertNotIn("-V", options)
+        self.assertEqual([], [case.case_id for case in cases
+                              if "-V" in case.argv])
         full = next(case for case in cases if case.case_id == "full-readback-composition")
         self.assertEqual(options, full.argv[3:])
-        # -V with the query after it and before it, so an order the fork
-        # treats alike is checked both ways.
-        self.assertEqual(
-            transitions.VERSION_CASES,
-            {case.case_id: case.argv[3:] for case in cases
-             if case.case_id in transitions.VERSION_CASES},
-        )
 
     def test_plans_select_valid_profiles_for_every_transition_test(self):
         expected = {"fast.yaml": ("fast", "smoke"), "release.yaml": ("release", "comprehensive")}
@@ -1209,34 +1200,14 @@ class TransitionExecutionTests(unittest.TestCase):
 
         self.assertTrue(summary.passed, summary.failure_reason)
 
-    def test_a_v_that_does_not_end_the_command_fails_the_version_case(self):
-        # Before fork f898fe5 -V was one report among the others, so -V -s
-        # printed the serial too and no version answer. Harness #162.
-        summary, events = run_test(
-            "Ubertooth util compositions", FakeUbertooth(version_ends=False),
-            coverage="comprehensive",
-        )
-
-        self.assertFalse(summary.passed)
-        failed = sorted(
-            event.details["case_id"].rsplit("compositions-", 1)[1]
-            for event in case_results(events) if event.status == "failed"
-        )
-        self.assertEqual(sorted(transitions.VERSION_CASES), failed)
-        self.assertIn("answers the version alone", summary.failure_reason)
-
     def test_compositions_do_not_repeat_identical_commands(self):
         _args, cases = cases_for("Ubertooth util compositions", "comprehensive")
 
         commands = [case.argv for case in cases]
 
         self.assertEqual(len(commands), len({tuple(c) for c in commands}))
-        # No two compositions ask for the same set of reports. The two -V
-        # cases are the one place where one pair appears twice, written in
-        # both orders on purpose, so they are compared as written above.
-        composed = [c for c in commands
-                    if c[3:] not in transitions.VERSION_CASES.values()]
-        self.assertEqual(len(composed), len({frozenset(c) for c in composed}))
+        # No two compositions ask for the same set of reports, in any order.
+        self.assertEqual(len(commands), len({frozenset(c) for c in commands}))
 
     def test_a_board_at_pa_zero_runs_every_case_and_gets_pa_zero_back(self):
         # Harness #5: -a0 sets PA 0 (fork 4ed4a1d), so nothing skips and the

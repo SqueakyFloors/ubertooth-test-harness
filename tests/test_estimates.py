@@ -200,11 +200,12 @@ class EstimateTests(unittest.TestCase):
         # top of those: 0.6 s for Raw receive replay's two new cases and
         # 0.2 s for BLE replay's one, measured as the catalog comments
         # beside those entries say. Util version conflicts (comprehensive)
-        # adds 9.9 s, scaled from Util mode refusals as the catalog comment
-        # beside its entry says (#431).
+        # adds 9.1 s, scaled from Util mode refusals as the catalog comment
+        # beside its entry says, less the 0.2 s of the two -V cases it takes
+        # out of Ubertooth util compositions (#431).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(1200.4, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1199.6, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 

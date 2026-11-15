@@ -826,14 +826,13 @@ command and requires every report asked for.
 that asks for two must print both. A parser bug that lets a later option
 replace an earlier one, or that returns after the first report, shows up as a
 missing line. `-l` and `-d` both print a USR LED line, so that pair requires
-two of them. `-V` is left out of the compositions and gets two cases of its
-own that go the other way: since fork `f898fe5` it is the version command and
-ends the command, so `-V -s` and `-s -V` must each print the whole version
-answer (its lines, in order, with the libbtbb path line among them on a
-commit that prints one) and no serial line. The fork sets the flags
-while it reads the command line and acts only once the whole line has parsed,
-so both orders must behave alike. Asking for `-V` beside the others would
-hide every query behind it.
+two of them. `-V` is not a composable report and no case here writes it: it
+is the version command and ends the command, and since
+[fork #1260](https://github.com/SqueakyFloors/ubertooth/pull/1260) a command
+line that writes it beside another option is refused. That refusal needs no
+board, so `Util version conflicts` covers it, for every option of the tool
+and in both orders; this test held two cases for it
+([#431](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/431)).
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
@@ -842,23 +841,20 @@ Guarded. `coverage:`.
 under test:
 
 ```text
-ubertooth-util -U <serial> -V -s                     # and -s -V: the version answer, no serial line
 ubertooth-util -U <serial> -v -s -p -b -a -C -z -l -d  # every composable report at once
 ubertooth-util -U <serial> -<query> -<query>          # each compatible pair, comprehensive
 ubertooth-util -U 99 -U <serial> -s                   # a repeated -U, refused
 ```
 
 The nine composable queries are `-v`, `-s`, `-p`, `-b`, `-a`, `-C`, `-z`,
-`-l` and `-d`; `-V` ends the command, so it is only ever paired with one
-other option to show that the other one prints nothing.
+`-l` and `-d`.
 
-**Expected outcome.** Smoke runs 3 cases: `-V -s` and `-s -V`, each
-answering the version alone, and all nine composable read-only queries in one
-command. Comprehensive runs 40: the same three, every compatible pair of the
-nine queries, and a refusal case, since two `-U` options name two boards for
-one command and are refused (`error: option '-U' given more than once`,
-exit 1) rather than the last one winning. A case failure does not stop the
-others.
+**Expected outcome.** Smoke runs 1 case: all nine composable read-only
+queries in one command. Comprehensive runs 38: that one, every compatible
+pair of the nine queries, and a refusal case, since two `-U` options name two
+boards for one command and are refused (`error: option '-U' given more than
+once`, exit 1) rather than the last one winning. A case failure does not stop
+the others.
 
 **Known limits.** Read-only only: nothing here writes a setting, so it says
 nothing about set-and-read ordering, which `Radio setting transitions` covers.
@@ -2884,12 +2880,13 @@ it is accepted.
 ## Util version conflicts
 
 **What it does.** Refuses every `ubertooth-util` report, setter, and mode
-option written beside `-V`, in both orders, and requires the options `-V`
-keeps to keep working, with no board attached.
+option written beside `-V`, in both orders, and requires the two options `-V`
+uses to keep working, with no board attached.
 
 **Theory of operation.** `-V` is terminal: the tool prints the version answer
-and returns before any report, setter, or mode runs. Until
-[ubertooth#1255](https://github.com/SqueakyFloors/ubertooth/issues/1255) a
+and returns before any report, setter, or mode runs. Before
+[fork #1260](https://github.com/SqueakyFloors/ubertooth/pull/1260), for
+[ubertooth#1255](https://github.com/SqueakyFloors/ubertooth/issues/1255), a
 command line such as `-V -B` or `-s -V` therefore exited 0 with the other half
 of it dropped without a word, and the harness's comprehensive argument
 coverage did not catch it, because nothing asked what `-V` did to the option
@@ -2901,40 +2898,50 @@ two orders are one command line and must give the same message; a tool that
 only noticed the option after `-V` would pass one order and fail the other.
 
 A refusal has to be all five of these, which is more than "it exited 1": the
-one error line below, naming the suppressed option and `-V`; no second error,
-note, or warning line, so a reader has one thing to act on; nothing at all on
-standard output, which is where the version answer goes, so half an answer
-cannot be mistaken for the answer; no mode start line; and no board asked for,
-which the `UBERTOOTH_TEST_NO_DEVICES=1` switch shows, since its "no board is
-selected" note is forbidden in every refusal. That last one is also what
-stands in for "no device state change" on a test with no board: a command line
-refused before any board is opened cannot have changed one. `ubertooth-util`
-has no file option, so there is no file for a refusal to create.
+one error line below; no second error, note, or warning line, so a reader has
+one thing to act on; nothing at all on standard output, which is where the
+version answer and the `-N` count would go, so half an answer cannot be
+mistaken for the answer; no mode start line; and no board asked for, which the
+`UBERTOOTH_TEST_NO_DEVICES=1` switch shows, since its "no board is selected"
+note is forbidden in every refusal. That last one is also what stands in for
+"no device state change" on a test with no board: a command line refused
+before any board is opened cannot have changed one. `ubertooth-util` has no
+file option, so there is no file for a refusal to create.
 
 ```text
-error: -B cannot be combined with -V; -V reports the version and ends the
+error: -V cannot be combined with -B; -V prints the version and ends the
 command, so run them as separate commands
 ```
 
-The wording is one function in the case builder, because the harness and the
-fork have to agree on it to the character; if the fork lands other words,
-that function is the one place that changes.
+`-V` is named first and the suppressed option second, and where a command line
+carries several, the option named is the first one *written*, whichever side of
+`-V` it is on. The wording is one function in the case builder, because the
+harness and the fork have to agree on it to the character; it is the line
+`ubertooth-util.c` prints, and if that changes, that function is the one place
+the harness changes with it.
 
 What stays composable, and is required to, so the check cannot pass by
 refusing everything: `-U <selector>` and `-U all`, which scope the version
-report rather than being suppressed by it, and `-h`, which the fork
-intentionally keeps beside `-V` and prints after it so the usage text does not
-scroll the version away.
+report rather than being suppressed by it, and `-h`, whose usage text the fork
+prints after the version answer. `-h` is one of the two options `-V` uses, so
+it does not excuse a third: `-V -h -b` is refused for `-b`, with no usage text
+either, which fork #1260 pins in its own command-line matrix.
 
 The matrix is derived from the option tables the harness already owns, so an
 option added to the harness cannot escape it: the reads from
-`transitions.QUERY_OPTIONS`, the setters from the `transitions.Setting`
-objects, the modes from `util_refusal_cases.MODES`, and a declared group for
-the six `ubertooth-util` options no table owns (`-S`, `-r`, `-m`, `-N`, `-B`,
-`-w`). A unit test holds that union to the `ubertooth-util` table of
-[COVERAGE.md](../COVERAGE.md), less the three options above and the two the
-fork removed (`-f`, `-9`), so a new option is a failing unit test rather than
-a quiet gap.
+`transitions.QUERY_OPTIONS`, the setters from every `transitions.Setting`
+object that module defines, the modes from `util_refusal_cases.MODES`, and a
+declared group for the six `ubertooth-util` options no table owns (`-S`, `-r`,
+`-m`, `-N`, `-B`, `-w`). Unit tests hold that union to two statements it was
+not derived from — the `ubertooth-util` table of [COVERAGE.md](../COVERAGE.md)
+and the tool's own getopt string — less the three options above and the two
+the fork removed (`-f`, `-9`), so a new option is a failing unit test rather
+than a quiet gap.
+
+This test is what covers `-V` beside another option. `Ubertooth util
+compositions` used to hold two cases requiring `-V -s` and `-s -V` to answer
+the version and print no serial line; fork #1260 refuses those command lines,
+so those cases are gone and what there is to check needs no board.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`.
 
@@ -2946,41 +2953,48 @@ no files, so there is no directory to state afterwards:
 utilconflict.py probe ubertooth-util
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -<suppressed>      # and -<suppressed> -V
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -a5                # each value form, both orders
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -c 2426            # the value as the next word
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V                    # the whole answer, no usage
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -U <selector> -V      # and -V -U <selector>
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -U all -V             # and -V -U all
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -h                 # and -h -V: both answers
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -h -b              # and -h -b -V: -b is refused
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -a8                # the value is refused
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -c2426 -c2450      # the repeat is refused
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -c2426 -C24        # the -c/-C clash is refused
 env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -B stray           # the stray word is refused
-env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -s -B              # one line for two options
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -s -B              # the first written is named
+env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-util -V -N -B              # and -s -B -V, -V -N -B
 ```
 
 `-<suppressed>` is each of `-v -s -p -b -a -C -z -l -d -q -n -e -t -x -I -i
 -c -S -r -m -N -B -w`, and the value forms are `-c2426 -C24 -a5 -z-60 -l1 -d1
--q120`. The cleanup of every case is `-V` on its own, which needs no board and
-records that the tool still answers in full.
+-q120 -n5`. The cleanup of every case is `-V` on its own, which needs no board
+and records that the tool still answers in full.
 
 **Expected outcome.** Smoke runs 9 cases: `-B`, `-s`, `-a`, `-I`, and `-N`
-beside `-V` in both orders, and the four kept combinations. Comprehensive runs
-31: one case per suppressed option, each in both orders and in both its bare
-and its value form where it takes one, the same four kept combinations, and
-four for order — a bad option value, an option given a value twice, and a
-stray word, each of which must be reported *instead of* the conflict because
-the option loop and the operand check run before it, and a command line
-carrying two suppressed options, which must give one conflict line naming
-either of them.
+beside `-V` in both orders, and the four that must keep working. Comprehensive
+runs 34: one case per suppressed option, each in both orders and in both its
+bare and its value form where it takes one, those same four, and seven about
+order and naming — a bad option value, an option given a value twice, the
+`-c`/`-C` clash, and a stray word, each of which must be reported *instead of*
+the conflict because the option loop and the operand check run before it; a
+command line with two suppressed options and one with `-N` among them, where
+the first option written must be the one named; `-V -h -b`, where `-h` does not
+excuse `-b`; and a value given as the next word, where the conflict must name
+the option rather than the value as a stray word.
 
 **Known limits.** It skips until the built `ubertooth-util` has the check at
-all. The probe decides that by behavior rather than by message — it runs `-V
--B` and reads the exit status — so a build that refuses the combination in
-other words is measured and fails on the wording, rather than skipping
-quietly, which is the one outcome worth designing against. Which option a
-message names when two are suppressed is deliberately not pinned. `-N` is
-treated as suppressed, like every other option `-V` does not execute; if the
-fork decides the bus count belongs with the version report after all, its case
-goes with it. Nothing here runs a board, so "no state change" means only that
-no board was opened.
+all, which is why it is in the `fast` and `release` plans but not in
+`host.yaml`: the CI build job runs that plan and allows no run-time skip, so
+the entry there waits for fork #1260 to merge. The probe decides by behavior
+rather than by message — it runs `-V -B` and requires exit 1, an `error:`
+line, and no version answer — so a build that refuses the combination in other
+words is measured and fails on the wording, rather than skipping quietly,
+which is the one outcome worth designing against. It is one option that
+decides for all of them: a build that refused every option but `-B` would read
+as not having the check and skip the lot. Nothing here runs a board, so "no
+state change" means only that no board was opened.
 
 ## DFU image checks
 

@@ -238,24 +238,24 @@ Ubertooth util compositions:
   theory: >-
     Each query has its own output line, so a command that asks for two must
     print both; a missing line is the regression. -l and -d both print a USR
-    LED line, so that pair requires two of them. -V goes the other way: it
-    ends the command, so -V -s and -s -V must each print the whole version
-    answer and no serial line, and both orders must behave alike because the
-    fork sets its flags while reading the command line and acts only once it
-    has parsed.
+    LED line, so that pair requires two of them. -V is not one of them and no
+    case here writes it: it ends the command, and fork #1260 refuses a command
+    line that writes it beside another option. That refusal needs no board, so
+    Util version conflicts covers it.
   hardware: >-
     One Ubertooth, selected by full serial, with every other registered board
     read as a guard. Read only; nothing transmits.
   expected: >-
-    Smoke runs 3 cases: -V -s and -s -V answering the version alone, and all
-    nine composable read-only queries in one command. Comprehensive runs 40,
-    adding every compatible pair of the nine and a refusal case, since two -U
-    options name two boards for one command and are refused (exit 1) rather
-    than the last one winning. A case failure does not stop the others.
+    Smoke runs 1 case: all nine composable read-only queries in one command.
+    Comprehensive runs 38, adding every compatible pair of the nine and a
+    refusal case, since two -U options name two boards for one command and are
+    refused (exit 1) rather than the last one winning. A case failure does not
+    stop the others.
   limitations: >-
     Read-only only: nothing here writes a setting, so it says nothing about
     set-and-read ordering, which Radio setting transitions covers.
-  related: []
+  related:
+    - ubertooth-test-harness#431
 
 Argument validation:
   purpose: >-
@@ -1284,17 +1284,18 @@ Util version conflicts:
     The matrix is derived from the option tables the harness already owns --
     the reads, the settings, the modes, and the six ubertooth-util options no
     table owns -- so an option added to the harness is paired with -V without
-    anyone remembering to, and a unit test holds that union to the
-    ubertooth-util table of COVERAGE.md. Each option is written on both sides
-    of -V, because the fork sets its flags while reading the command line and
-    decides once the whole line has parsed, so the two orders are one command
-    line and must answer alike. A refusal has to be one error line naming the
-    option and -V, with nothing at all on standard output, which is where the
-    version answer would go, no mode start line, and no board asked for: the
-    no-devices switch is set, so an accepted combination finds no board rather
-    than acting on one, and that is also what stands in for "no device state
-    change". The options -V keeps are required to keep working, so the check
-    cannot pass by refusing everything.
+    anyone remembering to, and unit tests hold that union to two statements it
+    was not derived from: the ubertooth-util table of COVERAGE.md and the
+    tool's own getopt string. Each option is written on both sides of -V,
+    because the fork sets its flags while reading the command line and decides
+    once the whole line has parsed, so the two orders are one command line and
+    must answer alike. A refusal has to be one error line naming -V and the
+    option, with nothing at all on standard output, which is where the version
+    answer and the -N count would go, no mode start line, and no board asked
+    for: the no-devices switch is set, so an accepted combination finds no
+    board rather than acting on one, and that is also what stands in for "no
+    device state change". The two options -V uses are required to keep
+    working, so the check cannot pass by refusing everything.
   hardware: >-
     No board. Nothing transmits, and ubertooth-util has no file option, so
     nothing is written either. Each case opens with a probe that reads the
@@ -1303,21 +1304,28 @@ Util version conflicts:
     Smoke runs 9 cases: -B, -s, -a, -I and -N beside -V in both orders, and
     the four that must keep working -- -V alone, -U <selector> -V, -U all -V,
     and -V -h, which prints both answers with the version first.
-    Comprehensive runs 31: every one of the 23 suppressed options, each in
+    Comprehensive runs 34: every one of the 23 suppressed options, each in
     both orders and in both its bare and its value form where it takes a
-    value, those same four, and four more for order -- a bad option value, an
-    option given a value twice, and a stray word, each of which must be
-    reported instead of the conflict, and a command line with two suppressed
-    options, which must give one conflict line naming either of them.
+    value, those same four, and seven about order and naming -- a bad option
+    value, an option given a value twice, the -c/-C clash, and a stray word,
+    each of which must be reported instead of the conflict; two command lines
+    carrying several suppressed options, where the first one written must be
+    the one named; -V -h -b, where -h does not excuse -b; and a value given as
+    the next word, where the conflict must name the option rather than the
+    value as a stray word.
   limitations: >-
-    It skips until the built ubertooth-util has the check at all, which the
-    probe decides by behavior rather than by message, so a build that refuses
-    the combination in other words is measured and fails on the wording
-    instead of skipping. Which option a message names when two are suppressed
-    is deliberately not pinned. Nothing here runs a board, so "no state
-    change" means only that no board was opened.
+    It skips until the built ubertooth-util has the check at all, which is why
+    it is in the fast and release plans but not in the host plan: the CI build
+    job runs that one and allows no run-time skip, so the entry there waits
+    for fork #1260 to merge. The probe decides by behavior rather than by
+    message, so a build that refuses the combination in other words is
+    measured and fails on the wording instead of skipping quietly; it is one
+    option that decides for all of them, so a build refusing every option but
+    -B would skip the lot. Nothing here runs a board, so "no state change"
+    means only that no board was opened.
   related:
     - ubertooth#1255
+    - ubertooth#1260
     - ubertooth-test-harness#431
 
 DFU image checks:

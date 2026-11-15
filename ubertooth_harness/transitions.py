@@ -80,11 +80,9 @@ from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     FIRMWARE_PATTERN,
     FIRMWARE_UNSUPPORTED_PATTERN,
-    HOST_VERSION_TIMEOUT_S,
     IMAGE_NAME_PATTERN,
     PART_ID_PATTERN,
     RX_ONLY_IMAGE,
-    VERSION_ANSWER_PATTERNS,
     matched_image,
     serial_pattern,
 )
@@ -874,35 +872,12 @@ QUERY_OPTIONS = (
     ("-d", "all-leds", r"RX LED status : [01]\s+TX LED status : [01]"),
 )
 _USR_LED_LINE = r"USR LED status: [01]"
-# The case ids of the -V cases, which are not option compositions. The query
-# goes after -V in one and before it in the other: the fork sets the flags
-# while it reads the command line and acts only once the whole line has
-# parsed, so the order must make no difference.
-VERSION_CASES = {
-    "version-ends-the-command": ("-V", "-s"),
-    "version-ends-the-command-written-last": ("-s", "-V"),
-}
-
-
-def _version_case(case_id, options, serial):
-    """-V beside a query answers the version and nothing else.
-
-    Since fork f898fe5 (#813) -V is the version command: ubertooth-util
-    returns as soon as it has printed the answer, before the identity queries
-    run. So -V with -s prints the version answer and no serial line, whichever
-    order they were written in, and the answer is the host tools' version and
-    the board's firmware version, each under a label of its own.
-    """
-    return CommandCase(
-        case_id,
-        f"{' '.join(options)} answers the version alone",
-        _util(serial, *options),
-        VERSION_ANSWER_PATTERNS + (
-            # -V ended the command, so -s never ran.
-            rf"\A(?![\s\S]*{serial_pattern(serial)})",
-        ),
-        timeout_s=HOST_VERSION_TIMEOUT_S,
-    )
+# -V beside a query was covered here, as the two cases "-V -s" and "-s -V"
+# answering the version and printing no serial line. Fork #1260
+# (ubertooth#1255) refuses those command lines instead, so what there is to
+# check about -V beside another option is a refusal, and a refusal needs no
+# board: `Util version conflicts` covers every option of the tool, in both
+# orders, with none (harness #431). Nothing about -V is left in this test.
 
 
 def _query_patterns(options, serial):
@@ -937,8 +912,7 @@ def util_composition_cases(arguments, _resources, resource_identities):
             serial,
         ),
     ]
-    cases = [_version_case(case_id, options, serial)
-             for case_id, options in VERSION_CASES.items()] + compositions
+    cases = list(compositions)
     if arguments["coverage"] == "comprehensive":
         cases.append(
             # Two -U name two boards for one command, so it is refused before

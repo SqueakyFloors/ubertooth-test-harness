@@ -31,7 +31,9 @@ suites:
         coverage: smoke
 
     # No Ubertooth: ubertooth-util -V beside the options it would suppress.
-    # Skipped until the built tool refuses them (ubertooth#1255).
+    # Skipped until the built tool refuses them (fork #1260 for
+    # ubertooth#1255); not in host.yaml until that merges, because the CI
+    # build job there allows no run-time skip.
     - Util version conflicts:
         hosts: each
         coverage: smoke
